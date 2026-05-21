@@ -3,15 +3,78 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: light;
+  color-scheme: dark;
+  --font-geist-sans: "Geist", system-ui, -apple-system, sans-serif;
+  --font-geist-mono: "Geist Mono", ui-monospace, monospace;
+  --font-inter: "Inter", system-ui, sans-serif;
 }
 
-body {
+html, body {
   margin: 0;
-  background: #f6f8f3;
-  color: #152018;
+  background: hsl(240 14% 7%);
+  color: hsl(240 18% 94%);
+  font-family: var(--font-geist-sans);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 * {
   box-sizing: border-box;
+}
+
+::selection {
+  background: hsl(265 78% 62% / 0.45);
+  color: hsl(240 18% 98%);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: hsl(240 8% 24%);
+  border-radius: 5px;
+  border: 2px solid hsl(240 14% 7%);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(240 8% 32%);
+}
+
+/* Tabular numerics by default on any element with .numeric */
+.numeric, .font-mono, table {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Subtle grid background for hero sections */
+.grid-bg {
+  background-image:
+    linear-gradient(to right, hsl(240 10% 18% / 0.5) 1px, transparent 1px),
+    linear-gradient(to bottom, hsl(240 10% 18% / 0.5) 1px, transparent 1px);
+  background-size: 48px 48px;
+  background-position: -1px -1px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 0%, transparent 70%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 0%, transparent 70%);
+}
+
+/* Animated gradient stroke for highlight cards */
+.glow-border {
+  position: relative;
+}
+.glow-border::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background: linear-gradient(135deg,
+    hsl(265 78% 62% / 0.4),
+    hsl(188 95% 56% / 0.4),
+    hsl(265 78% 62% / 0.4));
+  z-index: -1;
+  opacity: 0;
+  transition: opacity 220ms ease-out;
+}
+.glow-border:hover::before {
+  opacity: 1;
 }
