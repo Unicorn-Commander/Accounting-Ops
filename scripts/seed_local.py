@@ -1,9 +1,18 @@
+"""Seed two generic test tenants for local development.
+
+Idempotent. Uses scripts.provision_tenant which is safe to call multiple times.
+"""
+from __future__ import annotations
+
 import asyncio
+import sys
 import uuid
+from pathlib import Path
 
-from sqlalchemy import text
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.db import engine
+from app.db import engine  # noqa: E402
+from scripts.provision_tenant import provision_tenant  # noqa: E402
 
 
 TENANTS = [
@@ -13,28 +22,14 @@ TENANTS = [
 
 
 async def main() -> None:
-    async with engine.begin() as conn:
-        for slug, display_name in TENANTS:
-            tenant_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"accounting-ops:{slug}")
-            schema = f"accounting_ops_{str(tenant_id).replace('-', '_')}"
-            await conn.execute(
-                text(
-                    """
-                    INSERT INTO tenant (id, slug, display_name, postgres_schema, falkordb_subgraph, garage_bucket)
-                    VALUES (:id, :slug, :display_name, :schema, :subgraph, :bucket)
-                    ON CONFLICT (slug) DO UPDATE SET display_name = EXCLUDED.display_name
-                    """
-                ),
-                {
-                    "id": tenant_id,
-                    "slug": slug,
-                    "display_name": display_name,
-                    "schema": schema,
-                    "subgraph": f"tenant_{str(tenant_id).replace('-', '_')}",
-                    "bucket": f"accounting-ops-{tenant_id}",
-                },
-            )
-            await conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+    for slug, display_name in TENANTS:
+        # Deterministic UUID so re-running seed yields the same IDs.
+        tenant_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"accounting-ops:{slug}")
+        try:
+            schema = await provision_tenant(engine, tenant_id, display_name, slug=slug)
+            print(f"  {slug:<20} -> {schema}")
+        except Exception as exc:
+            print(f"  {slug:<20} FAILED: {exc}", file=sys.stderr)
     print("seeded generic local tenants")
 
 
