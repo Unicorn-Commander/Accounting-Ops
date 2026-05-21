@@ -1,0 +1,45 @@
+from fastapi import Depends, FastAPI
+
+from app.auth import AuthContext, validate_bearer_token
+from app.a2a.server import router as a2a_router
+from app.api.tools import router as tools_router
+from app.config import get_settings
+from app.otel import audit_span_middleware, setup_otel
+
+settings = get_settings()
+app = FastAPI(title=settings.app_name, version="0.1.0", openapi_url="/api/openapi.json")
+app.middleware("http")(audit_span_middleware)
+setup_otel(app)
+app.include_router(a2a_router)
+app.include_router(tools_router)
+
+
+@app.get("/healthz", tags=["system"])
+async def healthz() -> dict[str, str]:
+    return {"status": "ok", "service": settings.otel_service_name}
+
+
+@app.get("/readyz", tags=["system"])
+async def readyz() -> dict[str, str]:
+    return {"status": "ready"}
+
+
+@app.get("/.well-known/mcp.json", tags=["discovery"])
+async def well_known_mcp() -> dict:
+    return {
+        "name": "Accounting-Ops",
+        "version": "0.1.0",
+        "mcp_endpoint": f"{settings.public_base_url}/mcp",
+        "auth": {
+            "type": "oauth2",
+            "issuer": str(settings.keycloak_realm_url),
+            "authorization_url": f"{settings.keycloak_realm_url}/protocol/openid-connect/auth",
+            "token_url": f"{settings.keycloak_realm_url}/protocol/openid-connect/token",
+            "scopes": ["accounting:read", "accounting:write"],
+        },
+    }
+
+
+@app.get("/api/me", tags=["auth"])
+async def me(auth: AuthContext = Depends(validate_bearer_token)) -> dict:
+    return {"uc_uid": auth.uc_uid, "agent_id": auth.agent_id, "scopes": auth.scopes}

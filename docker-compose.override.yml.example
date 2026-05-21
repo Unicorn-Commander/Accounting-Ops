@@ -1,0 +1,11 @@
+services:
+  app:
+    volumes:
+      - .:/app
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  web:
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+    command: ["npm", "run", "dev"]
