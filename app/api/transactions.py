@@ -18,15 +18,33 @@ from uuid import UUID
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.db import SessionLocal
+from app.security.credentials import get_credential_plaintext
 from app.tenancy import WorkspaceContext, resolve_workspace
 
 router = APIRouter(tags=["transactions"])
 
 
-def _access_url_for_user(uc_uid: str) -> str | None:
-    return os.getenv(f"SIMPLEFIN_ACCESS_URL_{uc_uid.upper()}") or os.getenv(
-        "SIMPLEFIN_ACCESS_URL_AARON"
-    )
+async def _simplefin_access_url(workspace: WorkspaceContext) -> str | None:
+    """DB-first, env-var fallback (matches cash_position pattern)."""
+    async with SessionLocal() as session:
+        async with session.begin():
+            try:
+                plaintext = await get_credential_plaintext(
+                    session,
+                    workspace.workspace_id,
+                    "simplefin",
+                    requesting_service="transactions",
+                    actor_uc_uid=workspace.user_uc_uid,
+                    actor_agent_id=workspace.agent_id,
+                )
+                if plaintext:
+                    return plaintext
+            except Exception:
+                pass
+    return os.getenv(
+        f"SIMPLEFIN_ACCESS_URL_{workspace.user_uc_uid.upper()}"
+    ) or os.getenv("SIMPLEFIN_ACCESS_URL_AARON")
 
 
 async def _fetch_simplefin_window(
@@ -78,7 +96,7 @@ async def workspace_recent_transactions(
 
     Sorted newest-first by posted timestamp. Surfaces both pending and posted.
     """
-    access_url = _access_url_for_user(workspace.user_uc_uid)
+    access_url = await _simplefin_access_url(workspace)
     if not access_url:
         return {"configured": False, "transactions": [], "message": "No connection."}
 

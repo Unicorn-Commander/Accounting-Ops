@@ -10,8 +10,10 @@ import {
   Plus
 } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import { ConnectSimplefinModal } from "@/components/connect-simplefin-modal";
 import { Card, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
 import { CONNECTORS, getConnectorStatuses, type Connector, type ConnectorStatus } from "@/lib/connectors";
+import { getActiveContext } from "@/lib/active-context";
 import { cn } from "@/lib/cn";
 
 const CATEGORY_ICON: Record<Connector["category"], React.ComponentType<{ size?: number; className?: string }>> = {
@@ -24,6 +26,8 @@ const CATEGORY_ICON: Record<Connector["category"], React.ComponentType<{ size?: 
 
 export default async function ConnectorsPage() {
   const statuses = await getConnectorStatuses();
+  const ctx = await getActiveContext();
+  const workspace = ctx.activeWorkspace;
   const available = CONNECTORS.filter((c) => c.available);
   const upcoming = CONNECTORS.filter((c) => !c.available);
 
@@ -32,7 +36,11 @@ export default async function ConnectorsPage() {
       <PageShell>
         <SectionHeader
           title="Connectors"
-          subtitle="Read-only data sources the agents pull from. Each connector is a standalone MCP server in your stack. Add credentials per-entity in the workspace's connector state (Phase 1.5)."
+          subtitle={
+            workspace
+              ? `Read-only data sources for ${workspace.display_name}. Each connector is a standalone MCP server in your stack.`
+              : "Read-only data sources the agents pull from."
+          }
         />
 
         <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-ink-tertiary">
@@ -44,6 +52,8 @@ export default async function ConnectorsPage() {
               key={connector.id}
               connector={connector}
               status={statuses[connector.id]}
+              workspaceId={workspace?.id}
+              workspaceName={workspace?.display_name}
             />
           ))}
         </div>
@@ -63,10 +73,14 @@ export default async function ConnectorsPage() {
 
 function ConnectorCard({
   connector,
-  status
+  status,
+  workspaceId,
+  workspaceName
 }: {
   connector: Connector;
   status?: ConnectorStatus;
+  workspaceId?: string;
+  workspaceName?: string;
 }) {
   const Icon = CATEGORY_ICON[connector.category];
   return (
@@ -110,14 +124,31 @@ function ConnectorCard({
           )}
 
           <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-subtle pt-4">
-            <button
-              className="inline-flex items-center gap-1 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow hover:bg-brand-600 transition disabled:cursor-not-allowed disabled:opacity-60"
-              disabled
-              title="Credential capture UI lands in Phase 1.5"
-            >
-              <Plus size={12} />
-              Connect (Phase 1.5)
-            </button>
+            {connector.id === "simplefin" && workspaceId ? (
+              <ConnectSimplefinModal
+                workspaceId={workspaceId}
+                workspaceName={workspaceName ?? "this workspace"}
+                trigger={
+                  <button className="inline-flex items-center gap-1 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow hover:bg-brand-600 transition">
+                    <Plus size={12} />
+                    Connect
+                  </button>
+                }
+              />
+            ) : (
+              <button
+                className="inline-flex items-center gap-1 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow hover:bg-brand-600 transition disabled:cursor-not-allowed disabled:opacity-60"
+                disabled
+                title={
+                  connector.id === "simplefin"
+                    ? "Sign in + pick a workspace first"
+                    : "Connector-specific Connect flow lands soon"
+                }
+              >
+                <Plus size={12} />
+                Connect (soon)
+              </button>
+            )}
             {connector.signup_url && (
               <a
                 href={connector.signup_url}

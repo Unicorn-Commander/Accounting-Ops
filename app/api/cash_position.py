@@ -17,19 +17,37 @@ from uuid import UUID
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.db import SessionLocal
+from app.security.credentials import get_credential_plaintext
 from app.tenancy import WorkspaceContext, resolve_workspace
 
 router = APIRouter(tags=["cash-position"])
 
 
-def _access_url_for_user(uc_uid: str) -> str | None:
-    """Look up the SimpleFIN access URL for this user.
+async def _simplefin_access_url(workspace: WorkspaceContext) -> str | None:
+    """Resolve SimpleFIN access URL for this workspace.
 
-    Interim: env var keyed by uc_uid (uppercased). Phase 1.6 moves to DB.
+    Phase 1.6 path: encrypted DB credential via public.tenant_credentials.
+    Phase 1.5 fallback: env var (removed in 1.7 once everyone migrates).
     """
-    return os.getenv(f"SIMPLEFIN_ACCESS_URL_{uc_uid.upper()}") or os.getenv(
-        "SIMPLEFIN_ACCESS_URL_AARON"  # session-default fallback for the demo
-    )
+    async with SessionLocal() as session:
+        async with session.begin():
+            try:
+                plaintext = await get_credential_plaintext(
+                    session,
+                    workspace.workspace_id,
+                    "simplefin",
+                    requesting_service="cash_position",
+                    actor_uc_uid=workspace.user_uc_uid,
+                    actor_agent_id=workspace.agent_id,
+                )
+                if plaintext:
+                    return plaintext
+            except Exception:
+                pass
+    return os.getenv(
+        f"SIMPLEFIN_ACCESS_URL_{workspace.user_uc_uid.upper()}"
+    ) or os.getenv("SIMPLEFIN_ACCESS_URL_AARON")
 
 
 async def _fetch_simplefin_accounts(access_url: str) -> dict:
@@ -67,7 +85,7 @@ async def workspace_cash_position(
     env credentials. Each account has: id, name, org_name, currency, balance,
     available_balance, last_balance_as_of.
     """
-    access_url = _access_url_for_user(workspace.user_uc_uid)
+    access_url = await _simplefin_access_url(workspace)
     if not access_url:
         return {
             "total_usd": "0.00",
