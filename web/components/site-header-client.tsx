@@ -10,11 +10,9 @@ const NAV = [
   ["Reconciliation", "/reconciliation-queue"],
   ["Journal", "/journal"],
   ["Reports", "/reports"],
-  ["Rules", "/specialty-rules"],
-  ["Activity", "/agent-activity"],
-  ["Chat", "/chat"],
   ["Connectors", "/connectors"],
-  ["CPA Export", "/cpa-export"]
+  ["CPA Export", "/cpa-export"],
+  ["Help", "/help"]
 ];
 
 export function SiteHeaderClient({
