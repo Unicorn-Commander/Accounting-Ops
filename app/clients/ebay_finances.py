@@ -205,6 +205,143 @@ async def recent_transactions(
     return []
 
 
+# ---- Sell Fulfillment.readonly direct path -----------------------------
+# Used while Sell Finances API is gated by eBay's Application Growth
+# Check. Gives us order-level revenue immediately. The OAuth token from
+# tenant_credentials already has sell.fulfillment.readonly scope.
+
+import base64
+from datetime import datetime, timezone
+
+_FULFILLMENT_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
+
+
+async def _get_fulfillment_token(auth: EbayAuth) -> str:
+    """Refresh-token → access-token, scoped to fulfillment.readonly only.
+
+    Cached in-process by client_id for ~110 min (eBay tokens last 120 min;
+    leave 10 min buffer).
+    """
+    import time
+
+    cached = _FULFILLMENT_TOKEN_CACHE.get(auth.client_id)
+    if cached and cached[1] > time.time():
+        return cached[0]
+
+    basic = base64.b64encode(f"{auth.client_id}:{auth.client_secret}".encode()).decode()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            "https://api.ebay.com/identity/v1/oauth2/token",
+            headers={
+                "Authorization": f"Basic {basic}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": auth.refresh_token,
+                "scope": "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
+            },
+        )
+        if resp.status_code != 200:
+            raise EbayFinancesError(
+                f"eBay token refresh failed [{resp.status_code}]: {resp.text[:200]}"
+            )
+        data = resp.json()
+    token = data["access_token"]
+    expires_in = int(data.get("expires_in", 7200))
+    _FULFILLMENT_TOKEN_CACHE[auth.client_id] = (token, time.time() + expires_in - 600)
+    return token
+
+
+async def fulfillment_orders(
+    auth: EbayAuth, *, days: int = 30, limit: int = 200
+) -> list[dict]:
+    """Fetch recent eBay orders via /sell/fulfillment/v1/order, normalized
+    to canonical-transaction shape.
+
+    Each order becomes ONE transaction with the gross amount (positive for
+    a sale). Buyer info is anonymized. The eBay order id is used as the
+    canonical external id, prefixed `ebay:order:`.
+    """
+    from datetime import timedelta
+
+    token = await _get_fulfillment_token(auth)
+    since = (datetime.now(tz=timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT00:00:00.000Z"
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+    }
+    txns: list[dict] = []
+    offset = 0
+    page_size = min(limit, 200)
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        while True:
+            url = (
+                f"https://api.ebay.com/sell/fulfillment/v1/order"
+                f"?limit={page_size}&offset={offset}"
+                f"&filter=creationdate:%5B{since}..%5D"
+            )
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 404:
+                break  # eBay's "no data" or "no permission"
+            if resp.status_code >= 400:
+                raise EbayFinancesError(
+                    f"eBay fulfillment HTTP {resp.status_code}: {resp.text[:200]}"
+                )
+            payload = resp.json()
+            orders = payload.get("orders") or []
+            if not orders:
+                break
+            for order in orders:
+                txns.append(_normalize_fulfillment_order(order))
+            if len(orders) < page_size or len(txns) >= limit:
+                break
+            offset += page_size
+    return txns[:limit]
+
+
+def _normalize_fulfillment_order(order: dict) -> dict:
+    """Convert /sell/fulfillment/v1/order item → canonical transaction.
+
+    PII-safe payee synthesized as "eBay order #<short>". Amount is the
+    pricingSummary.total.value (positive for inflow).
+    """
+    order_id = order.get("orderId") or order.get("legacyOrderId") or ""
+    pricing = order.get("pricingSummary") or {}
+    total = pricing.get("total") or {}
+    amount_str = str(total.get("value", "0"))
+    currency = total.get("currency", "USD")
+
+    creation_date = order.get("creationDate")  # ISO string
+    try:
+        posted_dt = datetime.fromisoformat(creation_date.replace("Z", "+00:00"))
+        posted_ts = int(posted_dt.timestamp())
+        posted_iso = posted_dt.isoformat()
+    except (TypeError, ValueError, AttributeError):
+        posted_ts = None
+        posted_iso = creation_date
+
+    short_id = order_id[-8:] if order_id else "unknown"
+    return {
+        "id": f"ebay:order:{order_id}",
+        "account_id": "ebay:fulfillment:default",
+        "account_name": "eBay Sales",
+        "org_name": "eBay Finances",  # so existing vendor rules hit
+        "currency": currency,
+        "posted_at": posted_iso,
+        "posted_ts": posted_ts,
+        "transacted_at": posted_iso,
+        "amount": amount_str,  # positive — gross sale
+        "payee": f"eBay order #{short_id}",
+        "description": f"eBay order · {len(order.get('lineItems') or [])} items · status {order.get('orderFulfillmentStatus', 'unknown')}",
+        "memo": None,
+        "is_pending": (order.get("orderPaymentStatus") not in ("PAID", "FULLY_REFUNDED")),
+    }
+
+
 def merge_into_canonical(
     ebay_transactions: Iterable[dict], simplefin_transactions: Iterable[dict]
 ) -> list[dict]:

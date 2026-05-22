@@ -38,13 +38,15 @@ def categorize_transaction(
     description: str | None,
     memo: str | None,
     amount: float,
+    overrides: list[dict] | None = None,
 ) -> CategorySuggestion:
     """Categorize a single transaction by its surface text.
 
     Order:
-      1. Vendor rule match → status=auto
-      2. (future) LLM tier 2 → status=suggest
-      3. fallback → status=unknown, category=Uncategorized
+      1. User-trained category overrides → status=auto, source=override
+      2. Vendor rule match → status=auto, source=vendor_rule
+      3. (future) LLM tier 2 → status=suggest
+      4. fallback → status=unknown, category=Uncategorized
     """
     blob = _transaction_blob(payee, description, memo)
     if not blob.strip():
@@ -56,6 +58,22 @@ def categorize_transaction(
             reason="No payee or description.",
             sign_matched=False,
         )
+
+    # Tier 0: user-trained overrides (consulted before vendor rules so
+    # user corrections always win)
+    blob_lower = blob.lower()
+    for ov in overrides or []:
+        if ov["pattern"] in blob_lower:
+            # Sign-validation: assume override means "this category is right"
+            # regardless of sign — the user said so.
+            return CategorySuggestion(
+                category=ov["category"],
+                status="auto",
+                source=f"override:{ov['pattern']}",
+                kind="unknown",  # We don't know revenue/expense without DR/CR introspection
+                reason=f"User-trained override on pattern '{ov['pattern']}'.",
+                sign_matched=True,
+            )
 
     rule = match_vendor_rule(blob)
     if rule:

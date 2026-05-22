@@ -8,6 +8,8 @@ const NAV = [
   ["Dashboard", "/dashboard"],
   ["Transactions", "/transactions"],
   ["Reconciliation", "/reconciliation-queue"],
+  ["Journal", "/journal"],
+  ["Reports", "/reports"],
   ["Rules", "/specialty-rules"],
   ["Activity", "/agent-activity"],
   ["Chat", "/chat"],

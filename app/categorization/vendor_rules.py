@@ -40,6 +40,8 @@ VENDOR_RULES: list[tuple[str, str, str]] = [
     ("shopify payout", "Revenue · Marketplace", "revenue"),
     ("ebay finances", "Revenue · Marketplace", "revenue"),
     ("ebay payout", "Revenue · Marketplace", "revenue"),
+    ("ebay order", "Revenue · Marketplace", "revenue"),
+    ("ebay:order:", "Revenue · Marketplace", "revenue"),
     ("etsy", "Revenue · Marketplace", "revenue"),
     ("mlc", "Revenue · Music", "revenue"),
     ("soundexchange", "Revenue · Music", "revenue"),

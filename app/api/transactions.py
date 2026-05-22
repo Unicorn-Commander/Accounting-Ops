@@ -20,6 +20,7 @@ import logging
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.api.category_overrides import load_overrides_for_workspace
 from app.categorization import categorize_transaction
 from app.clients import ebay_finances
 from app.db import SessionLocal
@@ -113,6 +114,7 @@ async def workspace_recent_transactions(
 
     access_url = await _simplefin_access_url(workspace)
     account_map = await get_account_to_entity_map(workspace.workspace_id)
+    overrides = await load_overrides_for_workspace(workspace.workspace_id)
 
     # SimpleFIN (BofA, USAA, ...) — primary source
     payload: dict = {"accounts": [], "errors": []}
@@ -144,6 +146,7 @@ async def workspace_recent_transactions(
                 description=txn.get("description"),
                 memo=txn.get("memo"),
                 amount=amount_f,
+                overrides=overrides,
             )
             transactions.append(
                 {
@@ -182,17 +185,33 @@ async def workspace_recent_transactions(
         actor_uc_uid=workspace.user_uc_uid,
     )
     if ebay_auth is not None:
+        # Try Finances API first (gives net payouts); fall back to Fulfillment
+        # (gross order revenue) if Finances is gated.
         try:
             ebay_txns = await ebay_finances.recent_transactions(
                 ebay_auth, days=days, limit=min(limit * 4, 500)
             )
         except ebay_finances.EbayFinancesError as exc:
-            ebay_errors.append(str(exc))
+            ebay_errors.append(f"finances: {exc}")
             ebay_txns = []
         except Exception as exc:
-            _log.warning("ebay_transactions_fetch_failed: %s", exc)
-            ebay_errors.append(f"ebay-finances-mcp unavailable: {exc.__class__.__name__}")
+            _log.warning("ebay_finances_fetch_failed: %s", exc)
+            ebay_errors.append(f"finances-mcp unavailable: {exc.__class__.__name__}")
             ebay_txns = []
+        # If Finances returned nothing (gated or empty), try Fulfillment for
+        # order-level revenue.
+        if not ebay_txns:
+            try:
+                ebay_txns = await ebay_finances.fulfillment_orders(
+                    ebay_auth, days=days, limit=min(limit * 4, 200)
+                )
+            except ebay_finances.EbayFinancesError as exc:
+                ebay_errors.append(f"fulfillment: {exc}")
+                ebay_txns = []
+            except Exception as exc:
+                _log.warning("ebay_fulfillment_fetch_failed: %s", exc)
+                ebay_errors.append(f"fulfillment unavailable: {exc.__class__.__name__}")
+                ebay_txns = []
         for txn in ebay_txns:
             ext_id = txn.get("account_id") or ""
             mapping_key = f"ebay:{ext_id}"
@@ -207,6 +226,7 @@ async def workspace_recent_transactions(
                 description=txn.get("description"),
                 memo=txn.get("memo"),
                 amount=amount_f,
+                overrides=overrides,
             )
             transactions.append(
                 {

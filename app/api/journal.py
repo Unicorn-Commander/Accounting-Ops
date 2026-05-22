@@ -244,30 +244,71 @@ async def post_entry(
 async def list_entries(
     workspace_id: UUID,
     entity_id: UUID | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    category: str | None = None,
+    status_filter: str | None = None,
+    search: str | None = None,
     limit: int = 100,
     offset: int = 0,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
+    """List journal entries with optional filters.
+
+    Filters:
+      - entity_id: scope to one entity
+      - start_date / end_date: ISO date strings (effective_date range)
+      - category: exact match on category column
+      - status_filter: 'posted' | 'reversed'
+      - search: substring against (payee + description + memo + debit + credit)
+    """
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         where = ["1=1"]
         params: dict[str, Any] = {"limit": min(limit, 500), "offset": offset}
         if entity_id:
             where.append("entity_id = :eid")
             params["eid"] = str(entity_id)
+        if start_date:
+            where.append("effective_date >= :start_date")
+            params["start_date"] = start_date
+        if end_date:
+            where.append("effective_date <= :end_date")
+            params["end_date"] = end_date
+        if category:
+            where.append("category = :category")
+            params["category"] = category
+        if status_filter:
+            where.append("status = :status_filter")
+            params["status_filter"] = status_filter
+        if search:
+            where.append(
+                "(lower(coalesce(payee,'')) LIKE :s OR "
+                "lower(coalesce(description,'')) LIKE :s OR "
+                "lower(coalesce(memo,'')) LIKE :s OR "
+                "lower(debit_account) LIKE :s OR "
+                "lower(credit_account) LIKE :s)"
+            )
+            params["s"] = f"%{search.lower()}%"
+
+        where_sql = " AND ".join(where)
         rows = (
             await session.execute(
                 text(
                     f"""
-                    SELECT id::text, entity_id::text, posted_at, effective_date,
-                           amount, currency_code, debit_account, credit_account,
-                           category, materiality_tier, source, source_external_id,
-                           description, payee, memo, status, identity,
-                           approving_human_uc_uid,
-                           encode(prev_hash, 'hex') AS prev_hash_hex,
-                           encode(this_hash, 'hex') AS this_hash_hex
-                    FROM journal_entry
-                    WHERE {' AND '.join(where)}
-                    ORDER BY posted_at DESC, id DESC
+                    SELECT je.id::text, je.entity_id::text,
+                           e.display_name AS entity_display_name,
+                           e.slug AS entity_slug,
+                           je.posted_at, je.effective_date,
+                           je.amount, je.currency_code, je.debit_account, je.credit_account,
+                           je.category, je.materiality_tier, je.source, je.source_external_id,
+                           je.description, je.payee, je.memo, je.status, je.identity,
+                           je.approving_human_uc_uid,
+                           encode(je.prev_hash, 'hex') AS prev_hash_hex,
+                           encode(je.this_hash, 'hex') AS this_hash_hex
+                    FROM journal_entry je
+                    LEFT JOIN entity e ON e.id = je.entity_id
+                    WHERE {where_sql}
+                    ORDER BY je.effective_date DESC, je.posted_at DESC, je.id DESC
                     LIMIT :limit OFFSET :offset
                     """
                 ),
@@ -276,14 +317,62 @@ async def list_entries(
         ).mappings().all()
         total = (
             await session.execute(
-                text(
-                    "SELECT count(*) FROM journal_entry "
-                    + ("WHERE entity_id = :eid" if entity_id else "")
-                ),
-                {"eid": str(entity_id)} if entity_id else {},
+                text(f"SELECT count(*) FROM journal_entry WHERE {where_sql}"),
+                {k: v for k, v in params.items() if k not in ("limit", "offset")},
             )
         ).scalar_one()
-    return {"entries": [dict(r) for r in rows], "total": total}
+
+        # Distinct categories for filter dropdowns
+        categories = (
+            await session.execute(
+                text(
+                    "SELECT DISTINCT category FROM journal_entry "
+                    "WHERE category IS NOT NULL ORDER BY category"
+                )
+            )
+        ).scalars().all()
+
+    return {
+        "entries": [dict(r) for r in rows],
+        "total": total,
+        "categories": list(categories),
+    }
+
+
+@router.get("/api/workspaces/{workspace_id}/journal-entries/{entry_id}")
+async def get_entry_detail(
+    workspace_id: UUID,
+    entry_id: UUID,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Single entry with full detail + reversal lineage."""
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT je.id::text, je.entity_id::text,
+                           e.display_name AS entity_display_name,
+                           e.slug AS entity_slug,
+                           je.posted_at, je.effective_date,
+                           je.amount, je.currency_code, je.debit_account, je.credit_account,
+                           je.category, je.materiality_tier, je.source, je.source_external_id,
+                           je.description, je.payee, je.memo, je.status, je.identity,
+                           je.approving_human_uc_uid, je.reverses_entry_id::text AS reverses_entry_id,
+                           je.reasoning_trace, je.model_version,
+                           encode(je.prev_hash, 'hex') AS prev_hash_hex,
+                           encode(je.this_hash, 'hex') AS this_hash_hex
+                    FROM journal_entry je
+                    LEFT JOIN entity e ON e.id = je.entity_id
+                    WHERE je.id = :id
+                    """
+                ),
+                {"id": str(entry_id)},
+            )
+        ).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Journal entry not found")
+    return dict(row)
 
 
 @router.get("/api/workspaces/{workspace_id}/journal-entries/verify-chain")

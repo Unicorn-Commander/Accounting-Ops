@@ -5,6 +5,7 @@ import { EntitySelector } from "@/components/entity-selector";
 import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip, ConfidenceDot } from "@/components/primitives";
 import { getActiveContext } from "@/lib/active-context";
 import { getCashPosition, formatUSD } from "@/lib/cash-position";
+import { getProfitAndLoss } from "@/lib/journal";
 import { getRecentTransactions, shortDate, type LiveTransaction } from "@/lib/transactions";
 import { cn } from "@/lib/cn";
 
@@ -30,6 +31,12 @@ export default async function DashboardPage() {
   const txnData = ctx.activeWorkspace
     ? await getRecentTransactions(ctx.activeWorkspace.id, 30, 12, entityFilter)
     : null;
+  const [plMtd, plYtd] = ctx.activeWorkspace
+    ? await Promise.all([
+        getProfitAndLoss(ctx.activeWorkspace.id, "mtd", entityFilter),
+        getProfitAndLoss(ctx.activeWorkspace.id, "ytd", entityFilter)
+      ])
+    : [null, null];
   const liveTxns: LiveTransaction[] = txnData?.transactions ?? [];
   const subtitle = ctx.activeWorkspace
     ? `${ctx.activeWorkspace.display_name} · ${ctx.entities.length} ${ctx.entities.length === 1 ? "entity" : "entities"} · viewing ${ctx.isConsolidated ? "all entities (consolidated)" : ctx.activeEntity?.display_name ?? "—"}`
@@ -60,9 +67,28 @@ export default async function DashboardPage() {
             }
             deltaTone={cashPosition?.configured ? "credit" : "ink"}
           />
-          <KpiCard label="Net burn (30d)" value="$—" delta="Phase 1.6: requires Q-on-Q txn ingest" deltaTone="ink" />
-          <KpiCard label="Runway" value="—" delta="Awaiting burn rate" deltaTone="ink" />
-          <KpiCard label="Awaiting approval" value="0" delta="No agents wired to ledger yet" deltaTone="ink" />
+          <KpiCard
+            label="Revenue (YTD)"
+            value={plYtd ? formatUSD(plYtd.revenue.total) : "$—"}
+            delta={plYtd ? `${plYtd.revenue.lines.length} categories` : "Post entries to see"}
+            deltaTone="credit"
+          />
+          <KpiCard
+            label="Expenses (YTD)"
+            value={plYtd ? formatUSD(plYtd.expenses.total) : "$—"}
+            delta={plYtd ? `${plYtd.expenses.lines.length} categories` : "Post entries to see"}
+            deltaTone="debit"
+          />
+          <KpiCard
+            label="Net income (YTD)"
+            value={plYtd ? formatUSD(plYtd.net_income) : "$—"}
+            delta={
+              plMtd
+                ? `MTD ${formatUSD(plMtd.net_income)}`
+                : "Live from journal hash chain"
+            }
+            deltaTone={plYtd && parseFloat(plYtd.net_income) >= 0 ? "credit" : "debit"}
+          />
         </div>
 
         <div className="mt-8 grid grid-cols-1 gap-4 lg:grid-cols-3">
