@@ -1,10 +1,11 @@
 import Link from "next/link";
-import { ArrowRight, ArrowUpRight, TrendingDown, TrendingUp } from "lucide-react";
+import { ArrowRight, ArrowUpRight, TrendingDown, TrendingUp, Wifi } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip, ConfidenceDot } from "@/components/primitives";
 import { TransparencyPanel } from "@/components/transparency-panel";
 import { getActiveContext } from "@/lib/active-context";
+import { getCashPosition, formatUSD } from "@/lib/cash-position";
 import { cn } from "@/lib/cn";
 
 const RECENT_TXNS = [
@@ -22,6 +23,9 @@ export default async function DashboardPage() {
   const canConsolidate = ctx.activeWorkspace
     ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
     : false;
+  const cashPosition = ctx.activeWorkspace
+    ? await getCashPosition(ctx.activeWorkspace.id)
+    : null;
   const subtitle = ctx.activeWorkspace
     ? `${ctx.activeWorkspace.display_name} · ${ctx.entities.length} ${ctx.entities.length === 1 ? "entity" : "entities"} · viewing ${ctx.isConsolidated ? "all entities (consolidated)" : ctx.activeEntity?.display_name ?? "—"}`
     : "Cash position, agent activity, and approvals across all your entities.";
@@ -41,10 +45,19 @@ export default async function DashboardPage() {
         />
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <KpiCard label="Cash position" value="$487,193" delta="+$18.2k this week" deltaTone="credit" />
-          <KpiCard label="Net burn (30d)" value="$24,180" delta="−7% vs prior month" deltaTone="credit" />
-          <KpiCard label="Runway" value="14.2 mo" delta="at current burn" deltaTone="ink" />
-          <KpiCard label="Awaiting approval" value="3" delta="2 material · 1 specialty" deltaTone="pending" />
+          <KpiCard
+            label="Cash position"
+            value={cashPosition?.configured ? formatUSD(cashPosition.total_usd) : "$—"}
+            delta={
+              cashPosition?.configured
+                ? `Live · ${cashPosition.accounts.length} accounts via SimpleFIN`
+                : "Connect SimpleFIN to see live"
+            }
+            deltaTone={cashPosition?.configured ? "credit" : "ink"}
+          />
+          <KpiCard label="Net burn (30d)" value="$—" delta="Phase 1.6: requires Q-on-Q txn ingest" deltaTone="ink" />
+          <KpiCard label="Runway" value="—" delta="Awaiting burn rate" deltaTone="ink" />
+          <KpiCard label="Awaiting approval" value="0" delta="No agents wired to ledger yet" deltaTone="ink" />
         </div>
 
         <div className="mt-8 grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -114,24 +127,66 @@ export default async function DashboardPage() {
 
           <div className="space-y-4">
             <Card padded={false}>
-              <div className="border-b border-subtle px-5 py-4">
-                <h2 className="text-base font-semibold">Cash by account</h2>
-                <p className="mt-0.5 text-xs text-ink-tertiary">Real-time balances</p>
+              <div className="flex items-center justify-between border-b border-subtle px-5 py-4">
+                <div>
+                  <h2 className="text-base font-semibold">Cash by account</h2>
+                  <p className="mt-0.5 text-xs text-ink-tertiary">
+                    {cashPosition?.configured ? (
+                      <span className="inline-flex items-center gap-1.5">
+                        <Wifi size={11} className="text-credit" />
+                        Live · SimpleFIN ·{" "}
+                        {cashPosition.accounts[0]?.balance_as_of
+                          ? new Date(cashPosition.accounts[0].balance_as_of * 1000).toLocaleString(
+                              "en-US",
+                              { dateStyle: "short", timeStyle: "short" }
+                            )
+                          : ""}
+                      </span>
+                    ) : (
+                      "Connect a banking aggregator to see live balances"
+                    )}
+                  </p>
+                </div>
+                <Link
+                  href="/connectors"
+                  className="text-[11px] text-ink-secondary hover:text-ink-primary"
+                >
+                  Connectors →
+                </Link>
               </div>
               <ul className="divide-y divide-subtle/60">
-                {[
-                  ["Mercury · Operating", "$312,847", "credit" as const],
-                  ["Mercury · Tax reserve", "$48,200", "credit" as const],
-                  ["Mercury · Vault", "$112,946", "credit" as const],
-                  ["Stripe · USD balance", "$8,420", "credit" as const],
-                  ["PayPal · USD", "$1,082", "credit" as const],
-                  ["Wise · Multi-currency", "$3,698", "credit" as const]
-                ].map(([name, amt]) => (
-                  <li key={name as string} className="flex items-center justify-between px-5 py-2.5">
-                    <span className="text-sm text-ink-secondary">{name}</span>
-                    <span className="font-mono text-sm tabular-nums">{amt}</span>
+                {cashPosition?.configured && cashPosition.accounts.length > 0 ? (
+                  cashPosition.accounts.map((acct) => {
+                    const balanceNum = parseFloat(acct.balance);
+                    const isCredit = balanceNum >= 0;
+                    return (
+                      <li key={acct.id} className="flex items-center justify-between px-5 py-2.5">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm text-ink-secondary">{acct.name}</div>
+                          <div className="text-[10px] uppercase tracking-wider text-ink-tertiary">
+                            {acct.org_name}
+                          </div>
+                        </div>
+                        <span
+                          className={cn(
+                            "shrink-0 font-mono text-sm tabular-nums",
+                            isCredit ? "text-credit" : "text-debit"
+                          )}
+                        >
+                          {formatUSD(acct.balance)}
+                        </span>
+                      </li>
+                    );
+                  })
+                ) : (
+                  <li className="px-5 py-6 text-center text-xs text-ink-tertiary">
+                    No bank accounts connected yet.{" "}
+                    <Link href="/connectors" className="text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline">
+                      Connect SimpleFIN
+                    </Link>{" "}
+                    to see live balances.
                   </li>
-                ))}
+                )}
               </ul>
             </Card>
 
