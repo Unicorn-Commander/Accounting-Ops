@@ -23,7 +23,10 @@ class Settings(BaseModel):
 
     qwen_local_url: str = "http://midboy1:8000/v1"
     qwen_vlm_url: str = "http://midboy1:8087/v1"
-    tenant_id: str | None = None
+    # Default workspace+entity for single-tenant test deployments; production
+    # always resolves these per-request from JWT/path.
+    default_workspace_id: str | None = None
+    default_entity_id: str | None = None
 
 
 @lru_cache
@@ -43,5 +46,6 @@ def get_settings() -> Settings:
         otel_service_name=os.getenv("OTEL_SERVICE_NAME", defaults.otel_service_name),
         qwen_local_url=os.getenv("QWEN_LOCAL_URL", defaults.qwen_local_url),
         qwen_vlm_url=os.getenv("QWEN_VLM_URL", defaults.qwen_vlm_url),
-        tenant_id=os.getenv("TENANT_ID"),
+        default_workspace_id=os.getenv("DEFAULT_WORKSPACE_ID") or os.getenv("TENANT_ID"),
+        default_entity_id=os.getenv("DEFAULT_ENTITY_ID"),
     )

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/cn";
+import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 
 const NAV = [
   ["Dashboard", "/dashboard"],
@@ -75,10 +76,13 @@ export function SiteHeader({ variant = "app" }: { variant?: "app" | "marketing" 
               </a>
             </>
           ) : (
-            <div className="flex items-center gap-2 text-xs text-ink-tertiary">
-              <span className="h-1.5 w-1.5 rounded-full bg-credit shadow-[0_0_6px_hsl(157_64%_52%_/_0.8)]" />
-              <span className="hidden sm:inline">All agents online</span>
-            </div>
+            <>
+              <div className="hidden md:flex items-center gap-2 text-xs text-ink-tertiary">
+                <span className="h-1.5 w-1.5 rounded-full bg-credit shadow-[0_0_6px_hsl(157_64%_52%_/_0.8)]" />
+                <span className="hidden lg:inline">All agents online</span>
+              </div>
+              <WorkspaceSwitcher />
+            </>
           )}
         </div>
       </div>

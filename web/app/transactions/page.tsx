@@ -1,5 +1,6 @@
 import { Filter, Search } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import { EntitySelector } from "@/components/entity-selector";
 import {
   Card,
   ConfidenceDot,
@@ -54,13 +55,7 @@ export default function TransactionsPage() {
               <option>This year</option>
               <option>Custom range</option>
             </select>
-            <select className="rounded-md border border-default bg-surface px-3 py-1.5 text-xs">
-              <option>All entities</option>
-              <option>Magic Unicorn Inc</option>
-              <option>Aaron Stransky (personal)</option>
-              <option>Majiks JV</option>
-              <option>Brightwater Labs</option>
-            </select>
+            <EntitySelector size="sm" />
             <span className="ml-auto text-[11px] text-ink-tertiary">
               {TXNS.length} of 1,847 transactions
             </span>

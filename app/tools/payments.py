@@ -3,6 +3,20 @@ from typing import Any
 from uuid import UUID
 
 
-async def propose_payment(tenant_id: UUID, amount: Decimal, recipient: dict[str, Any], reasoning: str) -> dict:
-    """Prepare a non-custodial Stripe ACP payment proposal for human approval (§8.1, §11.1)."""
+async def propose_payment(
+    workspace_id: UUID,
+    entity_id: UUID,
+    amount: Decimal,
+    recipient: dict[str, Any],
+    reasoning: str,
+) -> dict:
+    """Prepare a non-custodial Stripe ACP payment proposal for human approval.
+
+    The entity_id determines which set of payment methods are usable
+    (a payment from Magic Unicorn Inc uses MU Inc's connected accounts;
+    a payment from Aaron personal uses personal accounts).
+
+    Always queues for approval. Never auto-executes regardless of materiality.
+    Custody stays with Stripe — we model AP2 mandate shape but don't move money.
+    """
     raise NotImplementedError("Phase 1")

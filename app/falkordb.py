@@ -1,20 +1,33 @@
 """FalkorDB client for Brigade-federated agent memory.
 
-Connects to the Brigade FalkorDB instance running on bigboy (192.168.10.10:6379)
-over Tailscale. Per-tenant subgraph isolation: every query is scoped to the
-tenant's subgraph name (computed from tenant_id).
+Workspace + entity isolation in the graph:
+- One subgraph per WORKSPACE on the Brigade FalkorDB on bigboy
+  (192.168.10.10:6379). Subgraph name: `workspace_<workspace_uuid_underscored>`.
+- Entity is encoded as a property on every node + a labeled relationship,
+  letting us scope graph queries to a single entity within a workspace.
 
 Node types (Graphiti-aware temporal validity):
-- Vendor          — counterparty registry, learned over time
-- Counterparty    — bank deposit sources, payout recipients
-- CategorizationRule — per-tenant chart-of-accounts mapping with effective intervals
-- ComplianceRule  — specialty / FERS / 1099-NEC / nexus / etc. rules with temporal validity
-- Decision        — every agent decision with reasoning trace
-- JournalEntry    — immutable ledger entries (mirror of Postgres)
-- SourceDocument  — receipts, invoices, bank statements (content-hash addressed)
-- Exception       — human-overrides + learned exceptions
-- Payout          — eBay, Stripe, etc. payout objects + recon links
-- ReconLink       — many-to-many between journal entries and source events
+- Workspace            — the workspace metadata node
+- Entity               — legal entity within a workspace
+- Vendor               — workspace-shared counterparty registry
+- Counterparty         — bank deposit sources, payout recipients (workspace-shared)
+- CategorizationRule   — per-entity chart-of-accounts mapping w/ temporal intervals
+- ComplianceRule       — specialty rules (FERS / 1099 / nexus / etc.)
+- Decision             — every agent decision with reasoning trace
+- JournalEntry         — immutable ledger entries (mirror of Postgres)
+- SourceDocument       — receipts, invoices, statements (content-hash addressed)
+- Exception            — human-overrides + learned exceptions
+- Payout               — eBay, Stripe, etc. payout objects + recon links
+- ReconLink            — many-to-many between journal entries and source events
+- AgentSession         — session boundary for grouping decisions
+
+Relationships:
+- (Entity)-[:BELONGS_TO]->(Workspace)
+- (JournalEntry)-[:FOR_ENTITY]->(Entity)
+- (JournalEntry)-[:SUPPORTED_BY]->(SourceDocument)
+- (Decision)-[:OVERRIDES]->(Decision)
+- (Decision)-[:APPLIED_RULE]->(ComplianceRule)
+- (Vendor)-[:LEARNED_PATTERN]->(CategorizationRule)
 """
 from __future__ import annotations
 
@@ -30,20 +43,32 @@ except ImportError:  # pragma: no cover - exercised only without falkordb-py ins
 from app.config import get_settings
 
 
-def subgraph_for_tenant(tenant_id: str | uuid.UUID) -> str:
-    """Compute the FalkorDB subgraph name for a tenant. Matches the schema convention."""
-    return f"tenant_{str(tenant_id).replace('-', '_')}"
+def subgraph_for_workspace(workspace_id: str | uuid.UUID) -> str:
+    """Compute the FalkorDB subgraph name for a workspace.
+
+    Matches the Postgres schema convention so workspace identity is consistent
+    across stores.
+    """
+    return f"workspace_{str(workspace_id).replace('-', '_')}"
+
+
+# Backwards-compat alias.
+subgraph_for_tenant = subgraph_for_workspace
 
 
 @asynccontextmanager
 async def falkordb_session(
-    tenant_id: str | uuid.UUID,
+    workspace_id: str | uuid.UUID,
 ) -> AsyncIterator[Any]:
-    """Open a FalkorDB connection scoped to the tenant's subgraph.
+    """Open a FalkorDB connection scoped to the workspace's subgraph.
 
     Usage:
-        async with falkordb_session(tenant_id) as graph:
-            result = await graph.query("MATCH (v:Vendor) RETURN v LIMIT 10")
+        async with falkordb_session(workspace_id) as graph:
+            result = await graph.query(
+                "MATCH (v:Vendor)-[:LEARNED_PATTERN]->(r:CategorizationRule) "
+                "WHERE v.name = $name RETURN r LIMIT 1",
+                params={"name": "Anthropic, PBC"}
+            )
     """
     if FalkorDB is None:
         raise RuntimeError(
@@ -51,7 +76,7 @@ async def falkordb_session(
         )
     settings = get_settings()
     db = FalkorDB(host=settings.falkordb_host, port=settings.falkordb_port)
-    graph_name = subgraph_for_tenant(tenant_id)
+    graph_name = subgraph_for_workspace(workspace_id)
     graph = db.select_graph(graph_name)
     try:
         yield graph
@@ -61,17 +86,18 @@ async def falkordb_session(
         pass
 
 
-async def ensure_tenant_subgraph(tenant_id: str | uuid.UUID) -> str:
-    """Idempotent: ensure the tenant's subgraph exists with required constraints.
+async def ensure_workspace_subgraph(workspace_id: str | uuid.UUID) -> str:
+    """Idempotent: ensure the workspace's subgraph exists with required constraints.
 
-    Creates uniqueness constraints on entity primary keys so duplicate inserts
-    don't proliferate. Called from scripts/provision_tenant.py at tenant creation.
+    Creates uniqueness constraints on entity primary keys + entity_id property
+    indexes for fast scoping. Called at workspace provisioning time.
     """
     if FalkorDB is None:
-        return subgraph_for_tenant(tenant_id)
-    async with falkordb_session(tenant_id) as graph:
-        # Constraints — idempotent, no-ops if already present
+        return subgraph_for_workspace(workspace_id)
+    async with falkordb_session(workspace_id) as graph:
         for label, prop in (
+            ("Workspace", "id"),
+            ("Entity", "id"),
             ("Vendor", "id"),
             ("Counterparty", "id"),
             ("CategorizationRule", "id"),
@@ -82,45 +108,58 @@ async def ensure_tenant_subgraph(tenant_id: str | uuid.UUID) -> str:
             ("Exception", "id"),
             ("Payout", "id"),
             ("ReconLink", "id"),
+            ("AgentSession", "id"),
         ):
             try:
                 await graph.query(
                     f"CREATE CONSTRAINT FOR (n:{label}) REQUIRE n.{prop} IS UNIQUE"
                 )
             except Exception:
-                # Constraint already exists or FalkorDB version differs; safe to ignore
                 pass
-    return subgraph_for_tenant(tenant_id)
+        # Index entity_id on all entity-scoped node types for fast scoping
+        for label in (
+            "ComplianceRule",
+            "Decision",
+            "JournalEntry",
+            "Exception",
+            "Payout",
+            "ReconLink",
+            "AgentSession",
+        ):
+            try:
+                await graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.entity_id)")
+            except Exception:
+                pass
+    return subgraph_for_workspace(workspace_id)
 
 
-# Common query helpers -----------------------------------------------------
+# Common query helpers — all entity-scoped within a workspace -------------
 
 
 async def get_active_compliance_rules(
-    tenant_id: str | uuid.UUID, at_time: str | None = None
+    workspace_id: str | uuid.UUID,
+    entity_id: str | uuid.UUID,
+    at_time: str | None = None,
 ) -> list[dict]:
-    """Return ComplianceRule nodes active at the given time (default: now).
-
-    Rules have effective_from / effective_to temporal validity intervals
-    (Graphiti pattern). A rule is active if effective_from <= at_time AND
-    (effective_to IS NULL OR effective_to > at_time).
-    """
-    async with falkordb_session(tenant_id) as graph:
+    """Return ComplianceRule nodes active for this entity at the given time."""
+    async with falkordb_session(workspace_id) as graph:
         result = await graph.query(
             """
             MATCH (r:ComplianceRule)
-            WHERE r.effective_from <= COALESCE($at, datetime())
+            WHERE r.entity_id = $entity_id
+              AND r.effective_from <= COALESCE($at, datetime())
               AND (r.effective_to IS NULL OR r.effective_to > COALESCE($at, datetime()))
             RETURN r
             ORDER BY r.kind
             """,
-            params={"at": at_time},
+            params={"entity_id": str(entity_id), "at": at_time},
         )
         return [dict(row[0]) for row in result.result_set or []]
 
 
 async def record_decision(
-    tenant_id: str | uuid.UUID,
+    workspace_id: str | uuid.UUID,
+    entity_id: str | uuid.UUID,
     *,
     decision_id: str,
     agent_id: str,
@@ -130,16 +169,17 @@ async def record_decision(
     model_version: str | None = None,
     parent_run_id: str | None = None,
 ) -> None:
-    """Append a Decision node to the tenant's subgraph.
+    """Append a Decision node to the workspace subgraph, scoped to entity.
 
     Decisions are immutable. Corrections create new Decision nodes with
     OVERRIDES relationships to the previous decision.
     """
-    async with falkordb_session(tenant_id) as graph:
+    async with falkordb_session(workspace_id) as graph:
         await graph.query(
             """
             CREATE (d:Decision {
                 id: $id,
+                entity_id: $entity_id,
                 agent_id: $agent_id,
                 verdict: $verdict,
                 reasoning: $reasoning,
@@ -151,11 +191,39 @@ async def record_decision(
             """,
             params={
                 "id": decision_id,
+                "entity_id": str(entity_id),
                 "agent_id": agent_id,
                 "verdict": verdict,
                 "reasoning": reasoning,
                 "rule_version": rule_version,
                 "model_version": model_version,
                 "parent_run_id": parent_run_id,
+            },
+        )
+
+
+async def link_journal_entry_to_source(
+    workspace_id: str | uuid.UUID,
+    entity_id: str | uuid.UUID,
+    journal_entry_id: str,
+    source_document_hash: str,
+) -> None:
+    """Materialize the (JournalEntry)-[:SUPPORTED_BY]->(SourceDocument) edge.
+
+    Closes the IRS purchase/payment/purpose triangle at write time.
+    """
+    async with falkordb_session(workspace_id) as graph:
+        await graph.query(
+            """
+            MERGE (j:JournalEntry {id: $je_id})
+            ON CREATE SET j.entity_id = $entity_id
+            MERGE (s:SourceDocument {content_hash: $hash})
+            ON CREATE SET s.entity_id = $entity_id
+            MERGE (j)-[:SUPPORTED_BY]->(s)
+            """,
+            params={
+                "je_id": journal_entry_id,
+                "entity_id": str(entity_id),
+                "hash": source_document_hash,
             },
         )

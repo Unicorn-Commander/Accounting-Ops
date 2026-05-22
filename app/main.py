@@ -2,7 +2,7 @@ from fastapi import Depends, FastAPI
 
 from app.auth import AuthContext, validate_bearer_token
 from app.a2a.server import router as a2a_router
-from app.api.tools import router as tools_router
+from app.api.tools import consolidated_router, router as tools_router
 from app.config import get_settings
 from app.otel import audit_span_middleware, setup_otel
 
@@ -12,6 +12,7 @@ app.middleware("http")(audit_span_middleware)
 setup_otel(app)
 app.include_router(a2a_router)
 app.include_router(tools_router)
+app.include_router(consolidated_router)
 
 
 @app.get("/healthz", tags=["system"])
@@ -35,11 +36,19 @@ async def well_known_mcp() -> dict:
             "issuer": str(settings.keycloak_realm_url),
             "authorization_url": f"{settings.keycloak_realm_url}/protocol/openid-connect/auth",
             "token_url": f"{settings.keycloak_realm_url}/protocol/openid-connect/token",
-            "scopes": ["accounting:read", "accounting:write"],
+            "scopes": ["accounting:read", "accounting:write", "accounting:admin"],
+        },
+        "addressing": {
+            "resource_pattern": "/api/workspaces/{workspace_id}/entities/{entity_id}/...",
+            "consolidated_pattern": "/api/workspaces/{workspace_id}/consolidated/...",
         },
     }
 
 
 @app.get("/api/me", tags=["auth"])
 async def me(auth: AuthContext = Depends(validate_bearer_token)) -> dict:
-    return {"uc_uid": auth.uc_uid, "agent_id": auth.agent_id, "scopes": auth.scopes}
+    return {
+        "uc_uid": auth.uc_uid,
+        "agent_id": auth.agent_id,
+        "scopes": auth.scopes,
+    }

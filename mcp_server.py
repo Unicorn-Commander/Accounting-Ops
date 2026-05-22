@@ -1,11 +1,13 @@
 import asyncio
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from app.config import get_settings
 from app.tools import (
     add_specialty_rule,
     categorize_transaction,
+    get_consolidated_p_and_l,
     get_p_and_l,
     get_runway,
     get_transaction,
@@ -25,6 +27,7 @@ def build_server():
     settings = get_settings()
     server = FastMCP("Accounting-Ops")
 
+    # Entity-scoped tools — caller passes workspace_id + entity_id.
     server.tool()(list_transactions)
     server.tool()(get_transaction)
     server.tool()(categorize_transaction)
@@ -34,11 +37,23 @@ def build_server():
     server.tool()(get_p_and_l)
     server.tool()(get_runway)
 
-    @server.tool()
-    async def propose_payment_tool(tenant_id: UUID, amount: str, recipient: dict, reasoning: str) -> dict:
-        return await propose_payment(tenant_id, Decimal(amount), recipient, reasoning)
+    # Workspace-level consolidated view (cross-entity).
+    server.tool()(get_consolidated_p_and_l)
 
-    @server.resource("https://accounting.magicunicorn.dev/.well-known/mcp.json")
+    @server.tool()
+    async def propose_payment_tool(
+        workspace_id: UUID,
+        entity_id: UUID,
+        amount: str,
+        recipient: dict[str, Any],
+        reasoning: str,
+    ) -> dict:
+        """Wrap propose_payment so MCP-side accepts amount as a string and we cast to Decimal."""
+        return await propose_payment(
+            workspace_id, entity_id, Decimal(amount), recipient, reasoning
+        )
+
+    @server.resource("https://accounting-ops.magicunicorn.dev/.well-known/mcp.json")
     def well_known_mcp() -> dict:
         return {
             "name": "Accounting-Ops",
@@ -48,6 +63,9 @@ def build_server():
                 "type": "oauth2",
                 "issuer": str(settings.keycloak_realm_url),
                 "token_url": f"{settings.keycloak_realm_url}/protocol/openid-connect/token",
+            },
+            "addressing": {
+                "resource_pattern": "/api/workspaces/{workspace_id}/entities/{entity_id}/...",
             },
         }
 

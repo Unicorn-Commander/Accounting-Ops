@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, ArrowUpRight, TrendingDown, TrendingUp } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import { EntitySelector } from "@/components/entity-selector";
 import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip, ConfidenceDot } from "@/components/primitives";
 import { TransparencyPanel } from "@/components/transparency-panel";
 import { cn } from "@/lib/cn";
@@ -22,15 +23,7 @@ export default function DashboardPage() {
         <SectionHeader
           title="Dashboard"
           subtitle="Cash position, agent activity, and approvals across all your entities."
-          action={
-            <select className="rounded-md border border-default bg-surface px-3 py-1.5 text-sm">
-              <option>Magic Unicorn Inc</option>
-              <option>Aaron Stransky (personal)</option>
-              <option>Majiks JV</option>
-              <option>Brightwater Labs</option>
-              <option>All entities (consolidated)</option>
-            </select>
-          }
+          action={<EntitySelector />}
         />
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">

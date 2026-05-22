@@ -1,5 +1,6 @@
 import { ArrowUp, Bot, Paperclip, User } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import { EntitySelector } from "@/components/entity-selector";
 import { Card, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
 import { cn } from "@/lib/cn";
 
@@ -39,12 +40,7 @@ export default function ChatPage() {
           action={
             <div className="flex items-center gap-2 text-xs">
               <StatusChip tone="agent">3 agents online</StatusChip>
-              <select className="rounded-md border border-default bg-surface px-2 py-1 text-xs">
-                <option>Magic Unicorn Inc</option>
-                <option>Aaron Stransky (personal)</option>
-                <option>Majiks JV</option>
-                <option>Consolidated</option>
-              </select>
+              <EntitySelector size="sm" />
             </div>
           }
         />

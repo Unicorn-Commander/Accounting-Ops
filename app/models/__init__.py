@@ -1,4 +1,5 @@
 from app.models.ledger import (
+    ActivityEvent,
     AgentSession,
     ApprovalQueue,
     ComplianceProfile,
@@ -6,16 +7,17 @@ from app.models.ledger import (
     ConnectorState,
     Counterparty,
     DecisionAudit,
+    Entity,
     EventLog,
     FxRate,
     JournalEntry,
     Receipt,
     ReconLink,
-    Tenant,
     Vendor,
 )
 
 __all__ = [
+    "ActivityEvent",
     "AgentSession",
     "ApprovalQueue",
     "ComplianceProfile",
@@ -23,11 +25,11 @@ __all__ = [
     "ConnectorState",
     "Counterparty",
     "DecisionAudit",
+    "Entity",
     "EventLog",
     "FxRate",
     "JournalEntry",
     "Receipt",
     "ReconLink",
-    "Tenant",
     "Vendor",
 ]

@@ -30,7 +30,8 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 async def get_session() -> AsyncIterator[AsyncSession]:
     """Public-schema session for tenant registry, admin, provisioning.
 
-    For per-tenant queries, use `app.tenant_session.tenant_session(...)`.
+    For per-workspace queries, use `app.workspace_session.workspace_session(...)`.
+    For per-entity queries within a workspace, use `entity_session(...)`.
     """
     async with SessionLocal() as session:
         yield session

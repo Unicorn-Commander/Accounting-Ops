@@ -39,7 +39,16 @@ async def audit_span_middleware(request: Request, call_next: Callable):
     tracer = trace.get_tracer("accounting_ops.audit")
     started = time.perf_counter()
     with tracer.start_as_current_span("http.request") as span:
-        span.set_attribute("tenant_id", request.headers.get("x-tenant-id", "unknown"))
+        span.set_attribute(
+            "workspace_id",
+            request.path_params.get("workspace_id")
+            or request.headers.get("x-workspace-id", "unknown"),
+        )
+        span.set_attribute(
+            "entity_id",
+            request.path_params.get("entity_id")
+            or request.headers.get("x-entity-id", "unknown"),
+        )
         span.set_attribute("agent_id", request.headers.get("x-agent-id", "unknown"))
         span.set_attribute("user_uc_uid", request.headers.get("x-uc-uid", "unknown"))
         span.set_attribute("tool_name", request.headers.get("x-tool-name", "none"))

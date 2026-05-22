@@ -1,3 +1,14 @@
+"""HTTP routes for MCP tool surfaces, workspace + entity scoped.
+
+URL pattern:
+    /api/workspaces/{workspace_id}/entities/{entity_id}/...
+
+Workspace-level routes (no entity scoping):
+    /api/workspaces/{workspace_id}/consolidated/...
+
+All routes resolve workspace + entity context via FastAPI dependency, enforce
+RBAC via require_role, then delegate to app.tools functions.
+"""
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -5,10 +16,17 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from app.tenancy import TenantContext, resolve_tenant
+from app.tenancy import (
+    EntityContext,
+    WorkspaceContext,
+    require_role,
+    resolve_entity,
+    resolve_workspace,
+)
 from app.tools import (
     add_specialty_rule,
     categorize_transaction,
+    get_consolidated_p_and_l,
     get_p_and_l,
     get_runway,
     get_transaction,
@@ -18,7 +36,19 @@ from app.tools import (
     query_specialty_rules,
 )
 
-router = APIRouter(prefix="/api/tenants/{tenant_id}", tags=["tools"])
+
+router = APIRouter(
+    prefix="/api/workspaces/{workspace_id}/entities/{entity_id}",
+    tags=["tools"],
+)
+
+consolidated_router = APIRouter(
+    prefix="/api/workspaces/{workspace_id}/consolidated",
+    tags=["consolidated"],
+)
+
+
+# Pydantic request bodies ----------------------------------------------------
 
 
 class CategorizeRequest(BaseModel):
@@ -47,114 +77,174 @@ class PaymentProposalRequest(BaseModel):
     reasoning: str
 
 
-def phase_1(exc: NotImplementedError) -> HTTPException:
-    return HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc))
+class ConsolidatedPLRequest(BaseModel):
+    period: str
+    entity_ids: list[UUID] | None = None
+
+
+def _phase_1(exc: NotImplementedError) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc)
+    )
+
+
+# Read endpoints (viewer+) ---------------------------------------------------
 
 
 @router.get("/transactions")
 async def http_list_transactions(
-    tenant_id: UUID,
     filter: str | None = None,
-    tenant: TenantContext = Depends(resolve_tenant),
+    ctx: EntityContext = Depends(resolve_entity),
 ) -> list[dict[str, Any]]:
     try:
-        return await list_transactions(tenant.tenant_id, {"raw": filter} if filter else None)
+        return await list_transactions(
+            ctx.workspace.workspace_id,
+            ctx.entity_id,
+            {"raw": filter} if filter else None,
+        )
     except NotImplementedError as exc:
-        raise phase_1(exc) from exc
+        raise _phase_1(exc) from exc
 
 
 @router.get("/transactions/{id}")
 async def http_get_transaction(
-    tenant_id: UUID,
-    id: UUID,
-    tenant: TenantContext = Depends(resolve_tenant),
+    id: UUID, ctx: EntityContext = Depends(resolve_entity)
 ) -> dict[str, Any]:
     try:
-        return await get_transaction(tenant.tenant_id, id)
+        return await get_transaction(
+            ctx.workspace.workspace_id, ctx.entity_id, id
+        )
     except NotImplementedError as exc:
-        raise phase_1(exc) from exc
-
-
-@router.post("/transactions/{id}/categorize")
-async def http_categorize_transaction(
-    tenant_id: UUID,
-    id: UUID,
-    body: CategorizeRequest,
-    tenant: TenantContext = Depends(resolve_tenant),
-) -> dict:
-    try:
-        return await categorize_transaction(tenant.tenant_id, id, body.category, body.reasoning)
-    except NotImplementedError as exc:
-        raise phase_1(exc) from exc
-
-
-@router.post("/receipts/link")
-async def http_link_receipt(
-    tenant_id: UUID,
-    body: LinkReceiptRequest,
-    tenant: TenantContext = Depends(resolve_tenant),
-) -> dict:
-    try:
-        return await link_receipt_to_transaction(tenant.tenant_id, body.receipt_id, body.tx_id)
-    except NotImplementedError as exc:
-        raise phase_1(exc) from exc
+        raise _phase_1(exc) from exc
 
 
 @router.get("/specialty-rules")
 async def http_query_specialty_rules(
-    tenant_id: UUID,
-    tenant: TenantContext = Depends(resolve_tenant),
+    ctx: EntityContext = Depends(resolve_entity),
 ) -> list[dict[str, Any]]:
     try:
-        return await query_specialty_rules(tenant.tenant_id)
+        return await query_specialty_rules(
+            ctx.workspace.workspace_id, ctx.entity_id
+        )
     except NotImplementedError as exc:
-        raise phase_1(exc) from exc
-
-
-@router.post("/specialty-rules")
-async def http_add_specialty_rule(
-    tenant_id: UUID,
-    body: SpecialtyRuleRequest,
-    tenant: TenantContext = Depends(resolve_tenant),
-) -> dict:
-    try:
-        return await add_specialty_rule(tenant.tenant_id, body.kind, body.params, body.reasoning)
-    except NotImplementedError as exc:
-        raise phase_1(exc) from exc
+        raise _phase_1(exc) from exc
 
 
 @router.get("/p-and-l")
 async def http_get_p_and_l(
-    tenant_id: UUID,
-    entity_id: UUID,
-    period: str,
-    tenant: TenantContext = Depends(resolve_tenant),
+    period: str, ctx: EntityContext = Depends(resolve_entity)
 ) -> dict[str, Any]:
     try:
-        return await get_p_and_l(tenant.tenant_id, entity_id, period)
+        return await get_p_and_l(
+            ctx.workspace.workspace_id, ctx.entity_id, period
+        )
     except NotImplementedError as exc:
-        raise phase_1(exc) from exc
+        raise _phase_1(exc) from exc
 
 
 @router.post("/runway")
 async def http_get_runway(
-    tenant_id: UUID,
-    body: RunwayRequest,
-    tenant: TenantContext = Depends(resolve_tenant),
+    body: RunwayRequest, ctx: EntityContext = Depends(resolve_entity)
 ) -> dict[str, Any]:
     try:
-        return await get_runway(tenant.tenant_id, body.scenario)
+        return await get_runway(
+            ctx.workspace.workspace_id, ctx.entity_id, body.scenario
+        )
     except NotImplementedError as exc:
-        raise phase_1(exc) from exc
+        raise _phase_1(exc) from exc
+
+
+# Write endpoints (accountant+) ----------------------------------------------
+
+
+@router.post("/transactions/{id}/categorize")
+async def http_categorize_transaction(
+    id: UUID,
+    body: CategorizeRequest,
+    ctx: EntityContext = Depends(resolve_entity),
+) -> dict:
+    require_role(ctx.workspace, "accountant")
+    try:
+        return await categorize_transaction(
+            ctx.workspace.workspace_id,
+            ctx.entity_id,
+            id,
+            body.category,
+            body.reasoning,
+        )
+    except NotImplementedError as exc:
+        raise _phase_1(exc) from exc
+
+
+@router.post("/receipts/link")
+async def http_link_receipt(
+    body: LinkReceiptRequest, ctx: EntityContext = Depends(resolve_entity)
+) -> dict:
+    require_role(ctx.workspace, "accountant")
+    try:
+        return await link_receipt_to_transaction(
+            ctx.workspace.workspace_id,
+            ctx.entity_id,
+            body.receipt_id,
+            body.tx_id,
+        )
+    except NotImplementedError as exc:
+        raise _phase_1(exc) from exc
+
+
+@router.post("/specialty-rules")
+async def http_add_specialty_rule(
+    body: SpecialtyRuleRequest,
+    ctx: EntityContext = Depends(resolve_entity),
+) -> dict:
+    require_role(ctx.workspace, "admin")
+    try:
+        return await add_specialty_rule(
+            ctx.workspace.workspace_id,
+            ctx.entity_id,
+            body.kind,
+            body.params,
+            body.reasoning,
+        )
+    except NotImplementedError as exc:
+        raise _phase_1(exc) from exc
 
 
 @router.post("/payments/propose")
 async def http_propose_payment(
-    tenant_id: UUID,
     body: PaymentProposalRequest,
-    tenant: TenantContext = Depends(resolve_tenant),
+    ctx: EntityContext = Depends(resolve_entity),
 ) -> dict:
+    require_role(ctx.workspace, "accountant")
     try:
-        return await propose_payment(tenant.tenant_id, body.amount, body.recipient, body.reasoning)
+        return await propose_payment(
+            ctx.workspace.workspace_id,
+            ctx.entity_id,
+            body.amount,
+            body.recipient,
+            body.reasoning,
+        )
     except NotImplementedError as exc:
-        raise phase_1(exc) from exc
+        raise _phase_1(exc) from exc
+
+
+# Workspace-level (consolidated) endpoints -----------------------------------
+
+
+@consolidated_router.post("/p-and-l")
+async def http_get_consolidated_p_and_l(
+    body: ConsolidatedPLRequest,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict[str, Any]:
+    require_role(workspace, "admin")
+    if workspace.entity_scope is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Consolidated views require unrestricted entity scope",
+        )
+    try:
+        return await get_consolidated_p_and_l(
+            workspace.workspace_id, body.period, body.entity_ids
+        )
+    except NotImplementedError as exc:
+        raise _phase_1(exc) from exc
