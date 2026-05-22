@@ -9,8 +9,9 @@ const NAV = [
   ["Transactions", "/transactions"],
   ["Reconciliation", "/reconciliation-queue"],
   ["Rules", "/specialty-rules"],
-  ["Agent Activity", "/agent-activity"],
+  ["Activity", "/agent-activity"],
   ["Chat", "/chat"],
+  ["Connectors", "/connectors"],
   ["CPA Export", "/cpa-export"]
 ];
 
