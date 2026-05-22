@@ -111,15 +111,18 @@ export const CONNECTORS: Connector[] = [
     name: "IMAP Receipts",
     category: "email",
     description:
-      "Reads from a dedicated receipts@ mailbox on your own email server. Extracts attachments + parses receipt emails.",
+      "Reads from a dedicated receipts@ mailbox on your own email server. Extracts attachments + parses receipt emails with confidence-scored heuristics.",
     what_it_enables: [
-      "Pull PDF/image attachments by date range",
-      "Heuristic receipt detection (subject + sender + attachment)",
-      "Content-hash dedup for journal binding"
+      "Folder + message listing with date / unseen / search filters",
+      "Per-attachment SHA-256 + size cap + MIME-safe extraction",
+      "extract_receipts: scored candidates (pdf, billing domain, subject, currency, localpart)",
+      "Content-hash dedup keys for journal binding"
     ],
-    internal_url: "",
+    internal_url: "http://imap-mcp:8000",
     monthly_cost: "Free (your own email server)",
-    available: false
+    signup_label: "Create receipts@ mailbox on your existing mail server",
+    doc_url: "https://datatracker.ietf.org/doc/html/rfc3501",
+    available: true
   }
 ];
 
