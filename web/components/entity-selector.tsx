@@ -1,34 +1,75 @@
 "use client";
 
-import { Building2, ChevronDown } from "lucide-react";
-import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { useState, useTransition } from "react";
+import { Building2, ChevronDown, Layers, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/cn";
+import type { Entity } from "@/lib/api";
 
-// Phase 1: hydrate from the active workspace's entity list.
-const ENTITIES = [
-  { id: "ent-mu", name: "Magic Unicorn Inc", kind: "C-Corp", default: true },
-  { id: "ent-aaron", name: "Aaron Stransky (personal)", kind: "Personal", default: false },
-  { id: "ent-majiks", name: "Majiks JV", kind: "JV", default: false },
-  { id: "ent-gfl", name: "Brightwater Labs", kind: "JV", default: false }
-];
-
-const CONSOLIDATED = {
-  id: "consolidated",
-  name: "All entities (consolidated)",
-  kind: "Workspace"
+const KIND_LABEL: Record<string, string> = {
+  c_corp: "C-Corp",
+  s_corp: "S-Corp",
+  llc: "LLC",
+  partnership: "Partnership",
+  sole_proprietorship: "Sole Prop",
+  personal: "Personal",
+  trust: "Trust",
+  non_profit: "Non-profit",
+  estate: "Estate",
+  other: "Other"
 };
 
+const CONSOLIDATED_ID = "consolidated";
+
 export function EntitySelector({
+  entities,
+  activeEntityId,
   showConsolidated = true,
+  canConsolidate = true,
   size = "md"
 }: {
+  entities: Entity[];
+  activeEntityId?: string;
   showConsolidated?: boolean;
+  canConsolidate?: boolean;
   size?: "sm" | "md";
 }) {
-  const [active, setActive] = useState<typeof ENTITIES[number] | typeof CONSOLIDATED>(
-    ENTITIES.find((e) => e.default) ?? ENTITIES[0]
-  );
+  const router = useRouter();
   const [open, setOpen] = useState(false);
+  const [, startTransition] = useTransition();
+
+  if (entities.length === 0) {
+    return (
+      <div
+        className={cn(
+          "rounded-md border border-pending/40 bg-pending/[0.06] text-pending",
+          size === "sm" ? "px-2 py-1 text-xs" : "px-3 py-1.5 text-sm"
+        )}
+      >
+        No entities · provision in workspace
+      </div>
+    );
+  }
+
+  const consolidated = canConsolidate && showConsolidated
+    ? {
+        id: CONSOLIDATED_ID,
+        display_name: "All entities (consolidated)",
+        kind: "workspace"
+      }
+    : null;
+
+  const active =
+    entities.find((e) => e.id === activeEntityId) ??
+    (activeEntityId === CONSOLIDATED_ID && consolidated
+      ? { ...consolidated, slug: CONSOLIDATED_ID, legal_name: null, country_code: "US", functional_currency: "USD", hipaa_protected: false, status: "active", created_at: "" }
+      : entities[0]);
+
+  function selectEntity(entityId: string) {
+    document.cookie = `aops_entity=${entityId}; Path=/; SameSite=Lax; Max-Age=2592000`;
+    setOpen(false);
+    startTransition(() => router.refresh());
+  }
 
   return (
     <div className="relative">
@@ -39,8 +80,15 @@ export function EntitySelector({
           size === "sm" ? "px-2.5 py-1 text-xs" : "px-3 py-1.5 text-sm"
         )}
       >
-        <Building2 size={size === "sm" ? 12 : 14} className="text-ink-tertiary" />
-        <span className="font-medium">{active.name}</span>
+        {active.id === CONSOLIDATED_ID ? (
+          <Layers
+            size={size === "sm" ? 12 : 14}
+            className="text-brand-400"
+          />
+        ) : (
+          <Building2 size={size === "sm" ? 12 : 14} className="text-ink-tertiary" />
+        )}
+        <span className="font-medium">{active.display_name}</span>
         <ChevronDown
           size={size === "sm" ? 11 : 13}
           className={cn(
@@ -51,20 +99,17 @@ export function EntitySelector({
       </button>
 
       {open && (
-        <div className="absolute right-0 z-40 mt-1.5 w-72 rounded-lg border border-default bg-elevated shadow-card">
+        <div className="absolute right-0 z-40 mt-1.5 w-80 rounded-lg border border-default bg-elevated shadow-card">
           <div className="border-b border-subtle px-3 py-2">
             <p className="text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
-              Entity
+              Entity ({entities.length})
             </p>
           </div>
-          <ul className="py-1">
-            {ENTITIES.map((entity) => (
+          <ul className="max-h-80 overflow-y-auto py-1">
+            {entities.map((entity) => (
               <li key={entity.id}>
                 <button
-                  onClick={() => {
-                    setActive(entity);
-                    setOpen(false);
-                  }}
+                  onClick={() => selectEntity(entity.id)}
                   className={cn(
                     "flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition hover:bg-white/[0.03]",
                     entity.id === active.id && "bg-white/[0.02]"
@@ -73,44 +118,54 @@ export function EntitySelector({
                   <Building2
                     size={12}
                     className={
-                      entity.id === active.id ? "text-agent-500" : "text-ink-tertiary"
+                      entity.id === active.id
+                        ? "text-agent-500"
+                        : "text-ink-tertiary"
                     }
                   />
                   <div className="flex-1">
-                    <div className="font-medium">{entity.name}</div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{entity.display_name}</span>
+                      {entity.hipaa_protected && (
+                        <ShieldCheck
+                          size={11}
+                          className="text-agent-500"
+                          aria-label="HIPAA-protected"
+                        />
+                      )}
+                    </div>
                     <div className="text-[10px] uppercase tracking-wider text-ink-tertiary">
-                      {entity.kind}
+                      {KIND_LABEL[entity.kind] ?? entity.kind}
+                      {entity.functional_currency !== "USD" &&
+                        ` · ${entity.functional_currency}`}
                     </div>
                   </div>
                 </button>
               </li>
             ))}
           </ul>
-          {showConsolidated && (
+          {consolidated && (
             <>
               <div className="border-t border-subtle" />
               <button
-                onClick={() => {
-                  setActive(CONSOLIDATED);
-                  setOpen(false);
-                }}
+                onClick={() => selectEntity(CONSOLIDATED_ID)}
                 className={cn(
                   "flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition hover:bg-white/[0.03]",
-                  active.id === CONSOLIDATED.id && "bg-white/[0.02]"
+                  active.id === CONSOLIDATED_ID && "bg-white/[0.02]"
                 )}
               >
-                <Building2
+                <Layers
                   size={12}
                   className={
-                    active.id === CONSOLIDATED.id
+                    active.id === CONSOLIDATED_ID
                       ? "text-brand-400"
                       : "text-ink-tertiary"
                   }
                 />
                 <div className="flex-1">
-                  <div className="font-medium">{CONSOLIDATED.name}</div>
+                  <div className="font-medium">All entities (consolidated)</div>
                   <div className="text-[10px] uppercase tracking-wider text-ink-tertiary">
-                    Owner/admin only
+                    Owner / admin only
                   </div>
                 </div>
               </button>

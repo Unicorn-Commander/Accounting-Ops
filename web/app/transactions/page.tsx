@@ -9,6 +9,7 @@ import {
   SectionHeader,
   StatusChip
 } from "@/components/primitives";
+import { getActiveContext } from "@/lib/active-context";
 import { cn } from "@/lib/cn";
 
 const TXNS = [
@@ -26,7 +27,11 @@ const TXNS = [
   { date: "May 16", payee: "eBay Finances payout · batch 19c2", category: "Revenue · Listing-Ops", entity: "Magic Unicorn Inc", amount: "+$1,847.81", tone: "credit", conf: 0.92, materiality: "M" as const, status: "Reconciled", tag: "credit" as const }
 ];
 
-export default function TransactionsPage() {
+export default async function TransactionsPage() {
+  const ctx = await getActiveContext();
+  const canConsolidate = ctx.activeWorkspace
+    ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
+    : false;
   return (
     <AppShell>
       <PageShell>
@@ -55,7 +60,12 @@ export default function TransactionsPage() {
               <option>This year</option>
               <option>Custom range</option>
             </select>
-            <EntitySelector size="sm" />
+            <EntitySelector
+              entities={ctx.entities}
+              activeEntityId={ctx.isConsolidated ? "consolidated" : ctx.activeEntity?.id}
+              canConsolidate={canConsolidate}
+              size="sm"
+            />
             <span className="ml-auto text-[11px] text-ink-tertiary">
               {TXNS.length} of 1,847 transactions
             </span>

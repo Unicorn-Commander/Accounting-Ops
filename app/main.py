@@ -3,6 +3,7 @@ from fastapi import Depends, FastAPI
 from app.auth import AuthContext, validate_bearer_token
 from app.a2a.server import router as a2a_router
 from app.api.tools import consolidated_router, router as tools_router
+from app.api.workspaces import router as workspaces_router
 from app.config import get_settings
 from app.otel import audit_span_middleware, setup_otel
 
@@ -11,6 +12,7 @@ app = FastAPI(title=settings.app_name, version="0.1.0", openapi_url="/api/openap
 app.middleware("http")(audit_span_middleware)
 setup_otel(app)
 app.include_router(a2a_router)
+app.include_router(workspaces_router)
 app.include_router(tools_router)
 app.include_router(consolidated_router)
 

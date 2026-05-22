@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { auth } from "@/lib/auth";
+import { getActiveContext } from "@/lib/active-context";
 import { SiteHeaderClient } from "@/components/site-header-client";
 import { UserMenu } from "@/components/user-menu";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
@@ -25,9 +26,16 @@ export async function SiteHeader({
     </Link>
   ) : null;
 
+  const ctx = session?.user ? await getActiveContext() : null;
+
   return (
     <SiteHeaderClient variant={variant} userBlock={userBlock}>
-      {variant === "app" && session?.user ? <WorkspaceSwitcher /> : null}
+      {ctx && (
+        <WorkspaceSwitcher
+          workspaces={ctx.workspaces}
+          activeWorkspaceId={ctx.activeWorkspace?.id}
+        />
+      )}
     </SiteHeaderClient>
   );
 }

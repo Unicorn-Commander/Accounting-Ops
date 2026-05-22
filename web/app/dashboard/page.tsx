@@ -4,6 +4,7 @@ import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip, ConfidenceDot } from "@/components/primitives";
 import { TransparencyPanel } from "@/components/transparency-panel";
+import { getActiveContext } from "@/lib/active-context";
 import { cn } from "@/lib/cn";
 
 const RECENT_TXNS = [
@@ -16,14 +17,27 @@ const RECENT_TXNS = [
   { id: "tx-7", date: "May 19", payee: "Postmark", category: "SaaS · Email", amount: "-$15.00", tone: "debit", conf: 0.98, materiality: "L" as const, recon: "reconciled" as const }
 ];
 
-export default function DashboardPage() {
+export default async function DashboardPage() {
+  const ctx = await getActiveContext();
+  const canConsolidate = ctx.activeWorkspace
+    ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
+    : false;
+  const subtitle = ctx.activeWorkspace
+    ? `${ctx.activeWorkspace.display_name} · ${ctx.entities.length} ${ctx.entities.length === 1 ? "entity" : "entities"} · viewing ${ctx.isConsolidated ? "all entities (consolidated)" : ctx.activeEntity?.display_name ?? "—"}`
+    : "Cash position, agent activity, and approvals across all your entities.";
   return (
     <AppShell>
       <PageShell>
         <SectionHeader
           title="Dashboard"
-          subtitle="Cash position, agent activity, and approvals across all your entities."
-          action={<EntitySelector />}
+          subtitle={subtitle}
+          action={
+            <EntitySelector
+              entities={ctx.entities}
+              activeEntityId={ctx.isConsolidated ? "consolidated" : ctx.activeEntity?.id}
+              canConsolidate={canConsolidate}
+            />
+          }
         />
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">

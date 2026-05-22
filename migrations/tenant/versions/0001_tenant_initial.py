@@ -20,7 +20,7 @@ every concept inside is 'workspace'. The schema name shape is
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0001_tenant_initial"
@@ -31,6 +31,13 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     bind = op.get_bind()
+    # Re-apply search_path inside the migration's own transaction.
+    # env.py sets it on the outer connection, but Alembic's transaction may
+    # have its own state. Belt-and-suspenders.
+    x_args = context.get_x_argument(as_dictionary=True)
+    schema = x_args.get("tenant")
+    if schema:
+        bind.execute(sa.text(f'SET LOCAL search_path = "{schema}", public'))
     for name, values in (
         ("decision_verdict", ("Approve", "Reject", "NeedsReview")),
         ("approval_status", ("pending", "approved", "rejected", "canceled")),

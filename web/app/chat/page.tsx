@@ -2,6 +2,7 @@ import { ArrowUp, Bot, Paperclip, User } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
+import { getActiveContext } from "@/lib/active-context";
 import { cn } from "@/lib/cn";
 
 const MESSAGES = [
@@ -30,7 +31,11 @@ const MESSAGES = [
   }
 ];
 
-export default function ChatPage() {
+export default async function ChatPage() {
+  const ctx = await getActiveContext();
+  const canConsolidate = ctx.activeWorkspace
+    ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
+    : false;
   return (
     <AppShell>
       <PageShell>
@@ -40,7 +45,12 @@ export default function ChatPage() {
           action={
             <div className="flex items-center gap-2 text-xs">
               <StatusChip tone="agent">3 agents online</StatusChip>
-              <EntitySelector size="sm" />
+              <EntitySelector
+                entities={ctx.entities}
+                activeEntityId={ctx.isConsolidated ? "consolidated" : ctx.activeEntity?.id}
+                canConsolidate={canConsolidate}
+                size="sm"
+              />
             </div>
           }
         />
