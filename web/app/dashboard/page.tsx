@@ -1,9 +1,8 @@
 import Link from "next/link";
-import { ArrowRight, ArrowUpRight, TrendingDown, TrendingUp, Wifi } from "lucide-react";
+import { ArrowRight, ArrowUpRight, Wifi } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip, ConfidenceDot } from "@/components/primitives";
-import { TransparencyPanel } from "@/components/transparency-panel";
 import { getActiveContext } from "@/lib/active-context";
 import { getCashPosition, formatUSD } from "@/lib/cash-position";
 import { getRecentTransactions, shortDate, type LiveTransaction } from "@/lib/transactions";
@@ -224,9 +223,9 @@ export default async function DashboardPage() {
               </ul>
             </Card>
 
-            <Card padded={false} className="border-pending/40 bg-pending/[0.04]">
-              <div className="flex items-center gap-2 border-b border-pending/30 px-5 py-3">
-                <span className="h-1.5 w-1.5 rounded-full bg-pending shadow-[0_0_6px_hsl(43_96%_56%_/_0.8)]" />
+            <Card padded={false}>
+              <div className="flex items-center gap-2 border-b border-subtle px-5 py-3">
+                <span className="h-1.5 w-1.5 rounded-full bg-ink-disabled" />
                 <h2 className="text-sm font-semibold">Compliance watch</h2>
                 <Link
                   href="/specialty-rules"
@@ -235,26 +234,20 @@ export default async function DashboardPage() {
                   Review rules <ArrowUpRight size={11} className="inline" />
                 </Link>
               </div>
-              <ul className="space-y-3 px-5 py-4 text-xs">
-                <li className="flex items-start gap-2">
-                  <TrendingUp size={14} className="mt-0.5 shrink-0 text-pending" />
-                  <span className="text-ink-secondary">
-                    <strong className="text-ink-primary">1099-NEC threshold</strong> — Daniel Tran cumulative $487 / $600. Two more invoices triggers reporting.
-                  </span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <TrendingDown size={14} className="mt-0.5 shrink-0 text-credit" />
-                  <span className="text-ink-secondary">
-                    <strong className="text-ink-primary">Sales tax nexus</strong> — TX trailing 12mo $312k / $500k. No action needed.
-                  </span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <TrendingUp size={14} className="mt-0.5 shrink-0 text-pending" />
-                  <span className="text-ink-secondary">
-                    <strong className="text-ink-primary">Q2 estimated tax</strong> — Due June 16. Projected $11,200 based on YTD income.
-                  </span>
-                </li>
-              </ul>
+              <div className="px-5 py-6 text-center text-xs text-ink-tertiary">
+                <p>No active rules yet.</p>
+                <p className="mt-1">
+                  Add a 1099-NEC trigger, sales-tax nexus tracker, FERS earned-income watch,
+                  or any other rule on{" "}
+                  <Link
+                    href="/specialty-rules"
+                    className="text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
+                  >
+                    Specialty rules
+                  </Link>{" "}
+                  to populate this panel.
+                </p>
+              </div>
             </Card>
           </div>
         </div>
@@ -263,12 +256,21 @@ export default async function DashboardPage() {
           <Card padded={false}>
             <div className="flex items-center justify-between border-b border-subtle px-6 py-4">
               <div>
-                <h2 className="text-base font-semibold">Latest agent decision · transparency</h2>
-                <p className="mt-0.5 text-xs text-ink-tertiary">Every agent action exposes its reasoning, source, and rule version.</p>
+                <h2 className="text-base font-semibold">Agent decisions · transparency</h2>
+                <p className="mt-0.5 text-xs text-ink-tertiary">
+                  Every agent action will expose its reasoning, source, and rule version here once
+                  Phase 2 agents are wired (Brigade orchestration + Qwen3-VL receipt pipeline).
+                </p>
               </div>
-              <StatusChip tone="agent">bookkeeper</StatusChip>
+              <StatusChip tone="ink">Phase 2</StatusChip>
             </div>
-            <TransparencyPanel />
+            <div className="px-6 py-12 text-center text-sm text-ink-tertiary">
+              <p>No agent decisions yet.</p>
+              <p className="mt-2 text-xs">
+                The pattern is in place. The first decisions will land when the Bookkeeper agent
+                begins categorizing your live transactions.
+              </p>
+            </div>
           </Card>
         </div>
       </PageShell>
