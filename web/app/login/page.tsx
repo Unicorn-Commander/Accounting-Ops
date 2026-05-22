@@ -9,11 +9,12 @@ export const metadata = {
 export default async function LoginPage({
   searchParams
 }: {
-  searchParams: Promise<{ callbackUrl?: string; error?: string }>;
+  searchParams: Promise<{ callbackUrl?: string; error?: string; reason?: string }>;
 }) {
   const params = await searchParams;
   const callbackUrl = params.callbackUrl ?? "/dashboard";
   const error = params.error;
+  const reason = params.reason;
 
   return (
     <main className="grid min-h-screen place-items-center bg-canvas px-6">
@@ -40,6 +41,12 @@ export default async function LoginPage({
             Same login as Brigade, Crisis-Ops, Project-Ops.
           </p>
 
+          {reason === "session_expired" && (
+            <div className="mt-5 rounded-md border border-pending/40 bg-pending/[0.06] px-3 py-2 text-sm text-pending">
+              Your session expired. Sign in again to continue — your data is
+              waiting.
+            </div>
+          )}
           {error && (
             <div className="mt-5 rounded-md border border-debit/40 bg-debit/[0.06] px-3 py-2 text-sm text-debit">
               {error === "AccessDenied"

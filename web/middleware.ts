@@ -20,6 +20,24 @@ export default auth((req) => {
   const { pathname, search } = req.nextUrl;
 
   if (isPublic(pathname)) return NextResponse.next();
+
+  // Detect a session whose Keycloak refresh-token has failed. Without
+  // this check the page renders with a stale access token, every
+  // server-side API call 401s, and the user sees an empty dashboard
+  // instead of being kicked back to sign-in.
+  const sessionWithError = req.auth as
+    | { error?: string }
+    | null
+    | undefined;
+  if (sessionWithError?.error === "RefreshAccessTokenError") {
+    const loginUrl = new URL("/login", req.nextUrl);
+    loginUrl.searchParams.set("reason", "session_expired");
+    if (pathname !== "/") {
+      loginUrl.searchParams.set("callbackUrl", pathname + search);
+    }
+    return NextResponse.redirect(loginUrl);
+  }
+
   if (req.auth) return NextResponse.next();
 
   // Not authenticated → bounce to /login with callback URL preserved.
