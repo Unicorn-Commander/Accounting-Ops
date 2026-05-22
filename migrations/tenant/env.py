@@ -1,21 +1,33 @@
-"""Alembic env for per-tenant schemas. Runs against accounting_ops_<tenant_uuid>.
+"""Alembic env for per-tenant (workspace) schemas. Runs against accounting_ops_<workspace_uuid>.
 
 Run: `alembic -c alembic-tenant.ini -x tenant=accounting_ops_<uuid_underscored> upgrade head`
 
-Iterates one tenant per invocation. Use scripts/provision_tenant.py or
-scripts/upgrade_all_tenants.py to loop over multiple tenants.
+Iterates one workspace per invocation. Use scripts/provision_workspace.py to loop.
+
+We use a SYNC SQLAlchemy engine here (not the async one the app runs on).
+Reason: the async-wrapper + run_sync() + alembic begin_transaction() chain has
+a subtle interaction where alembic's transaction silently rolls back the
+migration on commit. Switching to sync (psycopg2) makes the transaction
+boundaries crisp and the migration actually applies. The app's runtime engine
+stays async.
 """
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool, text
-from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy import create_engine, pool, text
 
 from app.config import get_settings
 
 config = context.config
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+
+# Force psycopg2 (sync) for alembic. The app itself uses asyncpg at runtime.
+_url = get_settings().database_url
+if "+asyncpg" in _url:
+    _url = _url.replace("+asyncpg", "+psycopg2")
+elif "://" in _url and "+" not in _url.split("://", 1)[0]:
+    # plain `postgresql://...` already implies psycopg2; leave as-is
+    pass
+config.set_main_option("sqlalchemy.url", _url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -37,39 +49,35 @@ def _tenant_schema() -> str:
     return schema
 
 
-def do_run_migrations(connection: Connection) -> None:
-    schema = _tenant_schema()
-    # PG-side: every statement in this Alembic run targets this schema by default.
-    connection.execute(text(f'SET search_path = "{schema}", public'))
-    # SQLA-side: makes autogen emit unqualified DDL, matching our schema=None models.
-    connection.dialect.default_schema_name = schema
-    context.configure(
-        connection=connection,
-        target_metadata=None,
-        include_schemas=False,
-        version_table="alembic_version",
-        version_table_schema=schema,
-        compare_type=True,
-        compare_server_default=True,
-    )
-    with context.begin_transaction():
-        context.run_migrations()
-
-
-async def run_async_migrations() -> None:
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-    await connectable.dispose()
-
-
 def run_migrations_online() -> None:
-    import asyncio
-    asyncio.run(run_async_migrations())
+    schema = _tenant_schema()
+    connectable = create_engine(
+        config.get_main_option("sqlalchemy.url"),
+        poolclass=pool.NullPool,
+        # Set search_path at connection time so every statement in the migration
+        # is scoped to this workspace's schema by default.
+        connect_args={"options": f'-csearch_path="{schema}",public'},
+    )
+    # SQLAlchemy 2.0: connect() auto-starts an unmanaged transaction that
+    # rolls back on close. We need explicit transaction management so the
+    # migration's writes COMMIT. begin() does that.
+    with connectable.begin() as connection:
+        connection.dialect.default_schema_name = schema
+        connection.execute(text(f'SET search_path = "{schema}", public'))
+        context.configure(
+            connection=connection,
+            target_metadata=None,
+            include_schemas=False,
+            version_table="alembic_version",
+            version_table_schema=schema,
+            compare_type=True,
+            compare_server_default=True,
+            # We're already inside connectable.begin(); tell alembic not to
+            # start its own (which would be a no-op or a savepoint).
+            transactional_ddl=False,
+        )
+        context.run_migrations()
+    connectable.dispose()
 
 
 if context.is_offline_mode():

@@ -31,9 +31,9 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     bind = op.get_bind()
-    # Re-apply search_path inside the migration's own transaction.
-    # env.py sets it on the outer connection, but Alembic's transaction may
-    # have its own state. Belt-and-suspenders.
+    # Re-apply search_path inside the migration's transaction (env.py also
+    # sets it on the connection; this is belt-and-suspenders against any
+    # implicit RESET).
     x_args = context.get_x_argument(as_dictionary=True)
     schema = x_args.get("tenant")
     if schema:
