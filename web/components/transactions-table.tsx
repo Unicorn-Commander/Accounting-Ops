@@ -54,24 +54,43 @@ export function LiveTransactionsTable({
     return Array.from(set).sort();
   }, [transactions]);
 
+  const showEntityColumn = useMemo(
+    () => transactions.some((t) => t.entity_id || t.entity_display_name),
+    [transactions]
+  );
+
+  const showCategoryColumn = useMemo(
+    () => transactions.some((t) => t.category),
+    [transactions]
+  );
+
   const [accountId, setAccountId] = useState<string>("all");
   const [orgName, setOrgName] = useState<string>("all");
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [includePending, setIncludePending] = useState(true);
   const [search, setSearch] = useState("");
+
+  const categories = useMemo(() => {
+    const set = new Set<string>();
+    for (const t of transactions) if (t.category) set.add(t.category);
+    return Array.from(set).sort();
+  }, [transactions]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return transactions.filter((t) => {
       if (accountId !== "all" && t.account_id !== accountId) return false;
       if (orgName !== "all" && t.org_name !== orgName) return false;
+      if (categoryFilter === "needs_review" && t.category_status !== "unknown" && t.category_sign_matched !== false) return false;
+      if (categoryFilter !== "all" && categoryFilter !== "needs_review" && t.category !== categoryFilter) return false;
       if (!includePending && t.is_pending) return false;
       if (q) {
-        const blob = `${t.payee ?? ""} ${t.description ?? ""} ${t.memo ?? ""} ${t.org_name} ${t.account_name} ${t.amount}`.toLowerCase();
+        const blob = `${t.payee ?? ""} ${t.description ?? ""} ${t.memo ?? ""} ${t.org_name} ${t.account_name} ${t.amount} ${t.entity_display_name ?? ""} ${t.category ?? ""}`.toLowerCase();
         if (!blob.includes(q)) return false;
       }
       return true;
     });
-  }, [transactions, accountId, orgName, includePending, search]);
+  }, [transactions, accountId, orgName, categoryFilter, includePending, search]);
 
   const inflow = useMemo(
     () => filtered.reduce((s, t) => s + Math.max(parseFloat(t.amount), 0), 0),
@@ -161,6 +180,22 @@ export function LiveTransactionsTable({
             ))}
         </select>
 
+        {showCategoryColumn && (
+          <select
+            value={categoryFilter}
+            onChange={(e) => setCategoryFilter(e.target.value)}
+            className="rounded-md border border-default bg-surface px-3 py-1.5 text-xs"
+          >
+            <option value="all">All categories</option>
+            <option value="needs_review">Needs review</option>
+            {categories.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        )}
+
         <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-default bg-surface px-3 py-1.5 text-xs text-ink-secondary hover:bg-elevated">
           <input
             type="checkbox"
@@ -206,6 +241,12 @@ export function LiveTransactionsTable({
               <th className="px-5 py-2.5 text-left font-medium">Date</th>
               <th className="px-2 py-2.5 text-left font-medium">Payee</th>
               <th className="px-2 py-2.5 text-left font-medium">Account</th>
+              {showEntityColumn && (
+                <th className="px-2 py-2.5 text-left font-medium">Entity</th>
+              )}
+              {showCategoryColumn && (
+                <th className="px-2 py-2.5 text-left font-medium">Category</th>
+              )}
               <th className="px-2 py-2.5 text-left font-medium">Status</th>
               <th className="px-2 py-2.5 text-center font-medium">M</th>
               <th className="px-2 py-2.5 text-center font-medium">Conf</th>
@@ -245,6 +286,28 @@ export function LiveTransactionsTable({
                     <div className="text-xs font-medium">{t.org_name}</div>
                     <div className="text-[10px] text-ink-tertiary">{t.account_name}</div>
                   </td>
+                  {showEntityColumn && (
+                    <td className="px-2 py-3">
+                      {t.entity_display_name ? (
+                        <span className="inline-flex items-center rounded-full bg-brand-500/10 px-2 py-0.5 text-[10px] font-medium text-brand-300">
+                          {t.entity_display_name}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center rounded-full bg-pending/10 px-2 py-0.5 text-[10px] font-medium text-pending">
+                          Unmapped
+                        </span>
+                      )}
+                    </td>
+                  )}
+                  {showCategoryColumn && (
+                    <td className="px-2 py-3">
+                      <CategoryPill
+                        category={t.category}
+                        status={t.category_status}
+                        signMatched={t.category_sign_matched}
+                      />
+                    </td>
+                  )}
                   <td className="px-2 py-3">
                     {t.is_pending ? (
                       <StatusChip tone="pending">Pending</StatusChip>
@@ -274,6 +337,42 @@ export function LiveTransactionsTable({
         </table>
       )}
     </Card>
+  );
+}
+
+function CategoryPill({
+  category,
+  status,
+  signMatched
+}: {
+  category?: string | null;
+  status?: "auto" | "suggest" | "unknown" | null;
+  signMatched?: boolean | null;
+}) {
+  if (!category || category === "Uncategorized" || status === "unknown") {
+    return (
+      <span className="inline-flex items-center rounded-full bg-ink-tertiary/10 px-2 py-0.5 text-[10px] font-medium text-ink-tertiary">
+        Uncategorized
+      </span>
+    );
+  }
+  if (status === "suggest" || signMatched === false) {
+    return (
+      <span
+        className="inline-flex items-center rounded-full bg-pending/15 px-2 py-0.5 text-[10px] font-medium text-pending"
+        title="Suggested — needs human review"
+      >
+        {category}
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center rounded-full bg-credit/10 px-2 py-0.5 text-[10px] font-medium text-credit"
+      title={`Auto-categorized via ${category}`}
+    >
+      {category}
+    </span>
   );
 }
 

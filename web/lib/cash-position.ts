@@ -17,6 +17,9 @@ export type CashAccount = {
   available_balance: string | null;
   balance_as_of: number | null;
   last4: string | null;
+  entity_id?: string | null;
+  entity_display_name?: string | null;
+  entity_slug?: string | null;
 };
 
 export type CashPosition = {
@@ -27,14 +30,20 @@ export type CashPosition = {
   source?: string;
   message?: string;
   errors?: string[];
+  per_entity_totals?: Record<string, string>;
+  unmapped_count?: number;
 };
 
-export async function getCashPosition(workspaceId: string): Promise<CashPosition | null> {
+export async function getCashPosition(
+  workspaceId: string,
+  entityId?: string
+): Promise<CashPosition | null> {
   const session = await auth();
   if (!session?.accessToken) return null;
   try {
+    const params = entityId ? `?entity_id=${encodeURIComponent(entityId)}` : "";
     const res = await fetch(
-      `${INTERNAL_BASE}/api/workspaces/${workspaceId}/cash-position`,
+      `${INTERNAL_BASE}/api/workspaces/${workspaceId}/cash-position${params}`,
       {
         headers: {
           Authorization: `Bearer ${session.accessToken}`,

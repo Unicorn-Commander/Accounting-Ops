@@ -23,11 +23,12 @@ export default async function DashboardPage() {
   const canConsolidate = ctx.activeWorkspace
     ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
     : false;
+  const entityFilter = ctx.activeEntity?.id && !ctx.isConsolidated ? ctx.activeEntity.id : undefined;
   const cashPosition = ctx.activeWorkspace
-    ? await getCashPosition(ctx.activeWorkspace.id)
+    ? await getCashPosition(ctx.activeWorkspace.id, entityFilter)
     : null;
   const txnData = ctx.activeWorkspace
-    ? await getRecentTransactions(ctx.activeWorkspace.id, 30, 12)
+    ? await getRecentTransactions(ctx.activeWorkspace.id, 30, 12, entityFilter)
     : null;
   const liveTxns: LiveTransaction[] = txnData?.transactions ?? [];
   const subtitle = ctx.activeWorkspace

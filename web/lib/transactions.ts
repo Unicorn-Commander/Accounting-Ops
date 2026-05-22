@@ -21,6 +21,14 @@ export type LiveTransaction = {
   description: string;
   memo: string | null;
   is_pending: boolean;
+  entity_id?: string | null;
+  entity_display_name?: string | null;
+  entity_slug?: string | null;
+  category?: string | null;
+  category_status?: "auto" | "suggest" | "unknown" | null;
+  category_source?: string | null;
+  category_kind?: "revenue" | "expense" | "transfer" | "unknown" | null;
+  category_sign_matched?: boolean | null;
 };
 
 export type TransactionsResponse = {
@@ -36,13 +44,19 @@ export type TransactionsResponse = {
 export async function getRecentTransactions(
   workspaceId: string,
   days = 30,
-  limit = 50
+  limit = 50,
+  entityId?: string
 ): Promise<TransactionsResponse | null> {
   const session = await auth();
   if (!session?.accessToken) return null;
   try {
+    const params = new URLSearchParams({
+      days: String(days),
+      limit: String(limit)
+    });
+    if (entityId) params.set("entity_id", entityId);
     const res = await fetch(
-      `${INTERNAL_BASE}/api/workspaces/${workspaceId}/recent-transactions?days=${days}&limit=${limit}`,
+      `${INTERNAL_BASE}/api/workspaces/${workspaceId}/recent-transactions?${params.toString()}`,
       {
         headers: {
           Authorization: `Bearer ${session.accessToken}`,

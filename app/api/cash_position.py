@@ -77,6 +77,7 @@ async def _fetch_simplefin_accounts(access_url: str) -> dict:
 @router.get("/api/workspaces/{workspace_id}/cash-position")
 async def workspace_cash_position(
     workspace_id: UUID,
+    entity_id: str | None = None,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
     """Return real-time account balances for this workspace.
@@ -84,7 +85,14 @@ async def workspace_cash_position(
     Aggregates accounts across all SimpleFIN connections wired into the user's
     env credentials. Each account has: id, name, org_name, currency, balance,
     available_balance, last_balance_as_of.
+
+    Optional `entity_id` filter:
+      - omitted / "consolidated" → all accounts
+      - specific UUID            → only accounts mapped to that entity
+      - "unmapped"               → only accounts with no mapping
     """
+    from app.api.account_mappings import get_account_to_entity_map
+
     access_url = await _simplefin_access_url(workspace)
     if not access_url:
         return {
@@ -96,20 +104,35 @@ async def workspace_cash_position(
         }
 
     payload = await _fetch_simplefin_accounts(access_url)
+    account_map = await get_account_to_entity_map(workspace.workspace_id)
     accounts = []
     total = 0.0
+    per_entity_totals: dict[str, float] = {}
     for a in payload.get("accounts", []):
         org_data = a.get("org") or {}
         org_name = org_data.get("name") or org_data.get("domain") or "—"
+        external_account_id = a.get("id")
+        mapping_key = f"simplefin:{external_account_id}"
+        mapping = account_map.get(mapping_key)
+        # Apply entity filter
+        if entity_id == "unmapped" and mapping is not None:
+            continue
+        if entity_id and entity_id not in ("consolidated", "unmapped"):
+            if mapping is None or mapping["entity_id"] != entity_id:
+                continue
         try:
             balance_f = float(a.get("balance", 0))
         except (TypeError, ValueError):
             balance_f = 0.0
         if a.get("currency", "USD").upper() == "USD":
             total += balance_f
+            if mapping is not None:
+                per_entity_totals[mapping["entity_id"]] = (
+                    per_entity_totals.get(mapping["entity_id"], 0.0) + balance_f
+                )
         accounts.append(
             {
-                "id": a.get("id"),
+                "id": external_account_id,
                 "name": a.get("name"),
                 "org_name": org_name,
                 "currency": a.get("currency", "USD"),
@@ -118,6 +141,9 @@ async def workspace_cash_position(
                 if a.get("available-balance") is not None
                 else None,
                 "balance_as_of": a.get("balance-date"),
+                "entity_id": mapping["entity_id"] if mapping else None,
+                "entity_display_name": mapping["entity_display_name"] if mapping else None,
+                "entity_slug": mapping["entity_slug"] if mapping else None,
                 "last4": (a.get("name") or "").rsplit("(", 1)[-1].rstrip(")")
                 if "(" in (a.get("name") or "")
                 else None,
@@ -130,4 +156,6 @@ async def workspace_cash_position(
         "configured": True,
         "source": "simplefin",
         "errors": payload.get("errors", []),
+        "per_entity_totals": {k: f"{v:.2f}" for k, v in per_entity_totals.items()},
+        "unmapped_count": sum(1 for a in accounts if a["entity_id"] is None),
     }

@@ -2,8 +2,10 @@ from fastapi import Depends, FastAPI
 
 from app.auth import AuthContext, validate_bearer_token
 from app.a2a.server import router as a2a_router
+from app.api.account_mappings import router as account_mappings_router
 from app.api.cash_position import router as cash_position_router
 from app.api.credentials import router as credentials_router
+from app.api.journal import router as journal_router
 from app.api.tools import consolidated_router, router as tools_router
 from app.api.transactions import router as transactions_router
 from app.api.workspaces import router as workspaces_router
@@ -17,6 +19,8 @@ setup_otel(app)
 app.include_router(a2a_router)
 app.include_router(workspaces_router)
 app.include_router(credentials_router)
+app.include_router(account_mappings_router)
+app.include_router(journal_router)
 app.include_router(cash_position_router)
 app.include_router(transactions_router)
 app.include_router(tools_router)

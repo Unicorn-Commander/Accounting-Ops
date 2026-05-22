@@ -4,9 +4,18 @@ The `act` claim (RFC 8693) carries the acting agent identity when an agent
 calls on behalf of a delegating user. uc_uid is the canonical user identifier
 across the Unicorn ecosystem (preferred over `preferred_username` per
 the OIDC-user-id canary lesson).
+
+Service tokens: if the presented bearer token matches a registered service
+token from ACCTOPS_SERVICE_TOKENS env (JSON map of token→{uc_uid, agent_id}),
+we synthesize an AuthContext for the impersonated user. This is the path
+used by long-running internal workers (receipt-reconciler, etc.) that
+operate on behalf of a workspace owner without a Keycloak session.
 """
 from __future__ import annotations
 
+import json
+import os
+import secrets
 import time
 from dataclasses import dataclass
 from typing import Annotated, Any
@@ -66,6 +75,53 @@ async def _fetch_jwks_force_refresh() -> dict[str, Any]:
     return await _fetch_jwks()
 
 
+_service_tokens_cache: dict[str, dict[str, str]] | None = None
+
+
+def _load_service_tokens() -> dict[str, dict[str, str]]:
+    """Parse ACCTOPS_SERVICE_TOKENS env var.
+
+    Format: {"<random-token>": {"uc_uid": "aaron", "agent_id": "receipt-reconciler"}}
+    The token strings must be at least 32 chars (entropy) and are compared
+    with secrets.compare_digest. Returns {} if unset or malformed.
+    """
+    global _service_tokens_cache
+    if _service_tokens_cache is not None:
+        return _service_tokens_cache
+    raw = os.getenv("ACCTOPS_SERVICE_TOKENS", "").strip()
+    if not raw:
+        _service_tokens_cache = {}
+        return _service_tokens_cache
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("ACCTOPS_SERVICE_TOKENS must be a JSON object")
+        tokens: dict[str, dict[str, str]] = {}
+        for token, ident in parsed.items():
+            if not isinstance(ident, dict):
+                continue
+            uc_uid = ident.get("uc_uid")
+            if not uc_uid or len(token) < 32:
+                continue
+            tokens[token] = {
+                "uc_uid": uc_uid,
+                "agent_id": ident.get("agent_id") or "service",
+            }
+        _service_tokens_cache = tokens
+        return tokens
+    except (ValueError, TypeError):
+        _service_tokens_cache = {}
+        return _service_tokens_cache
+
+
+def _match_service_token(presented: str) -> dict[str, str] | None:
+    """Constant-time compare against registered service tokens. None on miss."""
+    for token, ident in _load_service_tokens().items():
+        if secrets.compare_digest(token, presented):
+            return ident
+    return None
+
+
 async def validate_bearer_token(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
 ) -> AuthContext:
@@ -73,6 +129,18 @@ async def validate_bearer_token(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token"
         )
+
+    # Service token fast-path: long-lived shared-secret tokens for internal
+    # workers. Bypass JWT validation; impersonate the configured uc_uid.
+    service_ident = _match_service_token(credentials.credentials)
+    if service_ident is not None:
+        return AuthContext(
+            uc_uid=service_ident["uc_uid"],
+            agent_id=service_ident["agent_id"],
+            scopes=("service",),
+            claims={"sub": service_ident["uc_uid"], "uc_uid": service_ident["uc_uid"]},
+        )
+
     if jwt is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
