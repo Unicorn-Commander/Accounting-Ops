@@ -6,6 +6,7 @@ import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip, 
 import { TransparencyPanel } from "@/components/transparency-panel";
 import { getActiveContext } from "@/lib/active-context";
 import { getCashPosition, formatUSD } from "@/lib/cash-position";
+import { getRecentTransactions, shortDate, type LiveTransaction } from "@/lib/transactions";
 import { cn } from "@/lib/cn";
 
 const RECENT_TXNS = [
@@ -26,6 +27,10 @@ export default async function DashboardPage() {
   const cashPosition = ctx.activeWorkspace
     ? await getCashPosition(ctx.activeWorkspace.id)
     : null;
+  const txnData = ctx.activeWorkspace
+    ? await getRecentTransactions(ctx.activeWorkspace.id, 30, 12)
+    : null;
+  const liveTxns: LiveTransaction[] = txnData?.transactions ?? [];
   const subtitle = ctx.activeWorkspace
     ? `${ctx.activeWorkspace.display_name} · ${ctx.entities.length} ${ctx.entities.length === 1 ? "entity" : "entities"} · viewing ${ctx.isConsolidated ? "all entities (consolidated)" : ctx.activeEntity?.display_name ?? "—"}`
     : "Cash position, agent activity, and approvals across all your entities.";
@@ -75,53 +80,82 @@ export default async function DashboardPage() {
                   View all <ArrowRight size={13} />
                 </Link>
               </div>
-              <table className="w-full text-sm">
-                <thead className="text-[10px] uppercase tracking-wider text-ink-tertiary">
-                  <tr className="border-b border-subtle">
-                    <th className="px-6 py-2.5 text-left font-medium">Date</th>
-                    <th className="px-2 py-2.5 text-left font-medium">Payee · Category</th>
-                    <th className="px-2 py-2.5 text-left font-medium">Status</th>
-                    <th className="px-2 py-2.5 text-center font-medium">M</th>
-                    <th className="px-2 py-2.5 text-center font-medium">Conf</th>
-                    <th className="px-6 py-2.5 text-right font-medium">Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {RECENT_TXNS.map((t) => (
-                    <tr
-                      key={t.id}
-                      className="group cursor-pointer border-b border-subtle/60 last:border-b-0 hover:bg-white/[0.02]"
-                    >
-                      <td className="px-6 py-3 font-mono text-xs text-ink-tertiary whitespace-nowrap">{t.date}</td>
-                      <td className="px-2 py-3">
-                        <div className="font-medium">{t.payee}</div>
-                        <div className="text-xs text-ink-tertiary">{t.category}</div>
-                      </td>
-                      <td className="px-2 py-3">
-                        {t.recon === "reconciled" ? (
-                          <StatusChip tone="credit">Reconciled</StatusChip>
-                        ) : (
-                          <StatusChip tone="pending">Needs review</StatusChip>
-                        )}
-                      </td>
-                      <td className="px-2 py-3 text-center">
-                        <MaterialityBadge level={t.materiality} />
-                      </td>
-                      <td className="px-2 py-3 text-center">
-                        <ConfidenceDot value={t.conf} />
-                      </td>
-                      <td
-                        className={cn(
-                          "px-6 py-3 text-right font-mono tabular-nums",
-                          t.tone === "credit" ? "text-credit" : "text-ink-primary"
-                        )}
-                      >
-                        {t.amount}
-                      </td>
+              {liveTxns.length > 0 ? (
+                <table className="w-full text-sm">
+                  <thead className="text-[10px] uppercase tracking-wider text-ink-tertiary">
+                    <tr className="border-b border-subtle">
+                      <th className="px-6 py-2.5 text-left font-medium">Date</th>
+                      <th className="px-2 py-2.5 text-left font-medium">Payee · Account</th>
+                      <th className="px-2 py-2.5 text-left font-medium">Status</th>
+                      <th className="px-2 py-2.5 text-center font-medium">M</th>
+                      <th className="px-2 py-2.5 text-center font-medium">Conf</th>
+                      <th className="px-6 py-2.5 text-right font-medium">Amount</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {liveTxns.map((t) => {
+                      const amt = parseFloat(t.amount);
+                      const isCredit = amt >= 0;
+                      const absAmt = Math.abs(amt);
+                      const materiality: "L" | "M" | "H" =
+                        absAmt < 100 ? "L" : absAmt < 1000 ? "M" : "H";
+                      return (
+                        <tr
+                          key={t.id}
+                          className="group cursor-pointer border-b border-subtle/60 last:border-b-0 hover:bg-white/[0.02]"
+                        >
+                          <td className="whitespace-nowrap px-6 py-3 font-mono text-xs text-ink-tertiary">
+                            {shortDate(t.posted_at)}
+                          </td>
+                          <td className="px-2 py-3">
+                            <div className="font-medium truncate max-w-[260px]" title={t.payee ?? t.description}>
+                              {t.payee ?? t.description ?? "—"}
+                            </div>
+                            <div className="text-xs text-ink-tertiary truncate" title={`${t.org_name} · ${t.account_name}`}>
+                              {t.org_name} · {t.account_name}
+                            </div>
+                          </td>
+                          <td className="px-2 py-3">
+                            {t.is_pending ? (
+                              <StatusChip tone="pending">Pending</StatusChip>
+                            ) : (
+                              <StatusChip tone="ink">Posted</StatusChip>
+                            )}
+                          </td>
+                          <td className="px-2 py-3 text-center">
+                            <MaterialityBadge level={materiality} />
+                          </td>
+                          <td className="px-2 py-3 text-center">
+                            <ConfidenceDot value={0} />
+                          </td>
+                          <td
+                            className={cn(
+                              "px-6 py-3 text-right font-mono tabular-nums",
+                              isCredit ? "text-credit" : "text-ink-primary"
+                            )}
+                          >
+                            {isCredit ? "+" : "-"}
+                            {formatUSD(absAmt)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              ) : (
+                <div className="px-6 py-8 text-center text-xs text-ink-tertiary">
+                  {txnData?.configured
+                    ? "No transactions in the last 30 days across connected accounts."
+                    : "No live transaction feed yet."}{" "}
+                  <Link
+                    href="/connectors"
+                    className="text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
+                  >
+                    Connect a bank
+                  </Link>{" "}
+                  to populate.
+                </div>
+              )}
             </Card>
           </div>
 
