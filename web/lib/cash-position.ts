@@ -20,6 +20,8 @@ export type CashAccount = {
   entity_id?: string | null;
   entity_display_name?: string | null;
   entity_slug?: string | null;
+  account_type?: string | null;
+  coa_canonical?: string | null;
 };
 
 export type CashPosition = {
@@ -30,7 +32,12 @@ export type CashPosition = {
   source?: string;
   message?: string;
   errors?: string[];
+  assets_total?: string;
+  liabilities_total?: string;
+  net_total?: string;
   per_entity_totals?: Record<string, string>;
+  per_entity_assets?: Record<string, string>;
+  per_entity_liabilities?: Record<string, string>;
   unmapped_count?: number;
 };
 

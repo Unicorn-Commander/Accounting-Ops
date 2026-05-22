@@ -58,15 +58,87 @@ export default async function DashboardPage() {
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <KpiCard
-            label="Cash position"
-            value={cashPosition?.configured ? formatUSD(cashPosition.total_usd) : "$—"}
+            label="Cash (assets)"
+            value={cashPosition?.configured ? formatUSD(cashPosition.assets_total ?? cashPosition.total_usd) : "$—"}
             delta={
               cashPosition?.configured
-                ? `Live · ${cashPosition.accounts.length} accounts via SimpleFIN`
+                ? `Live · ${cashPosition.accounts.filter((a) => a.account_type !== "liability").length} cash + savings accounts`
                 : "Connect SimpleFIN to see live"
             }
             deltaTone={cashPosition?.configured ? "credit" : "ink"}
           />
+          <KpiCard
+            label="Credit card balance"
+            value={
+              cashPosition?.configured
+                ? `-${formatUSD(cashPosition.liabilities_total ?? "0")}`
+                : "$—"
+            }
+            delta={
+              cashPosition?.configured
+                ? `${cashPosition.accounts.filter((a) => a.account_type === "liability").length} card${cashPosition.accounts.filter((a) => a.account_type === "liability").length === 1 ? "" : "s"} · what you owe`
+                : "—"
+            }
+            deltaTone="debit"
+          />
+          <KpiCard
+            label="Net cash position"
+            value={cashPosition?.configured ? formatUSD(cashPosition.net_total ?? cashPosition.total_usd) : "$—"}
+            delta="Cash − credit card balance"
+            deltaTone={
+              cashPosition && parseFloat(cashPosition.net_total ?? cashPosition.total_usd) >= 0
+                ? "credit"
+                : "debit"
+            }
+          />
+          <KpiCard
+            label="Net income (YTD)"
+            value={plYtd ? formatUSD(plYtd.net_income) : "$—"}
+            delta={
+              plMtd
+                ? `MTD ${formatUSD(plMtd.net_income)}`
+                : "Live from journal hash chain"
+            }
+            deltaTone={plYtd && parseFloat(plYtd.net_income) >= 0 ? "credit" : "debit"}
+          />
+        </div>
+
+        {/* Per-entity breakdown — only when viewing consolidated */}
+        {cashPosition?.configured && ctx.isConsolidated && cashPosition.per_entity_assets && Object.keys(cashPosition.per_entity_assets).length > 0 && (
+          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4">
+            {ctx.entities.map((e) => {
+              const a = parseFloat(cashPosition.per_entity_assets?.[e.id] ?? "0");
+              const l = parseFloat(cashPosition.per_entity_liabilities?.[e.id] ?? "0");
+              if (a === 0 && l === 0) return null;
+              const net = a - l;
+              return (
+                <Card key={e.id}>
+                  <p className="text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
+                    {e.display_name}
+                  </p>
+                  <p className={cn("mt-1 font-mono text-base tabular-nums", net >= 0 ? "text-credit" : "text-debit")}>
+                    {formatUSD(net)}
+                  </p>
+                  <div className="mt-2 space-y-0.5 text-[11px] text-ink-tertiary">
+                    <div className="flex justify-between">
+                      <span>Cash</span>
+                      <span className="font-mono tabular-nums text-credit">{formatUSD(a)}</span>
+                    </div>
+                    {l > 0 && (
+                      <div className="flex justify-between">
+                        <span>Credit cards</span>
+                        <span className="font-mono tabular-nums text-debit">-{formatUSD(l)}</span>
+                      </div>
+                    )}
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Revenue/Expense secondary KPIs — kept for at-a-glance P&L health */}
+        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
           <KpiCard
             label="Revenue (YTD)"
             value={plYtd ? formatUSD(plYtd.revenue.total) : "$—"}
@@ -78,16 +150,6 @@ export default async function DashboardPage() {
             value={plYtd ? formatUSD(plYtd.expenses.total) : "$—"}
             delta={plYtd ? `${plYtd.expenses.lines.length} categories` : "Post entries to see"}
             deltaTone="debit"
-          />
-          <KpiCard
-            label="Net income (YTD)"
-            value={plYtd ? formatUSD(plYtd.net_income) : "$—"}
-            delta={
-              plMtd
-                ? `MTD ${formatUSD(plMtd.net_income)}`
-                : "Live from journal hash chain"
-            }
-            deltaTone={plYtd && parseFloat(plYtd.net_income) >= 0 ? "credit" : "debit"}
           />
         </div>
 
