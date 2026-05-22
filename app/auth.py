@@ -14,6 +14,7 @@ operate on behalf of a workspace owner without a Keycloak session.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import time
@@ -130,6 +131,9 @@ def _match_service_token(presented: str) -> dict[str, str] | None:
     return None
 
 
+_log = logging.getLogger("acctops.auth")
+
+
 async def validate_bearer_token(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
 ) -> AuthContext:
@@ -173,17 +177,37 @@ async def validate_bearer_token(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Unknown signing key",
                 )
+        # Keycloak default: aud="account" for browser tokens unless an
+        # Audience mapper is configured on the client. The canonical
+        # "this token was issued FOR client X" claim is azp (authorized
+        # party). We validate signature + issuer + expiry strictly, then
+        # check azp matches our client_id instead of strict audience.
         claims = jwt.decode(
             credentials.credentials,
             key,
             algorithms=[header["alg"]],
-            audience=settings.keycloak_client_id,
             issuer=str(settings.keycloak_realm_url),
-            options={"verify_at_hash": False},
+            options={"verify_at_hash": False, "verify_aud": False},
         )
+        azp = claims.get("azp")
+        aud = claims.get("aud")
+        # Accept if azp matches our client_id OR aud (list or string)
+        # contains it (covers tokens issued with explicit audience mapper).
+        if azp != settings.keycloak_client_id:
+            aud_list = aud if isinstance(aud, list) else [aud] if aud else []
+            if settings.keycloak_client_id not in aud_list:
+                _log.warning(
+                    "[acctops.auth] token rejected: azp=%r, aud=%r doesn't include %r",
+                    azp, aud, settings.keycloak_client_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token not authorized for this client",
+                )
     except HTTPException:
         raise
     except (JWTError, httpx.HTTPError, KeyError) as exc:
+        _log.info("JWT validation failed: %s: %s", exc.__class__.__name__, exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token"
         ) from exc
