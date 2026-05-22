@@ -50,7 +50,12 @@ _jwks_cache: dict[str, Any] = {"keys": None, "fetched_at": 0.0}
 
 
 async def _fetch_jwks() -> dict[str, Any]:
-    """Fetch the JWKS from Keycloak. Cached for _JWKS_CACHE_TTL_SEC seconds."""
+    """Fetch the JWKS from Keycloak. Cached for _JWKS_CACHE_TTL_SEC seconds.
+
+    Cloudflare's default WAF blocks the default httpx/Python User-Agent
+    with error 1010 ("banned based on browser signature"). We set an
+    explicit UA so server-to-server traffic passes through.
+    """
     now = time.time()
     if (
         _jwks_cache["keys"] is not None
@@ -58,7 +63,10 @@ async def _fetch_jwks() -> dict[str, Any]:
     ):
         return _jwks_cache["keys"]
     settings = get_settings()
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(
+        timeout=5,
+        headers={"User-Agent": "accounting-ops/0.1 (+https://accounting-ops.magicunicorn.dev)"},
+    ) as client:
         response = await client.get(
             f"{settings.keycloak_realm_url}/protocol/openid-connect/certs"
         )
