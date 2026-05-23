@@ -83,10 +83,10 @@ export function KpiCard({
     ink: "text-ink-tertiary"
   };
   return (
-    <div className="rounded-xl border border-default bg-surface p-6 transition hover:border-strong">
+    <div className="rounded-xl border border-default bg-surface p-4 md:p-6 transition hover:border-strong">
       <p className="text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">{label}</p>
-      <p className="mt-3 font-mono text-numeric-lg text-ink-primary">{value}</p>
-      {delta ? <p className={cn("mt-1 text-sm", deltaMap[deltaTone])}>{delta}</p> : null}
+      <p className="mt-2 md:mt-3 font-mono text-numeric-lg text-ink-primary break-all">{value}</p>
+      {delta ? <p className={cn("mt-1 text-xs md:text-sm", deltaMap[deltaTone])}>{delta}</p> : null}
     </div>
   );
 }
@@ -101,12 +101,12 @@ export function SectionHeader({
   action?: React.ReactNode;
 }) {
   return (
-    <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+    <div className="mb-5 md:mb-6 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-        {subtitle ? <p className="mt-1 text-sm text-ink-secondary">{subtitle}</p> : null}
+        <h1 className="text-xl md:text-2xl font-semibold tracking-tight">{title}</h1>
+        {subtitle ? <p className="mt-1 text-xs md:text-sm text-ink-secondary">{subtitle}</p> : null}
       </div>
-      {action}
+      {action ? <div className="flex flex-wrap items-center gap-2">{action}</div> : null}
     </div>
   );
 }
@@ -124,7 +124,7 @@ export function Card({
     <div
       className={cn(
         "rounded-xl border border-default bg-surface",
-        padded && "p-6",
+        padded && "p-4 md:p-6",
         className
       )}
     >
@@ -134,5 +134,9 @@ export function Card({
 }
 
 export function PageShell({ children }: { children: React.ReactNode }) {
-  return <div className="mx-auto w-full max-w-7xl px-6 py-8">{children}</div>;
+  return (
+    <div className="mx-auto w-full max-w-7xl px-4 py-5 md:px-6 md:py-8">
+      {children}
+    </div>
+  );
 }

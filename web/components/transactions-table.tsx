@@ -235,7 +235,7 @@ export function LiveTransactionsTable({
           {emptyAction}
         </div>
       ) : (
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto"><table className="w-full min-w-[640px] text-sm">
           <thead className="text-[10px] uppercase tracking-wider text-ink-tertiary">
             <tr className="border-b border-subtle">
               <th className="px-5 py-2.5 text-left font-medium">Date</th>
@@ -334,7 +334,7 @@ export function LiveTransactionsTable({
               );
             })}
           </tbody>
-        </table>
+        </table></div>
       )}
     </Card>
   );

@@ -169,7 +169,7 @@ export default async function DashboardPage() {
                 </Link>
               </div>
               {liveTxns.length > 0 ? (
-                <table className="w-full text-sm">
+                <div className="overflow-x-auto"><table className="w-full min-w-[600px] text-sm">
                   <thead className="text-[10px] uppercase tracking-wider text-ink-tertiary">
                     <tr className="border-b border-subtle">
                       <th className="px-6 py-2.5 text-left font-medium">Date</th>
@@ -229,7 +229,7 @@ export default async function DashboardPage() {
                       );
                     })}
                   </tbody>
-                </table>
+                </table></div>
               ) : (
                 <div className="px-6 py-8 text-center text-xs text-ink-tertiary">
                   {txnData?.configured

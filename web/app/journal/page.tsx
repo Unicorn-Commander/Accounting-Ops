@@ -205,7 +205,7 @@ export default async function JournalPage(props: {
               )}
             </div>
           ) : (
-            <table className="w-full text-sm">
+            <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-sm">
               <thead className="text-[10px] uppercase tracking-wider text-ink-tertiary">
                 <tr className="border-b border-subtle">
                   <th className="px-5 py-2.5 text-left font-medium">Date</th>
@@ -267,7 +267,7 @@ export default async function JournalPage(props: {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           )}
         </Card>
 

@@ -142,7 +142,7 @@ function PLView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getProfi
         {data.revenue.lines.length === 0 ? (
           <p className="px-5 py-3 text-xs text-ink-tertiary">No revenue in this period.</p>
         ) : (
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto"><table className="w-full min-w-[480px] text-sm">
             <tbody>
               {data.revenue.lines.map((l) => (
                 <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0">
@@ -161,7 +161,7 @@ function PLView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getProfi
                 </td>
               </tr>
             </tfoot>
-          </table>
+          </table></div>
         )}
 
         <div className="border-b border-t border-subtle px-5 py-2.5 text-[10px] font-medium uppercase tracking-wider text-debit">
@@ -170,7 +170,7 @@ function PLView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getProfi
         {data.expenses.lines.length === 0 ? (
           <p className="px-5 py-3 text-xs text-ink-tertiary">No expenses in this period.</p>
         ) : (
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto"><table className="w-full min-w-[480px] text-sm">
             <tbody>
               {data.expenses.lines.map((l) => (
                 <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0">
@@ -189,7 +189,7 @@ function PLView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getProfi
                 </td>
               </tr>
             </tfoot>
-          </table>
+          </table></div>
         )}
 
         <div className="border-t-2 border-brand-500/40 bg-brand-500/[0.05] px-5 py-3">
@@ -224,7 +224,7 @@ function BSView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getBalan
           {data.assets.lines.length === 0 ? (
             <p className="px-5 py-3 text-xs text-ink-tertiary">No assets recorded yet.</p>
           ) : (
-            <table className="w-full text-sm">
+            <div className="overflow-x-auto"><table className="w-full min-w-[480px] text-sm">
               <tbody>
                 {data.assets.lines.map((l) => (
                   <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0">
@@ -241,7 +241,7 @@ function BSView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getBalan
                   </td>
                 </tr>
               </tfoot>
-            </table>
+            </table></div>
           )}
         </Card>
 
@@ -252,7 +252,7 @@ function BSView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getBalan
           {data.liabilities.lines.length === 0 ? (
             <p className="px-5 py-3 text-xs text-ink-tertiary">No liabilities recorded yet.</p>
           ) : (
-            <table className="w-full text-sm">
+            <div className="overflow-x-auto"><table className="w-full min-w-[480px] text-sm">
               <tbody>
                 {data.liabilities.lines.map((l) => (
                   <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0">
@@ -269,13 +269,13 @@ function BSView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getBalan
                   </td>
                 </tr>
               </tfoot>
-            </table>
+            </table></div>
           )}
 
           <div className="border-t border-subtle px-5 py-2.5 text-[10px] font-medium uppercase tracking-wider text-brand-300">
             Equity
           </div>
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto"><table className="w-full min-w-[480px] text-sm">
             <tbody>
               {data.equity.lines.map((l) => (
                 <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0">
@@ -292,7 +292,7 @@ function BSView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getBalan
                 </td>
               </tr>
             </tfoot>
-          </table>
+          </table></div>
         </Card>
       </div>
 
@@ -334,7 +334,7 @@ function CFView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getCashF
             {s.data.lines.length === 0 ? (
               <p className="px-5 py-2 text-xs text-ink-tertiary">No activity.</p>
             ) : (
-              <table className="w-full text-sm">
+              <div className="overflow-x-auto"><table className="w-full min-w-[480px] text-sm">
                 <tbody>
                   {s.data.lines.map((l, i) => (
                     <tr key={`${s.title}-${i}`} className="border-b border-subtle/40 last:border-b-0">
@@ -362,7 +362,7 @@ function CFView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getCashF
                     </td>
                   </tr>
                 </tfoot>
-              </table>
+              </table></div>
             )}
           </div>
         ))}
