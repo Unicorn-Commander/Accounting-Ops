@@ -16,7 +16,7 @@ the second one fails and retries with the fresh prev_hash.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID, uuid4
@@ -298,71 +298,34 @@ async def post_journal_entry(
 
     # ---- 5. Insert into journal_entry ----
     je_id = uuid4()
-    # The existing 0001 schema requires: event_id, counterparty_id,
-    # amount, currency_code, usd_equivalent_at_event_time, posted_at,
-    # source_document_hash, reasoning_trace, rule_version_applied,
-    # model_version, decision_verdict, identity. We provide sane defaults
-    # for fields the v2 augmentation didn't redefine.
-    amount_decimal = Decimal(abs_amount_cents) / Decimal(100)
     # Use a savepoint so a duplicate-key error on (entity_id, source_external_id)
     # or (entity_id, this_hash) doesn't poison the outer transaction.
     try:
         async with session.begin_nested():
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO journal_entry (
-                        id, workspace_id, entity_id, event_id,
-                        amount, currency_code, usd_equivalent_at_event_time, fx_source,
-                        posted_at, effective_date,
-                        source_document_id, source_document_hash,
-                        counterparty_id,
-                        reasoning_trace, rule_version_applied, model_version,
-                        decision_verdict, identity, approving_human_uc_uid,
-                        debit_account, credit_account, category, materiality_tier,
-                        source, source_external_id,
-                        description, payee, memo,
-                        prev_hash, this_hash, status, receipt_link_id
-                    ) VALUES (
-                        :id, :workspace_id, :entity_id, NULL,
-                        :amount, 'USD', :amount, NULL,
-                        :posted_at, :effective_date,
-                        NULL, :hash_hex,
-                        NULL,
-                        :reasoning, NULL, :model_version,
-                        'Approve', :identity, :approving_uid,
-                        :debit, :credit, :category, :tier,
-                        :source, :source_external_id,
-                        :description, :payee, :memo,
-                        :prev_hash, :this_hash, 'posted', :receipt_link_id
-                    )
-                    """
-                ),
-                {
-                    "id": str(je_id),
-                    "workspace_id": workspace_id,
-                    "entity_id": entity_id,
-                    "amount": amount_decimal,
-                    "posted_at": posted_at,
-                    "effective_date": effective_date,
-                    "hash_hex": this_hash.hex(),
-                    "reasoning": reasoning_trace,
-                    "model_version": model_version,
-                    "identity": posted_by_uc_uid,
-                    "approving_uid": posted_by_uc_uid if user_confirmed else None,
-                    "debit": pair.debit_account,
-                    "credit": pair.credit_account,
-                    "category": category,
-                    "tier": verdict.tier,
-                    "source": source,
-                    "source_external_id": source_external_id,
-                    "description": description,
-                    "payee": payee,
-                    "memo": memo,
-                    "prev_hash": prev_hash,
-                    "this_hash": this_hash,
-                    "receipt_link_id": str(receipt_link_id) if receipt_link_id else None,
-                },
+            await _insert_journal_entry(
+                session,
+                je_id=je_id,
+                workspace_id=workspace_id,
+                entity_id=entity_id,
+                amount_cents=abs_amount_cents,
+                effective_date=effective_date,
+                posted_at=posted_at,
+                debit_account=pair.debit_account,
+                credit_account=pair.credit_account,
+                category=category,
+                tier=verdict.tier,
+                source=source,
+                source_external_id=source_external_id,
+                description=description,
+                payee=payee,
+                memo=memo,
+                prev_hash=prev_hash,
+                this_hash=this_hash,
+                reasoning_trace=reasoning_trace,
+                model_version=model_version,
+                identity=posted_by_uc_uid,
+                approving_uid=posted_by_uc_uid if user_confirmed else None,
+                receipt_link_id=receipt_link_id,
             )
     except IntegrityError as exc:
         # Concurrent post advanced the chain past us, OR an idempotency
@@ -395,6 +358,457 @@ async def post_journal_entry(
     )
 
     return PostingOutcome(journal_entry_id=je_id, materiality=verdict)
+
+
+async def _insert_journal_entry(
+    session: AsyncSession,
+    *,
+    je_id: UUID,
+    workspace_id: str,
+    entity_id: str,
+    amount_cents: int,  # absolute value; stored as NUMERIC(20,4)
+    effective_date,
+    posted_at: datetime,
+    debit_account: str,
+    credit_account: str,
+    category: str,
+    tier: str,
+    source: str,
+    source_external_id: str | None,
+    description: str,
+    payee: str | None,
+    memo: str | None,
+    prev_hash: bytes,
+    this_hash: bytes,
+    reasoning_trace: str,
+    model_version: str,
+    identity: str,
+    approving_uid: str | None,
+    receipt_link_id: UUID | None,
+    reverses_entry_id: UUID | None = None,
+) -> None:
+    """Single INSERT into journal_entry. The ONE place the column list +
+    schema defaults live so post_journal_entry and post_correction can never
+    drift. Caller owns the savepoint + chain-hash computation.
+
+    The existing 0001 schema requires event_id, counterparty_id,
+    source_document_hash, reasoning_trace, rule_version_applied, model_version,
+    decision_verdict, identity. We supply sane defaults for the fields the v2
+    augmentation didn't redefine (event_id/counterparty_id NULL since those
+    subsystems aren't built; source_document_hash carries the chain hash hex).
+    """
+    amount_decimal = Decimal(amount_cents) / Decimal(100)
+    await session.execute(
+        text(
+            """
+            INSERT INTO journal_entry (
+                id, workspace_id, entity_id, event_id,
+                amount, currency_code, usd_equivalent_at_event_time, fx_source,
+                posted_at, effective_date,
+                source_document_id, source_document_hash,
+                counterparty_id,
+                reasoning_trace, rule_version_applied, model_version,
+                decision_verdict, identity, approving_human_uc_uid,
+                debit_account, credit_account, category, materiality_tier,
+                source, source_external_id,
+                description, payee, memo,
+                prev_hash, this_hash, status, receipt_link_id,
+                reverses_entry_id
+            ) VALUES (
+                :id, :workspace_id, :entity_id, NULL,
+                :amount, 'USD', :amount, NULL,
+                :posted_at, :effective_date,
+                NULL, :hash_hex,
+                NULL,
+                :reasoning, NULL, :model_version,
+                'Approve', :identity, :approving_uid,
+                :debit, :credit, :category, :tier,
+                :source, :source_external_id,
+                :description, :payee, :memo,
+                :prev_hash, :this_hash, 'posted', :receipt_link_id,
+                :reverses_entry_id
+            )
+            """
+        ),
+        {
+            "id": str(je_id),
+            "workspace_id": workspace_id,
+            "entity_id": entity_id,
+            "amount": amount_decimal,
+            "posted_at": posted_at,
+            "effective_date": effective_date,
+            "hash_hex": this_hash.hex(),
+            "reasoning": reasoning_trace,
+            "model_version": model_version,
+            "identity": identity,
+            "approving_uid": approving_uid,
+            "debit": debit_account,
+            "credit": credit_account,
+            "category": category,
+            "tier": tier,
+            "source": source,
+            "source_external_id": source_external_id,
+            "description": description,
+            "payee": payee,
+            "memo": memo,
+            "prev_hash": prev_hash,
+            "this_hash": this_hash,
+            "receipt_link_id": str(receipt_link_id) if receipt_link_id else None,
+            "reverses_entry_id": str(reverses_entry_id) if reverses_entry_id else None,
+        },
+    )
+
+
+@dataclass
+class CorrectionOutcome:
+    """A category correction that was applied to the journal.
+
+    The original entry is left in place (append-only); a reversing entry plus a
+    re-stated entry with the new category are appended. ``net_unchanged`` is the
+    accounting invariant: reversal + restatement leave total debits/credits on
+    the *cash* side unchanged — only the category (expense/revenue) account moves.
+    """
+
+    reversal_entry_id: UUID
+    restated_entry_id: UUID
+    materiality_tier: str
+    from_category: str
+    to_category: str
+
+
+@dataclass
+class CorrectionQueued:
+    """A material correction was NOT posted; it queued for human attestation.
+
+    Mirrors post_journal_entry's queue/block behavior: a recategorization of an
+    M/H-tier entry is not auto-applied. An approval_queue row is created and the
+    ledger is left untouched until a human approves.
+    """
+
+    approval_id: UUID
+    materiality_tier: str
+    reason: str
+    from_category: str
+    to_category: str
+
+
+async def _resolve_category_account(
+    session: AsyncSession, *, entity_id: str, category: str
+) -> str | None:
+    """canonical_form of the COA account a category posts to, or None.
+
+    Same resolution post path uses (CATEGORY_TO_ACCOUNT -> chart_of_account),
+    so a correction lands on exactly the account a fresh post of that category
+    would have used."""
+    cat_number = CATEGORY_TO_ACCOUNT.get(category)
+    if not cat_number:
+        return None
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT canonical_form
+                FROM chart_of_account
+                WHERE entity_id = :eid AND account_number = :num AND is_active = true
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "num": cat_number},
+        )
+    ).mappings().first()
+    return row["canonical_form"] if row else None
+
+
+async def _is_cash_side(
+    session: AsyncSession, *, entity_id: str, canonical_form: str
+) -> bool:
+    """True if the COA account is asset/liability (the cash/credit-card side of
+    a simple two-line entry), False if it's the income-statement (category) side.
+    """
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT account_type FROM chart_of_account
+                WHERE entity_id = :eid AND canonical_form = :cf
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "cf": canonical_form},
+        )
+    ).mappings().first()
+    return bool(row) and row["account_type"] in ("asset", "liability")
+
+
+async def post_correction(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    entity_id: str,
+    original: dict,
+    new_category: str,
+    reasoning: str,
+    actor_uc_uid: str,
+    actor_agent_id: str | None = None,
+) -> CorrectionOutcome | CorrectionQueued | PostingRefusal:
+    """Re-categorize a POSTED journal entry, append-only.
+
+    journal_entry is immutable (DB trigger + role grant forbid UPDATE/DELETE),
+    so a category change is expressed as accounting corrections, NOT a field
+    edit — exactly the documented pattern ("Reversals are NEW entries that point
+    back via reverses_entry_id"). We:
+
+      1. resolve the new category's COA account (same path a fresh post uses);
+      2. consult the SAME materiality gate as post_journal_entry. A material
+         (M/H) correction is NOT auto-applied — it queues an approval_queue row
+         and leaves the ledger untouched (parity with post's queue/block);
+      3. for an auto-applicable (tier L) correction, append a reversing entry
+         (debit/credit flipped, reverses_entry_id -> original) then a re-stated
+         entry that keeps the cash side and swaps the category side. Both
+         advance the per-entity hash chain via compute_hash, so verify_chain
+         stays green.
+
+    ``original`` is the posted row: id, amount, debit_account, credit_account,
+    category, effective_date, payee, description, memo (+ optional receipt_link_id).
+    Returns CorrectionOutcome (applied), CorrectionQueued (material -> queued),
+    or PostingRefusal (new category not resolvable / original already reversed).
+    """
+    orig_id = UUID(str(original["id"]))
+    from_category = original.get("category") or "Uncategorized"
+    debit_account = original["debit_account"]
+    credit_account = original["credit_account"]
+    # amount is NUMERIC(20,4) absolute value; the gate + chain work in cents.
+    amount_cents = int((Decimal(str(original["amount"])) * 100).to_integral_value())
+    effective_date = original["effective_date"]
+    payee = original.get("payee")
+    description = original.get("description") or ""
+    memo = original.get("memo")
+    receipt_link_id = original.get("receipt_link_id")
+    if receipt_link_id is not None:
+        receipt_link_id = UUID(str(receipt_link_id))
+
+    # Resolve the NEW category's account. If the entry can't be expressed as
+    # the standard two-line (cash + category) shape, refuse rather than guess.
+    new_cat_canonical = await _resolve_category_account(
+        session, entity_id=entity_id, category=new_category
+    )
+    if new_cat_canonical is None:
+        return PostingRefusal(
+            outcome="blocked_unknown_category",
+            reason=(
+                f"Category '{new_category}' is not in CATEGORY_TO_ACCOUNT or the "
+                "entity has no matching active COA account."
+            ),
+        )
+    debit_is_cash = await _is_cash_side(
+        session, entity_id=entity_id, canonical_form=debit_account
+    )
+    credit_is_cash = await _is_cash_side(
+        session, entity_id=entity_id, canonical_form=credit_account
+    )
+    if debit_is_cash == credit_is_cash:
+        # Both or neither side is cash: not a simple expense/revenue entry
+        # (e.g. a transfer or an opening balance). Recategorization via this
+        # tool isn't defined for those — refuse cleanly.
+        return PostingRefusal(
+            outcome="blocked_unknown_category",
+            reason=(
+                "Entry is not a simple cash+category posting (could not identify "
+                "exactly one income-statement side to recategorize)."
+            ),
+        )
+
+    # ---- Materiality gate (same evaluate() the posting path uses) ----
+    # has_receipt_link reflects the original; sign already matched at post time;
+    # category_status='auto' because this is an explicit, deterministic recat.
+    verdict = evaluate(
+        amount_cents=amount_cents,
+        category=new_category,
+        category_status="auto",
+        entity_mapped=True,
+        sign_matched=True,
+        has_receipt_link=receipt_link_id is not None,
+        user_confirmed=False,
+    )
+    if verdict.outcome != "auto_post":
+        # Material (or 274(d)-blocked) correction: queue, do NOT touch the ledger.
+        approval_id = uuid4()
+        await session.execute(
+            text(
+                """
+                INSERT INTO approval_queue (
+                    id, workspace_id, entity_id, subject_type, subject_id,
+                    amount, currency_code, usd_equivalent_at_event_time,
+                    status, reasoning, requested_by_identity
+                ) VALUES (
+                    :id, :wid, :eid, 'journal_recategorization', :subject,
+                    :amount, 'USD', :amount,
+                    'pending', :reasoning, :identity
+                )
+                """
+            ),
+            {
+                "id": str(approval_id),
+                "wid": workspace_id,
+                "eid": entity_id,
+                "subject": str(orig_id),
+                "amount": Decimal(abs(amount_cents)) / Decimal(100),
+                "reasoning": (
+                    f"Re-categorize entry {orig_id} from '{from_category}' to "
+                    f"'{new_category}'. {verdict.reason} Agent reasoning: {reasoning}"
+                ),
+                "identity": actor_uc_uid,
+            },
+        )
+        await _log_post_attempt(
+            session, workspace_id=workspace_id, entity_id=entity_id,
+            source="recategorization",
+            source_external_id=f"recat:{orig_id}",
+            outcome=(
+                "blocked_materiality"
+                if verdict.outcome != "queue_for_confirm"
+                else "queued_for_confirm"
+            ),
+            journal_entry_id=orig_id, reason=verdict.reason,
+            actor_uc_uid=actor_uc_uid, actor_agent_id=actor_agent_id,
+            amount_cents=amount_cents, category=new_category,
+        )
+        return CorrectionQueued(
+            approval_id=approval_id,
+            materiality_tier=verdict.tier,
+            reason=verdict.reason,
+            from_category=from_category,
+            to_category=new_category,
+        )
+
+    # ---- Auto-applicable (tier L): append reversal + restatement ----
+    # Restatement keeps the cash side and swaps the income-statement side.
+    if debit_is_cash:
+        restated_debit, restated_credit = debit_account, new_cat_canonical
+    else:
+        restated_debit, restated_credit = new_cat_canonical, credit_account
+
+    reversal_id = uuid4()
+    restated_id = uuid4()
+    abs_cents = abs(amount_cents)
+    # The reversal carries its own description; verify_chain rehashes from the
+    # STORED description, so we must hash the exact same string we store.
+    reversal_description = f"Reversal of {orig_id} for recategorization"
+    try:
+        async with session.begin_nested():
+            # Two appended entries must verify in chain order. verify_chain walks
+            # by (posted_at ASC, id ASC); guarantee posted_at(reversal) <
+            # posted_at(restatement) by construction so the walk order always
+            # matches the link order (reversal -> restatement) regardless of the
+            # random ids — otherwise a same-microsecond tie could invert them and
+            # break the prev_hash check.
+            posted_at = datetime.now(tz=timezone.utc)
+            posted_at2 = posted_at + timedelta(microseconds=1)
+            # 1. Reversal: flip the original's debit/credit, point back at it.
+            prev_hash = await get_last_chain_hash(session, entity_id)
+            rev_src_ext = f"reversal:{orig_id}"
+            rev_hash = compute_hash(
+                prev_hash,
+                effective_date=effective_date,
+                amount_cents=abs_cents,
+                debit_account=credit_account,
+                credit_account=debit_account,
+                source="reversal",
+                source_external_id=rev_src_ext,
+                payee=payee,
+                description=reversal_description,
+                posted_at=posted_at,
+            )
+            await _insert_journal_entry(
+                session,
+                je_id=reversal_id,
+                workspace_id=workspace_id,
+                entity_id=entity_id,
+                amount_cents=abs_cents,
+                effective_date=effective_date,
+                posted_at=posted_at,
+                debit_account=credit_account,
+                credit_account=debit_account,
+                category=from_category,
+                tier=verdict.tier,
+                source="reversal",
+                source_external_id=rev_src_ext,
+                description=reversal_description,
+                payee=payee,
+                memo=memo,
+                prev_hash=prev_hash,
+                this_hash=rev_hash,
+                reasoning_trace=reasoning,
+                model_version="",
+                identity=actor_uc_uid,
+                approving_uid=actor_uc_uid,
+                receipt_link_id=receipt_link_id,
+                reverses_entry_id=orig_id,
+            )
+            # 2. Restatement: cash side unchanged, category side -> new account.
+            restated_src_ext = f"recat:{orig_id}"
+            restated_hash = compute_hash(
+                rev_hash,
+                effective_date=effective_date,
+                amount_cents=abs_cents,
+                debit_account=restated_debit,
+                credit_account=restated_credit,
+                source="recategorization",
+                source_external_id=restated_src_ext,
+                payee=payee,
+                description=description,
+                posted_at=posted_at2,
+            )
+            await _insert_journal_entry(
+                session,
+                je_id=restated_id,
+                workspace_id=workspace_id,
+                entity_id=entity_id,
+                amount_cents=abs_cents,
+                effective_date=effective_date,
+                posted_at=posted_at2,
+                debit_account=restated_debit,
+                credit_account=restated_credit,
+                category=new_category,
+                tier=verdict.tier,
+                source="recategorization",
+                source_external_id=restated_src_ext,
+                description=description,
+                payee=payee,
+                memo=memo,
+                prev_hash=rev_hash,
+                this_hash=restated_hash,
+                reasoning_trace=reasoning,
+                model_version="",
+                identity=actor_uc_uid,
+                approving_uid=actor_uc_uid,
+                receipt_link_id=receipt_link_id,
+                reverses_entry_id=None,
+            )
+    except IntegrityError:
+        return PostingRefusal(
+            outcome="blocked_idempotent",
+            reason=(
+                "Chain race or this entry was already recategorized "
+                f"(reversal source_external_id 'reversal:{orig_id}' exists)."
+            ),
+        )
+
+    await _log_post_attempt(
+        session, workspace_id=workspace_id, entity_id=entity_id,
+        source="recategorization", source_external_id=f"recat:{orig_id}",
+        outcome="posted", journal_entry_id=restated_id,
+        reason=f"Recategorized {orig_id}: {from_category} -> {new_category}",
+        actor_uc_uid=actor_uc_uid, actor_agent_id=actor_agent_id,
+        amount_cents=amount_cents, category=new_category,
+    )
+    return CorrectionOutcome(
+        reversal_entry_id=reversal_id,
+        restated_entry_id=restated_id,
+        materiality_tier=verdict.tier,
+        from_category=from_category,
+        to_category=new_category,
+    )
 
 
 async def _log_post_attempt(

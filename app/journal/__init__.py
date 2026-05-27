@@ -17,8 +17,11 @@ Public surface:
 from app.journal.hash_chain import GENESIS_HASH, compute_hash, verify_chain
 from app.journal.materiality import materiality_tier, MaterialityVerdict
 from app.journal.posting import (
+    CorrectionOutcome,
+    CorrectionQueued,
     PostingOutcome,
     PostingRefusal,
+    post_correction,
     post_journal_entry,
     resolve_accounts_for_txn,
 )
@@ -26,12 +29,15 @@ from app.journal.accounts import canonical_form
 
 __all__ = [
     "GENESIS_HASH",
+    "CorrectionOutcome",
+    "CorrectionQueued",
     "MaterialityVerdict",
     "PostingOutcome",
     "PostingRefusal",
     "canonical_form",
     "compute_hash",
     "materiality_tier",
+    "post_correction",
     "post_journal_entry",
     "resolve_accounts_for_txn",
     "verify_chain",
