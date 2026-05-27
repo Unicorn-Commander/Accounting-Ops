@@ -25,7 +25,21 @@ def build_server():
         raise RuntimeError("Install the PyPI 'mcp' package to run the MCP server") from exc
 
     settings = get_settings()
-    server = FastMCP("Accounting-Ops")
+    # streamable_http_path="/" so that mounting the app at "/mcp" (app/main.py)
+    # yields the endpoint exactly at "/mcp" — not "/mcp/mcp" (the default path is
+    # "/mcp", which would double up under the mount). Matches the /.well-known
+    # discovery doc and the Traefik /mcp route.
+    server = FastMCP(
+        "Accounting-Ops",
+        streamable_http_path="/",
+        instructions=(
+            "Agent-first financial operations for Magic Unicorn. Tools operate on "
+            "a workspace_id (+ entity_id for entity-scoped tools). The caller's "
+            "OAuth2 bearer (uchub realm) is authorized against workspace "
+            "membership on every call — you can only reach workspaces you belong "
+            "to. Reads operate on the posted append-only journal."
+        ),
+    )
 
     # Entity-scoped tools — caller passes workspace_id + entity_id.
     server.tool()(list_transactions)

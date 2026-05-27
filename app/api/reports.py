@@ -20,12 +20,12 @@ debit and credit sides of each entry.
 from __future__ import annotations
 
 import calendar
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 
 from app.authz import assert_entity_in_scope
@@ -152,24 +152,41 @@ async def _entity_label(session, entity_id: str | None) -> str:
     return row.display_name if row else entity_id
 
 
-@router.get("/api/workspaces/{workspace_id}/reports/pl")
-async def profit_and_loss(
-    workspace_id: UUID,
-    period: str = "ytd",
+async def compute_profit_and_loss(
+    workspace: WorkspaceContext,
+    period: str,
     entity_id: str | None = None,
-    workspace: WorkspaceContext = Depends(resolve_workspace),
+    restrict_entity_ids: list[UUID] | None = None,
 ) -> dict:
-    """Profit & Loss for the period.
+    """Compute a Profit & Loss for the period over the posted journal.
 
-    Revenue accounts (4xxx, 7xxx) are summed as credits-minus-debits
-    (normal balance = credit); expense accounts (5xxx, 6xxx, 8xxx, 9xxx)
-    are summed as debits-minus-credits (normal balance = debit).
-    Net income = revenue - expenses.
+    Single implementation shared by the HTTP route (``profit_and_loss``) and the
+    MCP tools (``get_p_and_l`` / ``get_consolidated_p_and_l``) so the two
+    surfaces can never produce different numbers. The caller is responsible for
+    role enforcement (``require_role``); this function still applies the
+    membership's entity_scope via ``assert_entity_in_scope`` as defense in depth.
+
+    Revenue accounts (4xxx, 7xxx) net credits-minus-debits (normal balance =
+    credit); expense accounts (5xxx, 6xxx, 8xxx, 9xxx) net debits-minus-credits
+    (normal balance = debit). Net income = revenue - expenses.
+
+    ``restrict_entity_ids`` (consolidated subset): when provided, the report is
+    restricted to exactly those entity ids (``je.entity_id = ANY(...)``) and
+    ``entity_id`` is treated as consolidated. The ids are intersected with the
+    caller's entity_scope when the membership is scoped.
     """
-    require_role(workspace, "viewer")
-    scope_restriction = assert_entity_in_scope(workspace, entity_id)
+    if restrict_entity_ids is not None:
+        # Intersect the requested subset with the caller's allowed scope.
+        scope_restriction = assert_entity_in_scope(workspace, None)
+        if scope_restriction is not None:
+            allowed = set(scope_restriction)
+            restrict_entity_ids = [e for e in restrict_entity_ids if e in allowed]
+        entity_clause = " AND je.entity_id = ANY(:entity_scope)"
+        entity_params = {"entity_scope": [str(e) for e in restrict_entity_ids]}
+    else:
+        scope_restriction = assert_entity_in_scope(workspace, entity_id)
+        entity_clause, entity_params = _entity_filter(entity_id, scope_restriction)
     start, end, label = _parse_period(period)
-    entity_clause, entity_params = _entity_filter(entity_id, scope_restriction)
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         entity_label = await _entity_label(session, entity_id)
@@ -269,6 +286,18 @@ async def profit_and_loss(
         },
         "net_income": str(revenue_total - expense_total),
     }
+
+
+@router.get("/api/workspaces/{workspace_id}/reports/pl")
+async def profit_and_loss(
+    workspace_id: UUID,
+    period: str = "ytd",
+    entity_id: str | None = None,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Profit & Loss for the period. See ``compute_profit_and_loss``."""
+    require_role(workspace, "viewer")
+    return await compute_profit_and_loss(workspace, period, entity_id)
 
 
 @router.get("/api/workspaces/{workspace_id}/reports/balance-sheet")
