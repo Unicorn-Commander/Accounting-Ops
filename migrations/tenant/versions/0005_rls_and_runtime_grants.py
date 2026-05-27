@@ -33,8 +33,9 @@ Audit finding C3 — make the DATABASE enforce what the app only promised:
   3. Row-Level Security backstop on every workspace-scoped table (all tenant
      tables carry workspace_id). Policy: workspace_id = the
      `app.current_workspace` GUC the app sets per request
-     (app/workspace_session.py). Tables are FORCE ROW LEVEL SECURITY so even
-     the owner is subject to RLS, and the runtime role is not BYPASSRLS.
+     (app/workspace_session.py). Tables ENABLE (not FORCE) RLS: the runtime
+     role (non-owner, not BYPASSRLS) is fully gated, while the owner keeps full
+     visibility for migrations/maintenance — see the FORCE rationale below.
      Because each schema holds exactly one workspace's rows, a query that
      lands in the WRONG schema (stale/missing search_path) sees ZERO rows
      instead of another tenant's data.
