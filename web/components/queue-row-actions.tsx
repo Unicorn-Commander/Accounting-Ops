@@ -58,11 +58,13 @@ function bestPattern(t: LiveTransaction): string {
 export function QueueRowActions({
   workspaceId,
   transaction,
-  kind
+  kind,
+  onShowReject
 }: {
   workspaceId: string;
   transaction: LiveTransaction;
   kind: "review" | "unknown" | "auto";
+  onShowReject?: () => void;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -198,7 +200,7 @@ export function QueueRowActions({
             Save rule
           </button>
           <button
-            onClick={() => setShowReject(false)}
+            onClick={() => { setShowReject(false); }}
             className="inline-flex h-6 items-center rounded border border-default px-2 text-[10px] text-ink-tertiary hover:bg-elevated"
           >
             Cancel
@@ -224,11 +226,11 @@ export function QueueRowActions({
           {pending ? <Loader2 size={11} className="animate-spin" /> : <Check size={12} />}
           Confirm
         </button>
-        <button
-          onClick={() => setShowReject(true)}
-          className="inline-flex h-7 items-center justify-center rounded-md border border-subtle bg-surface px-2 text-ink-secondary hover:bg-elevated"
-          title="Reject + train a new category rule"
-        >
+       <button
+            onClick={() => { setShowReject(true); onShowReject?.(); }}
+            className="inline-flex h-7 items-center justify-center rounded-md border border-subtle bg-surface px-2 text-ink-secondary hover:bg-elevated"
+            title="Reject + train a new category rule"
+          >
           <X size={12} />
         </button>
       </div>
