@@ -1,35 +1,10 @@
-import { ArrowUp, Bot, Paperclip, User } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
+import { ChatComposer, ChatThread } from "@/components/agent-chat-thread";
 import { getActiveContext } from "@/lib/active-context";
+import { CHAT_MESSAGES } from "@/lib/agent-chat";
 import { cn } from "@/lib/cn";
-
-const MESSAGES = [
-  {
-    role: "agent" as const,
-    agent: "Accounting-Ops",
-    body: "Good afternoon. Here's where things stand on Magic Unicorn Inc as of right now:\n\n- Cash position: $487,193 across 6 accounts\n- 23 transactions auto-posted today\n- 3 items waiting for your review (one is the Mercury ACH I flagged earlier)\n- Q2 estimated tax projection: $11,200, due June 16\n\nAnything you want to dig into?"
-  },
-  {
-    role: "user" as const,
-    body: "What's the Mercury ACH thing?"
-  },
-  {
-    role: "agent" as const,
-    agent: "recon-1.2",
-    body: "Inbound $5,000 ACH on May 19, account ending 2847. Looks like an inter-entity transfer from Magic Unicorn Inc to Majiks JV (the description says 'Majiks contributor float'), but I can't find a matching outbound debit in Magic Unicorn Inc's accounts.\n\nTwo possibilities:\n1. It's actually external revenue we haven't catalogued yet (royalty advance? customer payment?)\n2. The outbound side is mis-categorized in MU Inc — search history shows a $5,000 'Misc Outflow' on May 18 that might be it.\n\nWant me to dig into option 2 and propose a recategorization?"
-  },
-  {
-    role: "user" as const,
-    body: "Yeah, go ahead. If it's option 2, just queue the recategorization for my approval."
-  },
-  {
-    role: "agent" as const,
-    agent: "recon-1.2",
-    body: "Working on it. Pulling the May 18 'Misc Outflow' detail and matching counterparty + amount + date. Will queue a proposal in Reconciliation if confident, or flag this back if it's actually external revenue.\n\nETA: about 12 seconds. I'll ping you when ready."
-  }
-];
 
 export default async function ChatPage() {
   const ctx = await getActiveContext();
@@ -57,71 +32,8 @@ export default async function ChatPage() {
 
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
           <Card padded={false} className="flex flex-col lg:col-span-3">
-            <div className="flex-1 space-y-5 overflow-y-auto p-6">
-              {MESSAGES.map((msg, i) => (
-                <div
-                  key={i}
-                  className={cn("flex gap-3", msg.role === "user" && "flex-row-reverse")}
-                >
-                  <div
-                    className={cn(
-                      "flex h-7 w-7 shrink-0 items-center justify-center rounded-full ring-1 ring-inset",
-                      msg.role === "agent"
-                        ? "bg-elevated text-agent-500 ring-agent-500/30"
-                        : "bg-brand-500/20 text-brand-400 ring-brand-500/40"
-                    )}
-                  >
-                    {msg.role === "agent" ? <Bot size={14} /> : <User size={14} />}
-                  </div>
-                  <div
-                    className={cn(
-                      "max-w-[80%] space-y-1",
-                      msg.role === "user" && "items-end text-right"
-                    )}
-                  >
-                    {msg.role === "agent" && (
-                      <p className="text-[11px] font-medium uppercase tracking-wider text-agent-500">
-                        {msg.agent}
-                      </p>
-                    )}
-                    <div
-                      className={cn(
-                        "whitespace-pre-line rounded-lg px-4 py-3 font-reasoning text-sm leading-relaxed",
-                        msg.role === "agent"
-                          ? "border-l-2 border-agent-500/60 bg-elevated text-ink-primary"
-                          : "bg-brand-500/10 text-ink-primary"
-                      )}
-                    >
-                      {msg.body}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="border-t border-subtle p-4">
-              <div className="relative">
-                <textarea
-                  rows={2}
-                  placeholder="Ask the agents anything — try 'What's my burn this quarter?' or 'Categorize today's Stripe payouts'"
-                  className="w-full resize-none rounded-lg border border-default bg-canvas px-4 py-3 pr-24 text-sm placeholder:text-ink-disabled focus:border-brand-500 focus:outline-none"
-                />
-                <div className="absolute right-2 top-2 flex items-center gap-1.5">
-                  <button
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-md text-ink-tertiary hover:bg-white/5 hover:text-ink-primary"
-                    title="Attach file"
-                  >
-                    <Paperclip size={14} />
-                  </button>
-                  <button className="inline-flex h-7 items-center gap-1 rounded-md bg-brand-500 px-2.5 text-[11px] font-medium text-white shadow-brand-glow hover:bg-brand-600">
-                    <ArrowUp size={14} />
-                  </button>
-                </div>
-              </div>
-              <p className="mt-2 text-[10px] text-ink-tertiary">
-                Runtime: Tier 1 local Qwen on midboy1. Escalates to Claude Opus 4.7 on Tier 3.
-              </p>
-            </div>
+            <ChatThread messages={CHAT_MESSAGES} className="flex-1" />
+            <ChatComposer />
           </Card>
 
           <Card padded={false} className="lg:col-span-2">

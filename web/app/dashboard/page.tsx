@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, ArrowUpRight, Wifi } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import { AgentActivitySection } from "@/components/agent-activity-section";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip, ConfidenceDot } from "@/components/primitives";
 import { getActiveContext } from "@/lib/active-context";
@@ -342,25 +343,7 @@ export default async function DashboardPage() {
         </div>
 
         <div className="mt-8">
-          <Card padded={false}>
-            <div className="flex items-center justify-between border-b border-subtle px-6 py-4">
-              <div>
-                <h2 className="text-base font-semibold">Agent decisions · transparency</h2>
-                <p className="mt-0.5 text-xs text-ink-tertiary">
-                  Every agent action will expose its reasoning, source, and rule version here once
-                  Phase 2 agents are wired (Brigade orchestration + Qwen3-VL receipt pipeline).
-                </p>
-              </div>
-              <StatusChip tone="ink">Phase 2</StatusChip>
-            </div>
-            <div className="px-6 py-12 text-center text-sm text-ink-tertiary">
-              <p>No agent decisions yet.</p>
-              <p className="mt-2 text-xs">
-                The pattern is in place. The first decisions will land when the Bookkeeper agent
-                begins categorizing your live transactions.
-              </p>
-            </div>
-          </Card>
+          <AgentActivitySection />
         </div>
       </PageShell>
     </AppShell>
