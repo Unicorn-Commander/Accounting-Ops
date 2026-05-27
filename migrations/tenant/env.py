@@ -16,12 +16,15 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import create_engine, pool, text
 
-from app.config import get_settings
+from app.config import get_admin_database_url
 
 config = context.config
 
 # Force psycopg2 (sync) for alembic. The app itself uses asyncpg at runtime.
-_url = get_settings().database_url
+# Migrations create tables, triggers, grants, and RLS policies — they MUST run
+# as the table-OWNING role. Use the admin URL (falls back to DATABASE_URL when
+# ADMIN_DATABASE_URL is unset, i.e. single-role/local setups).
+_url = get_admin_database_url()
 if "+asyncpg" in _url:
     _url = _url.replace("+asyncpg", "+psycopg2")
 elif "://" in _url and "+" not in _url.split("://", 1)[0]:

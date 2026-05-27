@@ -14,18 +14,24 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import re
 import subprocess
 import sys
 import uuid
+from functools import lru_cache
 from pathlib import Path
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.db import engine as default_engine  # noqa: E402
+from app.config import get_admin_database_url  # noqa: E402
 from app.workspace_session import (  # noqa: E402
     schema_for_workspace,
     workspace_session,
@@ -36,7 +42,19 @@ try:
 except Exception:  # pragma: no cover
     ensure_workspace_subgraph = None  # type: ignore[assignment]
 
-from app.db import SessionLocal  # noqa: E402
+
+# Provisioning is an ADMIN operation: CREATE SCHEMA + alembic DDL + the seed
+# INSERTs must run as the table-OWNING role (accounting_ops), NOT the
+# least-privilege runtime role. We use a dedicated admin engine bound to
+# ADMIN_DATABASE_URL (falls back to DATABASE_URL for single-role setups).
+@lru_cache
+def _admin_engine() -> AsyncEngine:
+    return create_async_engine(get_admin_database_url(), pool_pre_ping=True)
+
+
+@lru_cache
+def _admin_sessionmaker() -> async_sessionmaker:
+    return async_sessionmaker(_admin_engine(), expire_on_commit=False)
 
 
 def slugify(value: str) -> str:
@@ -93,6 +111,12 @@ async def create_workspace_record(
 
 def run_alembic_upgrade(schema: str) -> None:
     project_root = Path(__file__).resolve().parent.parent
+    # The alembic env reads get_settings().database_url. Point that at the
+    # ADMIN (owner) URL for the subprocess so migrations run as the owner —
+    # tables, triggers, grants, and RLS policies must be created by the owner,
+    # not the runtime role.
+    child_env = dict(os.environ)
+    child_env["DATABASE_URL"] = get_admin_database_url()
     result = subprocess.run(
         [
             "alembic",
@@ -107,6 +131,7 @@ def run_alembic_upgrade(schema: str) -> None:
         text=True,
         check=False,
         cwd=project_root,
+        env=child_env,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -134,9 +159,14 @@ async def create_entity(
     functional_currency: str = "USD",
     hipaa_protected: bool = False,
 ) -> uuid.UUID:
-    """Create an entity row within the workspace's schema. Idempotent on slug."""
+    """Create an entity row within the workspace's schema. Idempotent on slug.
+
+    Runs on the ADMIN sessionmaker (owner role) — provisioning is an admin op.
+    workspace_session sets app.current_workspace so the RLS WITH CHECK on the
+    entity INSERT passes regardless of which role runs it.
+    """
     slug = slugify(display_name)
-    async with workspace_session(SessionLocal, workspace_id) as session:
+    async with workspace_session(_admin_sessionmaker(), workspace_id) as session:
         result = await session.execute(
             text(
                 """
@@ -171,7 +201,7 @@ async def create_entity(
 
 
 async def provision_workspace(
-    engine: AsyncEngine,
+    engine: AsyncEngine | None,
     workspace_id: uuid.UUID,
     display_name: str,
     *,
@@ -184,7 +214,14 @@ async def provision_workspace(
 
     `entities` is a list of (display_name, kind) tuples. kind is one of
     c_corp / s_corp / llc / partnership / sole_proprietorship / personal / trust / non_profit / estate / other.
+
+    Provisioning is an ADMIN/owner operation (CREATE SCHEMA + DDL + seed rows).
+    Pass `engine=None` (recommended) to use the admin engine bound to
+    ADMIN_DATABASE_URL. A passed-in engine is honored for back-compat but MUST
+    be an owner-role engine, or the CREATE SCHEMA + registry writes will fail.
     """
+    if engine is None:
+        engine = _admin_engine()
     slug = slug or slugify(display_name)
     schema = await create_workspace_record(
         engine, workspace_id, display_name, slug, hipaa_protected, isolation_tier
@@ -212,7 +249,14 @@ async def provision_workspace(
     return schema, entity_ids
 
 
-async def upgrade_all_workspaces(engine: AsyncEngine) -> list[tuple[str, bool]]:
+async def upgrade_all_workspaces(engine: AsyncEngine | None = None) -> list[tuple[str, bool]]:
+    """Re-run tenant migrations against every active workspace schema.
+
+    Defaults to the admin engine; the alembic subprocess itself always uses the
+    admin URL (run_alembic_upgrade), so this only needs to read the registry.
+    """
+    if engine is None:
+        engine = _admin_engine()
     async with engine.connect() as conn:
         rows = (
             await conn.execute(
@@ -273,7 +317,7 @@ async def _cli_main() -> None:
         entities.append((name.strip(), kind.strip()))
 
     schema, entity_ids = await provision_workspace(
-        default_engine,
+        _admin_engine(),
         wid,
         args.display_name,
         slug=args.slug,

@@ -41,6 +41,12 @@ TEST_ENTITY_NAME = "Integration Test Co"
 TEST_ENTITY_KIND = "c_corp"
 SCHEMA = f"accounting_ops_{str(TEST_WORKSPACE_ID).replace('-', '_')}"
 
+# A SECOND, fully separate workspace (its own schema) — the cross-tenant target
+# for the RLS-backstop proof. Provisioned the same way as workspace A.
+TEST_WORKSPACE_B_SLUG = "integration-ci-b"
+TEST_WORKSPACE_B_ID = uuid.uuid5(uuid.NAMESPACE_DNS, f"accounting-ops:{TEST_WORKSPACE_B_SLUG}")
+TEST_WORKSPACE_B_ENTITY_NAME = "Integration Test Co B"
+
 PROJECT = "acctops_itest"
 ENV_FILE = ROOT / ".env.integration"
 SECRET_FILE = ROOT / "secrets" / "accounting_ops_master_key"
@@ -56,6 +62,15 @@ HOST_CPA_PORT = 58093
 POSTGRES_PASSWORD = "accounting_ops_test_pw"
 SERVICE_TOKEN = "itest-" + "0" * 40  # >= 32 chars, deterministic for the test run
 SERVICE_UC_UID = "test-service"
+
+# The least-privilege runtime role + a LOCAL (throwaway-stack-only) password.
+# This is NOT a production secret — it exists only for the ephemeral CI/dev
+# stack so the app can authenticate as the restricted role and the RLS /
+# role-permission tests can connect as it directly. Production sets the
+# password out-of-band (DEPLOY.md), never in the repo.
+RUNTIME_DB_ROLE = "accounting_ops_app"
+RUNTIME_DB_PASSWORD = "accounting_ops_app_test_pw"
+OWNER_DB_ROLE = "accounting_ops"
 
 CORE_SERVICES = ["postgres", "garage", "app"]
 
@@ -93,7 +108,11 @@ def _write_secrets_and_env(with_cpa: bool) -> None:
         "POSTGRES_DB=accounting_ops",
         "POSTGRES_USER=accounting_ops",
         f"POSTGRES_PASSWORD={POSTGRES_PASSWORD}",
-        f"DATABASE_URL=postgresql+asyncpg://accounting_ops:{POSTGRES_PASSWORD}@postgres:5432/accounting_ops",
+        # Runtime: the app/web/cpa-export connect as the LEAST-PRIVILEGE role.
+        f"DATABASE_URL=postgresql+asyncpg://{RUNTIME_DB_ROLE}:{RUNTIME_DB_PASSWORD}@postgres:5432/accounting_ops",
+        # Admin: migrations + provisioning (run via `docker compose exec app`)
+        # use the table-OWNING role.
+        f"ADMIN_DATABASE_URL=postgresql+asyncpg://{OWNER_DB_ROLE}:{POSTGRES_PASSWORD}@postgres:5432/accounting_ops",
         f"GARAGE_RPC_SECRET={secrets.token_hex(32)}",
         f"GARAGE_ADMIN_TOKEN={secrets.token_hex(32)}",
         "GARAGE_S3_ENDPOINT=http://garage:3900",
@@ -138,6 +157,48 @@ def _exec_app(*args: str, check: bool = True):
     return _compose("exec", "-T", "app", *args, check=check)
 
 
+def _psql_owner(sql: str, check: bool = True):
+    """Run SQL as the OWNER (= POSTGRES_USER superuser) inside the pg container."""
+    return _compose(
+        "exec", "-T",
+        "-e", f"PGPASSWORD={POSTGRES_PASSWORD}",
+        "postgres",
+        "psql", "-v", "ON_ERROR_STOP=1",
+        "-U", OWNER_DB_ROLE, "-d", "accounting_ops",
+        "-c", sql,
+        check=check,
+    )
+
+
+def _bootstrap_runtime_role() -> None:
+    """Create the least-privilege runtime role WITH a (local, throwaway) password.
+
+    The migrations create the role too (idempotent), but with NO password — a
+    no-password LOGIN role can't authenticate. For the ephemeral test stack we
+    set a local password here so the app (and the role-permission tests) can
+    connect. In production the password is set out-of-band; see DEPLOY.md.
+
+    Runs before migrations so the migration DO-block finds the role already
+    present and only re-asserts the safe attributes (it never clears a password).
+    """
+    print(f"[integration] bootstrapping runtime role {RUNTIME_DB_ROLE}", file=sys.stderr)
+    _psql_owner(
+        f"""
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RUNTIME_DB_ROLE}') THEN
+            CREATE ROLE {RUNTIME_DB_ROLE} LOGIN PASSWORD '{RUNTIME_DB_PASSWORD}'
+              NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+          ELSE
+            ALTER ROLE {RUNTIME_DB_ROLE} LOGIN PASSWORD '{RUNTIME_DB_PASSWORD}'
+              NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+          END IF;
+        END
+        $$;
+        """
+    )
+
+
 def cmd_up(with_cpa: bool) -> None:
     _write_secrets_and_env(with_cpa)
     services = list(CORE_SERVICES)
@@ -153,6 +214,10 @@ def cmd_up(with_cpa: bool) -> None:
     # app/postgres/garage have healthchecks; cpa-export too.
     _wait_healthy(services)
 
+    # Create the least-privilege runtime role + local password BEFORE migrations
+    # so the migrations' idempotent role-create finds it and the app can connect.
+    _bootstrap_runtime_role()
+
     print("[integration] running public-schema migrations", file=sys.stderr)
     _exec_app("alembic", "-c", "alembic-public.ini", "upgrade", "head")
 
@@ -163,6 +228,14 @@ def cmd_up(with_cpa: bool) -> None:
         "--slug", TEST_WORKSPACE_SLUG,
         "--entity", f"{TEST_ENTITY_NAME}:{TEST_ENTITY_KIND}",
     )
+
+    print(f"[integration] provisioning workspace B {TEST_WORKSPACE_B_ID}", file=sys.stderr)
+    _exec_app(
+        "python", "-m", "scripts.provision_workspace",
+        str(TEST_WORKSPACE_B_ID), TEST_WORKSPACE_B_ENTITY_NAME,
+        "--slug", TEST_WORKSPACE_B_SLUG,
+        "--entity", f"{TEST_WORKSPACE_B_ENTITY_NAME}:{TEST_ENTITY_KIND}",
+    )
     print("[integration] stack ready.", file=sys.stderr)
     print("[integration] now run:  eval \"$(python scripts/integration_env.py env"
           + (" --with-cpa" if with_cpa else "") + ")\" && pytest -m integration tests/integration",
@@ -170,9 +243,17 @@ def cmd_up(with_cpa: bool) -> None:
 
 
 def cmd_env(with_cpa: bool) -> None:
-    dsn = f"postgresql://accounting_ops:{POSTGRES_PASSWORD}@127.0.0.1:{HOST_PG_PORT}/accounting_ops"
+    # Owner DSN: used by the harness for seeding + tamper-injection (the tamper
+    # test must DISABLE TRIGGER, an owner-only op — it models an attacker with
+    # raw owner access).
+    dsn = f"postgresql://{OWNER_DB_ROLE}:{POSTGRES_PASSWORD}@127.0.0.1:{HOST_PG_PORT}/accounting_ops"
+    # Runtime-role DSN: used by the RLS + role-permission tests to prove the
+    # least-privilege role canNOT mutate the ledger / disable triggers, and that
+    # RLS blocks cross-tenant reads under it.
+    app_dsn = f"postgresql://{RUNTIME_DB_ROLE}:{RUNTIME_DB_PASSWORD}@127.0.0.1:{HOST_PG_PORT}/accounting_ops"
     print(f'export ACCTOPS_TEST_BASE_URL="http://127.0.0.1:{HOST_APP_PORT}"')
     print(f'export ACCTOPS_TEST_DSN="{dsn}"')
+    print(f'export ACCTOPS_TEST_APP_DSN="{app_dsn}"')
     print(f'export ACCTOPS_TEST_TOKEN="{SERVICE_TOKEN}"')
     print(f'export ACCTOPS_TEST_UC_UID="{SERVICE_UC_UID}"')
     print(f'export POSTGRES_PASSWORD="{POSTGRES_PASSWORD}"')

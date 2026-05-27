@@ -50,6 +50,24 @@ class CredentialNotFound(LookupError):
     pass
 
 
+async def _set_workspace_guc(session: AsyncSession, workspace_id: uuid.UUID) -> None:
+    """Set app.current_workspace for the current transaction.
+
+    The credential tables (public.tenant_credentials,
+    public.credential_access_log) are protected by Row-Level Security keyed on
+    this GUC (migrations public/0003). These functions run on a bare public
+    session (not the per-request workspace_session), so we set the GUC here so
+    the workspace's own credential rows are visible/writable and another
+    workspace's are not — even if a query predicate were ever wrong.
+
+    is_local => true == SET LOCAL: auto-resets at COMMIT/ROLLBACK, no pool bleed.
+    """
+    await session.execute(
+        text("SELECT set_config('app.current_workspace', :wid, true)"),
+        {"wid": str(workspace_id)},
+    )
+
+
 async def store_credential(
     session: AsyncSession,
     workspace_id: uuid.UUID,
@@ -65,6 +83,7 @@ async def store_credential(
     Idempotent on (workspace_id, connector, label): if a credential with the
     same triple exists, it's overwritten in place with a fresh nonce.
     """
+    await _set_workspace_guc(session, workspace_id)
     crypto = get_crypto()
     # Reserve a cred_id first so we can use it as part of the AAD.
     cred_id = uuid.uuid4()
@@ -159,6 +178,7 @@ async def get_credential_plaintext(
     Returns None if no credential exists (caller decides whether that's an
     error or expected empty state).
     """
+    await _set_workspace_guc(session, workspace_id)
     where = "workspace_id = :workspace_id AND connector = :connector"
     params: dict[str, Any] = {
         "workspace_id": str(workspace_id),
@@ -230,6 +250,7 @@ async def list_credentials(
     session: AsyncSession, workspace_id: uuid.UUID
 ) -> list[CredentialMetadata]:
     """Metadata-only listing. Never returns ciphertext or plaintext."""
+    await _set_workspace_guc(session, workspace_id)
     rows = (
         await session.execute(
             text(
@@ -267,6 +288,7 @@ async def delete_credential(
     actor_uc_uid: str | None = None,
 ) -> bool:
     """Delete by (workspace_id, credential_id). Returns True if a row was removed."""
+    await _set_workspace_guc(session, workspace_id)
     result = await session.execute(
         text(
             """

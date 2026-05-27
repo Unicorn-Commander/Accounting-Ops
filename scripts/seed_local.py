@@ -12,7 +12,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.db import engine  # noqa: E402
 from scripts.provision_workspace import provision_workspace  # noqa: E402
 
 
@@ -43,7 +42,7 @@ async def main() -> None:
         )
         try:
             schema, entity_ids = await provision_workspace(
-                engine,
+                None,  # use the admin (owner) engine
                 workspace_id,
                 ws["name"],
                 slug=ws["slug"],

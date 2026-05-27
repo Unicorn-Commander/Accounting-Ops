@@ -60,13 +60,46 @@ async def live_stack(stack: StackConfig) -> StackConfig:
 
 @pytest_asyncio.fixture(scope="session")
 async def db(live_stack: StackConfig) -> AsyncIterator["asyncpg.Pool"]:
-    """asyncpg pool against the test Postgres. Used for setup + tamper injection."""
+    """asyncpg pool as the OWNER role. Used for setup + tamper injection.
+
+    The owner can DISABLE TRIGGER (the tamper test relies on it) and bypasses
+    RLS by default — so this pool sees all rows. It models an attacker with raw
+    owner-level DB access, which is the only path by which the ledger can be
+    tampered (the app path is UPDATE-proof).
+    """
     if asyncpg is None:  # pragma: no cover
         pytest.skip("asyncpg not installed")
     try:
         pool = await asyncpg.create_pool(live_stack.dsn, min_size=1, max_size=4)
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"Postgres not reachable at the test DSN: {exc!r}")
+    try:
+        yield pool
+    finally:
+        await pool.close()
+
+
+@pytest_asyncio.fixture(scope="session")
+async def app_db(live_stack: StackConfig) -> AsyncIterator["asyncpg.Pool"]:
+    """asyncpg pool as the LEAST-PRIVILEGE runtime role (accounting_ops_app).
+
+    Used by the C3 proofs: this role must NOT be able to UPDATE/DELETE or
+    TRUNCATE the append-only ledger, must NOT be able to DISABLE its trigger,
+    and is subject to RLS (a wrong/unset app.current_workspace yields zero
+    rows). SKIPS when the split-role stack isn't configured (ACCTOPS_TEST_APP_DSN
+    unset), e.g. an older single-role stack — so the suite stays green there.
+    """
+    if asyncpg is None:  # pragma: no cover
+        pytest.skip("asyncpg not installed")
+    if not live_stack.app_dsn:
+        pytest.skip(
+            "ACCTOPS_TEST_APP_DSN unset — split runtime role not configured. "
+            "Run `make integration` (it provisions accounting_ops_app)."
+        )
+    try:
+        pool = await asyncpg.create_pool(live_stack.app_dsn, min_size=1, max_size=4)
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"Postgres not reachable as the runtime role: {exc!r}")
     try:
         yield pool
     finally:

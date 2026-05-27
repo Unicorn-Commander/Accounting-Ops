@@ -2,10 +2,28 @@
 
 Pattern (per research synthesis):
 - Single global AsyncEngine + default pool stays efficient.
-- Per-request: BEGIN -> SET LOCAL search_path = "<workspace_schema>", public -> queries -> COMMIT
+- Per-request: BEGIN
+      -> SET LOCAL search_path = "<workspace_schema>", public
+      -> SET LOCAL app.current_workspace = '<workspace_uuid>'  (RLS backstop)
+      -> queries -> COMMIT
 - SET LOCAL auto-resets at COMMIT/ROLLBACK; no pool bleed.
 - Entity-level scoping is enforced in application code, not at the DB layer
   (workspace_id is the schema boundary; entity_id is a row predicate).
+
+Defense in depth (audit finding C3):
+- search_path picks the *schema* (workspace boundary). If a query ever runs
+  with a missing/stale search_path, it could touch another workspace's schema.
+- The `app.current_workspace` GUC is read by Row-Level Security policies on
+  every workspace-scoped table (migrations tenant/0005). Because each schema
+  holds exactly one workspace's rows (workspace_id == that workspace), a query
+  that lands in the wrong schema sees ZERO rows instead of another tenant's
+  data: RLS filters `workspace_id = app.current_workspace`, and the wrong
+  schema has no rows with this workspace_id. So the GUC + RLS turns a
+  search_path mistake from a data leak into an empty result.
+- The runtime role is NOT the table owner and is NOT BYPASSRLS, so RLS is
+  fully enforced against it. RLS is ENABLEd (not FORCEd): the owner role keeps
+  full visibility for migrations + operator maintenance; only the app's
+  least-privilege role is gated. See migrations/tenant/0005 for the rationale.
 
 Why workspace at schema level + entity at row level:
 - Workspace isolation is a hard requirement (HIPAA + customer separation).
@@ -45,15 +63,38 @@ schema_for_tenant = schema_for_workspace
 
 
 async def set_workspace_search_path(
-    session: AsyncSession, workspace_id: str | uuid.UUID
+    session: AsyncSession,
+    workspace_id: str | uuid.UUID,
+    entity_id: str | uuid.UUID | None = None,
 ) -> None:
-    """Pin search_path to the workspace's schema for the current transaction.
+    """Pin search_path + RLS GUCs to the workspace for the current transaction.
 
-    SET LOCAL means the change auto-resets at COMMIT/ROLLBACK and cannot bleed
-    into the next request that gets this pooled connection.
+    Sets, transaction-locally:
+      - search_path = "<workspace_schema>", public   (schema boundary)
+      - app.current_workspace = <workspace_uuid>      (RLS backstop, required)
+      - app.current_entity = <entity_uuid>            (when known; optional)
+
+    SET LOCAL / set_config(..., is_local => true) auto-reset at COMMIT/ROLLBACK
+    and cannot bleed into the next request that reuses this pooled connection.
+
+    The schema name is validated as our naming convention by
+    schema_for_workspace (raises on a non-UUID), so the f-string for
+    search_path is injection-safe. The GUC values go through set_config with
+    bound parameters.
     """
     schema = schema_for_workspace(workspace_id)
     await session.execute(text(f'SET LOCAL search_path = "{schema}", public'))
+    # set_config(name, value, is_local) — is_local=true == SET LOCAL semantics.
+    # Bound params keep the values fully parameterized.
+    await session.execute(
+        text("SELECT set_config('app.current_workspace', :wid, true)"),
+        {"wid": str(workspace_id)},
+    )
+    if entity_id is not None:
+        await session.execute(
+            text("SELECT set_config('app.current_entity', :eid, true)"),
+            {"eid": str(entity_id)},
+        )
 
 
 @asynccontextmanager
@@ -97,5 +138,5 @@ async def entity_session(
     entity_uuid = uuid.UUID(str(entity_id))
     async with sessionmaker() as session:
         async with session.begin():
-            await set_workspace_search_path(session, workspace_id)
+            await set_workspace_search_path(session, workspace_id, entity_uuid)
             yield session, entity_uuid

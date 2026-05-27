@@ -43,6 +43,15 @@ TEST_ENTITY_ID = uuid.uuid5(
     uuid.NAMESPACE_DNS, f"{TEST_WORKSPACE_ID}:entity:integration-test-co"
 )
 
+# A SECOND fully-separate workspace (its own Postgres schema) used by the
+# RLS-backstop cross-tenant proof in tests/integration/test_db_rls_roles.py.
+# Provisioned by scripts/integration_env.py — keep in lockstep.
+TEST_WORKSPACE_B_SLUG = "integration-ci-b"
+TEST_WORKSPACE_B_ID = uuid.uuid5(uuid.NAMESPACE_DNS, f"accounting-ops:{TEST_WORKSPACE_B_SLUG}")
+TEST_WORKSPACE_B_ENTITY_ID = uuid.uuid5(
+    uuid.NAMESPACE_DNS, f"{TEST_WORKSPACE_B_ID}:entity:integration-test-co-b"
+)
+
 # The external bank account the SimpleFIN-style transactions arrive on. We
 # link COA 1010 (Cash · Primary Checking) to it AND register an
 # account_entity_mapping row so the journal-posting path resolves accounts
@@ -58,11 +67,15 @@ def env(name: str, default: str | None = None) -> str | None:
 @dataclass(frozen=True)
 class StackConfig:
     base_url: str
-    dsn: str
+    dsn: str  # OWNER role DSN — seeding + tamper-injection (DISABLE TRIGGER)
     token: str
     uc_uid: str
     cpa_export_url: str | None
     cpa_export_token: str
+    # Least-privilege RUNTIME role DSN. Used by the RLS-backstop +
+    # role-can't-bypass tests to connect AS the restricted role. None if the
+    # split-role stack isn't configured (those tests then SKIP).
+    app_dsn: str | None = None
 
 
 def _stack_config() -> StackConfig:
@@ -81,6 +94,7 @@ def _stack_config() -> StackConfig:
     if cpa_export_url:
         cpa_export_url = cpa_export_url.rstrip("/")
     cpa_export_token = env("CPA_EXPORT_TOKEN") or token
+    app_dsn = env("ACCTOPS_TEST_APP_DSN")
     return StackConfig(
         base_url=base_url,
         dsn=dsn,
@@ -88,6 +102,7 @@ def _stack_config() -> StackConfig:
         uc_uid=uc_uid,
         cpa_export_url=cpa_export_url,
         cpa_export_token=cpa_export_token,
+        app_dsn=app_dsn,
     )
 
 

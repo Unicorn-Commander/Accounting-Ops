@@ -38,7 +38,7 @@ integration-down:
 .PHONY: integration-test
 integration-test:
 	@eval "$$($(PY) $(ENV_SCRIPT) env $(CPA_FLAG))"; \
-	export ACCTOPS_TEST_BASE_URL ACCTOPS_TEST_DSN ACCTOPS_TEST_TOKEN ACCTOPS_TEST_UC_UID POSTGRES_PASSWORD CPA_EXPORT_URL CPA_EXPORT_TOKEN; \
+	export ACCTOPS_TEST_BASE_URL ACCTOPS_TEST_DSN ACCTOPS_TEST_APP_DSN ACCTOPS_TEST_TOKEN ACCTOPS_TEST_UC_UID POSTGRES_PASSWORD CPA_EXPORT_URL CPA_EXPORT_TOKEN; \
 	$(PYTEST) -m integration tests/integration -v
 
 # Full cycle: up -> test -> down (down always runs, even on test failure).
