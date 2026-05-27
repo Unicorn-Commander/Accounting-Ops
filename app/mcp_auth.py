@@ -26,11 +26,11 @@ from __future__ import annotations
 from contextvars import ContextVar
 from uuid import UUID
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 
-from app.auth import AuthContext, authenticate_token
+from app.auth import AuthContext, authenticate_token, validate_bearer_token
 from app.authz import assert_entity_in_scope
 from app.tenancy import WorkspaceContext, _resolve_membership, require_role
 
@@ -45,6 +45,27 @@ _current_auth: ContextVar[AuthContext | None] = ContextVar(
 def current_auth() -> AuthContext | None:
     """Return the AuthContext bound to the current MCP request, if any."""
     return _current_auth.get()
+
+
+async def bind_http_caller(auth: AuthContext = Depends(validate_bearer_token)):
+    """FastAPI dependency that bridges the HTTP-validated bearer identity into the
+    SAME ``_current_auth`` contextvar ``MCPAuthMiddleware`` sets.
+
+    ``app.tools`` functions authorize via ``authorize_workspace``, which reads that
+    contextvar. Mounted under ``/mcp`` the middleware sets it; over plain HTTP (the
+    ``app/api/tools.py`` routes) nothing did, so those routes raised
+    ``PermissionError`` ("No authenticated caller") -> 500. Applied as a router
+    dependency, this sets the contextvar from the request's already-validated token
+    on entry and resets it on exit (no cross-request bleed), so the HTTP tool routes
+    authorize identically to the MCP surface. ``validate_bearer_token`` is the same
+    dependency ``resolve_workspace``/``resolve_entity`` use, so FastAPI resolves it
+    once per request — no double validation.
+    """
+    reset = _current_auth.set(auth)
+    try:
+        yield
+    finally:
+        _current_auth.reset(reset)
 
 
 def _bearer_from_scope(scope) -> str | None:
@@ -163,4 +184,4 @@ async def authorize_workspace(
     return ctx
 
 
-__all__ = ("MCPAuthMiddleware", "authorize_workspace", "current_auth")
+__all__ = ("MCPAuthMiddleware", "authorize_workspace", "bind_http_caller", "current_auth")

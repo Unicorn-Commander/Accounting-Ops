@@ -16,6 +16,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
+from app.mcp_auth import bind_http_caller
 from app.tenancy import (
     EntityContext,
     WorkspaceContext,
@@ -40,11 +41,13 @@ from app.tools import (
 router = APIRouter(
     prefix="/api/workspaces/{workspace_id}/entities/{entity_id}",
     tags=["tools"],
+    dependencies=[Depends(bind_http_caller)],
 )
 
 consolidated_router = APIRouter(
     prefix="/api/workspaces/{workspace_id}/consolidated",
     tags=["consolidated"],
+    dependencies=[Depends(bind_http_caller)],
 )
 
 
