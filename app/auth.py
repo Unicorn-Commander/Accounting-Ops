@@ -183,11 +183,12 @@ async def authenticate_token(token: str) -> AuthContext:
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Unknown signing key",
                 )
-        # Keycloak default: aud="account" for browser tokens unless an
-        # Audience mapper is configured on the client. The canonical
-        # "this token was issued FOR client X" claim is azp (authorized
-        # party). We validate signature + issuer + expiry strictly, then
-        # check azp matches our client_id instead of strict audience.
+        # Strictly validate signature + issuer + expiry here. We do our OWN
+        # audience check below against the configurable accepted_audience, so
+        # `verify_aud` stays off in jwt.decode: Keycloak routinely stamps
+        # aud="account" on tokens, and jose's built-in check has no notion of
+        # "also accept via resource_access". (Signature/issuer/exp are NOT
+        # weakened — they are enforced exactly as before.)
         claims = jwt.decode(
             token,
             key,
@@ -195,21 +196,33 @@ async def authenticate_token(token: str) -> AuthContext:
             issuer=str(settings.keycloak_realm_url),
             options={"verify_at_hash": False, "verify_aud": False},
         )
-        azp = claims.get("azp")
+        # OAuth resource-server audience validation (finding H3). A valid uchub
+        # token is authorized for THIS resource server iff its configured
+        # audience (settings.accepted_audience, default = our client id) is
+        # present in the `aud` claim (string OR list) OR appears as a client key
+        # under `resource_access`. Agent/Brigade clients carry it via a Keycloak
+        # Audience mapper, so a token minted by a different client is accepted
+        # when — and only when — it is explicitly scoped to this resource. We no
+        # longer key off azp: that would reject valid cross-client tokens (H3).
+        expected_aud = settings.accepted_audience
         aud = claims.get("aud")
-        # Accept if azp matches our client_id OR aud (list or string)
-        # contains it (covers tokens issued with explicit audience mapper).
-        if azp != settings.keycloak_client_id:
-            aud_list = aud if isinstance(aud, list) else [aud] if aud else []
-            if settings.keycloak_client_id not in aud_list:
-                _log.warning(
-                    "[acctops.auth] token rejected: azp=%r, aud=%r doesn't include %r",
-                    azp, aud, settings.keycloak_client_id,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token not authorized for this client",
-                )
+        aud_list = aud if isinstance(aud, list) else [aud] if aud else []
+        resource_access = claims.get("resource_access")
+        in_resource_access = (
+            isinstance(resource_access, dict) and expected_aud in resource_access
+        )
+        if expected_aud not in aud_list and not in_resource_access:
+            _log.warning(
+                "[acctops.auth] token rejected: aud=%r / resource_access keys=%r "
+                "do not include required audience %r",
+                aud,
+                list(resource_access) if isinstance(resource_access, dict) else None,
+                expected_aud,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Token audience does not include this resource server",
+            )
     except HTTPException:
         raise
     except (JWTError, httpx.HTTPError, KeyError) as exc:

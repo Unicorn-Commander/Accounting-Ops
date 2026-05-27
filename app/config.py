@@ -23,6 +23,13 @@ class Settings(BaseModel):
     keycloak_realm_url: str = "https://auth.unicorncommander.ai/realms/uchub"
     keycloak_client_id: str = "accounting-ops-app"
     keycloak_client_secret: str | None = None
+    # OAuth resource-server audience this app validates incoming bearer tokens
+    # against (finding H3). A uchub token is accepted iff this value appears in
+    # the token's `aud` (string or list) OR under `resource_access` — so tokens
+    # minted by OTHER uchub clients (agents, Brigade) are accepted when they
+    # carry this app's resource id via a Keycloak Audience mapper. Defaults to
+    # keycloak_client_id (the app's own client id) when ACCEPTED_AUDIENCE unset.
+    accepted_audience: str = "accounting-ops-app"
 
     falkordb_host: str = "192.168.10.10"
     falkordb_port: int = 6379
@@ -54,13 +61,17 @@ def get_admin_database_url() -> str:
 @lru_cache
 def get_settings() -> Settings:
     defaults = Settings()
+    # Resolve client_id first so accepted_audience can default to the EFFECTIVE
+    # client id (env-overridden or not), not the static class default.
+    keycloak_client_id = os.getenv("KEYCLOAK_CLIENT_ID", defaults.keycloak_client_id)
     return Settings(
         public_base_url=os.getenv("PUBLIC_BASE_URL", defaults.public_base_url),
         database_url=os.getenv("DATABASE_URL", defaults.database_url),
         admin_database_url=os.getenv("ADMIN_DATABASE_URL"),
         keycloak_realm_url=os.getenv("KEYCLOAK_REALM_URL", defaults.keycloak_realm_url),
-        keycloak_client_id=os.getenv("KEYCLOAK_CLIENT_ID", defaults.keycloak_client_id),
+        keycloak_client_id=keycloak_client_id,
         keycloak_client_secret=os.getenv("KEYCLOAK_CLIENT_SECRET"),
+        accepted_audience=os.getenv("ACCEPTED_AUDIENCE", keycloak_client_id),
         falkordb_host=os.getenv("FALKORDB_HOST", defaults.falkordb_host),
         falkordb_port=int(os.getenv("FALKORDB_PORT", str(defaults.falkordb_port))),
         garage_s3_endpoint=os.getenv("GARAGE_S3_ENDPOINT", defaults.garage_s3_endpoint),
