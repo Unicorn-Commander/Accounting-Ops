@@ -4,10 +4,12 @@
 //        → cpa-export:8093/{...path}?<same>
 //
 // Why proxy (not direct):
-//  - CPA_EXPORT_SERVICE_TOKEN is a privileged service token with broad access.
-//    It must never reach the browser.
-//  - We verify the calling user's session + the user's workspace access before
-//    forwarding (defense in depth).
+//  - The browser must not reach the docker-internal cpa-export service directly.
+//  - We forward the USER's own Keycloak access token; cpa-export validates it +
+//    the user's workspace membership (finding H1). We also verify the user's
+//    workspace access here against the main API first (defense in depth). The
+//    old shared CPA_EXPORT_SERVICE_TOKEN is no longer used — a single broad
+//    token can't express per-user, per-workspace authorization.
 
 import { auth } from "@/lib/auth";
 import { type NextRequest, NextResponse } from "next/server";
@@ -19,8 +21,6 @@ const INTERNAL_API_BASE =
 
 const CPA_EXPORT_INTERNAL_URL =
   process.env.CPA_EXPORT_INTERNAL_URL ?? "http://cpa-export:8093";
-
-const CPA_EXPORT_SERVICE_TOKEN = process.env.CPA_EXPORT_SERVICE_TOKEN ?? "";
 
 // Allow-list of backend path segments. Anything outside this never gets proxied.
 const ALLOWED_PATHS = new Set<string>([
@@ -97,7 +97,9 @@ export async function GET(
   let upstream: Response;
   try {
     upstream = await fetch(targetUrl, {
-      headers: { Authorization: `Bearer ${CPA_EXPORT_SERVICE_TOKEN}` },
+      // Forward the USER's Keycloak token — cpa-export (H1) authorizes the real
+      // user against workspace membership, not a shared privileged token.
+      headers: { Authorization: `Bearer ${session.accessToken}` },
       cache: "no-store"
     });
   } catch (err) {
