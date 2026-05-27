@@ -10,6 +10,7 @@ const NAV = [
   ["Dashboard", "/dashboard"],
   ["Transactions", "/transactions"],
   ["Reconciliation", "/reconciliation-queue"],
+  ["Approvals", "/approvals"],
   ["Agent activity", "/agent-activity"],
   ["Journal", "/journal"],
   ["Chart of Accounts", "/coa"],
