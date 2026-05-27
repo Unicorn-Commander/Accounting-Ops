@@ -17,6 +17,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace
@@ -31,6 +32,107 @@ _VALID_ACTIONS = frozenset({"notify", "block", "require_approval", "tag"})
 # The per-entity holding profile for agent-proposed rules. It is created
 # inactive so its rules don't take effect until a human activates it.
 _PENDING_PROFILE_NAME = "Agent-proposed (pending approval)"
+
+# The per-entity ACTIVE profile a rule is moved into when a human approves it.
+# query_specialty_rules filters on profile.active = true, so re-pointing an
+# approved rule here makes it visible to the compliance engine. We move the
+# rule (rather than flip the holding profile active) so that activating ONE
+# proposed rule never accidentally activates every other pending proposal that
+# shares the holding profile.
+_APPROVED_PROFILE_NAME = "Approved rules"
+
+
+async def activate_proposed_rule(
+    session: AsyncSession,
+    *,
+    workspace_id: UUID,
+    entity_id: UUID,
+    rule_id: UUID,
+) -> dict:
+    """Activate a single agent-proposed compliance rule.
+
+    Called by the approve endpoint when a 'compliance_rule' approval is APPROVED.
+    Moves the rule out of the inactive "Agent-proposed" holding profile and into
+    the entity's ACTIVE "Approved rules" profile (created on first use), so it
+    becomes visible to ``query_specialty_rules`` (which filters profile.active =
+    true). Moving the rule — instead of flipping the holding profile active —
+    keeps the OTHER still-pending proposals under the holding profile inactive.
+
+    Runs on the caller's session (shares its workspace search_path + RLS GUC +
+    transaction). compliance_profile + compliance_rule are both SELECT/INSERT/
+    UPDATE for the runtime role (0005 RW_NO_DELETE_TABLES). Idempotent: a rule
+    already under an active profile is left where it is. Returns the rule id +
+    the active profile id it now lives under.
+    """
+    # Re-read the rule's CURRENT profile (don't trust a snapshot). Entity-scoped.
+    rule = (
+        await session.execute(
+            text(
+                """
+                SELECT r.id::text AS id, r.profile_id::text AS profile_id,
+                       p.active AS profile_active
+                FROM compliance_rule r
+                JOIN compliance_profile p ON p.id = r.profile_id
+                WHERE r.id = :rid AND r.entity_id = :eid
+                """
+            ),
+            {"rid": str(rule_id), "eid": str(entity_id)},
+        )
+    ).mappings().first()
+    if rule is None:
+        raise LookupError(f"compliance_rule {rule_id} not found in entity {entity_id}")
+    if rule["profile_active"]:
+        # Already active (e.g. a duplicate approve). No-op, idempotent.
+        return {"rule_id": str(rule_id), "profile_id": rule["profile_id"], "already_active": True}
+
+    # Reuse the entity's active "Approved rules" profile, or create it (active).
+    approved = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text AS id FROM compliance_profile
+                WHERE entity_id = :eid AND name = :name AND active = true
+                LIMIT 1
+                """
+            ),
+            {"eid": str(entity_id), "name": _APPROVED_PROFILE_NAME},
+        )
+    ).mappings().first()
+    if approved is not None:
+        approved_profile_id = UUID(approved["id"])
+    else:
+        approved_profile_id = uuid4()
+        await session.execute(
+            text(
+                """
+                INSERT INTO compliance_profile (
+                    id, workspace_id, entity_id, name, active
+                ) VALUES (:id, :wid, :eid, :name, true)
+                """
+            ),
+            {
+                "id": str(approved_profile_id),
+                "wid": str(workspace_id),
+                "eid": str(entity_id),
+                "name": _APPROVED_PROFILE_NAME,
+            },
+        )
+
+    await session.execute(
+        text(
+            """
+            UPDATE compliance_rule
+            SET profile_id = :pid
+            WHERE id = :rid AND entity_id = :eid
+            """
+        ),
+        {"pid": str(approved_profile_id), "rid": str(rule_id), "eid": str(entity_id)},
+    )
+    return {
+        "rule_id": str(rule_id),
+        "profile_id": str(approved_profile_id),
+        "already_active": False,
+    }
 
 
 async def query_specialty_rules(
@@ -182,15 +284,28 @@ async def add_specialty_rule(
         )
 
         approval_id = uuid4()
+        # Structured action for the approve-apply path: activating this rule.
+        # subject_id already points at the rule; payload makes the activation
+        # mechanism explicit (which holding profile the rule sits under) so the
+        # approve path doesn't have to re-derive it from prose. The approve path
+        # still re-reads the rule's live profile_id before acting.
+        approval_payload = {
+            "action": "activate_rule",
+            "rule_id": str(rule_id),
+            "pending_profile_id": str(profile_id),
+            "kind": kind.strip(),
+            "trigger": trigger,
+            "action_enum": action,
+        }
         await session.execute(
             text(
                 """
                 INSERT INTO approval_queue (
                     id, workspace_id, entity_id, subject_type, subject_id,
-                    status, reasoning, requested_by_identity
+                    status, reasoning, requested_by_identity, payload
                 ) VALUES (
                     :id, :wid, :eid, 'compliance_rule', :subject,
-                    'pending', :reasoning, :identity
+                    'pending', :reasoning, :identity, CAST(:payload AS jsonb)
                 )
                 """
             ),
@@ -204,6 +319,7 @@ async def add_specialty_rule(
                     f"(trigger={trigger}, action={action}). {reasoning}"
                 ),
                 "identity": ctx.user_uc_uid,
+                "payload": json.dumps(approval_payload),
             },
         )
 
