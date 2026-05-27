@@ -1,13 +1,15 @@
-"""Financial reports (P&L, balance sheet, cash flow) over journal_entry.
+"""Financial reports (P&L, balance sheet, cash flow, 1099-NEC) over journal_entry.
 
   GET /api/workspaces/{wid}/reports/pl              — Profit & Loss
   GET /api/workspaces/{wid}/reports/balance-sheet   — Balance Sheet (as-of)
   GET /api/workspaces/{wid}/reports/cash-flow       — Cash Flow
+  GET /api/workspaces/{wid}/reports/1099-nec        — 1099-NEC contractors >= $600
 
-All three accept period and entity_id query params:
+pl / balance-sheet / cash-flow accept period and entity_id query params:
   period:    "YYYY", "YYYY-Q1..Q4", "YYYY-MM", "YYYY-MM-DD..YYYY-MM-DD",
              "mtd", "qtd", "ytd"
   entity_id: UUID or "consolidated" / "all" (default: consolidated)
+1099-nec takes a calendar `year` ("YYYY") + entity_id instead of period.
 
 Account-type classification uses the chart_of_account.account_type column
 (asset / liability / equity / revenue / cogs / expense / other_income /
@@ -475,4 +477,215 @@ async def cash_flow(
         "investing": {"lines": investing, "total": str(inv_total)},
         "financing": {"lines": financing, "total": str(fin_total)},
         "net_change_in_cash": str(op_total + inv_total + fin_total),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 1099-NEC (Nonemployee Compensation)
+# ---------------------------------------------------------------------------
+#
+# IRS rule (Instructions for Forms 1099-MISC and 1099-NEC, rev. 04/2025):
+# File a 1099-NEC for each person to whom you paid, in the course of your
+# trade or business, at least $600 during the calendar year for *services*
+# performed by someone who is NOT your employee (nonemployee compensation).
+#
+# WHAT COUNTS — account-class decision:
+#   NEC is compensation for SERVICES by a contractor — NOT general operating
+#   expense. A $5,000 cloud-hosting bill or a SaaS subscription is an expense
+#   but it is NOT nonemployee compensation, so summing every 6xxx expense
+#   account (let alone every posting, as the prior WIP did) materially
+#   over-reports NEC. The chart of accounts (app/journal/accounts.py) gives us
+#   a purpose-built bucket: account 6300 "Contractor · 1099-NEC". We therefore
+#   aggregate ONLY entries whose DEBIT side lands in a contract-labor account
+#   (6300 today). This is the precise, materially-correct basis for the form.
+#   CONTRACT_LABOR_ACCOUNTS is a tunable allow-list: if the COA later splits
+#   contractor spend across more accounts (e.g. a 63xx range), add them here.
+#   We deliberately do NOT fall back to "all expense-kind prefixes" — that
+#   would put rent/SaaS/meals/travel on a NEC form, which is wrong.
+#
+# DIRECTION — debit side only, netted:
+#   NEC is money paid OUT to the contractor, which posts to the DEBIT side of
+#   the expense account (normal balance = debit). We sum debit-minus-credit on
+#   6300 per counterparty so that contractor refunds / reversals (credits back
+#   to 6300) correctly reduce the reportable total — mirroring how P&L nets the
+#   expense side. Revenue (4xxx credits), transfers, and refunds therefore can
+#   never inflate the number.
+#
+# AGGREGATION — by counterparty:
+#   Payee == counterparty.display_name. We JOIN counterparty on counterparty_id
+#   and GROUP BY the counterparty, then apply the $600 threshold via HAVING.
+#
+# WHAT WE DO **NOT** AUTO-EXCLUDE (left to human review, per mission):
+#   - Payments to corporations are generally exempt (legal-services fees to a
+#     corporation are the notable exception). We do not know payee tax status
+#     from the ledger, so we surface everyone and flag for review rather than
+#     silently dropping.
+#   - Credit-card / third-party-network (PayPal, Stripe, Venmo, ...) payments
+#     are reported by the settlement entity on 1099-K and are NOT reportable on
+#     1099-NEC by the payer. We cannot reliably infer payment rail from the
+#     ledger, so processor-named counterparties are FLAGGED (requires_human_
+#     review) rather than auto-excluded. A human confirms before filing.
+#
+# THRESHOLD NOTE: $600 is the long-standing threshold and is still what the
+# IRS 1099-NEC instructions (rev. 04/2025) state. The One Big Beautiful Bill
+# Act raises it to $2,000 starting with TY2026 (inflation-indexed thereafter);
+# if/when the IRS form instructions adopt that, make NEC_THRESHOLD year-aware.
+
+CONTRACT_LABOR_ACCOUNTS: tuple[str, ...] = ("6300",)
+NEC_THRESHOLD = Decimal("600")
+
+# Substrings in a counterparty name that suggest a credit-card / third-party
+# payment processor (1099-K territory) — used only to set requires_human_review,
+# never to auto-exclude.
+_PROCESSOR_KEYWORDS: tuple[str, ...] = (
+    "stripe", "paypal", "square", "shopify", "squareup",
+    "checkout", "braintree", "adyen", "worldpay", "zelle",
+    "venmo", "cashapp", "cash app",
+)
+
+
+def _looks_like_processor(payee_name: str) -> bool:
+    """True if the payee name hints at a payment processor (1099-K territory)."""
+    low = (payee_name or "").lower()
+    return any(kw in low for kw in _PROCESSOR_KEYWORDS)
+
+
+def _build_1099_nec_payees(rows: list[dict]) -> list[dict]:
+    """Turn netted (payee, net_amount, posting_count) rows into the report's
+    payee list: enforce the >= $600 NEC threshold, flag processor-mediated
+    payees for human review, and sort by amount descending.
+
+    Pure function (no DB) so the threshold + exclusion logic is unit-testable.
+    Rows whose netted contractor payment is below the threshold (or <= 0 after
+    refunds) are dropped — only reportable NEC remains.
+    """
+    payees: list[dict] = []
+    for r in rows:
+        net = Decimal(str(r["net_amount"] or 0))
+        if net < NEC_THRESHOLD:
+            continue
+        payee_name = r["payee"] or "Unknown Payee"
+        payees.append(
+            {
+                "payee": payee_name,
+                "total_amount": str(net),
+                "posting_count": int(r["posting_count"] or 0),
+                "requires_human_review": _looks_like_processor(payee_name),
+            }
+        )
+    payees.sort(key=lambda p: Decimal(p["total_amount"]), reverse=True)
+    return payees
+
+
+@router.get("/api/workspaces/{workspace_id}/reports/1099-nec")
+async def form_1099_nec(
+    workspace_id: UUID,
+    year: str,
+    entity_id: str | None = None,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """1099-NEC year-end report: counterparties paid >= $600 in nonemployee
+    compensation for a given calendar year + entity.
+
+    Aggregates the DEBIT side of posted journal entries whose debit account is
+    a contract-labor account (6300 "Contractor · 1099-NEC"), grouped by
+    counterparty (= payee). Returns rows of
+    {payee, total_amount, posting_count, requires_human_review} where the
+    netted total >= $600, sorted descending. See the module-level comment above
+    for the full account-class + IRS reasoning.
+
+    NOTE: This endpoint does NOT auto-determine corporate status or
+    payment-method exclusions. Payees paid via credit-card / payment processors
+    may instead belong on 1099-K; those whose name matches a known processor
+    are flagged ``requires_human_review`` for a human to confirm before filing.
+    """
+    # Validate year
+    if len(year) != 4 or not year.isdigit():
+        raise HTTPException(400, "year must be a 4-digit string like '2025'")
+    y = int(year)
+    start = date(y, 1, 1)
+    end = date(y, 12, 31)
+    entity_clause, entity_params = _entity_filter(entity_id)
+
+    # Allow-list of contract-labor account NUMBERS, expanded into a SQL IN-list
+    # of bound params so the query stays injection-safe.
+    acct_params = {
+        f"nec_acct_{i}": num for i, num in enumerate(CONTRACT_LABOR_ACCOUNTS)
+    }
+    acct_in = ", ".join(f":{k}" for k in acct_params)
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        entity_label = await _entity_label(session, entity_id)
+        # Sum debit-minus-credit on the contractor account(s), per counterparty.
+        # Both sides are filtered to the contract-labor account so a contractor
+        # refund (credit back to 6300) nets against the payments. Counterparty
+        # join is the canonical payee.
+        rows = (
+            await session.execute(
+                text(
+                    f"""
+                    WITH nec_sides AS (
+                        SELECT
+                            je.counterparty_id AS counterparty_id,
+                            je.amount          AS debit,
+                            0::numeric         AS credit
+                        FROM journal_entry je
+                        WHERE je.status = 'posted'
+                          AND je.effective_date >= :start
+                          AND je.effective_date <= :end
+                          AND split_part(je.debit_account, '·', 1) IN ({acct_in})
+                          {entity_clause}
+                        UNION ALL
+                        SELECT
+                            je.counterparty_id AS counterparty_id,
+                            0::numeric         AS debit,
+                            je.amount          AS credit
+                        FROM journal_entry je
+                        WHERE je.status = 'posted'
+                          AND je.effective_date >= :start
+                          AND je.effective_date <= :end
+                          AND split_part(je.credit_account, '·', 1) IN ({acct_in})
+                          {entity_clause}
+                    )
+                    SELECT
+                        coalesce(c.display_name, 'Unknown Payee') AS payee,
+                        SUM(s.debit) - SUM(s.credit)              AS net_amount,
+                        COUNT(*)                                  AS posting_count
+                    FROM nec_sides s
+                    LEFT JOIN counterparty c ON c.id = s.counterparty_id
+                    GROUP BY c.id, c.display_name
+                    HAVING SUM(s.debit) - SUM(s.credit) >= :threshold
+                    ORDER BY net_amount DESC
+                    """
+                ),
+                {
+                    "start": start,
+                    "end": end,
+                    "threshold": NEC_THRESHOLD,
+                    **acct_params,
+                    **entity_params,
+                },
+            )
+        ).mappings().all()
+
+    payees = _build_1099_nec_payees([dict(r) for r in rows])
+
+    return {
+        "year": year,
+        "entity_label": entity_label,
+        "entity_id": entity_id or "consolidated",
+        "currency": "USD",
+        "threshold": f"{NEC_THRESHOLD:.2f}",
+        "basis_accounts": list(CONTRACT_LABOR_ACCOUNTS),
+        "payees": payees,
+        "total_payees": len(payees),
+        "total_paid": str(sum((Decimal(p["total_amount"]) for p in payees), Decimal("0"))),
+        "note": "Nonemployee compensation = payments for contractor services "
+                "(GL account 6300). This report does not auto-determine "
+                "corporate status or payment-method exclusions: payments to "
+                "corporations are generally exempt (legal fees excepted), and "
+                "credit-card / third-party-network payments belong on 1099-K, "
+                "not 1099-NEC. Payees flagged requires_human_review match a "
+                "known payment processor — verify the payment rail and the "
+                "payee's tax status before filing.",
     }

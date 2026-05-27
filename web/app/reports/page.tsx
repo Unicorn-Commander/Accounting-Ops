@@ -8,14 +8,16 @@ import {
   formatAmount,
   getBalanceSheet,
   getCashFlow,
-  getProfitAndLoss
+  getProfitAndLoss,
+  get1099NEC
 } from "@/lib/journal";
 import { cn } from "@/lib/cn";
 
 type SearchParams = {
   period?: string;
-  view?: "pl" | "bs" | "cf";
+  view?: "pl" | "bs" | "cf" | "1099-nec";
   as_of?: string;
+  year?: string;
 };
 
 const PERIODS = [
@@ -28,12 +30,15 @@ const PERIODS = [
   { v: "2025", label: "2025" }
 ];
 
+const YEARS = ["2026", "2025", "2024", "2023"];
+
 export default async function ReportsPage(props: {
   searchParams: Promise<SearchParams>;
 }) {
   const sp = await props.searchParams;
   const period = sp.period ?? "ytd";
   const view = sp.view ?? "pl";
+  const year = sp.year ?? "2026";
   const ctx = await getActiveContext();
   const workspace = ctx.activeWorkspace;
   const entityFilter = ctx.isConsolidated ? "consolidated" : ctx.activeEntity?.id;
@@ -41,13 +46,14 @@ export default async function ReportsPage(props: {
     ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
     : false;
 
-  const [pl, bs, cf] = workspace
+  const [pl, bs, cf, ten99] = workspace
     ? await Promise.all([
         view === "pl" ? getProfitAndLoss(workspace.id, period, entityFilter) : null,
         view === "bs" ? getBalanceSheet(workspace.id, sp.as_of, entityFilter) : null,
-        view === "cf" ? getCashFlow(workspace.id, period, entityFilter) : null
+        view === "cf" ? getCashFlow(workspace.id, period, entityFilter) : null,
+        view === "1099-nec" ? get1099NEC(workspace.id, year, entityFilter) : null
       ])
-    : [null, null, null];
+    : [null, null, null, null];
 
   return (
     <AppShell>
@@ -66,12 +72,12 @@ export default async function ReportsPage(props: {
         />
 
         <div className="mb-6 flex flex-wrap items-center gap-2">
-          {(["pl", "bs", "cf"] as const).map((v) => {
-            const label = v === "pl" ? "Profit & Loss" : v === "bs" ? "Balance Sheet" : "Cash Flow";
+          {(["pl", "bs", "cf", "1099-nec"] as const).map((v) => {
+            const label = v === "pl" ? "Profit & Loss" : v === "bs" ? "Balance Sheet" : v === "cf" ? "Cash Flow" : "1099-NEC";
             return (
               <Link
                 key={v}
-                href={`/reports?view=${v}&period=${period}`}
+                href={`/reports?view=${v}${view !== "1099-nec" && v !== "1099-nec" ? `&period=${period}` : v === "1099-nec" ? `&year=${year}` : ``}`}
                 className={cn(
                   "rounded-md border px-3 py-1.5 text-xs font-medium",
                   view === v
@@ -84,7 +90,7 @@ export default async function ReportsPage(props: {
             );
           })}
           <span className="mx-2 text-ink-tertiary">·</span>
-          {view !== "bs" &&
+          {view !== "bs" && view !== "1099-nec" &&
             PERIODS.map((p) => (
               <Link
                 key={p.v}
@@ -97,6 +103,21 @@ export default async function ReportsPage(props: {
                 )}
               >
                 {p.label}
+              </Link>
+            ))}
+          {view === "1099-nec" &&
+            YEARS.map((y) => (
+              <Link
+                key={y}
+                href={`/reports?view=1099-nec&year=${y}`}
+                className={cn(
+                  "rounded-md border px-2.5 py-1 text-[11px]",
+                  year === y
+                    ? "border-brand-500 bg-brand-500/10 text-brand-300"
+                    : "border-default bg-surface text-ink-tertiary hover:bg-elevated"
+                )}
+              >
+                {y}
               </Link>
             ))}
           <span className="ml-auto">
@@ -118,8 +139,11 @@ export default async function ReportsPage(props: {
         {view === "cf" && cf && (
           <CFView data={cf} />
         )}
+        {view === "1099-nec" && ten99 && (
+          <Ten99NECView data={ten99} />
+        )}
 
-        {(!pl && view === "pl") || (!bs && view === "bs") || (!cf && view === "cf") ? (
+        {(!pl && view === "pl") || (!bs && view === "bs") || (!cf && view === "cf") || (!ten99 && view === "1099-nec") ? (
           <Card>
             <p className="text-sm text-ink-tertiary">Loading report…</p>
           </Card>
@@ -378,6 +402,93 @@ function CFView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getCashF
               {formatAmount(data.net_change_in_cash)}
             </span>
           </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function Ten99NECView({ data }: { data: NonNullable<Awaited<ReturnType<typeof get1099NEC>>> }) {
+  const hasPayees = data.payees.length > 0;
+  return (
+    <div>
+      <p className="mb-4 text-xs text-ink-tertiary">
+        {data.entity_label} · Calendar Year {data.year} · Threshold: {formatAmount(data.threshold)}
+        {data.basis_accounts?.length ? ` · Contractor acct ${data.basis_accounts.join(", ")}` : ""}
+      </p>
+
+      <Card>
+        <div className="mb-3 flex items-center justify-between">
+          <span className="text-xs font-semibold uppercase tracking-wider text-ink-secondary">
+            {data.total_payees} payee{data.total_payees !== 1 ? "s" : ""} ≥ {formatAmount(data.threshold)}
+          </span>
+          <span className="font-mono text-sm font-bold text-credit">
+            {formatAmount(data.total_paid)}
+          </span>
+        </div>
+
+        {hasPayees ? (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[480px] text-sm">
+              <thead>
+                <tr className="border-b border-subtle text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
+                  <th className="px-5 py-2 text-left">Payee</th>
+                  <th className="px-5 py-2 text-right">Total Amount</th>
+                  <th className="px-5 py-2 text-center">Postings</th>
+                  <th className="px-5 py-2 text-center">Review</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.payees.map((p, i) => (
+                  <tr key={`${p.payee}-${i}`} className="border-b border-subtle/40 last:border-b-0">
+                    <td className="px-5 py-2 font-mono text-xs">
+                      {p.payee}
+                      {p.requires_human_review && (
+                        <span className="ml-2 inline-flex items-center gap-1 rounded bg-pending/10 px-1.5 py-0.5 text-[10px] font-medium text-pending">
+                          <AlertTriangle size={10} /> Processor
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-5 py-2 text-right font-mono tabular-nums font-semibold">
+                      {formatAmount(p.total_amount)}
+                    </td>
+                    <td className="px-5 py-2 text-center font-mono tabular-nums text-ink-tertiary">
+                      {p.posting_count}
+                    </td>
+                    <td className="px-5 py-2 text-center">
+                      {p.requires_human_review ? (
+                        <span className="text-[10px] text-pending">Needs review</span>
+                      ) : (
+                        <span className="text-[10px] text-ink-tertiary">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-credit/30 bg-credit/[0.04]">
+                  <td className="px-5 py-2 text-xs font-semibold uppercase tracking-wider">Total</td>
+                  <td className="px-5 py-2 text-right font-mono tabular-nums font-semibold text-credit">
+                    {formatAmount(data.total_paid)}
+                  </td>
+                  <td className="px-5 py-2"></td>
+                  <td className="px-5 py-2"></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        ) : (
+          <p className="px-5 py-3 text-xs text-ink-tertiary">
+            No payees reached the $600 threshold for {data.year}.
+          </p>
+        )}
+
+        <div className="mt-4 border-t border-subtle px-5 py-3">
+          <p className="text-[11px] text-ink-tertiary">
+            <strong>Note:</strong> This report does not auto-determine corporate status or
+            payment-method exclusions. Payees flagged "Processor" may have been paid via
+            credit-card processors (1099-K territory). Verify before filing.
+          </p>
         </div>
       </Card>
     </div>

@@ -192,6 +192,37 @@ export async function getCashFlow(
   return fetchReport<CashFlow>(workspaceId, "cash-flow", params);
 }
 
+export type Ten99NECPayee = {
+  payee: string;
+  total_amount: string;
+  posting_count: number;
+  requires_human_review: boolean;
+};
+
+export type Ten99NEC = {
+  year: string;
+  entity_label: string;
+  entity_id: string;
+  currency: string;
+  threshold: string;
+  /** GL account numbers treated as contract-labor (NEC basis), e.g. ["6300"]. */
+  basis_accounts: string[];
+  payees: Ten99NECPayee[];
+  total_payees: number;
+  total_paid: string;
+  note: string;
+};
+
+export async function get1099NEC(
+  workspaceId: string,
+  year: string,
+  entityId?: string
+): Promise<Ten99NEC | null> {
+  const params = new URLSearchParams({ year });
+  if (entityId) params.set("entity_id", entityId);
+  return fetchReport<Ten99NEC>(workspaceId, "1099-nec", params);
+}
+
 export function shortHash(hex: string): string {
   if (!hex) return "";
   return hex.slice(0, 8) + "…" + hex.slice(-4);
