@@ -42,6 +42,17 @@ from app.workspace_session import workspace_session
 router = APIRouter(tags=["journal"])
 
 
+def _parse_iso_date(value: str, field: str) -> date:
+    """Parse an ISO date string to a date object, 400 on malformed input."""
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field} must be an ISO date (YYYY-MM-DD): {value!r}",
+        ) from exc
+
+
 # ====================================================================
 # Chart of accounts
 # ====================================================================
@@ -492,30 +503,37 @@ async def list_entries(
       - search: substring against (payee + description + memo + debit + credit)
     """
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        # Predicates are qualified with the `je` alias because the main query
+        # JOINs `entity e`, and several column names (notably `status`) exist
+        # on BOTH tables — an unqualified `status` is ambiguous and 500s. The
+        # count query below uses the same `je` alias so the clause is shared.
         where = ["1=1"]
         params: dict[str, Any] = {"limit": min(limit, 500), "offset": offset}
         if entity_id:
-            where.append("entity_id = :eid")
+            where.append("je.entity_id = :eid")
             params["eid"] = str(entity_id)
         if start_date:
-            where.append("effective_date >= :start_date")
-            params["start_date"] = start_date
+            # Bind a real date object: asyncpg compares against the DATE column
+            # natively and won't coerce a bound str (it raised
+            # "'str' object has no attribute 'toordinal'").
+            where.append("je.effective_date >= :start_date")
+            params["start_date"] = _parse_iso_date(start_date, "start_date")
         if end_date:
-            where.append("effective_date <= :end_date")
-            params["end_date"] = end_date
+            where.append("je.effective_date <= :end_date")
+            params["end_date"] = _parse_iso_date(end_date, "end_date")
         if category:
-            where.append("category = :category")
+            where.append("je.category = :category")
             params["category"] = category
         if status_filter:
-            where.append("status = :status_filter")
+            where.append("je.status = :status_filter")
             params["status_filter"] = status_filter
         if search:
             where.append(
-                "(lower(coalesce(payee,'')) LIKE :s OR "
-                "lower(coalesce(description,'')) LIKE :s OR "
-                "lower(coalesce(memo,'')) LIKE :s OR "
-                "lower(debit_account) LIKE :s OR "
-                "lower(credit_account) LIKE :s)"
+                "(lower(coalesce(je.payee,'')) LIKE :s OR "
+                "lower(coalesce(je.description,'')) LIKE :s OR "
+                "lower(coalesce(je.memo,'')) LIKE :s OR "
+                "lower(je.debit_account) LIKE :s OR "
+                "lower(je.credit_account) LIKE :s)"
             )
             params["s"] = f"%{search.lower()}%"
 
@@ -546,7 +564,7 @@ async def list_entries(
         ).mappings().all()
         total = (
             await session.execute(
-                text(f"SELECT count(*) FROM journal_entry WHERE {where_sql}"),
+                text(f"SELECT count(*) FROM journal_entry je WHERE {where_sql}"),
                 {k: v for k, v in params.items() if k not in ("limit", "offset")},
             )
         ).scalar_one()
@@ -568,13 +586,29 @@ async def list_entries(
     }
 
 
+@router.get("/api/workspaces/{workspace_id}/journal-entries/verify-chain")
+async def verify_chain_endpoint(
+    workspace_id: UUID,
+    entity_id: UUID,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        tampered = await verify_chain(session, str(entity_id))
+    return {"entity_id": str(entity_id), **chain_summary(tampered)}
+
+
 @router.get("/api/workspaces/{workspace_id}/journal-entries/{entry_id}")
 async def get_entry_detail(
     workspace_id: UUID,
     entry_id: UUID,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
-    """Single entry with full detail + reversal lineage."""
+    """Single entry with full detail + reversal lineage.
+
+    NOTE: this dynamic /{entry_id} route MUST be declared AFTER all static
+    sibling routes (e.g. /verify-chain) — FastAPI matches in declaration
+    order, so a static path listed later would be swallowed by {entry_id}.
+    """
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         row = (
             await session.execute(
@@ -602,17 +636,6 @@ async def get_entry_detail(
         if not row:
             raise HTTPException(status_code=404, detail="Journal entry not found")
     return dict(row)
-
-
-@router.get("/api/workspaces/{workspace_id}/journal-entries/verify-chain")
-async def verify_chain_endpoint(
-    workspace_id: UUID,
-    entity_id: UUID,
-    workspace: WorkspaceContext = Depends(resolve_workspace),
-) -> dict:
-    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
-        tampered = await verify_chain(session, str(entity_id))
-    return {"entity_id": str(entity_id), **chain_summary(tampered)}
 
 
 @router.get("/api/workspaces/{workspace_id}/posting-log")

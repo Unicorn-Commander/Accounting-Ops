@@ -18,5 +18,9 @@ postgres_data/
 garage_data/
 vendor/anthropic-financial-services/
 
+# Secrets (master key etc.) — never commit
+secrets/
+.env.integration
+
 # Local agent hand-off prompts (not part of the app)
 agent-prompts/

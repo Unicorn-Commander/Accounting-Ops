@@ -13,4 +13,5 @@ def test_tool_stubs_raise_phase_1():
     with pytest.raises(NotImplementedError, match="Phase 1"):
         import asyncio
 
-        asyncio.run(get_transaction(uuid.uuid4(), uuid.uuid4()))
+        # get_transaction(workspace_id, entity_id, id) — all three are required.
+        asyncio.run(get_transaction(uuid.uuid4(), uuid.uuid4(), uuid.uuid4()))
