@@ -134,17 +134,21 @@ def _match_service_token(presented: str) -> dict[str, str] | None:
 _log = logging.getLogger("acctops.auth")
 
 
-async def validate_bearer_token(
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-) -> AuthContext:
-    if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token"
-        )
+async def authenticate_token(token: str) -> AuthContext:
+    """Validate a raw bearer token string and return its AuthContext.
 
+    This is the transport-agnostic core of bearer authentication. The FastAPI
+    dependency ``validate_bearer_token`` is a thin wrapper around it; the MCP
+    sub-app (mounted under /mcp, which bypasses FastAPI dependencies) calls this
+    directly from its ASGI auth middleware. Both paths therefore validate
+    identically — there is exactly one token-validation implementation.
+
+    Raises HTTPException(401) on any failure (so the FastAPI wrapper propagates
+    it unchanged; the MCP middleware translates the status into a JSON 401).
+    """
     # Service token fast-path: long-lived shared-secret tokens for internal
     # workers. Bypass JWT validation; impersonate the configured uc_uid.
-    service_ident = _match_service_token(credentials.credentials)
+    service_ident = _match_service_token(token)
     if service_ident is not None:
         ctx = AuthContext(
             uc_uid=service_ident["uc_uid"],
@@ -162,7 +166,7 @@ async def validate_bearer_token(
         )
     settings = get_settings()
     try:
-        header = jwt.get_unverified_header(credentials.credentials)
+        header = jwt.get_unverified_header(token)
         kid = header.get("kid")
         if not kid:
             raise HTTPException(
@@ -185,7 +189,7 @@ async def validate_bearer_token(
         # party). We validate signature + issuer + expiry strictly, then
         # check azp matches our client_id instead of strict audience.
         claims = jwt.decode(
-            credentials.credentials,
+            token,
             key,
             algorithms=[header["alg"]],
             issuer=str(settings.keycloak_realm_url),
@@ -229,6 +233,21 @@ async def validate_bearer_token(
     ctx = AuthContext(uc_uid=uc_uid, agent_id=agent_id, scopes=scope, claims=claims)
     _stamp_audit_actor(ctx)
     return ctx
+
+
+async def validate_bearer_token(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+) -> AuthContext:
+    """FastAPI dependency: extract the bearer credential and validate it.
+
+    Thin wrapper over ``authenticate_token`` so HTTP routes and the mounted MCP
+    sub-app share one validation path.
+    """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token"
+        )
+    return await authenticate_token(credentials.credentials)
 
 
 def _stamp_audit_actor(ctx: AuthContext) -> None:

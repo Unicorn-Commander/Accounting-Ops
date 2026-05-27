@@ -83,13 +83,22 @@ def test_middleware_does_not_trust_actor_headers():
     assert "unauthenticated" in src
 
 
-def test_validate_bearer_token_stamps_actor():
-    """auth.validate_bearer_token must call the audit-stamp helper."""
+def test_authenticate_token_stamps_actor():
+    """The token-validation core must stamp the VALIDATED actor onto the span.
+
+    Stamping lives in authenticate_token (the transport-agnostic core shared by
+    the HTTP dependency validate_bearer_token AND the /mcp auth middleware), so
+    both surfaces attribute the audit trail to the verified identity — not to
+    spoofable headers (finding M2). validate_bearer_token must delegate to it."""
     import app.auth as auth
 
-    src = inspect.getsource(auth.validate_bearer_token)
-    assert "_stamp_audit_actor" in src, (
-        "validate_bearer_token no longer stamps the validated actor onto the span"
+    core_src = inspect.getsource(auth.authenticate_token)
+    assert "_stamp_audit_actor" in core_src, (
+        "authenticate_token no longer stamps the validated actor onto the span"
+    )
+    wrapper_src = inspect.getsource(auth.validate_bearer_token)
+    assert "authenticate_token" in wrapper_src, (
+        "validate_bearer_token must delegate to the shared authenticate_token core"
     )
     helper_src = inspect.getsource(auth._stamp_audit_actor)
     assert "set_actor_attributes" in helper_src
@@ -125,13 +134,20 @@ def test_spoofed_actor_headers_do_not_reach_the_audit_span(monkeypatch):
         def shutdown(self):  # pragma: no cover - nothing to clean up
             pass
 
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(_Capture()))
-    # Install BEFORE importing the app so FastAPIInstrumentor binds to it.
+    # set_tracer_provider is a process-global singleton: once ANY earlier test
+    # (or import) installs a provider, later set calls are ignored with a
+    # warning. So we don't depend on our set winning — we attach the capture
+    # exporter to whichever provider is actually global. This keeps the test
+    # robust to collection/run ordering (e.g. test_app_imports importing the app
+    # first) instead of silently capturing zero spans.
     try:
-        trace.set_tracer_provider(provider)
+        trace.set_tracer_provider(TracerProvider())
     except Exception:  # pragma: no cover - provider already set in this process
         pass
+    active_provider = trace.get_tracer_provider()
+    if not hasattr(active_provider, "add_span_processor"):  # pragma: no cover
+        pytest.skip("global tracer provider is not an SDK TracerProvider")
+    active_provider.add_span_processor(SimpleSpanProcessor(_Capture()))
 
     # Register an in-process service token so /api/me validates without a DB.
     token = "x" * 40
@@ -164,7 +180,7 @@ def test_spoofed_actor_headers_do_not_reach_the_audit_span(monkeypatch):
     assert resp.status_code == 200, resp.text
     assert resp.json()["uc_uid"] == "audit-real"
 
-    provider.force_flush()
+    active_provider.force_flush()
     spans = [s for s in captured if s.name == "http.request"]
     assert spans, "audit middleware did not emit an http.request span"
     attrs = dict(spans[-1].attributes or {})

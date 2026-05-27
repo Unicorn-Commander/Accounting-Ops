@@ -1,6 +1,9 @@
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI
 
 from app.auth import AuthContext, validate_bearer_token
+from app.mcp_auth import MCPAuthMiddleware
 from app.a2a.server import router as a2a_router
 from app.api.account_mappings import router as account_mappings_router
 from app.api.cash_position import router as cash_position_router
@@ -15,9 +18,45 @@ from app.config import get_settings
 from app.otel import audit_span_middleware, setup_otel
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version="0.1.0", openapi_url="/api/openapi.json")
+
+# Build the FastMCP "Accounting-Ops" server once. Its streamable-HTTP ASGI app
+# is mounted at /mcp (below) behind MCPAuthMiddleware. The session manager must
+# run for the lifetime of the process; mounted sub-apps do NOT get their own
+# lifespan from Starlette, so we drive it from the parent app's lifespan (same
+# pattern as accounting-ops-imap-mcp).
+from mcp_server import build_server  # noqa: E402  (after settings, before app)
+
+_mcp_server = build_server()
+_mcp_http_app = (
+    _mcp_server.streamable_http_app()
+    if hasattr(_mcp_server, "streamable_http_app")
+    else None
+)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    session_manager = getattr(_mcp_server, "session_manager", None)
+    if session_manager is None:
+        yield
+        return
+    async with session_manager.run():
+        yield
+
+
+app = FastAPI(
+    title=settings.app_name,
+    version="0.1.0",
+    openapi_url="/api/openapi.json",
+    lifespan=lifespan,
+)
 app.middleware("http")(audit_span_middleware)
 setup_otel(app)
+if _mcp_http_app is not None:
+    # /mcp is gated by MCPAuthMiddleware (validates the uchub Bearer and binds
+    # the AuthContext that every tool authorizes against). Traefik already
+    # routes /mcp -> app:8000.
+    app.mount("/mcp", MCPAuthMiddleware(_mcp_http_app))
 app.include_router(a2a_router)
 app.include_router(workspaces_router)
 app.include_router(credentials_router)
