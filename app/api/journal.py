@@ -3,6 +3,9 @@
   POST /api/workspaces/{wid}/coa/seed       — install default COA for all entities (idempotent)
   POST /api/workspaces/{wid}/coa/link       — link a COA account to a connected bank account
   GET  /api/workspaces/{wid}/coa            — list COA for an entity
+  POST /api/workspaces/{wid}/coa            — create a new COA account
+  PATCH /api/workspaces/{wid}/coa/{id}      — rename/reclassify a COA account
+  DELETE /api/workspaces/{wid}/coa/{id}     — soft-deactivate a COA account
   POST /api/workspaces/{wid}/journal-entries — post a transaction to the journal
   POST /api/workspaces/{wid}/journal-entries/reverse — reversing entry
   GET  /api/workspaces/{wid}/journal-entries/verify-chain?entity_id={uuid}
@@ -49,6 +52,24 @@ class CoaLinkRequest(BaseModel):
     account_number: str = Field(..., min_length=4, max_length=8)
     source: str = Field(..., max_length=64)
     external_account_id: str = Field(..., max_length=256)
+
+
+class CoaCreateRequest(BaseModel):
+    entity_id: UUID
+    account_number: str = Field(..., min_length=4, max_length=8)
+    account_name: str = Field(..., min_length=1, max_length=128)
+    account_type: str = Field(...)
+
+
+class CoaUpdateRequest(BaseModel):
+    account_name: str | None = None
+    account_type: str | None = None
+
+
+VALID_COA_TYPES = frozenset({
+    "asset", "liability", "equity", "revenue", "cogs",
+    "expense", "other_income", "other_expense", "tax",
+})
 
 
 @router.post("/api/workspaces/{workspace_id}/coa/seed")
@@ -122,10 +143,10 @@ async def list_coa(
             await session.execute(
                 text(
                     """
-                    SELECT account_number, account_name, canonical_form,
+                    SELECT id::text, account_number, account_name, canonical_form,
                            account_type, normal_balance,
                            linked_external_source, linked_external_account_id,
-                           is_active, is_system
+                           is_active, is_system, notes
                     FROM chart_of_account
                     WHERE entity_id = :eid
                     ORDER BY account_number
@@ -135,6 +156,214 @@ async def list_coa(
             )
         ).mappings().all()
     return {"entity_id": str(entity_id), "accounts": [dict(r) for r in rows]}
+
+
+@router.post("/api/workspaces/{workspace_id}/coa", status_code=status.HTTP_201_CREATED)
+async def create_coa_account(
+    workspace_id: UUID,
+    body: CoaCreateRequest,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+):
+    """Create a new chart-of-accounts entry for an entity."""
+    require_role(workspace, "accountant")
+
+    if body.account_type not in VALID_COA_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid account_type '{body.account_type}'. Must be one of: {', '.join(sorted(VALID_COA_TYPES))}",
+        )
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        # Check that account_number is unique within this entity
+        dup = (
+            await session.execute(
+                text(
+                    "SELECT 1 FROM chart_of_account "
+                    "WHERE entity_id = :eid AND account_number = :num"
+                ),
+                {"eid": str(body.entity_id), "num": body.account_number},
+            )
+        ).first()
+        if dup:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Account number {body.account_number} already exists for this entity",
+            )
+
+        canonical = f"{body.account_number.strip()}·{body.account_name.strip()}"
+        # Derive normal_balance from account_type
+        nb = "debit" if body.account_type in ("asset", "expense", "cogs", "other_expense", "tax") else "credit"
+
+        result = await session.execute(
+            text(
+                """
+                INSERT INTO chart_of_account (
+                    workspace_id, entity_id, account_number, account_name,
+                    canonical_form, account_type, normal_balance,
+                    is_system, is_active
+                ) VALUES (
+                    :wid, :eid, :num, :name, :canonical, :atype, :nb,
+                    false, true
+                )
+                RETURNING id::text, account_number, account_name, canonical_form,
+                          account_type, is_active
+                """
+            ),
+            {
+                "wid": str(workspace_id),
+                "eid": str(body.entity_id),
+                "num": body.account_number,
+                "name": body.account_name,
+                "canonical": canonical,
+                "atype": body.account_type,
+                "nb": nb,
+            },
+        )
+        row = result.mappings().one()
+
+    return dict(row)
+
+
+@router.patch("/api/workspaces/{workspace_id}/coa/{account_id}")
+async def update_coa_account(
+    workspace_id: UUID,
+    account_id: UUID,
+    body: CoaUpdateRequest,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+):
+    """Rename and/or reclassify an existing COA account.
+    Soft-deactivate (set is_active=false) is not allowed here; use DELETE endpoint.
+    """
+    require_role(workspace, "accountant")
+
+    if body.account_type and body.account_type not in VALID_COA_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid account_type '{body.account_type}'. Must be one of: {', '.join(sorted(VALID_COA_TYPES))}",
+        )
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        # Fetch existing account
+        existing = (
+            await session.execute(
+                text(
+                    "SELECT id::text, account_number, account_name, account_type, "
+                    "is_active, is_system FROM chart_of_account "
+                    "WHERE id = :aid AND entity_id IN ("
+                    "  SELECT id FROM entity WHERE workspace_id = :wid"
+                    ")"
+                ),
+                {"aid": str(account_id), "wid": str(workspace_id)},
+            )
+        ).mappings().first()
+        if not existing:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="COA account not found",
+            )
+
+        updates: dict[str, Any] = {}
+        if body.account_name is not None:
+            updates["account_name"] = body.account_name
+        if body.account_type is not None:
+            updates["account_type"] = body.account_type
+            updates["normal_balance"] = (
+                "debit" if body.account_type in ("asset", "expense", "cogs", "other_expense", "tax")
+                else "credit"
+            )
+
+        if updates:
+            # If account_name changed, update canonical_form
+            new_name = updates.get("account_name", existing["account_name"])
+            new_type = updates.get("account_type", existing["account_type"])
+            updates["canonical_form"] = f"{existing['account_number']}·{new_name}"
+
+            await session.execute(
+                text(
+                    """
+                    UPDATE chart_of_account
+                    SET account_name = :name, canonical_form = :canonical,
+                        account_type = :atype, normal_balance = :nb
+                    WHERE id = :aid
+                    """
+                ),
+                {
+                    "name": new_name,
+                    "canonical": updates["canonical_form"],
+                    "atype": new_type,
+                    "nb": updates["normal_balance"],
+                    "aid": str(account_id),
+                },
+            )
+
+    return {
+        "id": existing["id"],
+        "account_number": existing["account_number"],
+        "account_name": updates.get("account_name", existing["account_name"]),
+        "account_type": updates.get("account_type", existing["account_type"]),
+        "is_active": existing["is_active"],
+    }
+
+
+@router.delete("/api/workspaces/{workspace_id}/coa/{account_id}")
+async def deactivate_coa_account(
+    workspace_id: UUID,
+    account_id: UUID,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+):
+    """Soft-deactivate a COA account (set is_active=false).
+    Prevents deactivation if the account has journal postings.
+    """
+    require_role(workspace, "accountant")
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        # Check if account has any journal entries
+        postings = (
+            await session.execute(
+                text(
+                    "SELECT count(*) FROM journal_entry "
+                    "WHERE entity_id IN ("
+                    "  SELECT entity_id FROM chart_of_account WHERE id = :aid"
+                    ")"
+                    " AND (debit_account = ("
+                    "    SELECT canonical_form FROM chart_of_account WHERE id = :aid2"
+                    "  ) OR credit_account = ("
+                    "    SELECT canonical_form FROM chart_of_account WHERE id = :aid3"
+                    "  ))"
+                ),
+                {"aid": str(account_id), "aid2": str(account_id), "aid3": str(account_id)},
+            )
+        ).scalar_one()
+
+        if postings > 0:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot deactivate account with existing journal postings. Consider renaming it with a '(D)' suffix instead.",
+            )
+
+        # Soft-deactivate
+        result = await session.execute(
+            text(
+                """
+                UPDATE chart_of_account
+                SET is_active = false
+                WHERE id = :aid
+                  AND entity_id IN (
+                    SELECT id FROM entity WHERE workspace_id = :wid
+                  )
+                RETURNING id::text, account_number, account_name, is_active
+                """
+            ),
+            {"aid": str(account_id), "wid": str(workspace_id)},
+        )
+        row = result.mappings().first()
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="COA account not found",
+            )
+
+    return dict(row)
 
 
 # ====================================================================

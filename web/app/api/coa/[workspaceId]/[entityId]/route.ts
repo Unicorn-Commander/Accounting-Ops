@@ -28,3 +28,90 @@ export async function GET(
     headers: { "Content-Type": "application/json" }
   });
 }
+
+export async function POST(
+  req: NextRequest,
+  ctx: { params: Promise<{ workspaceId: string; entityId: string }> }
+) {
+  const session = await auth();
+  if (!session?.accessToken) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const { workspaceId, entityId } = await ctx.params;
+  const body = await req.json();
+  const res = await fetch(
+    `${INTERNAL_BASE}/api/workspaces/${workspaceId}/coa`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ ...body, entity_id: entityId })
+    }
+  );
+  const respBody = await res.text();
+  return new NextResponse(respBody, {
+    status: res.status,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+
+export async function PATCH(
+  req: NextRequest,
+  ctx: { params: Promise<{ workspaceId: string; entityId: string }> }
+) {
+  const session = await auth();
+  if (!session?.accessToken) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const { workspaceId } = await ctx.params;
+  const accountId = req.nextUrl.searchParams.get("accountId");
+  if (!accountId) {
+    return NextResponse.json({ error: "Missing accountId query param" }, { status: 400 });
+  }
+  const body = await req.json();
+  const res = await fetch(
+    `${INTERNAL_BASE}/api/workspaces/${workspaceId}/coa/${accountId}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${session.accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    }
+  );
+  const respBody = await res.text();
+  return new NextResponse(respBody, {
+    status: res.status,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+
+export async function DELETE(
+  req: NextRequest,
+  ctx: { params: Promise<{ workspaceId: string; entityId: string }> }
+) {
+  const session = await auth();
+  if (!session?.accessToken) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const { workspaceId } = await ctx.params;
+  const accountId = req.nextUrl.searchParams.get("accountId");
+  if (!accountId) {
+    return NextResponse.json({ error: "Missing accountId query param" }, { status: 400 });
+  }
+  const res = await fetch(
+    `${INTERNAL_BASE}/api/workspaces/${workspaceId}/coa/${accountId}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${session.accessToken}` }
+    }
+  );
+  const respBody = await res.text();
+  return new NextResponse(respBody, {
+    status: res.status,
+    headers: { "Content-Type": "application/json" }
+  });
+}

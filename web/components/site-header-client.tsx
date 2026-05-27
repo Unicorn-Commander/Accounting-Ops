@@ -11,6 +11,7 @@ const NAV = [
   ["Transactions", "/transactions"],
   ["Reconciliation", "/reconciliation-queue"],
   ["Journal", "/journal"],
+  ["Chart of Accounts", "/coa"],
   ["Reports", "/reports"],
   ["Connectors", "/connectors"],
   ["CPA Export", "/cpa-export"],
