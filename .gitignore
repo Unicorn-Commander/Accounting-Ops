@@ -17,3 +17,6 @@ coverage/
 postgres_data/
 garage_data/
 vendor/anthropic-financial-services/
+
+# Local agent hand-off prompts (not part of the app)
+agent-prompts/
