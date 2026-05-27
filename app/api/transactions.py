@@ -1,16 +1,17 @@
 """Real-time transactions list from SimpleFIN.
 
-Same interim Phase 1.5 wiring as cash_position: env var keyed by uc_uid.
-Phase 1.6 moves to encrypted DB credentials.
+SimpleFIN credentials come ONLY from the per-workspace encrypted store
+(public.tenant_credentials) — no environment-variable fallback (audit finding
+C1). A workspace with no stored credential simply yields no SimpleFIN rows
+(and `configured: false` if no other source is wired); it NEVER returns
+another workspace's transactions.
 
 Returns a flattened, sorted transaction list across all accounts visible
-through the user's SimpleFIN connection. Entity-mapping (which account
-belongs to which entity) is a future feature; for now we surface the
-origin account name + org so the user can mentally map them.
+through the workspace's SimpleFIN connection. Each transaction is annotated
+with the entity it maps to (account_entity_mapping) when one exists.
 """
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -21,11 +22,12 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.category_overrides import load_overrides_for_workspace
+from app.authz import assert_entity_in_scope
 from app.categorization import categorize_transaction
 from app.clients import ebay_finances
 from app.db import SessionLocal
 from app.security.credentials import get_credential_plaintext
-from app.tenancy import WorkspaceContext, resolve_workspace
+from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 
 _log = logging.getLogger(__name__)
 
@@ -33,25 +35,23 @@ router = APIRouter(tags=["transactions"])
 
 
 async def _simplefin_access_url(workspace: WorkspaceContext) -> str | None:
-    """DB-first, env-var fallback (matches cash_position pattern)."""
+    """Per-workspace encrypted SimpleFIN credential, or None if unconfigured.
+
+    Credential comes ONLY from public.tenant_credentials — no environment-
+    variable fallback (audit finding C1). Returns None when this workspace has
+    no stored SimpleFIN credential; the endpoint then surfaces no SimpleFIN
+    data (eBay, if configured, is additive and handled separately).
+    """
     async with SessionLocal() as session:
         async with session.begin():
-            try:
-                plaintext = await get_credential_plaintext(
-                    session,
-                    workspace.workspace_id,
-                    "simplefin",
-                    requesting_service="transactions",
-                    actor_uc_uid=workspace.user_uc_uid,
-                    actor_agent_id=workspace.agent_id,
-                )
-                if plaintext:
-                    return plaintext
-            except Exception:
-                pass
-    return os.getenv(
-        f"SIMPLEFIN_ACCESS_URL_{workspace.user_uc_uid.upper()}"
-    ) or os.getenv("SIMPLEFIN_ACCESS_URL_AARON")
+            return await get_credential_plaintext(
+                session,
+                workspace.workspace_id,
+                "simplefin",
+                requesting_service="transactions",
+                actor_uc_uid=workspace.user_uc_uid,
+                actor_agent_id=workspace.agent_id,
+            )
 
 
 async def _fetch_simplefin_window(
@@ -109,8 +109,20 @@ async def workspace_recent_transactions(
     If `entity_id` query param is provided, only transactions from accounts
     mapped to that entity are returned. Pass entity_id=unmapped to filter to
     only accounts with no mapping.
+
+    Entity-scope (BOLA): a scoped member requesting a specific out-of-scope
+    entity gets 403; on a consolidated/unmapped request a scoped member is
+    RESTRICTED to transactions mapped to their allowed entities (unmapped
+    transactions are excluded). Unscoped members are unaffected.
     """
     from app.api.account_mappings import get_account_to_entity_map
+
+    require_role(workspace, "viewer")
+    scope_probe = None if entity_id == "unmapped" else entity_id
+    scope_restriction = assert_entity_in_scope(workspace, scope_probe)
+    scope_ids = (
+        {str(e) for e in scope_restriction} if scope_restriction is not None else None
+    )
 
     access_url = await _simplefin_access_url(workspace)
     account_map = await get_account_to_entity_map(workspace.workspace_id)
@@ -254,6 +266,13 @@ async def workspace_recent_transactions(
                 }
             )
 
+    # Entity-scope restriction (scoped members only): keep only transactions
+    # whose mapped entity is in the member's allowed set. Unmapped transactions
+    # (entity_id is None) are hidden from scoped members.
+    if scope_ids is not None:
+        transactions = [
+            t for t in transactions if t["entity_id"] in scope_ids
+        ]
     # Entity filter
     if entity_id == "unmapped":
         transactions = [t for t in transactions if t["entity_id"] is None]

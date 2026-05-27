@@ -179,6 +179,10 @@ async def http_list_credentials(
     workspace_id: UUID,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> list[dict]:
+    # Credential metadata (connector, label, last_used_at, expiry) is sensitive
+    # operational data — restrict the listing to accountant+ (audit finding H4).
+    # Storing/deleting credentials already requires admin.
+    require_role(workspace, "accountant")
     async with SessionLocal() as session:
         async with session.begin():
             metas = await list_credentials(session, workspace_id)

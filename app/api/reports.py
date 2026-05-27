@@ -28,8 +28,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 
+from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
-from app.tenancy import WorkspaceContext, resolve_workspace
+from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
 
 router = APIRouter(tags=["reports"])
@@ -112,8 +113,25 @@ def _account_type_prefix(number: str) -> str:
     return "unknown"
 
 
-def _entity_filter(entity_id: str | None) -> tuple[str, dict[str, Any]]:
+def _entity_filter(
+    entity_id: str | None,
+    scope_restriction: tuple[UUID, ...] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Build the SQL entity predicate for a report query.
+
+    `scope_restriction` comes from assert_entity_in_scope: when a *scoped*
+    member requests a consolidated/all view it is the tuple of entity UUIDs
+    they may see, so we restrict the (otherwise unfiltered) query to that set.
+    For a concrete in-scope entity_id the normal equality predicate is used and
+    scope_restriction is None (nothing extra to add). Unscoped members always
+    pass scope_restriction=None and get the original behavior.
+    """
     if not entity_id or entity_id in ("consolidated", "all"):
+        if scope_restriction is not None:
+            return (
+                " AND je.entity_id = ANY(:entity_scope)",
+                {"entity_scope": [str(e) for e in scope_restriction]},
+            )
         return "", {}
     try:
         UUID(entity_id)
@@ -148,8 +166,10 @@ async def profit_and_loss(
     are summed as debits-minus-credits (normal balance = debit).
     Net income = revenue - expenses.
     """
+    require_role(workspace, "viewer")
+    scope_restriction = assert_entity_in_scope(workspace, entity_id)
     start, end, label = _parse_period(period)
-    entity_clause, entity_params = _entity_filter(entity_id)
+    entity_clause, entity_params = _entity_filter(entity_id, scope_restriction)
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         entity_label = await _entity_label(session, entity_id)
@@ -265,8 +285,10 @@ async def balance_sheet(
     Includes computed retained earnings = sum(revenue) - sum(expenses)
     from beginning-of-time to as_of.
     """
+    require_role(workspace, "viewer")
+    scope_restriction = assert_entity_in_scope(workspace, entity_id)
     as_of_date = date.fromisoformat(as_of) if as_of else date.today()
-    entity_clause, entity_params = _entity_filter(entity_id)
+    entity_clause, entity_params = _entity_filter(entity_id, scope_restriction)
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         entity_label = await _entity_label(session, entity_id)
@@ -388,8 +410,10 @@ async def cash_flow(
     = changes in 3xxx / 2400. We'll refine the classifier as the COA
     grows.)
     """
+    require_role(workspace, "viewer")
+    scope_restriction = assert_entity_in_scope(workspace, entity_id)
     start, end, label = _parse_period(period)
-    entity_clause, entity_params = _entity_filter(entity_id)
+    entity_clause, entity_params = _entity_filter(entity_id, scope_restriction)
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         entity_label = await _entity_label(session, entity_id)
@@ -599,13 +623,15 @@ async def form_1099_nec(
     may instead belong on 1099-K; those whose name matches a known processor
     are flagged ``requires_human_review`` for a human to confirm before filing.
     """
+    require_role(workspace, "viewer")
+    scope_restriction = assert_entity_in_scope(workspace, entity_id)
     # Validate year
     if len(year) != 4 or not year.isdigit():
         raise HTTPException(400, "year must be a 4-digit string like '2025'")
     y = int(year)
     start = date(y, 1, 1)
     end = date(y, 12, 31)
-    entity_clause, entity_params = _entity_filter(entity_id)
+    entity_clause, entity_params = _entity_filter(entity_id, scope_restriction)
 
     # Allow-list of contract-labor account NUMBERS, expanded into a SQL IN-list
     # of bound params so the query stays injection-safe.

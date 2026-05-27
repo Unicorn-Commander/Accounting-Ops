@@ -146,12 +146,14 @@ async def validate_bearer_token(
     # workers. Bypass JWT validation; impersonate the configured uc_uid.
     service_ident = _match_service_token(credentials.credentials)
     if service_ident is not None:
-        return AuthContext(
+        ctx = AuthContext(
             uc_uid=service_ident["uc_uid"],
             agent_id=service_ident["agent_id"],
             scopes=("service",),
             claims={"sub": service_ident["uc_uid"], "uc_uid": service_ident["uc_uid"]},
         )
+        _stamp_audit_actor(ctx)
+        return ctx
 
     if jwt is None:
         raise HTTPException(
@@ -224,4 +226,20 @@ async def validate_bearer_token(
     if isinstance(act, dict):
         agent_id = act.get("sub") or act.get("client_id")
     scope = tuple(str(claims.get("scope", "")).split())
-    return AuthContext(uc_uid=uc_uid, agent_id=agent_id, scopes=scope, claims=claims)
+    ctx = AuthContext(uc_uid=uc_uid, agent_id=agent_id, scopes=scope, claims=claims)
+    _stamp_audit_actor(ctx)
+    return ctx
+
+
+def _stamp_audit_actor(ctx: AuthContext) -> None:
+    """Record the VALIDATED caller on the current audit span (finding M2).
+
+    Imported lazily to avoid any import-time coupling to the OTel SDK (which is
+    optional). Best-effort: never let telemetry break request auth.
+    """
+    try:
+        from app.otel import set_actor_attributes
+
+        set_actor_attributes(ctx.uc_uid, ctx.agent_id)
+    except Exception:  # pragma: no cover - telemetry must never break auth
+        pass

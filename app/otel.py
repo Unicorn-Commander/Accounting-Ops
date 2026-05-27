@@ -33,6 +33,25 @@ def setup_otel(app) -> None:
     FastAPIInstrumentor.instrument_app(app, tracer_provider=provider)
 
 
+def set_actor_attributes(uc_uid: str, agent_id: str | None) -> None:
+    """Stamp the audit span with the VALIDATED caller identity.
+
+    Audit attribution must come from the verified AuthContext, never from
+    client-supplied headers (audit finding M2): a caller could otherwise set
+    x-uc-uid / x-agent-id to any value and frame another user in the trail.
+    Called from app.auth.validate_bearer_token once the bearer token (JWT or
+    service token) has been verified; it overwrites the placeholder values the
+    middleware seeded. No-op if OTel isn't installed or there's no live span.
+    """
+    if trace is None:
+        return
+    span = trace.get_current_span()
+    if span is None or not getattr(span, "is_recording", lambda: False)():
+        return
+    span.set_attribute("user_uc_uid", uc_uid)
+    span.set_attribute("agent_id", agent_id or "none")
+
+
 async def audit_span_middleware(request: Request, call_next: Callable):
     if trace is None:
         return await call_next(request)
@@ -49,8 +68,12 @@ async def audit_span_middleware(request: Request, call_next: Callable):
             request.path_params.get("entity_id")
             or request.headers.get("x-entity-id", "unknown"),
         )
-        span.set_attribute("agent_id", request.headers.get("x-agent-id", "unknown"))
-        span.set_attribute("user_uc_uid", request.headers.get("x-uc-uid", "unknown"))
+        # Actor identity is intentionally NOT read from request headers — it is
+        # set from the validated AuthContext by set_actor_attributes() (called
+        # in validate_bearer_token). Seed placeholders so the attribute always
+        # exists even on requests that never authenticate (e.g. /healthz, 401s).
+        span.set_attribute("agent_id", "unauthenticated")
+        span.set_attribute("user_uc_uid", "unauthenticated")
         span.set_attribute("tool_name", request.headers.get("x-tool-name", "none"))
         try:
             response = await call_next(request)

@@ -1,25 +1,26 @@
 """Real-time cash position from SimpleFIN.
 
-Interim Phase 1.5 wiring: credentials come from environment variables, scoped
-per-user (e.g., SIMPLEFIN_ACCESS_URL_AARON). Phase 1.6 will move credentials
-into encrypted-at-rest storage in public.connector_credentials with a
-KMS-derived per-tenant key, and lookups will join through connector_state.
+Credentials come ONLY from the per-workspace encrypted store
+(public.tenant_credentials, AES-GCM with a per-credential AAD). There is no
+environment-variable fallback — see app/security/credentials.py. A workspace
+with no stored SimpleFIN credential returns the `configured: false` branch and
+NEVER another workspace's bank data (audit finding C1).
 
-For now this proves the live-data path works end-to-end:
+Live-data path:
   /dashboard → /api/workspaces/{wid}/cash-position → SimpleFIN bridge → bank
 """
 from __future__ import annotations
 
-import os
 from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
 from app.security.credentials import get_credential_plaintext
-from app.tenancy import WorkspaceContext, resolve_workspace
+from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 
 router = APIRouter(tags=["cash-position"])
 
@@ -27,27 +28,25 @@ router = APIRouter(tags=["cash-position"])
 async def _simplefin_access_url(workspace: WorkspaceContext) -> str | None:
     """Resolve SimpleFIN access URL for this workspace.
 
-    Phase 1.6 path: encrypted DB credential via public.tenant_credentials.
-    Phase 1.5 fallback: env var (removed in 1.7 once everyone migrates).
+    The credential comes ONLY from the per-workspace encrypted store
+    (public.tenant_credentials). There is NO environment-variable fallback:
+    a uc_uid-keyed env var (SIMPLEFIN_ACCESS_URL_<UID>, and especially the
+    SIMPLEFIN_ACCESS_URL_AARON catch-all) would let a workspace with no stored
+    credential read whichever bank connection happened to be in the process
+    environment — a cross-workspace financial-data leak (audit finding C1).
+    Returns None when this workspace has no stored SimpleFIN credential; the
+    caller renders its `configured: false` branch.
     """
     async with SessionLocal() as session:
         async with session.begin():
-            try:
-                plaintext = await get_credential_plaintext(
-                    session,
-                    workspace.workspace_id,
-                    "simplefin",
-                    requesting_service="cash_position",
-                    actor_uc_uid=workspace.user_uc_uid,
-                    actor_agent_id=workspace.agent_id,
-                )
-                if plaintext:
-                    return plaintext
-            except Exception:
-                pass
-    return os.getenv(
-        f"SIMPLEFIN_ACCESS_URL_{workspace.user_uc_uid.upper()}"
-    ) or os.getenv("SIMPLEFIN_ACCESS_URL_AARON")
+            return await get_credential_plaintext(
+                session,
+                workspace.workspace_id,
+                "simplefin",
+                requesting_service="cash_position",
+                actor_uc_uid=workspace.user_uc_uid,
+                actor_agent_id=workspace.agent_id,
+            )
 
 
 async def _fetch_simplefin_accounts(access_url: str) -> dict:
@@ -90,8 +89,24 @@ async def workspace_cash_position(
       - omitted / "consolidated" → all accounts
       - specific UUID            → only accounts mapped to that entity
       - "unmapped"               → only accounts with no mapping
+
+    Entity-scope (BOLA): a scoped member requesting a specific out-of-scope
+    entity gets 403; a scoped member requesting consolidated/unmapped is
+    RESTRICTED to accounts mapped to their allowed entities (unmapped accounts
+    are excluded — they could belong to any entity). Unscoped members are
+    unaffected.
     """
     from app.api.account_mappings import get_account_to_entity_map
+
+    require_role(workspace, "viewer")
+    # "unmapped" is a view-mode token, not an entity id — treat it as
+    # consolidated for the scope check (the per-account filter below still
+    # honors the unmapped semantics for unscoped members).
+    scope_probe = None if entity_id == "unmapped" else entity_id
+    scope_restriction = assert_entity_in_scope(workspace, scope_probe)
+    scope_ids = (
+        {str(e) for e in scope_restriction} if scope_restriction is not None else None
+    )
 
     access_url = await _simplefin_access_url(workspace)
     if not access_url:
@@ -145,6 +160,12 @@ async def workspace_cash_position(
         mapping_key = f"simplefin:{external_account_id}"
         mapping = account_map.get(mapping_key)
         coa = coa_link.get(mapping_key)
+        # Entity-scope restriction (scoped members only): an account is visible
+        # only if it's mapped to one of the member's allowed entities. Unmapped
+        # accounts are hidden from scoped members entirely.
+        if scope_ids is not None:
+            if mapping is None or mapping["entity_id"] not in scope_ids:
+                continue
         # Apply entity filter
         if entity_id == "unmapped" and mapping is not None:
             continue

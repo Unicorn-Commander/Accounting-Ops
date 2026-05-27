@@ -12,7 +12,6 @@ eBay/Plaid/etc.). Unmapped accounts are surfaced so the user can assign them.
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -46,25 +45,23 @@ class BulkMappingRequest(BaseModel):
 
 
 async def _simplefin_access_url(workspace: WorkspaceContext) -> str | None:
-    """Same DB-first lookup as cash_position / transactions."""
+    """Per-workspace encrypted SimpleFIN credential, or None if unconfigured.
+
+    Credential comes ONLY from public.tenant_credentials — no environment-
+    variable fallback (audit finding C1). When None, account discovery is
+    skipped and only this workspace's stored mappings + entities are returned;
+    we NEVER discover another workspace's bank accounts.
+    """
     async with SessionLocal() as session:
         async with session.begin():
-            try:
-                pt = await get_credential_plaintext(
-                    session,
-                    workspace.workspace_id,
-                    "simplefin",
-                    requesting_service="account_mappings",
-                    actor_uc_uid=workspace.user_uc_uid,
-                    actor_agent_id=workspace.agent_id,
-                )
-                if pt:
-                    return pt
-            except Exception:
-                pass
-    return os.getenv(
-        f"SIMPLEFIN_ACCESS_URL_{workspace.user_uc_uid.upper()}"
-    ) or os.getenv("SIMPLEFIN_ACCESS_URL_AARON")
+            return await get_credential_plaintext(
+                session,
+                workspace.workspace_id,
+                "simplefin",
+                requesting_service="account_mappings",
+                actor_uc_uid=workspace.user_uc_uid,
+                actor_agent_id=workspace.agent_id,
+            )
 
 
 async def _discover_simplefin_accounts(access_url: str) -> list[dict[str, Any]]:

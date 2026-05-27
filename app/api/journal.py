@@ -35,6 +35,7 @@ from app.journal.accounts import (
     normal_balance_for,
     seed_coa_for_entity,
 )
+from app.authz import assert_entity_in_scope
 from app.journal.hash_chain import chain_summary, verify_chain
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
@@ -502,6 +503,11 @@ async def list_entries(
       - status_filter: 'posted' | 'reversed'
       - search: substring against (payee + description + memo + debit + credit)
     """
+    require_role(workspace, "viewer")
+    # Entity-scope (BOLA): a scoped member requesting a specific out-of-scope
+    # entity gets 403; a scoped member requesting all entities is RESTRICTED to
+    # their allowed set; an unscoped member is unrestricted.
+    scope_restriction = assert_entity_in_scope(workspace, entity_id)
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         # Predicates are qualified with the `je` alias because the main query
         # JOINs `entity e`, and several column names (notably `status`) exist
@@ -512,6 +518,9 @@ async def list_entries(
         if entity_id:
             where.append("je.entity_id = :eid")
             params["eid"] = str(entity_id)
+        if scope_restriction is not None:
+            where.append("je.entity_id = ANY(:entity_scope)")
+            params["entity_scope"] = [str(e) for e in scope_restriction]
         if start_date:
             # Bind a real date object: asyncpg compares against the DATE column
             # natively and won't coerce a bound str (it raised
@@ -569,13 +578,21 @@ async def list_entries(
             )
         ).scalar_one()
 
-        # Distinct categories for filter dropdowns
+        # Distinct categories for filter dropdowns. Respect entity-scope so a
+        # scoped member can't enumerate category names from entities they
+        # cannot see (unscoped members are unaffected — no extra predicate).
+        cat_where = "category IS NOT NULL"
+        cat_params: dict[str, Any] = {}
+        if scope_restriction is not None:
+            cat_where += " AND entity_id = ANY(:entity_scope)"
+            cat_params["entity_scope"] = [str(e) for e in scope_restriction]
         categories = (
             await session.execute(
                 text(
-                    "SELECT DISTINCT category FROM journal_entry "
-                    "WHERE category IS NOT NULL ORDER BY category"
-                )
+                    f"SELECT DISTINCT category FROM journal_entry "
+                    f"WHERE {cat_where} ORDER BY category"
+                ),
+                cat_params,
             )
         ).scalars().all()
 
@@ -592,6 +609,8 @@ async def verify_chain_endpoint(
     entity_id: UUID,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
+    require_role(workspace, "viewer")
+    assert_entity_in_scope(workspace, entity_id)
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         tampered = await verify_chain(session, str(entity_id))
     return {"entity_id": str(entity_id), **chain_summary(tampered)}
@@ -608,12 +627,25 @@ async def get_entry_detail(
     NOTE: this dynamic /{entry_id} route MUST be declared AFTER all static
     sibling routes (e.g. /verify-chain) — FastAPI matches in declaration
     order, so a static path listed later would be swallowed by {entry_id}.
+
+    Entity-scope (BOLA): previously this route had NO entity predicate, so a
+    member scoped to one entity could read ANY entry in the workspace by id.
+    We now add `je.entity_id = ANY(:entity_scope)` for scoped members; an
+    out-of-scope entry is reported as 404 (indistinguishable from a
+    nonexistent id — no existence oracle). Unscoped members are unaffected.
     """
+    require_role(workspace, "viewer")
+    scope_restriction = assert_entity_in_scope(workspace, None)
+    where = "je.id = :id"
+    params: dict[str, Any] = {"id": str(entry_id)}
+    if scope_restriction is not None:
+        where += " AND je.entity_id = ANY(:entity_scope)"
+        params["entity_scope"] = [str(e) for e in scope_restriction]
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         row = (
             await session.execute(
                 text(
-                    """
+                    f"""
                     SELECT je.id::text, je.entity_id::text,
                            e.display_name AS entity_display_name,
                            e.slug AS entity_slug,
@@ -627,10 +659,10 @@ async def get_entry_detail(
                            encode(je.this_hash, 'hex') AS this_hash_hex
                     FROM journal_entry je
                     LEFT JOIN entity e ON e.id = je.entity_id
-                    WHERE je.id = :id
+                    WHERE {where}
                     """
                 ),
-                {"id": str(entry_id)},
+                params,
             )
         ).mappings().first()
         if not row:
@@ -645,12 +677,19 @@ async def list_posting_log(
     outcome: str | None = None,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
+    require_role(workspace, "viewer")
+    # Entity-scope (BOLA): the posting log carries an entity_id per row; a
+    # scoped member only sees attempts for their entities (unscoped: all).
+    scope_restriction = assert_entity_in_scope(workspace, None)
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         where = ["workspace_id = :wid"]
         params: dict[str, Any] = {"wid": str(workspace.workspace_id), "limit": min(limit, 500)}
         if outcome:
             where.append("outcome = :o")
             params["o"] = outcome
+        if scope_restriction is not None:
+            where.append("entity_id = ANY(:entity_scope)")
+            params["entity_scope"] = [str(e) for e in scope_restriction]
         rows = (
             await session.execute(
                 text(
