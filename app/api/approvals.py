@@ -58,6 +58,27 @@ router = APIRouter(tags=["approvals"])
 
 
 # ====================================================================
+# List valid categories (used by the UI dropdown)
+# ====================================================================
+
+
+@router.get("/api/workspaces/{workspace_id}/approvals/categories")
+async def list_approval_categories(
+    workspace_id: UUID,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Return the list of valid category keys (CATEGORY_TO_ACCOUNT keys).
+
+    Used by the approvals UI to populate the category-override dropdown for
+    bank_transaction_import rows. Read floor is accountant (same as list).
+    """
+    from app.journal.posting import CATEGORY_TO_ACCOUNT  # local import avoids circular
+
+    require_role(workspace, "accountant")
+    return {"categories": sorted(CATEGORY_TO_ACCOUNT.keys())}
+
+
+# ====================================================================
 # List pending approvals
 # ====================================================================
 
@@ -138,6 +159,10 @@ async def list_approvals(
 class DecideRequest(BaseModel):
     decision: str  # "approve" | "reject"
     note: str | None = None
+    # Optional category override for bank_transaction_import approvals.
+    # When present (and decision=="approve"), replaces payload["category"]
+    # before the import is applied. Must be a key in CATEGORY_TO_ACCOUNT.
+    category_override: str | None = None
 
 
 @router.post("/api/workspaces/{workspace_id}/approvals/{approval_id}/decide")
@@ -261,6 +286,7 @@ async def decide_approval(
                 payload=payload,
                 approving_human=workspace.user_uc_uid,
                 note=body.note,
+                category_override=body.category_override,
             )
         else:
             raise HTTPException(
@@ -439,6 +465,7 @@ async def _approve_bank_transaction_import(
     payload: dict,
     approving_human: str,
     note: str | None,
+    category_override: str | None = None,
 ) -> dict:
     """Apply a held bank-statement transaction import.
 
@@ -470,8 +497,22 @@ async def _approve_bank_transaction_import(
     source_external_id: str = payload["source_external_id"]
     effective_date = dt.date.fromisoformat(payload["effective_date"])
     amount_cents: int = int(payload["amount_cents"])
-    category: str = payload["category"]
-    category_status: str = payload.get("category_status", "auto")
+    # If the human picked a different category in the UI, validate + use it.
+    if category_override:
+        from app.journal.posting import CATEGORY_TO_ACCOUNT as _C2A
+        if category_override not in _C2A:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"category_override '{category_override}' is not a valid "
+                    "CATEGORY_TO_ACCOUNT key."
+                ),
+            )
+        category: str = category_override
+        category_status: str = "human_override"
+    else:
+        category = payload["category"]
+        category_status = payload.get("category_status", "auto")
 
     # The external account id for the cash/bank side.  The ingest script stores
     # debit_account_hint / credit_account_hint as COA canonical hints (not the

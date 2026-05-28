@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowRight, FileText, ShieldCheck } from "lucide-react";
+import { ArrowRight, FileText, ShieldCheck, Banknote } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import {
   Card,
@@ -9,9 +9,19 @@ import {
   StatusChip
 } from "@/components/primitives";
 import { ApprovalActions } from "@/components/approval-actions";
+import { BankTxnBatchPanel } from "@/components/bank-txn-batch-panel";
 import { getActiveContext } from "@/lib/active-context";
-import { getApprovals, type Approval } from "@/lib/approvals";
+import {
+  getApprovals,
+  getApprovalCategories,
+  type Approval
+} from "@/lib/approvals";
 import { formatAmount } from "@/lib/journal";
+
+// -----------------------------------------------------------------------
+// Helpers for journal_recategorization + compliance_rule rows
+// (bank_transaction_import rows are handled by BankTxnBatchPanel)
+// -----------------------------------------------------------------------
 
 function subjectLabel(a: Approval): string {
   if (a.subject_type === "journal_recategorization") return "Recategorization";
@@ -80,8 +90,8 @@ function ApprovalCard({
 
           <p className="mt-3 text-[11px] text-ink-tertiary">
             Requested by{" "}
-            <span className="font-mono">{approval.requested_by_identity}</span> ·{" "}
-            {new Date(approval.created_at).toLocaleString()}
+            <span className="font-mono">{approval.requested_by_identity}</span>{" "}
+            · {new Date(approval.created_at).toLocaleString()}
           </p>
         </div>
 
@@ -97,19 +107,36 @@ function ApprovalCard({
   );
 }
 
+// -----------------------------------------------------------------------
+// Page
+// -----------------------------------------------------------------------
+
 export default async function ApprovalsPage() {
   const ctx = await getActiveContext();
   const workspace = ctx.activeWorkspace;
-  // The active entity scopes the list; consolidated/no-entity lists all the
-  // member can see (backend enforces entity-scope either way).
   const entityId = ctx.isConsolidated ? undefined : ctx.activeEntity?.id;
-  const data = workspace
-    ? await getApprovals(workspace.id, { entityId, status: "pending" })
-    : null;
+
+  const [data, categories] = await Promise.all([
+    workspace
+      ? getApprovals(workspace.id, { entityId, status: "pending" })
+      : null,
+    workspace ? getApprovalCategories(workspace.id) : []
+  ]);
+
   const approvals = data?.approvals ?? [];
   const canDecide = workspace
     ? ["owner", "admin"].includes(workspace.role)
     : false;
+
+  // Split by type — BTI rows go to the interactive batch panel
+  const btiApprovals = approvals.filter(
+    (a) => a.subject_type === "bank_transaction_import"
+  );
+  const otherApprovals = approvals.filter(
+    (a) => a.subject_type !== "bank_transaction_import"
+  );
+
+  const totalPending = approvals.length;
 
   return (
     <AppShell>
@@ -118,14 +145,14 @@ export default async function ApprovalsPage() {
           title="Pending approvals"
           subtitle={
             workspace
-              ? `${approvals.length} material ${
-                  approvals.length === 1 ? "action" : "actions"
+              ? `${totalPending} material ${
+                  totalPending === 1 ? "action" : "actions"
                 } awaiting human attestation`
               : "Material actions an agent queued, waiting for a human to attest."
           }
           action={
-            approvals.length > 0 ? (
-              <StatusChip tone="pending">{approvals.length} pending</StatusChip>
+            totalPending > 0 ? (
+              <StatusChip tone="pending">{totalPending} pending</StatusChip>
             ) : undefined
           }
         />
@@ -136,12 +163,12 @@ export default async function ApprovalsPage() {
               No active workspace. Pick one from the switcher above.
             </p>
           </Card>
-        ) : approvals.length === 0 ? (
+        ) : totalPending === 0 ? (
           <Card>
             <p className="text-sm text-ink-tertiary">
-              Nothing waiting on you. Material recategorizations and proposed
-              compliance rules show up here for approval. Lower-value items are in
-              the{" "}
+              Nothing waiting on you — books are caught up. Material
+              recategorizations, proposed compliance rules, and bank import
+              reviews show up here. Lower-value items are in the{" "}
               <Link
                 href="/reconciliation-queue"
                 className="text-brand-400 underline-offset-2 hover:underline"
@@ -152,21 +179,60 @@ export default async function ApprovalsPage() {
             </p>
           </Card>
         ) : (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-8">
             {!canDecide && (
               <div className="rounded-xl border border-pending/40 bg-pending/[0.06] px-5 py-3 text-xs text-ink-secondary">
-                You can review these, but only an <strong>admin</strong> can attest
-                (approve/apply) a material action.
+                You can review these, but only an <strong>admin</strong> can
+                attest (approve/apply) a material action.
               </div>
             )}
-            {approvals.map((a) => (
-              <ApprovalCard
-                key={a.id}
-                approval={a}
-                workspaceId={workspace.id}
-                canDecide={canDecide}
-              />
-            ))}
+
+            {/* ---- bank_transaction_import section ---- */}
+            {btiApprovals.length > 0 && (
+              <section>
+                <div className="mb-3 flex items-center gap-2">
+                  <Banknote size={16} className="text-ink-secondary" />
+                  <h2 className="text-sm font-semibold">
+                    Bank import review
+                  </h2>
+                  <StatusChip tone="pending">
+                    {btiApprovals.length} pending
+                  </StatusChip>
+                </div>
+                <BankTxnBatchPanel
+                  approvals={btiApprovals}
+                  workspaceId={workspace.id}
+                  canDecide={canDecide}
+                  categories={categories}
+                />
+              </section>
+            )}
+
+            {/* ---- journal_recategorization + compliance_rule section ---- */}
+            {otherApprovals.length > 0 && (
+              <section>
+                {btiApprovals.length > 0 && (
+                  <div className="mb-3 flex items-center gap-2">
+                    <h2 className="text-sm font-semibold">
+                      Other pending approvals
+                    </h2>
+                    <StatusChip tone="pending">
+                      {otherApprovals.length} pending
+                    </StatusChip>
+                  </div>
+                )}
+                <div className="flex flex-col gap-3">
+                  {otherApprovals.map((a) => (
+                    <ApprovalCard
+                      key={a.id}
+                      approval={a}
+                      workspaceId={workspace.id}
+                      canDecide={canDecide}
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
           </div>
         )}
       </PageShell>
