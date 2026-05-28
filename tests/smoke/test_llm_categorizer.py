@@ -40,7 +40,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from app.categorization.llm import LLMCategorizer, _parse_and_validate
+from app.categorization.llm import LLMCategorizer, _normalize_category, _parse_and_validate
 from app.categorization.engine import categorize_transaction_async
 from app.config import Settings
 
@@ -260,6 +260,65 @@ def test_parse_and_validate_case_insensitive_match():
     assert result is not None
     cat, _, _ = result
     assert cat == "Banking · Fees"   # normalized to canonical form
+
+
+# ---------------------------------------------------------------------------
+# 6b. Middle-dot normalization — the Qwen format-mismatch case
+# ---------------------------------------------------------------------------
+
+def test_parse_and_validate_middle_dot_missing_maps_to_canonical():
+    """LLM returns 'Office Supplies' (no middle-dot) → maps to 'Office · Supplies'.
+
+    This is the primary regression test for the 148/148 rejection bug where
+    Qwen returned categories without the `·` separator character and the strict
+    equality check rejected them all.
+    """
+    raw = json.dumps({"category": "Office Supplies", "confidence": 0.8, "reasoning": "synth"})
+    result = _parse_and_validate(raw, _ALLOWED)
+    assert result is not None, (
+        "Expected 'Office Supplies' to map to canonical 'Office · Supplies', got None"
+    )
+    cat, conf, _ = result
+    assert cat == "Office · Supplies", f"Expected 'Office · Supplies', got {cat!r}"
+    assert conf == pytest.approx(0.8)
+
+
+def test_parse_and_validate_middle_dot_normalization_all_known_categories():
+    """All canonical COA categories survive a round-trip through _normalize_category.
+
+    Verifies that stripping the middle-dot and lowercasing produces a unique
+    key for every allowed category — no two categories collapse to the same
+    normalised form (which would silently mis-map one to the other).
+    """
+    from app.journal.posting import CATEGORY_TO_ACCOUNT
+    canonical_list = list(CATEGORY_TO_ACCOUNT.keys())
+    normalized_keys = [_normalize_category(c) for c in canonical_list]
+    # All normalized keys must be unique.
+    assert len(normalized_keys) == len(set(normalized_keys)), (
+        "Two canonical categories map to the same normalised key — "
+        "the middle-dot normalizer would mis-route one of them."
+    )
+    # And every dot-stripped category string round-trips back to the canonical.
+    for canonical in canonical_list:
+        dot_stripped = canonical.replace("·", "").replace("  ", " ").strip()
+        result = _parse_and_validate(
+            json.dumps({"category": dot_stripped, "confidence": 0.9, "reasoning": "x"}),
+            canonical_list,
+        )
+        assert result is not None, (
+            f"Dot-stripped form {dot_stripped!r} did not map back to canonical {canonical!r}"
+        )
+        cat, _, _ = result
+        assert cat == canonical, f"Expected {canonical!r}, got {cat!r}"
+
+
+def test_parse_and_validate_extra_spaces_around_separator():
+    """Qwen may add extra spaces: 'Revenue  Marketplace' still maps to canonical."""
+    raw = json.dumps({"category": "Revenue  Marketplace", "confidence": 0.75, "reasoning": "x"})
+    result = _parse_and_validate(raw, _ALLOWED)
+    assert result is not None
+    cat, _, _ = result
+    assert cat == "Revenue · Marketplace"
 
 
 # ---------------------------------------------------------------------------

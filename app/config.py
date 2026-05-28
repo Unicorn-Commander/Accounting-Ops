@@ -58,7 +58,11 @@ class Settings(BaseModel):
     llm_model: str = "Qwen3.6-35B-A3B-Vision"
     llm_api_key: str = ""          # blank = local/no-auth; set in env for cloud
     llm_timeout_s: int = 30
-    llm_max_tokens: int = 200
+    # 512 gives the JSON response room even if thinking suppression is unavailable.
+    # With chat_template_kwargs enable_thinking=False (sent by the categorizer),
+    # the actual output is ~150 tokens; the higher ceiling is a safety net for
+    # endpoints that ignore the thinking-suppression param.
+    llm_max_tokens: int = 512
 
 
 def get_admin_database_url() -> str:
