@@ -1,8 +1,9 @@
-"""Financial reports (P&L, balance sheet, cash flow, 1099-NEC) over journal_entry.
+"""Financial reports (P&L, balance sheet, cash flow, trial balance, 1099-NEC).
 
   GET /api/workspaces/{wid}/reports/pl              — Profit & Loss
   GET /api/workspaces/{wid}/reports/balance-sheet   — Balance Sheet (as-of)
   GET /api/workspaces/{wid}/reports/cash-flow       — Cash Flow
+  GET /api/workspaces/{wid}/reports/trial-balance   — Trial Balance (as-of)
   GET /api/workspaces/{wid}/reports/1099-nec        — 1099-NEC contractors >= $600
 
 pl / balance-sheet / cash-flow accept period and entity_id query params:
@@ -530,6 +531,153 @@ async def cash_flow(
         "investing": {"lines": investing, "total": str(inv_total)},
         "financing": {"lines": financing, "total": str(fin_total)},
         "net_change_in_cash": str(op_total + inv_total + fin_total),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Trial Balance
+# ---------------------------------------------------------------------------
+#
+# A trial balance is the double-entry integrity check: for every posted entry
+# the debit side equals the credit side, so the grand total of all debits MUST
+# equal the grand total of all credits.  It lists one row per active
+# chart_of_account entry that has non-zero activity up to as_of.
+#
+# Sign convention (normal-balance notation):
+#   asset/expense:            normal balance = debit  → positive net = normal
+#   liability/equity/revenue: normal balance = credit → positive net = inverted
+# net_balance = total_debit − total_credit for every row.
+#
+# Exclusions (same as the cash-recon):
+#   source IN ('reversal', 'recategorization') — these are the accounting
+#   correction appendages; they cancel the original entry when included, but
+#   for a plain trial balance we follow the cash-recon convention and exclude
+#   them so a reversal/restatement pair doesn't double-count.
+#   NOTE: the spec says "excluding source IN ('reversal','recategorization')"
+#   matches the cash-recon exclusion.  Discuss with lead if all-entries view
+#   is desired for a future "include_corrections" flag.
+
+
+@router.get("/api/workspaces/{workspace_id}/reports/trial-balance")
+async def trial_balance(
+    workspace_id: UUID,
+    as_of: str | None = None,
+    entity_id: str | None = None,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Trial balance as of a date.  Defaults to today.
+
+    Returns one row per active chart_of_account with non-zero activity up to
+    as_of.  Each row:
+      account_number, canonical_form, account_type,
+      total_debit, total_credit, net_balance (debit − credit).
+
+    Grand totals (grand_total_debit, grand_total_credit) and a balanced bool
+    (total debits == total credits, the fundamental double-entry check) are
+    included.  Role floor: viewer.  Entity-scope honored.
+
+    Exclusion: entries with source IN ('reversal', 'recategorization') are
+    excluded — they are accounting-correction appendages that cancel in pairs;
+    including them would double-count corrections.  This matches the cash-recon
+    exclusion convention.
+    """
+    require_role(workspace, "viewer")
+    scope_restriction = assert_entity_in_scope(workspace, entity_id)
+    as_of_date = date.fromisoformat(as_of) if as_of else date.today()
+    entity_clause, entity_params = _entity_filter(entity_id, scope_restriction)
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        entity_label = await _entity_label(session, entity_id)
+
+        # Aggregate debits and credits per COA account across all posted entries
+        # up to as_of, excluding reversal/recategorization correction sources.
+        # We join chart_of_account via account_number prefix extracted from
+        # canonical_form (split_part on '·').  Only active COA rows with
+        # non-zero activity are returned (HAVING filters zero-net rows).
+        rows = (
+            await session.execute(
+                text(
+                    f"""
+                    WITH activity AS (
+                        -- Debit side of each posted entry
+                        SELECT
+                            split_part(je.debit_account, '·', 1) AS account_number,
+                            je.amount AS debit_amount,
+                            0::numeric               AS credit_amount
+                        FROM journal_entry je
+                        WHERE je.status = 'posted'
+                          AND je.effective_date <= :as_of
+                          AND je.source NOT IN ('reversal', 'recategorization')
+                          {entity_clause}
+                        UNION ALL
+                        -- Credit side of each posted entry
+                        SELECT
+                            split_part(je.credit_account, '·', 1) AS account_number,
+                            0::numeric               AS debit_amount,
+                            je.amount                AS credit_amount
+                        FROM journal_entry je
+                        WHERE je.status = 'posted'
+                          AND je.effective_date <= :as_of
+                          AND je.source NOT IN ('reversal', 'recategorization')
+                          {entity_clause}
+                    ),
+                    aggregated AS (
+                        SELECT
+                            a.account_number,
+                            SUM(a.debit_amount)  AS total_debit,
+                            SUM(a.credit_amount) AS total_credit
+                        FROM activity a
+                        GROUP BY a.account_number
+                        HAVING SUM(a.debit_amount) != 0 OR SUM(a.credit_amount) != 0
+                    )
+                    SELECT
+                        agg.account_number,
+                        coa.canonical_form,
+                        coa.account_type,
+                        agg.total_debit,
+                        agg.total_credit
+                    FROM aggregated agg
+                    JOIN chart_of_account coa
+                      ON coa.account_number = agg.account_number
+                     AND coa.is_active = true
+                    ORDER BY agg.account_number
+                    """
+                ),
+                {"as_of": as_of_date, **entity_params},
+            )
+        ).mappings().all()
+
+    accounts: list[dict] = []
+    grand_debit = Decimal("0")
+    grand_credit = Decimal("0")
+
+    for r in rows:
+        total_debit = Decimal(str(r["total_debit"] or 0))
+        total_credit = Decimal(str(r["total_credit"] or 0))
+        net_balance = total_debit - total_credit
+        grand_debit += total_debit
+        grand_credit += total_credit
+        accounts.append(
+            {
+                "account_number": r["account_number"],
+                "canonical_form": r["canonical_form"],
+                "account_type": r["account_type"],
+                "total_debit": str(total_debit),
+                "total_credit": str(total_credit),
+                "net_balance": str(net_balance),
+            }
+        )
+
+    balanced = grand_debit == grand_credit
+    return {
+        "as_of": as_of_date.isoformat(),
+        "entity_label": entity_label,
+        "entity_id": entity_id or "consolidated",
+        "currency": "USD",
+        "accounts": accounts,
+        "grand_total_debit": str(grand_debit),
+        "grand_total_credit": str(grand_credit),
+        "balanced": balanced,
     }
 
 
