@@ -23,6 +23,7 @@ const CPA_EXPORT_INTERNAL_URL =
   process.env.CPA_EXPORT_INTERNAL_URL ?? "http://cpa-export:8093";
 
 // Allow-list of backend path segments. Anything outside this never gets proxied.
+// Fixed paths are matched exactly. Dynamic 1120 paths are matched by regex below.
 const ALLOWED_PATHS = new Set<string>([
   "exports/csv",
   "exports/iif",
@@ -32,6 +33,11 @@ const ALLOWED_PATHS = new Set<string>([
   "reports/cash-flow.pdf",
   "healthz"
 ]);
+
+// Dynamic path pattern: exports/1120/{workspace_id}/{entity_id}/{year}
+// workspace_id and entity_id are UUIDs or "all"/"consolidated"; year is 4-digit.
+const DYNAMIC_1120_RX =
+  /^exports\/1120\/[0-9a-f-]{8,}\/[0-9a-f-]{8,}\/\d{4}$|^exports\/1120\/[^/]+\/[^/]+\/\d{4}$/;
 
 const PASSTHROUGH_HEADERS = new Set([
   "content-type",
@@ -52,7 +58,8 @@ export async function GET(
 
   const { path } = await params;
   const joined = path.join("/");
-  if (!ALLOWED_PATHS.has(joined)) {
+  const isAllowed = ALLOWED_PATHS.has(joined) || DYNAMIC_1120_RX.test(joined);
+  if (!isAllowed) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
 

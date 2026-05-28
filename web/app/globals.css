@@ -58,6 +58,66 @@ html, body {
   -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 0%, transparent 70%);
 }
 
+/* ------------------------------------------------------------------ */
+/* Print styles — used by /taxes/[year] Form 1120 view                */
+/* ------------------------------------------------------------------ */
+@media print {
+  /* Hide nav, header, buttons, export controls */
+  header,
+  nav,
+  .print\:hidden,
+  [data-print-hidden] {
+    display: none !important;
+  }
+
+  /* Force white background, black text for legibility on paper */
+  html, body {
+    background: white !important;
+    color: black !important;
+    font-size: 11pt;
+  }
+
+  /* Remove card shadows and dark backgrounds */
+  .rounded-xl,
+  .bg-surface,
+  .bg-elevated,
+  .bg-canvas {
+    background: white !important;
+    box-shadow: none !important;
+    border-color: #ccc !important;
+  }
+
+  /* Disclaimer banner — yellow on paper */
+  .border-pending\/50 {
+    border-color: #f59e0b !important;
+    background: #fef3c7 !important;
+    color: #78350f !important;
+  }
+
+  /* Ensure tables don't break mid-row */
+  table {
+    page-break-inside: auto;
+    border-collapse: collapse;
+  }
+  tr {
+    page-break-inside: avoid;
+    page-break-after: auto;
+  }
+
+  /* Force ink colors to readable on paper */
+  .text-credit   { color: #166534 !important; }
+  .text-debit    { color: #991b1b !important; }
+  .text-pending  { color: #92400e !important; }
+  .text-brand-300 { color: #4c1d95 !important; }
+  .text-ink-primary    { color: #111 !important; }
+  .text-ink-secondary  { color: #444 !important; }
+  .text-ink-tertiary   { color: #666 !important; }
+  .text-ink-disabled   { color: #999 !important; }
+  .font-mono { font-family: "Courier New", Courier, monospace !important; }
+
+  a { color: inherit !important; text-decoration: none !important; }
+}
+
 /* Animated gradient stroke for highlight cards */
 .glow-border {
   position: relative;

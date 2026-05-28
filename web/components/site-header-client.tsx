@@ -15,6 +15,7 @@ const NAV = [
   ["Journal", "/journal"],
   ["Chart of Accounts", "/coa"],
   ["Reports", "/reports"],
+  ["Taxes", "/taxes"],
   ["Connectors", "/connectors"],
   ["CPA Export", "/cpa-export"],
   ["Help", "/help"]
