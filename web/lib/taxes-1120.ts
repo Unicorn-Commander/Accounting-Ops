@@ -1,13 +1,17 @@
 // Server-side + shared types/fetcher for the Form 1120 tax package.
 //
 // The cpa-export service exposes:
-//   GET /exports/1120/{workspace_id}/{entity_id}/{year}
+//   GET /exports/1120/{year}?workspace_id=&entity_id=
 // which returns a JSON package documented in
 //   accounting-ops-cpa-export/cpa_export/reports/form_1120.py
 //
-// On the server side (Next.js Server Components) we call the proxy route
-// which forwards the user's Keycloak bearer token.
-// On the client side, the same proxy is called via the /api/cpa-export/ path.
+// workspace_id + entity_id are query params (matching the convention of every
+// other /exports + /reports endpoint). The authorize_export dependency reads
+// them from the URL and authorizes against the bearer-token JWT.
+//
+// On the server side (Next.js Server Components) we call cpa-export directly
+// with the user's Keycloak bearer token.
+// On the client side, the same path is reachable via the /api/cpa-export proxy.
 
 import { auth } from "@/lib/auth";
 
@@ -100,7 +104,11 @@ export async function fetch1120Package(
     throw new Error("unauthenticated");
   }
 
-  const url = `${CPA_EXPORT_INTERNAL_URL}/exports/1120/${encodeURIComponent(workspaceId)}/${encodeURIComponent(entityId)}/${year}`;
+  const qs = new URLSearchParams({
+    workspace_id: workspaceId,
+    entity_id: entityId,
+  });
+  const url = `${CPA_EXPORT_INTERNAL_URL}/exports/1120/${year}?${qs.toString()}`;
 
   const res = await fetch(url, {
     headers: {

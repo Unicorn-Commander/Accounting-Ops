@@ -34,10 +34,10 @@ const ALLOWED_PATHS = new Set<string>([
   "healthz"
 ]);
 
-// Dynamic path pattern: exports/1120/{workspace_id}/{entity_id}/{year}
-// workspace_id and entity_id are UUIDs or "all"/"consolidated"; year is 4-digit.
-const DYNAMIC_1120_RX =
-  /^exports\/1120\/[0-9a-f-]{8,}\/[0-9a-f-]{8,}\/\d{4}$|^exports\/1120\/[^/]+\/[^/]+\/\d{4}$/;
+// Dynamic path pattern: exports/1120/{year} (4-digit year).
+// workspace_id and entity_id come from query string (?workspace_id=…&entity_id=…),
+// matching the convention of every other /exports + /reports endpoint.
+const DYNAMIC_1120_RX = /^exports\/1120\/\d{4}$/;
 
 const PASSTHROUGH_HEADERS = new Set([
   "content-type",
