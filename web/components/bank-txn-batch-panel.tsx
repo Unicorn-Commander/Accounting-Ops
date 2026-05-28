@@ -19,10 +19,13 @@ import {
   X,
   Loader2,
   ChevronDown,
-  AlertTriangle
+  AlertTriangle,
+  Layers,
+  List
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { BankTxnImportRow } from "@/components/bank-txn-import-row";
+import { BankTxnGroupedView } from "@/components/bank-txn-grouped-view";
 import type { Approval } from "@/lib/approvals";
 
 // -----------------------------------------------------------------------
@@ -159,6 +162,11 @@ export function BankTxnBatchPanel({
   const [filterTier, setFilterTier] = useState<string>("all");
   const [filterCategory, setFilterCategory] = useState<string>("all");
   const [filterSuggestion, setFilterSuggestion] = useState<string>("all");
+
+  // ---- view mode: rows vs grouped-by-category ----
+  // Groups mode is the bulk-approve accelerator: collapses N rows of the same
+  // suggested category into one card with an "Approve all in group" action.
+  const [viewMode, setViewMode] = useState<"rows" | "groups">("rows");
 
   // ---- pagination ----
   const [page, setPage] = useState(0);
@@ -370,10 +378,46 @@ export function BankTxnBatchPanel({
         <span className="ml-auto text-xs text-ink-tertiary">
           {filteredApprovals.length} matching
         </span>
+
+        {/* View-mode toggle (single rows vs grouped-by-category) */}
+        <div
+          className="inline-flex items-center overflow-hidden rounded-md border border-subtle"
+          role="group"
+          aria-label="View mode"
+        >
+          <button
+            type="button"
+            onClick={() => setViewMode("rows")}
+            className={cn(
+              "inline-flex h-7 items-center gap-1 px-2 text-xs",
+              viewMode === "rows"
+                ? "bg-brand-500/15 text-brand-300"
+                : "bg-surface text-ink-secondary hover:bg-elevated"
+            )}
+            title="One transaction per row"
+          >
+            <List size={12} />
+            Rows
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode("groups")}
+            className={cn(
+              "inline-flex h-7 items-center gap-1 px-2 text-xs",
+              viewMode === "groups"
+                ? "bg-brand-500/15 text-brand-300"
+                : "bg-surface text-ink-secondary hover:bg-elevated"
+            )}
+            title="Group by suggested category — bulk approve a whole category"
+          >
+            <Layers size={12} />
+            Grouped
+          </button>
+        </div>
       </div>
 
-      {/* ---- Select controls ---- */}
-      {canDecide && filteredApprovals.length > 0 && (
+      {/* ---- Select controls (rows mode only) ---- */}
+      {viewMode === "rows" && canDecide && filteredApprovals.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={selectAll}
@@ -403,8 +447,8 @@ export function BankTxnBatchPanel({
         </div>
       )}
 
-      {/* ---- Batch action bar ---- */}
-      {canDecide && selCount > 0 && (
+      {/* ---- Batch action bar (rows mode only — groups mode has its own per-card buttons) ---- */}
+      {viewMode === "rows" && canDecide && selCount > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-brand-500/40 bg-brand-500/[0.06] px-4 py-2.5">
           <span className="text-xs font-medium text-ink-primary">
             {selCount} selected
@@ -457,8 +501,23 @@ export function BankTxnBatchPanel({
         </div>
       )}
 
-      {/* ---- Row list ---- */}
-      {filteredApprovals.length === 0 ? (
+      {/* ---- Body: row list OR grouped view ---- */}
+      {viewMode === "groups" ? (
+        <BankTxnGroupedView
+          approvals={filteredApprovals}
+          workspaceId={workspaceId}
+          canDecide={canDecide}
+          categories={categories}
+          onDecided={(id) => {
+            setDecidedIds((prev) => new Set([...prev, id]));
+            setSelected((prev) => {
+              const next = new Set(prev);
+              next.delete(id);
+              return next;
+            });
+          }}
+        />
+      ) : filteredApprovals.length === 0 ? (
         <div className="rounded-xl border border-default bg-surface px-5 py-8 text-center">
           <p className="text-sm text-ink-secondary">
             Nothing to review — books are caught up.
@@ -489,8 +548,8 @@ export function BankTxnBatchPanel({
         </div>
       )}
 
-      {/* ---- Pagination ---- */}
-      {totalPages > 1 && (
+      {/* ---- Pagination (rows mode only) ---- */}
+      {viewMode === "rows" && totalPages > 1 && (
         <div className="flex items-center justify-center gap-3 pt-2">
           <button
             disabled={page === 0}
