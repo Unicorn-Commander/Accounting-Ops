@@ -419,7 +419,7 @@ async def balance_sheet(
         "assets": {"lines": assets, "total": str(assets_total)},
         "liabilities": {"lines": liabilities, "total": str(liab_total)},
         "equity": {"lines": equity, "total": str(equity_total)},
-        "balanced": str(drift) == "0",
+        "balanced": drift == Decimal(0),
         "drift": str(drift),
     }
 
