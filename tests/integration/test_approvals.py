@@ -161,12 +161,16 @@ async def _verify_chain(base_url: str, token: str) -> dict:
 
 async def _decide(
     base_url: str, token: str, approval_id: str, decision: str,
+    extra: dict | None = None,
 ) -> httpx.Response:
     headers = {"Authorization": f"Bearer {token}"}
+    body = {"decision": decision}
+    if extra:
+        body.update(extra)
     async with httpx.AsyncClient(base_url=base_url, headers=headers, timeout=30) as c:
         return await c.post(
             f"/api/workspaces/{TEST_WORKSPACE_ID}/approvals/{approval_id}/decide",
-            json={"decision": decision},
+            json=body,
         )
 
 
@@ -735,3 +739,103 @@ async def test_reject_bank_transaction_import_leaves_ledger_untouched(
     assert aq["status"] == "rejected"
     assert aq["decided_by_uc_uid"] == seeded_workspace.uc_uid
     assert je_count == 0, "reject must not post a journal entry"
+
+
+# ==========================================================================
+# (8) category_override: approve a BTI with an override → entry lands on the
+#     overridden account; the payload category is NOT used.
+# ==========================================================================
+@pytest.mark.asyncio
+async def test_approve_bank_transaction_import_with_category_override(
+    db: asyncpg.Pool, seeded_workspace: StackConfig
+) -> None:
+    """Approving a BTI row with category_override posts the entry on the
+    overridden category/account rather than the payload's suggested category.
+
+    Pattern:
+      seed row (category='Banking · Fees', acct 6700)
+      → APPROVE with category_override='SaaS · AI' (acct 6210)
+      → journal entry lands on 6210, not 6700
+      → approval row marked approved + audit written
+    """
+    base, token = seeded_workspace.base_url, seeded_workspace.token
+    tag = _run_tag()
+    sxid = f"bofa-1792:2022-02-15:001:{tag}"
+
+    approval_id = await _seed_bank_txn_import_approval(
+        db,
+        sxid=sxid,
+        effective_date="2022-02-15",
+        amount_cents=-2500,  # -$25, tier L but payload says M for test coverage
+        category="Banking · Fees",
+    )
+
+    # Override to "SaaS · AI" (account 6210).
+    r = await _decide(
+        base, token, approval_id, "approve",
+        extra={"category_override": "SaaS · AI"},
+    )
+    assert r.status_code == 200, r.text
+    decided = r.json()
+    assert decided["ok"] is True
+    assert decided["applied"] is True
+    journal_entry_id = decided["journal_entry_id"]
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            je = await conn.fetchrow(
+                "SELECT status, category, debit_account FROM journal_entry "
+                "WHERE id::text = $1",
+                journal_entry_id,
+            )
+            aq = await conn.fetchrow(
+                "SELECT status::text AS status FROM approval_queue "
+                "WHERE id::text = $1",
+                approval_id,
+            )
+
+    assert je is not None, "journal entry must exist"
+    assert je["status"] == "posted"
+    # Category override took effect — should be "SaaS · AI" (6210), not "Banking · Fees" (6700)
+    assert je["category"] == "SaaS · AI", (
+        f"Expected category 'SaaS · AI' (category_override), got {je['category']!r}"
+    )
+    assert je["debit_account"].startswith("6210"), (
+        f"Expected debit account 6210 (SaaS · AI), got {je['debit_account']!r}"
+    )
+    assert aq["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_approve_bank_transaction_import_invalid_category_override_rejected(
+    db: asyncpg.Pool, seeded_workspace: StackConfig
+) -> None:
+    """Passing an unknown category_override returns 422; row stays pending."""
+    base, token = seeded_workspace.base_url, seeded_workspace.token
+    tag = _run_tag()
+    sxid = f"bofa-1792:2022-02-20:001:{tag}"
+
+    approval_id = await _seed_bank_txn_import_approval(
+        db,
+        sxid=sxid,
+        effective_date="2022-02-20",
+        amount_cents=-1000,
+        category="Banking · Fees",
+    )
+
+    r = await _decide(
+        base, token, approval_id, "approve",
+        extra={"category_override": "Not A Real Category"},
+    )
+    assert r.status_code == 422, r.text
+
+    # Row must still be pending — the override validation failure rolled back.
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            status = await conn.fetchval(
+                "SELECT status::text FROM approval_queue WHERE id::text = $1",
+                approval_id,
+            )
+    assert status == "pending", "invalid category_override must not mark the row decided"
