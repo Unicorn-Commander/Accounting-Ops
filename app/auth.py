@@ -6,10 +6,26 @@ across the Unicorn ecosystem (preferred over `preferred_username` per
 the OIDC-user-id canary lesson).
 
 Service tokens: if the presented bearer token matches a registered service
-token from ACCTOPS_SERVICE_TOKENS env (JSON map of token→{uc_uid, agent_id}),
-we synthesize an AuthContext for the impersonated user. This is the path
-used by long-running internal workers (receipt-reconciler, etc.) that
+token from ACCTOPS_SERVICE_TOKENS env (JSON map of token→{uc_uid, agent_id,
+…}), we synthesize an AuthContext for the impersonated user. This is the
+path used by long-running internal workers (receipt-reconciler, etc.) that
 operate on behalf of a workspace owner without a Keycloak session.
+
+H2 (2026-05-28): service tokens may carry optional scope fields that
+constrain the token's reach below the impersonated user's full membership:
+
+  - ``workspace_ids``: list of workspace UUIDs the token may access. If set
+    and the request's workspace_id is not in the list, resolve_workspace
+    raises 403 (independent of the user's membership).
+  - ``entity_ids``: list of entity UUIDs the token may access. Intersected
+    with the user's membership entity_scope; an empty intersection raises
+    403. None = inherit the user's full membership.
+  - ``role_floor``: caps the token's effective role at this value (e.g.
+    ``viewer``). The token gets ``min(membership_role, role_floor)``.
+
+A service token WITHOUT these fields keeps full impersonation reach for
+backward compatibility — useful for trusted internal workers during the
+transition. New tokens SHOULD declare the minimum scope they need.
 """
 from __future__ import annotations
 
@@ -18,8 +34,9 @@ import logging
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated, Any
+from uuid import UUID
 
 import httpx
 from fastapi import Depends, HTTPException, status
@@ -36,12 +53,35 @@ from app.config import get_settings
 bearer = HTTPBearer(auto_error=False)
 
 
+# Role hierarchy for the role_floor cap. Lower index = lower privilege.
+# Must stay in sync with the ROLE_ORDER used in app.tenancy.require_role.
+_ROLE_ORDER = ("viewer", "accountant", "admin", "owner")
+
+
+@dataclass(frozen=True)
+class ServiceScope:
+    """Per-service-token scope constraints applied at resolve_workspace.
+
+    Each field is "additive restriction" — if None, the token inherits
+    whatever the impersonated user has in the membership row. If set, it
+    further restricts the effective reach.
+    """
+
+    workspace_ids: frozenset[UUID] | None = None
+    entity_ids: frozenset[UUID] | None = None
+    role_floor: str | None = None
+
+
 @dataclass(frozen=True)
 class AuthContext:
     uc_uid: str
     agent_id: str | None
     scopes: tuple[str, ...]
     claims: dict[str, Any]
+    # H2: service-token scope constraints. None for Keycloak-validated user
+    # tokens (no constraint — the user's full membership applies). Set when
+    # the bearer matched a service token that declared scope fields.
+    service_scope: ServiceScope | None = None
 
 
 # JWKS cache: avoid refetching Keycloak's signing keys on every request.
@@ -84,15 +124,57 @@ async def _fetch_jwks_force_refresh() -> dict[str, Any]:
     return await _fetch_jwks()
 
 
-_service_tokens_cache: dict[str, dict[str, str]] | None = None
+_service_tokens_cache: dict[str, dict[str, Any]] | None = None
 
 
-def _load_service_tokens() -> dict[str, dict[str, str]]:
+def _parse_uuid_list(value: Any) -> frozenset[UUID] | None:
+    """Parse a JSON list-of-strings into a frozenset of UUIDs.
+
+    Returns None on missing/None (= unbounded). Returns an empty frozenset on
+    an explicit empty list (= deny-all, intentional). Skips invalid UUIDs.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return None
+    out: set[UUID] = set()
+    for v in value:
+        try:
+            out.add(UUID(str(v)))
+        except (ValueError, TypeError):
+            # Skip malformed entries — better to drop than to widen scope.
+            continue
+    return frozenset(out)
+
+
+def _parse_role_floor(value: Any) -> str | None:
+    """Validate a role_floor string against the known hierarchy. Drop unknowns."""
+    if value is None or not isinstance(value, str):
+        return None
+    value = value.strip().lower()
+    if value in _ROLE_ORDER:
+        return value
+    return None
+
+
+def _load_service_tokens() -> dict[str, dict[str, Any]]:
     """Parse ACCTOPS_SERVICE_TOKENS env var.
 
-    Format: {"<random-token>": {"uc_uid": "aaron", "agent_id": "receipt-reconciler"}}
-    The token strings must be at least 32 chars (entropy) and are compared
-    with secrets.compare_digest. Returns {} if unset or malformed.
+    Format::
+
+        {
+          "<token>": {
+            "uc_uid": "aaron",
+            "agent_id": "receipt-reconciler",
+            # H2 optional scope fields (least-privilege; backward compatible):
+            "workspace_ids": ["<wid>", "<wid>"],   // None = all workspaces the user is in
+            "entity_ids":    ["<eid>"],            // None = all entities in membership
+            "role_floor":    "accountant"          // None = inherit membership role
+          }
+        }
+
+    Token strings must be at least 32 chars (entropy) and are compared with
+    ``secrets.compare_digest``. Returns {} if unset or malformed.
     """
     global _service_tokens_cache
     if _service_tokens_cache is not None:
@@ -105,7 +187,7 @@ def _load_service_tokens() -> dict[str, dict[str, str]]:
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
             raise ValueError("ACCTOPS_SERVICE_TOKENS must be a JSON object")
-        tokens: dict[str, dict[str, str]] = {}
+        tokens: dict[str, dict[str, Any]] = {}
         for token, ident in parsed.items():
             if not isinstance(ident, dict):
                 continue
@@ -115,6 +197,9 @@ def _load_service_tokens() -> dict[str, dict[str, str]]:
             tokens[token] = {
                 "uc_uid": uc_uid,
                 "agent_id": ident.get("agent_id") or "service",
+                "workspace_ids": _parse_uuid_list(ident.get("workspace_ids")),
+                "entity_ids": _parse_uuid_list(ident.get("entity_ids")),
+                "role_floor": _parse_role_floor(ident.get("role_floor")),
             }
         _service_tokens_cache = tokens
         return tokens
@@ -123,7 +208,7 @@ def _load_service_tokens() -> dict[str, dict[str, str]]:
         return _service_tokens_cache
 
 
-def _match_service_token(presented: str) -> dict[str, str] | None:
+def _match_service_token(presented: str) -> dict[str, Any] | None:
     """Constant-time compare against registered service tokens. None on miss."""
     for token, ident in _load_service_tokens().items():
         if secrets.compare_digest(token, presented):
@@ -148,13 +233,24 @@ async def authenticate_token(token: str) -> AuthContext:
     """
     # Service token fast-path: long-lived shared-secret tokens for internal
     # workers. Bypass JWT validation; impersonate the configured uc_uid.
+    # H2: any declared scope constraints travel with the AuthContext and are
+    # applied by resolve_workspace below.
     service_ident = _match_service_token(token)
     if service_ident is not None:
+        wsids = service_ident.get("workspace_ids")
+        eids = service_ident.get("entity_ids")
+        floor = service_ident.get("role_floor")
+        scope: ServiceScope | None = None
+        if wsids is not None or eids is not None or floor is not None:
+            scope = ServiceScope(
+                workspace_ids=wsids, entity_ids=eids, role_floor=floor
+            )
         ctx = AuthContext(
             uc_uid=service_ident["uc_uid"],
             agent_id=service_ident["agent_id"],
             scopes=("service",),
             claims={"sub": service_ident["uc_uid"], "uc_uid": service_ident["uc_uid"]},
+            service_scope=scope,
         )
         _stamp_audit_actor(ctx)
         return ctx
