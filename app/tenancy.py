@@ -170,9 +170,45 @@ async def resolve_workspace(
     auth: AuthContext = Depends(validate_bearer_token),
     workspace_id_header: str | None = Header(default=None, alias="X-Workspace-Id"),
 ) -> WorkspaceContext:
-    """FastAPI dependency: resolve and authorize the user for the workspace."""
+    """FastAPI dependency: resolve and authorize the user for the workspace.
+
+    For service tokens carrying H2 scope constraints, the membership lookup
+    runs first (the service token impersonates a real user), then the scope
+    is intersected: workspace_ids gates the workspace; entity_ids narrows
+    entity_scope; role_floor caps the effective role. A scope mismatch
+    raises 403 — independent of what the impersonated user is allowed.
+    """
     workspace_id = _extract_workspace_id(request, workspace_id_header, auth.claims)
     role, entity_scope, hipaa, slug = await _resolve_membership(auth.uc_uid, workspace_id)
+
+    # ---- H2: apply service-token scope, if any ----
+    if auth.service_scope is not None:
+        ss = auth.service_scope
+        # 1. Workspace gate. If the token declared a workspace allow-list and
+        #    this workspace isn't in it, 403 regardless of membership.
+        if ss.workspace_ids is not None and workspace_id not in ss.workspace_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Service token is not scoped to this workspace.",
+            )
+        # 2. Entity scope intersection. The service-token entity_ids further
+        #    restricts the membership entity_scope (None on either side = all).
+        if ss.entity_ids is not None:
+            if entity_scope is None:
+                # Membership had no constraint → take the token's restriction.
+                entity_scope = tuple(ss.entity_ids)
+            else:
+                intersection = tuple(e for e in entity_scope if e in ss.entity_ids)
+                if not intersection:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Service token entity scope has no overlap with membership.",
+                    )
+                entity_scope = intersection
+        # 3. Role cap. min(membership_role, role_floor) in _ROLE_ORDER.
+        if ss.role_floor is not None:
+            role = _cap_role(role, ss.role_floor)
+
     return WorkspaceContext(
         workspace_id=workspace_id,
         workspace_slug=slug,
@@ -182,6 +218,27 @@ async def resolve_workspace(
         entity_scope=entity_scope,
         hipaa_protected=hipaa,
     )
+
+
+# Role hierarchy mirrored from app.auth._ROLE_ORDER. Lowest-priv first.
+_ROLE_ORDER = ("viewer", "accountant", "admin", "owner")
+
+
+def _cap_role(actual: str, ceiling: str) -> str:
+    """Return min(actual, ceiling) along the role hierarchy.
+
+    If either role is unknown, fall back to the safer (lower) one: an unknown
+    value should never grant more reach than declared.
+    """
+    try:
+        a_idx = _ROLE_ORDER.index(actual)
+    except ValueError:
+        return ceiling  # unknown actual → use ceiling (safer)
+    try:
+        c_idx = _ROLE_ORDER.index(ceiling)
+    except ValueError:
+        return actual  # unknown ceiling → fall back to actual
+    return actual if a_idx <= c_idx else ceiling
 
 
 async def resolve_entity(
