@@ -11,9 +11,14 @@ Layering (deliberate):
 
 Every fixture SKIPS (never errors) when the stack isn't reachable so the
 suite stays green on a machine without docker.
+
+Shared provisioning helpers (ENTITY_B_ID, _ensure_entity_b, _set_membership)
+are defined here so they can be reused by both test_tenant_isolation.py and
+test_h2_service_token_scope.py without duplication.
 """
 from __future__ import annotations
 
+import json
 import uuid
 from typing import AsyncIterator
 
@@ -36,6 +41,102 @@ from tests.conftest import (
 )
 
 _SCHEMA = f"accounting_ops_{str(TEST_WORKSPACE_ID).replace('-', '_')}"
+
+# ---------------------------------------------------------------------------
+# Shared second-entity constants (reused across test_tenant_isolation.py and
+# test_h2_service_token_scope.py). Keep the slug/ID in one place.
+# ---------------------------------------------------------------------------
+ENTITY_B_ID = uuid.uuid5(
+    uuid.NAMESPACE_DNS, f"{TEST_WORKSPACE_ID}:entity:isolation-entity-b"
+)
+ENTITY_B_SLUG = "isolation-entity-b"
+ENTITY_B_EXTERNAL_ACCOUNT = "ACC-isolation-entity-b-0002"
+
+
+async def _ensure_entity_b(pool: "asyncpg.Pool") -> None:
+    """Create entity B in the workspace schema (idempotent on slug)."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            await conn.execute(
+                """
+                INSERT INTO entity (
+                    id, workspace_id, slug, display_name, kind,
+                    country_code, functional_currency, status
+                ) VALUES (
+                    $1, $2, $3, 'Isolation Entity B', CAST('llc' AS entity_type),
+                    'US', 'USD', 'active'
+                )
+                ON CONFLICT (slug) DO NOTHING
+                """,
+                str(ENTITY_B_ID),
+                str(TEST_WORKSPACE_ID),
+                ENTITY_B_SLUG,
+            )
+
+
+async def _ensure_entity_b_mapping(pool: "asyncpg.Pool") -> None:
+    """Register entity B's external bank account mapping (idempotent)."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            await conn.execute(
+                """
+                INSERT INTO account_entity_mapping (
+                    id, workspace_id, entity_id, source, external_account_id,
+                    external_org, external_account_name, auto_categorize
+                ) VALUES (
+                    gen_random_uuid(), $1, $2, $3, $4,
+                    'Isolation B Bank', 'Isolation B Checking (0002)', true
+                )
+                ON CONFLICT (source, external_account_id) DO NOTHING
+                """,
+                str(TEST_WORKSPACE_ID),
+                str(ENTITY_B_ID),
+                TEST_SOURCE,
+                ENTITY_B_EXTERNAL_ACCOUNT,
+            )
+
+
+async def _set_membership(
+    pool: "asyncpg.Pool",
+    uc_uid: str,
+    role: str,
+    entity_scope: list[str] | None,
+) -> tuple[str, list[str] | None]:
+    """Set (role, entity_scope) for uc_uid's membership; return the previous values."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            prev = await conn.fetchrow(
+                """
+                SELECT m.role::text AS role, m.entity_scope
+                FROM public.workspace_membership m
+                JOIN public.user_account u ON u.id = m.user_id
+                WHERE u.uc_uid = $1 AND m.workspace_id = $2
+                """,
+                uc_uid,
+                str(TEST_WORKSPACE_ID),
+            )
+            assert prev is not None, "membership not found — seeded_workspace must run first"
+            scope_json = json.dumps(entity_scope) if entity_scope is not None else None
+            await conn.execute(
+                """
+                UPDATE public.workspace_membership m
+                SET role = CAST($1 AS public.workspace_role),
+                    entity_scope = $2::jsonb
+                FROM public.user_account u
+                WHERE u.id = m.user_id AND u.uc_uid = $3
+                  AND m.workspace_id = $4
+                """,
+                role,
+                scope_json,
+                uc_uid,
+                str(TEST_WORKSPACE_ID),
+            )
+    prev_scope = prev["entity_scope"]
+    if isinstance(prev_scope, str):
+        prev_scope = json.loads(prev_scope)
+    return prev["role"], prev_scope
 
 
 # --------------------------------------------------------------------------
