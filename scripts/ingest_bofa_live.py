@@ -361,12 +361,21 @@ async def plan_txn(
             "source_external_id": sxid,
             "effective_date": txn_date,
             "amount_cents": amount_cents,
+            # Carry the full surface so the approve handler has what it needs
+            # without falling back to a COA lookup, AND so the human approver
+            # in /approvals can see what they're actually approving.
+            "description": description,
+            "payee": None,            # BofA eStatements don't break out a payee
+            "memo": None,             # BofA eStatements don't carry a memo
+            "external_account_id": COA_CASH_LINKED_EXT_ID,
             "category": suggestion.category,
             "category_status": suggestion.status,
             "categorization_source": suggestion.source,
+            "sign_matched": suggestion.sign_matched,
             "debit_account_hint": debit_hint,
             "credit_account_hint": credit_hint,
             "materiality_tier": verdict.tier,
+            "materiality_outcome": verdict.outcome,
             "block_reason": block_reason,
             "llm_suggested": llm_suggested,
         }
