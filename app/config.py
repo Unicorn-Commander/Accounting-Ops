@@ -46,6 +46,20 @@ class Settings(BaseModel):
     default_workspace_id: str | None = None
     default_entity_id: str | None = None
 
+    # ---- LLM Categorizer (Tier-2 fallback) ----
+    # All fields are env-only — no API key ever in code.
+    #
+    # The endpoint is OpenAI-compatible (/v1/chat/completions). Point at:
+    #   - Local Ollama / llama.cpp / vLLM (no key needed, llm_api_key="")
+    #   - OpenRouter / OpenAI / Anthropic proxy (set LLM_API_KEY in the environment)
+    #
+    # Default targets the local Qwen3.6-35B on midboy1's P40 GPU pair.
+    llm_endpoint_url: str = "http://100.121.80.175:8088/v1"
+    llm_model: str = "Qwen3.6-35B-A3B-Vision"
+    llm_api_key: str = ""          # blank = local/no-auth; set in env for cloud
+    llm_timeout_s: int = 30
+    llm_max_tokens: int = 200
+
 
 def get_admin_database_url() -> str:
     """DB URL for DDL/owner operations (migrations + provisioning).
@@ -82,4 +96,9 @@ def get_settings() -> Settings:
         qwen_vlm_url=os.getenv("QWEN_VLM_URL", defaults.qwen_vlm_url),
         default_workspace_id=os.getenv("DEFAULT_WORKSPACE_ID") or os.getenv("TENANT_ID"),
         default_entity_id=os.getenv("DEFAULT_ENTITY_ID"),
+        llm_endpoint_url=os.getenv("LLM_ENDPOINT_URL", defaults.llm_endpoint_url),
+        llm_model=os.getenv("LLM_MODEL", defaults.llm_model),
+        llm_api_key=os.getenv("LLM_API_KEY", defaults.llm_api_key),
+        llm_timeout_s=int(os.getenv("LLM_TIMEOUT_S", str(defaults.llm_timeout_s))),
+        llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", str(defaults.llm_max_tokens))),
     )
