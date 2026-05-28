@@ -546,3 +546,192 @@ async def test_decide_denied_out_of_scope_entity(
                 "SELECT status::text FROM approval_queue WHERE id::text = $1", approval_id,
             )
     assert aq == "pending", "out-of-scope decide must not finalize the approval"
+
+
+# ==========================================================================
+# (6) Approve a bank_transaction_import queued row -> journal entry posted
+# ==========================================================================
+
+
+async def _seed_bank_txn_import_approval(
+    db: asyncpg.Pool,
+    *,
+    sxid: str,
+    effective_date: str,
+    amount_cents: int,
+    category: str = "Banking · Fees",
+) -> str:
+    """Reproduce the 'bank_transaction_import pending' row the ingest script writes.
+
+    The ingest script can't be run in integration tests (no live bank statements),
+    so we seed the same approval_queue row shape it would write — exact
+    subject_type / status / payload structure — via the owner pool.  The thing
+    under test (approve → apply) then runs entirely through the real HTTP endpoint.
+    Returns the approval_queue id.
+    """
+    import json
+    import uuid as _uuid
+
+    approval_id = str(_uuid.uuid4())
+    subject_id = str(_uuid.uuid4())  # per-row UUID (not the source_external_id)
+    payload = {
+        "action": "bank_transaction_import",
+        "source_external_id": sxid,
+        "effective_date": effective_date,
+        "amount_cents": amount_cents,
+        "category": category,
+        "category_status": "auto",
+        "categorization_source": "vendor_rules",
+        "external_account_id": TEST_EXTERNAL_ACCOUNT_ID,
+        "materiality_tier": "M",
+        "block_reason": "queue_for_confirm",
+        "llm_suggested": False,
+    }
+    amount_dec = abs(amount_cents) / 100
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            await conn.execute(
+                """
+                INSERT INTO approval_queue (
+                    id, workspace_id, entity_id, subject_type, subject_id,
+                    amount, currency_code, usd_equivalent_at_event_time,
+                    status, reasoning, requested_by_identity, payload
+                ) VALUES (
+                    $1, $2, $3, 'bank_transaction_import', $4::uuid,
+                    $5, 'USD', $5, 'pending', $6, 'ingest_bofa_live.py', $7::jsonb
+                )
+                """,
+                approval_id,
+                str(TEST_WORKSPACE_ID),
+                str(TEST_ENTITY_ID),
+                subject_id,
+                amount_dec,
+                f"BofA import: {effective_date} category={category!r} tier=M",
+                json.dumps(payload),
+            )
+    return approval_id
+
+
+@pytest.mark.asyncio
+async def test_approve_bank_transaction_import_posts_journal_entry(
+    db: asyncpg.Pool, seeded_workspace: StackConfig
+) -> None:
+    """Approve a queued bank_transaction_import → journal entry posted + audit written.
+
+    Shape mirrors test_approve_material_recat_applies_reversal_and_restatement:
+      seed pending row → APPROVE → assert journal entry + status=approved + audit.
+    """
+    base, token = seeded_workspace.base_url, seeded_workspace.token
+    tag = _run_tag()
+    sxid = f"bofa-1792:2022-01-31:001:{tag}"
+
+    approval_id = await _seed_bank_txn_import_approval(
+        db,
+        sxid=sxid,
+        effective_date="2022-01-15",
+        amount_cents=-5000,  # -$50, Banking · Fees outflow (tier M — needs confirm)
+        category="Banking · Fees",
+    )
+
+    # Approval is pending; no journal entry for this sxid yet.
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            aq_before = await conn.fetchrow(
+                "SELECT status::text AS status, subject_type "
+                "FROM approval_queue WHERE id::text = $1", approval_id,
+            )
+            je_before = await conn.fetchval(
+                "SELECT count(*) FROM journal_entry "
+                "WHERE source = 'bofa-statement' AND source_external_id = $1", sxid,
+            )
+    assert aq_before["status"] == "pending"
+    assert aq_before["subject_type"] == "bank_transaction_import"
+    assert je_before == 0, "no journal entry should exist before approve"
+
+    # APPROVE via real HTTP endpoint.
+    r = await _decide(base, token, approval_id, "approve")
+    assert r.status_code == 200, r.text
+    decided = r.json()
+    assert decided["ok"] is True
+    assert decided["decision"] == "approved"
+    assert decided["applied"] is True
+    journal_entry_id = decided["journal_entry_id"]
+    assert journal_entry_id  # must be a non-empty UUID string
+
+    # Verify journal entry was posted + approval row marked decided + audit written.
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            je = await conn.fetchrow(
+                "SELECT status, source, source_external_id, category, "
+                "debit_account, credit_account, approving_human_uc_uid "
+                "FROM journal_entry WHERE id::text = $1", journal_entry_id,
+            )
+            aq_after = await conn.fetchrow(
+                "SELECT status::text AS status, decided_by_uc_uid, decided_at "
+                "FROM approval_queue WHERE id::text = $1", approval_id,
+            )
+            audit_count = await conn.fetchval(
+                "SELECT count(*) FROM decision_audit "
+                "WHERE tool_name = 'approval_decision' AND outcome = 'approved' "
+                "AND entity_id = $1", TEST_ENTITY_ID,
+            )
+
+    # Journal entry: source=bofa-statement, correct sxid, status=posted.
+    assert je is not None, "journal entry must exist after approve"
+    assert je["status"] == "posted"
+    assert je["source"] == "bofa-statement"
+    assert je["source_external_id"] == sxid
+    assert je["category"] == "Banking · Fees"
+    # Banking · Fees is account 6700; outflow: DR 6700 (expense), CR 1010 (cash).
+    assert je["debit_account"].startswith("6700"), je["debit_account"]
+    assert je["credit_account"].startswith("1010"), je["credit_account"]
+    # The approving human is stamped on the journal entry.
+    assert je["approving_human_uc_uid"] == seeded_workspace.uc_uid
+
+    # Approval row marked approved + decided_by + audit.
+    assert aq_after["status"] == "approved"
+    assert aq_after["decided_by_uc_uid"] == seeded_workspace.uc_uid
+    assert aq_after["decided_at"] is not None
+    assert audit_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_reject_bank_transaction_import_leaves_ledger_untouched(
+    db: asyncpg.Pool, seeded_workspace: StackConfig
+) -> None:
+    """Reject a queued bank_transaction_import → no journal entry; row rejected."""
+    base, token = seeded_workspace.base_url, seeded_workspace.token
+    tag = _run_tag()
+    sxid = f"bofa-1792:2022-01-31:002:{tag}"
+
+    approval_id = await _seed_bank_txn_import_approval(
+        db,
+        sxid=sxid,
+        effective_date="2022-01-20",
+        amount_cents=-9999,
+        category="Banking · Fees",
+    )
+
+    r = await _decide(base, token, approval_id, "reject")
+    assert r.status_code == 200, r.text
+    decided = r.json()
+    assert decided["decision"] == "rejected" and decided["applied"] is False
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            aq = await conn.fetchrow(
+                "SELECT status::text AS status, decided_by_uc_uid "
+                "FROM approval_queue WHERE id::text = $1", approval_id,
+            )
+            je_count = await conn.fetchval(
+                "SELECT count(*) FROM journal_entry "
+                "WHERE source = 'bofa-statement' AND source_external_id = $1", sxid,
+            )
+
+    assert aq["status"] == "rejected"
+    assert aq["decided_by_uc_uid"] == seeded_workspace.uc_uid
+    assert je_count == 0, "reject must not post a journal entry"

@@ -36,8 +36,10 @@ PHASE-2-CATEGORIZATION.md:
   Travel · Transport         — Airlines, rental cars, Uber
   Meals                      — Restaurants, food delivery
   Office · Supplies          — Amazon, Staples, generic PayPal outflows
-  Inventory · Cost           — Listing-Ops cost basis (Daniel Tran purchases)
   Uncategorized              — Tier 1 unable to assign; Tier 2 will try
+  (Note: "Inventory · Cost" was removed from this docstring — it is absent from
+   CATEGORY_TO_ACCOUNT in app/journal/posting.py and therefore cannot be posted.
+   Lead to confirm whether the COA account exists before re-adding.)
 """
 
 from __future__ import annotations
