@@ -425,6 +425,79 @@ async def balance_sheet(
     }
 
 
+# ---------------------------------------------------------------------------
+# Cash-flow v2 classifier helpers
+# ---------------------------------------------------------------------------
+#
+# v2 classification rules (applied in order; first match wins):
+#
+#   investing:  counter account_type = 'asset'
+#               AND account_number starts with '15' (Fixed Assets / Accum. Depr.)
+#               This covers Fixed Assets (1500) and Accumulated Depreciation
+#               (1550) today; as the COA adds more 15xx intangible-asset lines
+#               they automatically fall into the investing bucket because the
+#               type='asset' + '15' prefix check stays accurate without edits.
+#
+#   financing:  counter account_type = 'equity'  (3xxx accounts), OR
+#               counter account_type = 'liability' AND account_number = '2400'
+#               (Notes Payable — long-term debt indicator), OR
+#               counter account_number IN ('6900', '7900')
+#               (inter-entity transfer accounts).
+#
+#   operating:  everything else (accounts payable 2xxx, A/R 1xxx short-term,
+#               revenue 4xxx, expense 6xxx, etc.).
+#
+# v1 fallback: if the COA JOIN yields no account_type for the counter (NULL),
+# the v1 prefix logic is used so existing behaviour is preserved for any
+# legacy entries whose counter canonical_form doesn't match a live COA row.
+
+
+# Account-number prefixes / exact numbers used by the v2 rules.
+_INVESTING_ACCOUNT_PREFIX = "15"  # Fixed Assets + Accumulated Depreciation
+_FINANCING_DEBT_ACCOUNT = "2400"   # Notes Payable (long-term debt indicator)
+_INTER_ENTITY_ACCOUNTS = frozenset({"6900", "7900"})  # inter-entity transfers
+
+
+def _classify_cash_flow_v2(
+    counter_number: str,
+    counter_type: str | None,
+) -> str:
+    """v2 cash-flow bucket for a counter-account number + account_type.
+
+    Returns 'investing', 'financing', or 'operating'.
+
+    Rules (first match wins):
+      investing  — type='asset' AND number starts with '15'
+      financing  — type='equity', OR
+                   type='liability' AND number='2400' (Notes Payable), OR
+                   number in inter-entity set (6900/7900)
+      operating  — everything else
+
+    Falls back to v1 prefix logic when counter_type is None (COA lookup miss).
+    """
+    if counter_type is not None:
+        # --- investing: fixed assets / accumulated depreciation ---
+        if counter_type == "asset" and counter_number.startswith(_INVESTING_ACCOUNT_PREFIX):
+            return "investing"
+        # --- financing: equity, long-term debt, inter-entity transfers ---
+        if counter_type == "equity":
+            return "financing"
+        if counter_type == "liability" and counter_number == _FINANCING_DEBT_ACCOUNT:
+            return "financing"
+        if counter_number in _INTER_ENTITY_ACCOUNTS:
+            return "financing"
+        # --- everything else: operating ---
+        return "operating"
+
+    # v1 fallback (COA row not found for counter)
+    counter_kind = _account_type_prefix(counter_number)
+    if counter_kind == "equity" or counter_number == _FINANCING_DEBT_ACCOUNT:
+        return "financing"
+    if counter_number in ("1500", "1550"):
+        return "investing"
+    return "operating"
+
+
 @router.get("/api/workspaces/{workspace_id}/reports/cash-flow")
 async def cash_flow(
     workspace_id: UUID,
@@ -432,13 +505,21 @@ async def cash_flow(
     entity_id: str | None = None,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
-    """Simple cash-flow statement: change in cash accounts (1010, 1011,
-    1020) split by operating / investing / financing.
+    """Cash-flow statement: change in cash accounts (10xx) split into
+    operating / investing / financing.
 
-    v1 classification: every non-cash account counter-side maps to
-    operating by default. (Investing = changes in 1500/1550 / financing
-    = changes in 3xxx / 2400. We'll refine the classifier as the COA
-    grows.)
+    v2 classifier (version: "v2") uses chart_of_account.account_type to
+    classify the counter account accurately:
+
+      investing:  counter type='asset' AND account_number starts with '15'
+                  (Fixed Assets, Accumulated Depreciation, future 15xx intangibles)
+      financing:  counter type='equity' (3xxx), OR
+                  type='liability' AND account='2400' (Notes Payable), OR
+                  inter-entity transfers (6900, 7900)
+      operating:  everything else
+
+    v1 prefix fallback is used when the COA JOIN yields no account_type for
+    a counter account (preserves behaviour for legacy entries).
     """
     require_role(workspace, "viewer")
     scope_restriction = assert_entity_in_scope(workspace, entity_id)
@@ -447,16 +528,19 @@ async def cash_flow(
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         entity_label = await _entity_label(session, entity_id)
-        # Net change in each cash account (10xx) over the period.
+        # v2: JOIN chart_of_account on the counter canonical_form's account_number
+        # to get account_type for classification.  LEFT JOIN so entries whose
+        # counter isn't in the live COA still appear (handled by v1 fallback).
         rows = (
             await session.execute(
                 text(
                     f"""
                     WITH cash_sides AS (
+                        -- Cash inflows: entries where the debit side is a cash account
                         SELECT
                             debit_account AS canonical_form,
-                            amount AS in_flow,
-                            0::numeric AS out_flow,
+                            amount        AS in_flow,
+                            0::numeric    AS out_flow,
                             credit_account AS counter
                         FROM journal_entry je
                         WHERE status = 'posted'
@@ -465,11 +549,12 @@ async def cash_flow(
                           AND debit_account LIKE '10%'
                           {entity_clause}
                         UNION ALL
+                        -- Cash outflows: entries where the credit side is a cash account
                         SELECT
                             credit_account AS canonical_form,
-                            0::numeric AS in_flow,
-                            amount AS out_flow,
-                            debit_account AS counter
+                            0::numeric     AS in_flow,
+                            amount         AS out_flow,
+                            debit_account  AS counter
                         FROM journal_entry je
                         WHERE status = 'posted'
                           AND effective_date >= :start
@@ -478,13 +563,18 @@ async def cash_flow(
                           {entity_clause}
                     )
                     SELECT
-                        canonical_form,
-                        counter,
-                        SUM(in_flow) AS sum_in,
-                        SUM(out_flow) AS sum_out
-                    FROM cash_sides
-                    GROUP BY canonical_form, counter
-                    ORDER BY canonical_form, counter
+                        cs.canonical_form,
+                        cs.counter,
+                        SUM(cs.in_flow)  AS sum_in,
+                        SUM(cs.out_flow) AS sum_out,
+                        -- v2: pull account_type from COA for the counter account
+                        coa.account_type AS counter_type
+                    FROM cash_sides cs
+                    LEFT JOIN chart_of_account coa
+                      ON coa.account_number = split_part(cs.counter, '·', 1)
+                     AND coa.is_active = true
+                    GROUP BY cs.canonical_form, cs.counter, coa.account_type
+                    ORDER BY cs.canonical_form, cs.counter
                     """
                 ),
                 {"start": start, "end": end, **entity_params},
@@ -503,19 +593,20 @@ async def cash_flow(
         out_flow = Decimal(str(r["sum_out"] or 0))
         net = in_flow - out_flow
         counter = r["counter"] or ""
-        counter_number = counter.split("·", 1)[0] if "·" in counter else ""
-        counter_kind = _account_type_prefix(counter_number)
+        counter_number = counter.split("·", 1)[0] if "·" in counter else counter
+        counter_type: str | None = r.get("counter_type")  # None when COA JOIN misses
+        bucket = _classify_cash_flow_v2(counter_number, counter_type)
         line = {
             "cash_account": r["canonical_form"],
             "counter_account": counter,
             "amount": str(net),
         }
-        if counter_kind in ("equity",) or counter_number == "2400":
-            financing.append(line)
-            fin_total += net
-        elif counter_number == "1500" or counter_number == "1550":
+        if bucket == "investing":
             investing.append(line)
             inv_total += net
+        elif bucket == "financing":
+            financing.append(line)
+            fin_total += net
         else:
             operating.append(line)
             op_total += net
@@ -527,6 +618,7 @@ async def cash_flow(
         "entity_label": entity_label,
         "entity_id": entity_id or "consolidated",
         "currency": "USD",
+        "version": "v2",
         "operating": {"lines": operating, "total": str(op_total)},
         "investing": {"lines": investing, "total": str(inv_total)},
         "financing": {"lines": financing, "total": str(fin_total)},

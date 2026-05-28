@@ -154,3 +154,69 @@ def test_balanced_flag_true_with_retained_earnings():
     result = _run_balance_sheet(rows)
     assert result["balanced"] is True
     assert Decimal(result["drift"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Cash-flow v2 classifier unit tests
+# ---------------------------------------------------------------------------
+#
+# _classify_cash_flow_v2 is a pure function; test each bucket rule directly.
+
+
+def test_v2_classifies_fixed_asset_as_investing():
+    """counter type='asset' + account starting with '15' -> investing."""
+    assert reports._classify_cash_flow_v2("1500", "asset") == "investing"
+    assert reports._classify_cash_flow_v2("1550", "asset") == "investing"
+    # A future 15xx intangible also classifies as investing
+    assert reports._classify_cash_flow_v2("1520", "asset") == "investing"
+
+
+def test_v2_classifies_short_term_asset_as_operating():
+    """counter type='asset' NOT starting with '15' -> operating."""
+    # Accounts receivable (1200 range) is NOT investing
+    assert reports._classify_cash_flow_v2("1200", "asset") == "operating"
+    assert reports._classify_cash_flow_v2("1010", "asset") == "operating"
+
+
+def test_v2_classifies_equity_as_financing():
+    """counter type='equity' (3xxx) -> financing."""
+    assert reports._classify_cash_flow_v2("3010", "equity") == "financing"
+    assert reports._classify_cash_flow_v2("3099", "equity") == "financing"
+
+
+def test_v2_classifies_notes_payable_as_financing():
+    """counter type='liability' AND number='2400' -> financing."""
+    assert reports._classify_cash_flow_v2("2400", "liability") == "financing"
+
+
+def test_v2_classifies_other_liability_as_operating():
+    """counter type='liability' but NOT 2400 -> operating."""
+    assert reports._classify_cash_flow_v2("2010", "liability") == "operating"
+
+
+def test_v2_classifies_inter_entity_transfers_as_financing():
+    """counter number 6900 or 7900 -> financing regardless of type."""
+    assert reports._classify_cash_flow_v2("6900", "expense") == "financing"
+    assert reports._classify_cash_flow_v2("7900", "other_income") == "financing"
+
+
+def test_v2_classifies_expense_as_operating():
+    """Standard expense (6xxx) -> operating."""
+    assert reports._classify_cash_flow_v2("6210", "expense") == "operating"
+    assert reports._classify_cash_flow_v2("6300", "expense") == "operating"
+
+
+def test_v2_falls_back_to_v1_when_no_type():
+    """When counter_type is None (COA JOIN miss) v1 logic is used.
+
+    v1: equity prefix (3xxx) -> financing; 1500/1550 -> investing; else operating.
+    """
+    # v1: 3xxx -> financing
+    assert reports._classify_cash_flow_v2("3010", None) == "financing"
+    # v1: 2400 -> financing  (explicit number check in v1 fallback)
+    assert reports._classify_cash_flow_v2("2400", None) == "financing"
+    # v1: 1500 -> investing
+    assert reports._classify_cash_flow_v2("1500", None) == "investing"
+    assert reports._classify_cash_flow_v2("1550", None) == "investing"
+    # v1: expense -> operating
+    assert reports._classify_cash_flow_v2("6210", None) == "operating"
