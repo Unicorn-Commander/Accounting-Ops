@@ -40,10 +40,14 @@ from sqlalchemy import text
 
 from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
+import datetime as dt
+
 from app.journal import (
     CorrectionOutcome,
+    PostingOutcome,
     PostingRefusal,
     apply_held_recategorization,
+    post_journal_entry,
 )
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.tools._audit import write_decision_audit
@@ -249,6 +253,15 @@ async def decide_approval(
                 subject_id=UUID(row["subject_id"]),
                 payload=payload,
             )
+        elif subject_type == "bank_transaction_import":
+            applied = await _approve_bank_transaction_import(
+                session,
+                workspace_id=workspace_id,
+                entity_id=entity_id,
+                payload=payload,
+                approving_human=workspace.user_uc_uid,
+                note=body.note,
+            )
         else:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -415,4 +428,123 @@ async def _approve_compliance_rule(
     return {
         "rule_id": activated["rule_id"],
         "active_profile_id": activated["profile_id"],
+    }
+
+
+async def _approve_bank_transaction_import(
+    session,
+    *,
+    workspace_id: UUID,
+    entity_id: UUID,
+    payload: dict,
+    approving_human: str,
+    note: str | None,
+) -> dict:
+    """Apply a held bank-statement transaction import.
+
+    The payload written by the ingest script carries:
+      source_external_id, effective_date, amount_cents, category,
+      category_status, categorization_source, debit_account_hint,
+      credit_account_hint, materiality_tier, block_reason, llm_suggested.
+
+    On APPROVE we call post_journal_entry() with user_confirmed=True and
+    posted_by_uc_uid=<the approving human> — the same pattern as
+    apply_held_recategorization.  Materiality is intentionally NOT
+    re-evaluated: the gate's purpose is to decide whether human attestation
+    is required; that attestation has now happened.
+
+    On PostingRefusal → raise HTTPException(409) so the outer transaction
+    rolls back and the row stays pending (consistent with the recat path).
+    """
+    required = ("source_external_id", "effective_date", "amount_cents", "category")
+    missing = [k for k in required if k not in payload]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Approval payload missing fields: {missing}. "
+                "Cannot apply this bank_transaction_import automatically."
+            ),
+        )
+
+    source_external_id: str = payload["source_external_id"]
+    effective_date = dt.date.fromisoformat(payload["effective_date"])
+    amount_cents: int = int(payload["amount_cents"])
+    category: str = payload["category"]
+    category_status: str = payload.get("category_status", "auto")
+
+    # The external account id for the cash/bank side.  The ingest script stores
+    # debit_account_hint / credit_account_hint as COA canonical hints (not the
+    # external account id).  The authoritative external account id for BofA 1792
+    # comes from the COA lookup in post_journal_entry via resolve_accounts_for_txn,
+    # which needs linked_external_account_id on the COA row.  We pass the value
+    # that was stored in the COA at provision time.  If the script wrote an
+    # external_account_id key in the payload, use it; otherwise look it up from
+    # the COA account linked to the source.
+    external_account_id: str | None = payload.get("external_account_id")
+    if not external_account_id:
+        # Fall back: query the COA for the account linked to 'bofa-statement' source
+        # for this entity.  This mirrors how post_journal_entry resolves the cash side.
+        from sqlalchemy import text as _text
+        cash_row = (
+            await session.execute(
+                _text(
+                    """
+                    SELECT linked_external_account_id
+                    FROM chart_of_account
+                    WHERE entity_id = :eid
+                      AND linked_external_source = 'bofa-statement'
+                      AND is_active = true
+                    LIMIT 1
+                    """
+                ),
+                {"eid": str(entity_id)},
+            )
+        ).mappings().first()
+        if cash_row:
+            external_account_id = cash_row["linked_external_account_id"]
+
+    reasoning = (
+        f"Human-approved bank statement import (approval). "
+        f"Source: {source_external_id}."
+        + (f" Reviewer note: {note}" if note else "")
+    )
+
+    result = await post_journal_entry(
+        session,
+        workspace_id=str(workspace_id),
+        entity_id=str(entity_id),
+        source="bofa-statement",
+        source_external_id=source_external_id,
+        effective_date=effective_date,
+        amount_cents=amount_cents,
+        description=payload.get("description", source_external_id),
+        payee=payload.get("payee"),
+        memo=payload.get("memo"),
+        category=category,
+        category_status=category_status,
+        entity_mapped=True,
+        sign_matched=True,  # human attestation = gate cleared
+        external_account_id=external_account_id,
+        has_receipt_link=False,
+        receipt_link_id=None,
+        posted_by_uc_uid=approving_human,
+        posted_by_agent_id=None,
+        user_confirmed=True,  # human attestation bypasses materiality re-gate
+        reasoning_trace=reasoning,
+        model_version=payload.get("categorization_source", "human_approval"),
+    )
+
+    if isinstance(result, PostingRefusal):
+        # Roll the whole decision back: the import could not be applied cleanly.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Could not apply bank_transaction_import: {result.reason}",
+        )
+
+    assert isinstance(result, PostingOutcome)
+    return {
+        "journal_entry_id": str(result.journal_entry_id),
+        "materiality_tier": result.materiality.tier,
+        "source_external_id": source_external_id,
     }

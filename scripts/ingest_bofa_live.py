@@ -36,10 +36,25 @@ For each transaction in each statement (in chronological order):
 
   4.  AUDIT — write_decision_audit() row per transaction decision.
 
-  5.  RECONCILE — after each statement, query the journal's running cash
-      balance at period_end and assert it equals the statement's
-      ending_balance. Drift halts a live run (refuse to continue with a
-      broken ledger).
+  5.  RECONCILE — after each statement, compare the per-period journal cash
+      delta against the statement's (ending_balance − beginning_balance),
+      accounting for queued/blocked transactions that did NOT post.
+
+      Design choice (a) — per-period delta comparison:
+        journal_delta = sum(signed amount_cents) of all posted entries in
+                        the period's date range for the cash account (1010).
+        queued_drift  = sum(signed amount_cents) for plans with
+                        proposed_action != 'would_post' in this period.
+        expected_stmt_delta = (ending_balance − beginning_balance) in cents.
+        Pass iff journal_delta == expected_stmt_delta − queued_drift
+              (i.e., journal posted exactly the transactions that cleared
+              materiality; the rest sit in approval_queue awaiting humans).
+        Halt only on a *real* drift (journal_delta ≠ expected).
+
+      This is cleaner than the alternative (require 100% queue-clearance before
+      advancing to the next year and re-anchoring reconciliation from zero),
+      because it doesn't force artificial sequencing between years and handles
+      multi-year runs naturally as long as each period's queued set is tracked.
 
 Idempotency
 -----------
@@ -49,12 +64,19 @@ source_external_id is deterministic:
 The platform's (entity_id, source, source_external_id) UNIQUE constraint
 catches any duplicate on re-run → script logs and continues.
 
+Approval-queue idempotency: before inserting an approval_queue row the script
+pre-checks for an existing row with the same (entity_id, source_external_id) in
+the payload (SELECT … WHERE payload->>'source_external_id' = …).  If one exists,
+the row is skipped.  A future migration should add a UNIQUE constraint on
+(entity_id, payload->>'source_external_id') via a partial functional index to
+enforce this at the DB level (tracked as follow-up: approval_queue dedup index).
+
 Approval-queue payload schema
 ------------------------------
 Rows inserted for queue/block cases carry:
 
     {
-      "action": "bank_statement_import",
+      "action": "bank_transaction_import",
       "source_external_id": "bofa-1792:...",
       "effective_date": "YYYY-MM-DD",
       "amount_cents": -4999,
@@ -68,7 +90,7 @@ Rows inserted for queue/block cases carry:
       "llm_suggested": false
     }
 
-The approve→apply workflow picks up "bank_statement_import" entries and,
+The approve→apply workflow picks up "bank_transaction_import" entries and,
 on APPROVE, calls post_journal_entry() directly. DO NOT add a parallel
 "approve" path here — reuse the existing endpoint.
 
@@ -404,29 +426,21 @@ async def plan_statement(
 # Live DB actions (require a real async session + write access)
 # ---------------------------------------------------------------------------
 
-async def _get_db_session(workspace_id: str):
-    """Create a workspace-scoped async DB session.
+async def _get_db_engine(workspace_id: str):
+    """Create the async engine for the live run.
 
-    This is the only place we touch the DB.  We import lazily so --dry-run
-    mode works without a live Postgres connection.
+    Returns (engine,).  The session is managed per-transaction via
+    workspace_session() so the GUC name (app.current_workspace) and the schema
+    format (accounting_ops_<uuid_underscored>) are always the platform's own
+    logic — this script can't drift from it.
+
+    Imported lazily so --dry-run mode works without a live Postgres connection.
     """
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
-    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
 
     settings = get_settings()
     engine = create_async_engine(settings.database_url, echo=False)
-    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    session: AsyncSession = async_session()
-
-    # Set the workspace search path + GUC so posting.py + audit.py resolve
-    # their tables in the right schema (mirrors the MCP request path).
-    schema = workspace_id.replace("-", "_")
-    await session.execute(text(f"SET search_path TO {schema}, public"))
-    await session.execute(
-        text("SET app.workspace_id = :wid"), {"wid": workspace_id}
-    )
-    return session, engine
+    return engine
 
 
 async def _insert_approval_queue_row(
@@ -436,10 +450,46 @@ async def _insert_approval_queue_row(
     entity_id: str,
     plan: TxnPlan,
     amount_cents: int,
-) -> UUID:
-    """Insert one approval_queue row for a queued/blocked transaction."""
+) -> UUID | None:
+    """Insert one approval_queue row for a queued/blocked transaction.
+
+    Returns the new approval_queue UUID, or None if a row for this
+    source_external_id already exists (idempotent skip — no DB write).
+
+    subject_id is a freshly generated UUID per row (the column is sa.UUID() in
+    the schema).  The deterministic source_external_id lives in
+    payload->>'source_external_id' so the approve handler can locate the
+    proposed entry.
+
+    Pre-check idempotency via SELECT before INSERT (no migration needed).
+    Follow-up: add a UNIQUE index on (entity_id, (payload->>'source_external_id'))
+    to enforce this at the DB level.
+    """
     from sqlalchemy import text
 
+    # Idempotency pre-check: skip if a row for this source_external_id already exists.
+    existing = (
+        await session.execute(
+            text(
+                """
+                SELECT id FROM approval_queue
+                WHERE entity_id = :eid
+                  AND payload->>'source_external_id' = :sxid
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "sxid": plan.source_external_id},
+        )
+    ).first()
+    if existing is not None:
+        log.debug(
+            "Approval_queue row already exists for %s — skipping",
+            plan.source_external_id,
+        )
+        return None
+
+    # subject_id is a generated UUID (the column is UUID type); the deterministic
+    # source_external_id is stored in payload->>'source_external_id'.
     approval_id = uuid4()
     amount_decimal = Decimal(abs(amount_cents)) / Decimal(100)
     await session.execute(
@@ -460,7 +510,7 @@ async def _insert_approval_queue_row(
             "id": str(approval_id),
             "wid": workspace_id,
             "eid": entity_id,
-            "subject": plan.source_external_id,
+            "subject": str(uuid4()),  # UUID per row; source_external_id lives in payload
             "amount": amount_decimal,
             "reasoning": (
                 f"BofA statement import: {plan.effective_date} "
@@ -531,19 +581,25 @@ async def _write_audit(
     )
 
 
-async def _query_cash_balance(session, *, entity_id: str, as_of: str) -> int | None:
-    """Query the journal's running cash balance for the 1010 account at as_of date.
+async def _query_cash_period_delta(
+    session, *, entity_id: str, period_start: str, period_end: str
+) -> int | None:
+    """Query the journal's cash delta (DR − CR on the 1010 account) for a period.
 
-    Returns the balance in cents (sum of DR - CR on the cash account up to and
-    including as_of), or None if no journal entries exist yet.
+    Returns the delta in cents for the half-open range [period_start, period_end],
+    or None if no posted journal entries exist in the range.
+
+    Per-period delta is used for reconciliation (design choice a — see module
+    docstring) so that multi-year runs don't require an ever-growing cumulative
+    balance to be accurate.
     """
     from sqlalchemy import text
 
     # The cash account is on the DEBIT side for inflows (DR cash, CR revenue)
     # and on the CREDIT side for outflows (DR expense, CR cash).
-    # Net cash = sum(abs_amount WHERE debit_account LIKE '1010%')
-    #          - sum(abs_amount WHERE credit_account LIKE '1010%')
-    # expressed in cents.
+    # Delta = sum(amount WHERE debit LIKE '1010%') − sum(amount WHERE credit LIKE '1010%')
+    # expressed in cents; excludes reversal/recategorization source rows (those are
+    # category-side corrections, not new cash flows).
     result = (
         await session.execute(
             text(
@@ -551,15 +607,16 @@ async def _query_cash_balance(session, *, entity_id: str, as_of: str) -> int | N
                 SELECT
                     COALESCE(SUM(CASE WHEN debit_account LIKE '1010%%' THEN amount ELSE 0 END), 0)
                   - COALESCE(SUM(CASE WHEN credit_account LIKE '1010%%' THEN amount ELSE 0 END), 0)
-                    AS net_balance
+                    AS period_delta
                 FROM journal_entry
                 WHERE entity_id = :eid
-                  AND effective_date <= :as_of
+                  AND effective_date >= :period_start
+                  AND effective_date <= :period_end
                   AND status = 'posted'
                   AND source NOT IN ('reversal', 'recategorization')
                 """
             ),
-            {"eid": entity_id, "as_of": as_of},
+            {"eid": entity_id, "period_start": period_start, "period_end": period_end},
         )
     ).first()
 
@@ -585,9 +642,10 @@ class StatementResult:
     queued: int
     blocked: int
     skipped_idempotent: int
-    recon_expected_cents: int
-    recon_actual_cents: int | None   # None if no journal data yet
-    recon_drift_cents: int | None
+    recon_expected_delta_cents: int   # eb − bb from the bank statement
+    recon_queued_drift_cents: int     # sum of signed amount_cents for queued/blocked plans
+    recon_journal_delta_cents: int | None   # None if no journal data yet
+    recon_real_drift_cents: int | None      # None if no journal data; 0 = clean
     llm_call_count: int
     llm_total_ms: int
 
@@ -601,7 +659,18 @@ async def apply_statement(
     live: bool,
     session,
 ) -> StatementResult:
-    """Apply all planned transactions for one statement (live mode) or simulate (dry-run)."""
+    """Apply all planned transactions for one statement (live mode) or simulate (dry-run).
+
+    Reconciliation uses per-period delta comparison (design choice a):
+      journal_delta  = sum of signed cash-account net for posted entries in this period.
+      queued_drift   = sum of signed amount_cents for plans that did NOT post
+                       (queued + blocked).  The journal is EXPECTED to be short by
+                       exactly this amount.
+      expected_delta = (ending_balance − beginning_balance) from the bank statement.
+      Real drift     = journal_delta − (expected_delta − queued_drift).
+                     = 0 when everything is consistent.
+      Halt only when real_drift ≠ 0.
+    """
     period_start = stmt["statement_period_start"]
     period_end = stmt["statement_period_end"]
     bb_cents = _to_cents(stmt["beginning_balance"])
@@ -612,6 +681,10 @@ async def apply_statement(
     llm_call_count = sum(1 for p in plans if p.llm_suggested)
     llm_total_ms = sum(p.llm_duration_ms or 0 for p in plans if p.llm_suggested)
 
+    # Track the sum of signed amount_cents for plans that do NOT post, so
+    # reconciliation knows the expected shortfall in the journal.
+    queued_drift_cents = 0
+
     for plan in plans:
         if not live:
             # Dry-run: just count.
@@ -619,8 +692,10 @@ async def apply_statement(
                 posted += 1
             elif plan.proposed_action == "would_queue":
                 queued += 1
+                queued_drift_cents += plan.amount_cents
             else:
                 blocked += 1
+                queued_drift_cents += plan.amount_cents
             continue
 
         # ---- Live: attempt to post or queue ----
@@ -665,6 +740,7 @@ async def apply_statement(
                 else:
                     # Posting was refused for a structural reason — queue for review.
                     queued += 1
+                    queued_drift_cents += plan.amount_cents
                     log.warning(
                         "Post refused (%s): %s — queuing",
                         result.outcome, plan.source_external_id,
@@ -677,7 +753,7 @@ async def apply_statement(
                         session, workspace_id=workspace_id, entity_id=entity_id,
                         plan=plan, outcome="queued",
                         response_extra={
-                            "approval_id": str(approval_id),
+                            "approval_id": str(approval_id) if approval_id else "dedup_skip",
                             "post_refusal_outcome": result.outcome,
                         },
                     )
@@ -685,45 +761,60 @@ async def apply_statement(
 
         elif plan.proposed_action in ("would_queue", "would_block"):
             queued += 1
-            try:
-                approval_id = await _insert_approval_queue_row(
-                    session, workspace_id=workspace_id, entity_id=entity_id,
-                    plan=plan, amount_cents=plan.amount_cents,
-                )
+            queued_drift_cents += plan.amount_cents
+            approval_id = await _insert_approval_queue_row(
+                session, workspace_id=workspace_id, entity_id=entity_id,
+                plan=plan, amount_cents=plan.amount_cents,
+            )
+            if approval_id is not None:
+                # New row inserted — write audit.
                 await _write_audit(
                     session, workspace_id=workspace_id, entity_id=entity_id,
                     plan=plan, outcome="queued",
                     response_extra={"approval_id": str(approval_id)},
                 )
                 await session.commit()
-            except Exception as exc:
-                # Duplicate approval_queue subject → idempotent skip.
-                log.debug("Approval_queue duplicate skip: %s (%s)", plan.source_external_id, exc)
-                await session.rollback()
+            else:
+                # Pre-check found an existing row → idempotent skip.
+                log.debug(
+                    "Approval_queue dedup skip: %s", plan.source_external_id
+                )
                 skipped_idempotent += 1
                 queued -= 1
+                queued_drift_cents -= plan.amount_cents
         else:
             blocked += 1
+            queued_drift_cents += plan.amount_cents
             await _write_audit(
                 session, workspace_id=workspace_id, entity_id=entity_id,
                 plan=plan, outcome="blocked",
             )
             await session.commit()
 
-    # ---- Reconciliation ----
-    recon_actual: int | None = None
-    recon_drift: int | None = None
+    # ---- Reconciliation (per-period delta, design choice a) ----
+    # journal_delta  = what the journal actually recorded for this period's cash flows.
+    # expected_delta = (eb − bb) from the bank statement = what SHOULD have been posted.
+    # queued_drift   = sum of signed cents for transactions that intentionally did NOT
+    #                  post (queued/blocked).  The journal is SHORT by exactly this.
+    # real_drift     = journal_delta − (expected_delta − queued_drift)
+    #                = 0 means "the journal posted exactly what it should have; the
+    #                  rest is in the approval queue where it belongs."
+    # Halt only when real_drift ≠ 0 (something truly unexpected happened).
+    recon_journal_delta: int | None = None
+    recon_real_drift: int | None = None
     if live:
-        balance = await _query_cash_balance(
-            session, entity_id=entity_id, as_of=period_end
+        journal_delta = await _query_cash_period_delta(
+            session,
+            entity_id=entity_id,
+            period_start=period_start,
+            period_end=period_end,
         )
-        if balance is not None:
-            # Balance from the journal is the net since inception; we compare
-            # against ending_balance (absolute value on the statement).
-            # Note: for the FIRST statement the journal balance = sum of all
-            # posted cash deltas so far, which should equal ending_balance.
-            recon_actual = balance
-            recon_drift = balance - eb_cents
+        if journal_delta is not None:
+            recon_journal_delta = journal_delta
+            # expected_delta − queued_drift = portion of the period delta that should
+            # have posted.  Cash outflows are negative; queued_drift is the SUM of
+            # those signed cents, so the shortfall is already sign-correct.
+            recon_real_drift = journal_delta - (expected_delta - queued_drift_cents)
 
     return StatementResult(
         period_start=period_start,
@@ -733,9 +824,10 @@ async def apply_statement(
         queued=queued,
         blocked=blocked,
         skipped_idempotent=skipped_idempotent,
-        recon_expected_cents=eb_cents,
-        recon_actual_cents=recon_actual,
-        recon_drift_cents=recon_drift,
+        recon_expected_delta_cents=expected_delta,
+        recon_queued_drift_cents=queued_drift_cents,
+        recon_journal_delta_cents=recon_journal_delta,
+        recon_real_drift_cents=recon_real_drift,
         llm_call_count=llm_call_count,
         llm_total_ms=llm_total_ms,
     )
@@ -807,9 +899,9 @@ def print_report(
     total_skipped = sum(r.skipped_idempotent for r in results)
     total_llm_calls = sum(r.llm_call_count for r in results)
     total_llm_ms = sum(r.llm_total_ms for r in results)
-    n_clean_recon = sum(1 for r in results if r.recon_drift_cents == 0)
-    n_dirty_recon = sum(1 for r in results if r.recon_drift_cents not in (0, None))
-    n_unknown_recon = sum(1 for r in results if r.recon_drift_cents is None)
+    n_clean_recon = sum(1 for r in results if r.recon_real_drift_cents == 0)
+    n_dirty_recon = sum(1 for r in results if r.recon_real_drift_cents not in (0, None))
+    n_unknown_recon = sum(1 for r in results if r.recon_real_drift_cents is None)
 
     mode = "LIVE" if live else "DRY-RUN"
 
@@ -833,17 +925,17 @@ def print_report(
     print()
 
     if live:
-        print("RECONCILIATION (live — compares journal balance to statement ending_balance):")
-        print(f"  clean (drift=0)  : {n_clean_recon}/{len(results)}")
-        print(f"  DIRTY (drift≠0)  : {n_dirty_recon}")
-        print(f"  not yet posted   : {n_unknown_recon}")
+        print("RECONCILIATION (live — per-period delta vs statement eb−bb, accounting for queue):")
+        print(f"  clean (real_drift=0) : {n_clean_recon}/{len(results)}")
+        print(f"  DIRTY (real_drift≠0) : {n_dirty_recon}")
+        print(f"  not yet posted       : {n_unknown_recon}")
         if n_dirty_recon:
-            print("  *** DRIFT DETECTED — review before proceeding ***")
+            print("  *** REAL DRIFT DETECTED — review before proceeding ***")
             for r in results:
-                if r.recon_drift_cents not in (0, None):
+                if r.recon_real_drift_cents not in (0, None):
                     print(
                         f"    {r.period_start} → {r.period_end}: "
-                        f"drift {_fmt_cents(r.recon_drift_cents)}"
+                        f"real_drift {_fmt_cents(r.recon_real_drift_cents)}"
                     )
         print()
     else:
@@ -866,8 +958,11 @@ def print_report(
     print("PER-STATEMENT SUMMARY (counts only):")
     for r in results:
         recon_tag = ""
-        if r.recon_drift_cents is not None:
-            recon_tag = " RECON:CLEAN" if r.recon_drift_cents == 0 else " *** RECON:DIRTY ***"
+        if r.recon_real_drift_cents is not None:
+            recon_tag = (
+                " RECON:CLEAN" if r.recon_real_drift_cents == 0
+                else " *** RECON:DIRTY ***"
+            )
         elif live:
             recon_tag = " (not-yet-posted)"
         print(
@@ -885,7 +980,7 @@ def print_report(
         print()
 
     if live and n_dirty_recon:
-        print("*** WARNING: reconciliation drift detected. Do NOT continue ingesting")
+        print("*** WARNING: real reconciliation drift detected. Do NOT continue ingesting")
         print("*** additional years until drift is investigated and resolved.")
         print()
 
@@ -964,6 +1059,12 @@ async def _main_async(args: argparse.Namespace) -> int:
         # Dry-run: build results without a DB session.
         results = []
         for stmt, plans in zip(statements, all_plans):
+            bb = _to_cents(stmt["beginning_balance"])
+            eb = _to_cents(stmt["ending_balance"])
+            expected_delta = eb - bb
+            queued_drift = sum(
+                p.amount_cents for p in plans if p.proposed_action != "would_post"
+            )
             # Synthesize a dry-run StatementResult.
             r = StatementResult(
                 period_start=stmt["statement_period_start"],
@@ -973,9 +1074,10 @@ async def _main_async(args: argparse.Namespace) -> int:
                 queued=sum(1 for p in plans if p.proposed_action == "would_queue"),
                 blocked=sum(1 for p in plans if p.proposed_action == "would_block"),
                 skipped_idempotent=0,
-                recon_expected_cents=_to_cents(stmt["ending_balance"]),
-                recon_actual_cents=None,
-                recon_drift_cents=None,
+                recon_expected_delta_cents=expected_delta,
+                recon_queued_drift_cents=queued_drift,
+                recon_journal_delta_cents=None,
+                recon_real_drift_cents=None,
                 llm_call_count=sum(1 for p in plans if p.llm_suggested),
                 llm_total_ms=sum(p.llm_duration_ms or 0 for p in plans),
             )
@@ -1011,7 +1113,16 @@ async def _main_async(args: argparse.Namespace) -> int:
     log.warning(
         "workspace=%s entity=%s source=%s", workspace_id, entity_id, SOURCE_LABEL
     )
-    session, engine = await _get_db_session(workspace_id)
+    # Use the platform's set_workspace_search_path so the GUC name
+    # (app.current_workspace) and schema format (accounting_ops_<uuid_underscored>)
+    # always match the platform's own conventions — this script cannot drift.
+    # We DON'T use workspace_session() here because that wraps everything in a
+    # single outer BEGIN; apply_statement commits per-transaction for atomicity.
+    from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+
+    engine = await _get_db_engine(workspace_id)
+    SessionFactory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
     try:
         results = []
         for stmt, plans in zip(statements, all_plans):
@@ -1021,34 +1132,62 @@ async def _main_async(args: argparse.Namespace) -> int:
                 stmt["statement_period_end"],
                 len(plans),
             )
-            result = await apply_statement(
-                stmt,
-                plans,
-                workspace_id=workspace_id,
-                entity_id=entity_id,
-                live=True,
-                session=session,
-            )
+            # Fresh session per statement.  apply_statement commits per-transaction
+            # for atomicity, so we cannot wrap the whole statement in a single
+            # session.begin() context manager.  Instead we pin search_path and the
+            # app.current_workspace GUC at the SESSION level (not transaction-local)
+            # so they survive across the per-txn commits inside apply_statement.
+            # This is safe because this session uses a dedicated one-shot engine
+            # that is disposed after the run — no pool bleed.
+            session: AsyncSession = SessionFactory()
+            try:
+                # Bootstrap transaction: set the schema + GUC at session scope.
+                from sqlalchemy import text as _sql
+                from app.workspace_session import schema_for_workspace
+                ws_schema = schema_for_workspace(workspace_id)
+                async with session.begin():
+                    # SET (no LOCAL) = session-scoped; survives commits.
+                    await session.execute(
+                        _sql(f'SET search_path = "{ws_schema}", public')
+                    )
+                    # set_config(name, value, is_local=false) = session-scoped.
+                    await session.execute(
+                        _sql("SELECT set_config('app.current_workspace', :wid, false)"),
+                        {"wid": workspace_id},
+                    )
+                # Session-level GUC + search_path now persist for all subsequent
+                # transactions on this connection (single-connection batch session).
+                result = await apply_statement(
+                    stmt,
+                    plans,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    live=True,
+                    session=session,
+                )
+            finally:
+                await session.close()
+
             results.append(result)
             log.info(
                 "  Done: post=%d queue=%d block=%d idempotent=%d "
-                "recon_drift=%s",
+                "real_drift=%s",
                 result.posted,
                 result.queued,
                 result.blocked,
                 result.skipped_idempotent,
-                _fmt_cents(result.recon_drift_cents)
-                if result.recon_drift_cents is not None
+                _fmt_cents(result.recon_real_drift_cents)
+                if result.recon_real_drift_cents is not None
                 else "n/a",
             )
-            # Hard halt on reconciliation drift in live mode.
-            if result.recon_drift_cents not in (0, None):
+            # Hard halt on REAL reconciliation drift in live mode.
+            if result.recon_real_drift_cents not in (0, None):
                 log.error(
-                    "RECONCILIATION DRIFT detected on %s → %s: drift=%s. "
+                    "REAL RECONCILIATION DRIFT detected on %s → %s: real_drift=%s. "
                     "Halting live run. Check the journal before continuing.",
                     result.period_start,
                     result.period_end,
-                    _fmt_cents(result.recon_drift_cents),
+                    _fmt_cents(result.recon_real_drift_cents),
                 )
                 print_report(
                     results,
@@ -1060,7 +1199,6 @@ async def _main_async(args: argparse.Namespace) -> int:
                 )
                 return 1
     finally:
-        await session.close()
         await engine.dispose()
 
     print_report(
