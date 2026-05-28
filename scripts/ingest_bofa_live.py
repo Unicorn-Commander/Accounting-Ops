@@ -604,6 +604,12 @@ async def _query_cash_period_delta(
     """
     from sqlalchemy import text
 
+    # asyncpg requires date objects (not strings) for date-typed columns; accept either.
+    if isinstance(period_start, str):
+        period_start = date.fromisoformat(period_start)
+    if isinstance(period_end, str):
+        period_end = date.fromisoformat(period_end)
+
     # The cash account is on the DEBIT side for inflows (DR cash, CR revenue)
     # and on the CREDIT side for outflows (DR expense, CR cash).
     # Delta = sum(amount WHERE debit LIKE '1010%') − sum(amount WHERE credit LIKE '1010%')

@@ -490,10 +490,15 @@ async def _approve_bank_transaction_import(
             await session.execute(
                 _text(
                     """
+                    -- Match either the explicit 'bofa-statement' link OR the
+                    -- live 'simplefin' link (the COA actually carries 'simplefin'
+                    -- for BofA accounts today). Belt-and-suspenders so legacy
+                    -- approval_queue rows missing external_account_id in payload
+                    -- can still resolve.
                     SELECT linked_external_account_id
                     FROM chart_of_account
                     WHERE entity_id = :eid
-                      AND linked_external_source = 'bofa-statement'
+                      AND linked_external_source IN ('bofa-statement', 'simplefin')
                       AND is_active = true
                     LIMIT 1
                     """

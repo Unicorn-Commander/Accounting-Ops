@@ -75,7 +75,14 @@ async def resolve_accounts_for_txn(
     Returns None if either side can't be resolved (caller blocks the post).
     """
     # 1. Find the cash/credit-card side: the COA account linked to the
-    #    external bank account this txn came from.
+    #    external bank account this txn came from. Match by external_account_id
+    #    ALONE (not linked_external_source) — external_account_id is uniquely
+    #    identifying, and the source label is for data lineage (stored on
+    #    journal_entry.source) NOT for COA resolution. This lets the SAME COA
+    #    account legitimately serve multiple ingest sources (e.g. the live
+    #    'simplefin' feed + a 'bofa-statement' historical-statement backfill,
+    #    or a future 'plaid' source). The `source` param is preserved in this
+    #    function's signature for callers and audit logging.
     cash_row = (
         await session.execute(
             text(
@@ -83,13 +90,12 @@ async def resolve_accounts_for_txn(
                 SELECT canonical_form, account_type
                 FROM chart_of_account
                 WHERE entity_id = :eid
-                  AND linked_external_source = :source
                   AND linked_external_account_id = :ext_id
                   AND is_active = true
                 LIMIT 1
                 """
             ),
-            {"eid": entity_id, "source": source, "ext_id": external_account_id},
+            {"eid": entity_id, "ext_id": external_account_id},
         )
     ).mappings().first()
     if not cash_row:
