@@ -75,9 +75,14 @@ def categorize_transaction(
                 sign_matched=True,
             )
 
-    rule = match_vendor_rule(blob)
+    rule = match_vendor_rule(blob, amount=amount)
     if rule:
-        # Validate kind vs sign
+        # Validate kind vs sign. Note: rules with direction="inflow"|
+        # "outflow" are already pre-filtered by the matcher so this
+        # check is effectively a no-op for them, but it stays here so a
+        # bug in a future rule (e.g. wrong direction tag) still surfaces
+        # as `sign_matched=False` → status="suggest" rather than auto-
+        # posting silently.
         is_revenue = amount > 0
         is_expense = amount < 0
         sign_matched = (
