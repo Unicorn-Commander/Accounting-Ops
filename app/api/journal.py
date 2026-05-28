@@ -11,6 +11,7 @@
   GET  /api/workspaces/{wid}/journal-entries/verify-chain?entity_id={uuid}
   GET  /api/workspaces/{wid}/posting-log    — recent post attempts (audit feed)
   POST /api/workspaces/{wid}/entities/{eid}/close-period — close/lock a period (admin)
+  GET  /api/workspaces/{wid}/entities/{eid}/closed-periods — list closed periods (viewer)
 """
 
 from __future__ import annotations
@@ -722,6 +723,41 @@ class ClosePeriodRequest(BaseModel):
                     "will be blocked from posting after the period is closed.",
     )
     reason: str | None = Field(None, description="Optional human-readable reason for closing.")
+
+
+@router.get("/api/workspaces/{workspace_id}/entities/{entity_id}/closed-periods")
+async def list_closed_periods(
+    workspace_id: UUID,
+    entity_id: UUID,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """List closed accounting periods for an entity.
+
+    Role floor: viewer. Entity-scope enforced. Results are ordered newest
+    period_end first for admin/review screens.
+    """
+    require_role(workspace, "viewer")
+    assert_entity_in_scope(workspace, entity_id)
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT period_end::text, closed_at, closed_by_uc_uid, reason
+                    FROM closed_period
+                    WHERE entity_id = :eid
+                    ORDER BY period_end DESC
+                    """
+                ),
+                {"eid": str(entity_id)},
+            )
+        ).mappings().all()
+
+    return {
+        "entity_id": str(entity_id),
+        "closed_periods": [dict(r) for r in rows],
+    }
 
 
 @router.post("/api/workspaces/{workspace_id}/entities/{entity_id}/close-period")

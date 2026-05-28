@@ -31,9 +31,12 @@ export async function SiteHeader({
   const canConsolidate = ctx?.activeWorkspace
     ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
     : false;
+  const canAdmin = ctx?.activeWorkspace
+    ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
+    : false;
 
   return (
-    <SiteHeaderClient variant={variant} userBlock={userBlock}>
+    <SiteHeaderClient variant={variant} userBlock={userBlock} canAdmin={canAdmin}>
       {ctx && (
         <>
           <WorkspaceSwitcher

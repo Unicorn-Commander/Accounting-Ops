@@ -21,6 +21,8 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+from fastapi import HTTPException
+
 from app.journal.posting import (
     PostingRefusal,
     PostingOutcome,
@@ -440,3 +442,138 @@ def test_blocked_period_closed_in_posting_result_literal():
     assert "blocked_period_closed" in args, (
         f"'blocked_period_closed' not found in PostingResult Literal: {args}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 6: feat: list closed periods
+# ---------------------------------------------------------------------------
+
+
+def test_list_closed_periods_empty_and_multiple_ordered():
+    """closed-periods endpoint returns an empty list, then period_end DESC rows."""
+    from app.api import journal as journal_mod
+    from app.tenancy import WorkspaceContext
+
+    wid = uuid4()
+    eid = uuid4()
+
+    class _ClosedPeriodRow:
+        def __init__(self, period_end, closed_at, closed_by_uc_uid, reason):
+            self._data = {
+                "period_end": period_end,
+                "closed_at": closed_at,
+                "closed_by_uc_uid": closed_by_uc_uid,
+                "reason": reason,
+            }
+
+        def __getitem__(self, k):
+            return self._data[k]
+
+        def keys(self):
+            return list(self._data.keys())
+
+        def items(self):
+            return self._data.items()
+
+    class _ListClosedPeriodsSession:
+        def __init__(self, rows):
+            self.rows = rows
+            self.statements: list[str] = []
+            self.params: list[dict[str, Any] | None] = []
+
+        async def execute(self, statement, params=None):
+            self.statements.append(str(statement))
+            self.params.append(params)
+            return _FakeResult(self.rows)
+
+    ws = WorkspaceContext(
+        workspace_id=wid,
+        workspace_slug="test",
+        role="viewer",
+        user_uc_uid="u",
+        agent_id=None,
+        entity_scope=None,
+        hipaa_protected=False,
+    )
+
+    async def _run_with_rows(rows):
+        fake_session = _ListClosedPeriodsSession(rows)
+
+        @contextlib.asynccontextmanager
+        async def _fake_ws(session_local, workspace_id):
+            yield fake_session
+
+        original_ws = journal_mod.workspace_session
+        journal_mod.workspace_session = _fake_ws
+        try:
+            result = await journal_mod.list_closed_periods(
+                workspace_id=wid,
+                entity_id=eid,
+                workspace=ws,
+            )
+        finally:
+            journal_mod.workspace_session = original_ws
+        return result, fake_session
+
+    empty_result, empty_session = asyncio.run(_run_with_rows([]))
+    assert empty_result == {"entity_id": str(eid), "closed_periods": []}
+    assert empty_session.params[0] == {"eid": str(eid)}
+
+    rows = [
+        _ClosedPeriodRow("2025-12-31", "2026-05-28T12:00:00+00:00", "uc_a", "FY close"),
+        _ClosedPeriodRow("2025-03-31", "2026-04-01T12:00:00+00:00", "uc_b", "Q1 close"),
+    ]
+    multiple_result, multiple_session = asyncio.run(_run_with_rows(rows))
+
+    assert multiple_result["entity_id"] == str(eid)
+    assert [r["period_end"] for r in multiple_result["closed_periods"]] == [
+        "2025-12-31",
+        "2025-03-31",
+    ]
+    assert "ORDER BY period_end DESC" in multiple_session.statements[0]
+
+
+def test_list_closed_periods_entity_scope_respected():
+    """A scoped workspace member cannot list another entity's closed periods."""
+    from app.api import journal as journal_mod
+    from app.tenancy import WorkspaceContext
+
+    wid = uuid4()
+    allowed_eid = uuid4()
+    denied_eid = uuid4()
+    session_opened = False
+
+    @contextlib.asynccontextmanager
+    async def _fake_ws(session_local, workspace_id):
+        nonlocal session_opened
+        session_opened = True
+        yield _PostingSession()
+
+    original_ws = journal_mod.workspace_session
+    journal_mod.workspace_session = _fake_ws
+    try:
+        ws = WorkspaceContext(
+            workspace_id=wid,
+            workspace_slug="test",
+            role="viewer",
+            user_uc_uid="u",
+            agent_id=None,
+            entity_scope=(allowed_eid,),
+            hipaa_protected=False,
+        )
+        try:
+            asyncio.run(
+                journal_mod.list_closed_periods(
+                    workspace_id=wid,
+                    entity_id=denied_eid,
+                    workspace=ws,
+                )
+            )
+        except HTTPException as exc:
+            assert exc.status_code == 403
+        else:
+            raise AssertionError("Expected entity-scope violation to raise 403")
+    finally:
+        journal_mod.workspace_session = original_ws
+
+    assert session_opened is False

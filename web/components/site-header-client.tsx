@@ -6,29 +6,52 @@ import { useEffect, useState } from "react";
 import { Menu, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 
-const NAV = [
-  ["Dashboard", "/dashboard"],
-  ["Transactions", "/transactions"],
-  ["Reconciliation", "/reconciliation-queue"],
-  ["Approvals", "/approvals"],
-  ["Agent activity", "/agent-activity"],
-  ["Journal", "/journal"],
-  ["Chart of Accounts", "/coa"],
-  ["Reports", "/reports"],
-  ["Taxes", "/taxes"],
-  ["Connectors", "/connectors"],
-  ["CPA Export", "/cpa-export"],
-  ["Help", "/help"]
+const NAV_SECTIONS = [
+  {
+    label: null,
+    items: [
+      ["Dashboard", "/dashboard"],
+      ["Transactions", "/transactions"],
+      ["Reconciliation", "/reconciliation-queue"],
+      ["Approvals", "/approvals"],
+      ["Agent activity", "/agent-activity"],
+      ["Journal", "/journal"],
+      ["Chart of Accounts", "/coa"],
+    ],
+  },
+  {
+    label: "Reports",
+    items: [
+      ["Reports", "/reports"],
+      ["Trial Balance", "/reports/trial-balance"],
+      ["Taxes", "/taxes"],
+      ["CPA Export", "/cpa-export"],
+    ],
+  },
+  {
+    label: "Admin",
+    adminOnly: true,
+    items: [["Period Close", "/admin/period-close"]],
+  },
+  {
+    label: null,
+    items: [
+      ["Connectors", "/connectors"],
+      ["Help", "/help"],
+    ],
+  },
 ];
 
 export function SiteHeaderClient({
   variant,
   userBlock,
-  children
+  children,
+  canAdmin = false
 }: {
   variant: "app" | "marketing";
   userBlock: React.ReactNode;
   children?: React.ReactNode;
+  canAdmin?: boolean;
 }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -84,24 +107,35 @@ export function SiteHeaderClient({
 
           {variant === "app" && (
             <nav className="ml-6 hidden flex-1 items-center gap-1 lg:flex">
-              {NAV.map(([label, href]) => {
-                const active =
-                  pathname === href || pathname?.startsWith(href + "/");
-                return (
-                  <Link
-                    key={href}
-                    href={href}
-                    className={cn(
-                      "rounded-md px-2.5 py-1.5 text-sm transition",
-                      active
-                        ? "bg-white/5 text-ink-primary"
-                        : "text-ink-secondary hover:text-ink-primary hover:bg-white/[0.03]"
-                    )}
-                  >
-                    {label}
-                  </Link>
-                );
-              })}
+              {NAV_SECTIONS.filter((section) => !section.adminOnly || canAdmin).map(
+                (section) => (
+                  <div key={section.label ?? section.items.map(([, href]) => href).join("|")} className="flex items-center gap-1">
+                    {section.label ? (
+                      <span className="px-1.5 text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
+                        {section.label}
+                      </span>
+                    ) : null}
+                    {section.items.map(([label, href]) => {
+                      const active =
+                        pathname === href || pathname?.startsWith(href + "/");
+                      return (
+                        <Link
+                          key={href}
+                          href={href}
+                          className={cn(
+                            "rounded-md px-2.5 py-1.5 text-sm transition",
+                            active
+                              ? "bg-white/5 text-ink-primary"
+                              : "text-ink-secondary hover:text-ink-primary hover:bg-white/[0.03]"
+                          )}
+                        >
+                          {label}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )
+              )}
             </nav>
           )}
 
@@ -168,24 +202,35 @@ export function SiteHeaderClient({
             )}
 
             <nav className="flex flex-col gap-1">
-              {NAV.map(([label, href]) => {
-                const active =
-                  pathname === href || pathname?.startsWith(href + "/");
-                return (
-                  <Link
-                    key={href}
-                    href={href}
-                    className={cn(
-                      "rounded-md px-3 py-2.5 text-sm transition",
-                      active
-                        ? "bg-brand-500/10 text-brand-300"
-                        : "text-ink-secondary hover:bg-white/[0.04] hover:text-ink-primary"
-                    )}
-                  >
-                    {label}
-                  </Link>
-                );
-              })}
+              {NAV_SECTIONS.filter((section) => !section.adminOnly || canAdmin).map(
+                (section) => (
+                  <div key={section.label ?? section.items.map(([, href]) => href).join("|")}>
+                    {section.label ? (
+                      <p className="px-3 pb-1 pt-3 text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
+                        {section.label}
+                      </p>
+                    ) : null}
+                    {section.items.map(([label, href]) => {
+                      const active =
+                        pathname === href || pathname?.startsWith(href + "/");
+                      return (
+                        <Link
+                          key={href}
+                          href={href}
+                          className={cn(
+                            "block rounded-md px-3 py-2.5 text-sm transition",
+                            active
+                              ? "bg-brand-500/10 text-brand-300"
+                              : "text-ink-secondary hover:bg-white/[0.04] hover:text-ink-primary"
+                          )}
+                        >
+                          {label}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )
+              )}
             </nav>
           </div>
         </div>
