@@ -115,9 +115,13 @@ _SYSTEM_PROMPT = (
     "You are a financial categorization assistant for a small business accounting system. "
     "You will receive a bank transaction and a list of allowed Chart-of-Accounts categories. "
     "You MUST reply with ONLY a JSON object with exactly three keys: "
-    '"category" (one of the allowed categories, verbatim), '
+    '"category" (one of the allowed categories, copied EXACTLY as shown — including any '
+    "middle-dot `·` separator characters, spacing, and capitalisation), "
     '"confidence" (float 0.0–1.0, your self-assessed confidence), '
     '"reasoning" (one sentence, plain English). '
+    "The allowed categories use a middle-dot character `·` (U+00B7) as a separator — "
+    "for example `\"Office · Supplies\"` NOT `\"Office Supplies\"`. "
+    "Copy the category string character-for-character from the provided list. "
     "If you cannot confidently categorize the transaction, set category to "
     '"Uncategorized" if it appears in the allowed list, otherwise use the closest '
     "allowed category and set confidence low. "
@@ -203,6 +207,12 @@ class LLMCategorizer:
             "messages": messages,
             "max_tokens": settings.llm_max_tokens,
             "temperature": 0.0,   # deterministic; we want consistent categorization
+            # Suppress Qwen3 / llama.cpp extended-thinking mode.
+            # Without this, Qwen3 spending all token budget on reasoning_content
+            # and produces an empty content field (observed: 148/148 → None).
+            # The parameter is silently ignored by endpoints that don't support it
+            # (OpenAI, Anthropic, standard vLLM), so it is safe to send everywhere.
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if settings.llm_api_key:
@@ -320,6 +330,26 @@ def _extract_completion(response_body: dict[str, Any]) -> str | None:
         return None
 
 
+def _normalize_category(s: str) -> str:
+    """Canonical-form normalizer for fuzzy category matching.
+
+    Strips the middle-dot separator (U+00B7) and surrounding whitespace,
+    collapses any remaining internal whitespace runs to a single space, and
+    lowercases.  Used only for the *comparison key* — the canonical string
+    from ``allowed_categories`` is always what gets returned to callers.
+
+    Examples::
+
+        "Office · Supplies"  →  "office supplies"
+        "Office Supplies"    →  "office supplies"   ← Qwen drops the dot
+        " SaaS · AI "        →  "saas ai"
+    """
+    # Remove middle-dot (·, U+00B7) and any surrounding spaces around it.
+    no_dot = s.replace("·", " ")
+    # Collapse multiple whitespace runs, strip leading/trailing.
+    return " ".join(no_dot.lower().split())
+
+
 def _parse_and_validate(
     raw: str,
     allowed_categories: list[str],
@@ -330,6 +360,15 @@ def _parse_and_validate(
     - not valid JSON
     - missing required keys
     - category not in allowed_categories (hallucination guard)
+
+    Matching order (first hit wins):
+    1. Exact string match against ``allowed_categories``.
+    2. Case-insensitive exact match (catches capitalisation drift).
+    3. Normalised match via ``_normalize_category`` — strips the middle-dot
+       `·` separator so that Qwen returning ``"Office Supplies"`` is correctly
+       mapped to the canonical ``"Office · Supplies"``.
+    In cases 2 and 3 the *canonical* form from ``allowed_categories`` is
+    returned so downstream code always sees the exact COA-compatible string.
     """
     # Strip markdown code fences if the model wraps its JSON (common with
     # instruction-tuned models that were trained to fence code blocks).
@@ -360,14 +399,28 @@ def _parse_and_validate(
     except (TypeError, ValueError):
         conf_float = 0.5
 
-    # Hallucination guard: the category MUST be one we know about.
-    allowed_lower = {c.lower(): c for c in allowed_categories}
+    # --- Hallucination guard: the category MUST be one we know about. ---
+    # Build lookup tables once, cheaply (N is tiny — ~20 categories at most).
     normalized = category.strip()
+
+    # 1. Exact match (fast path, no allocation).
     if normalized in allowed_categories:
         return normalized, conf_float, reasoning
-    # Case-insensitive fallback
+
+    # 2. Case-insensitive exact match.
+    allowed_lower: dict[str, str] = {c.lower(): c for c in allowed_categories}
     canonical = allowed_lower.get(normalized.lower())
     if canonical:
         return canonical, conf_float, reasoning
-    # Category not in the allowed list → reject.
+
+    # 3. Normalised (middle-dot-stripped) match.
+    #    Handles Qwen returning "Office Supplies" for canonical "Office · Supplies".
+    allowed_normalized: dict[str, str] = {
+        _normalize_category(c): c for c in allowed_categories
+    }
+    canonical = allowed_normalized.get(_normalize_category(normalized))
+    if canonical:
+        return canonical, conf_float, reasoning
+
+    # Category not in the allowed list → reject as hallucination.
     return None
