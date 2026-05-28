@@ -137,6 +137,7 @@ async def resolve_accounts_for_txn(
 PostingResult = Literal[
     "posted", "queued_for_confirm", "blocked_materiality",
     "blocked_unmapped", "blocked_unknown_category", "blocked_idempotent",
+    "blocked_period_closed",
 ]
 
 
@@ -284,6 +285,48 @@ async def post_journal_entry(
                 reason="Already posted",
                 existing_entry_id=UUID(existing.id),
             )
+
+    # ---- 3.5. Period-close guard ----
+    # Refuse the post if the entity has a closed_period row whose period_end
+    # is >= effective_date (i.e. the effective date falls inside or before the
+    # closed window).  This runs after the idempotency check so a re-delivered
+    # already-posted entry still returns blocked_idempotent (which is harmless),
+    # not blocked_period_closed (which would be confusing for a no-op).
+    closed_row = (
+        await session.execute(
+            text(
+                """
+                SELECT period_end
+                FROM closed_period
+                WHERE entity_id = :eid
+                  AND period_end >= :effective_date
+                ORDER BY period_end ASC
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "effective_date": effective_date},
+        )
+    ).first()
+    if closed_row is not None:
+        period_end = closed_row[0]
+        await _log_post_attempt(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            source=source,
+            source_external_id=source_external_id,
+            outcome="blocked_period_closed",
+            journal_entry_id=None,
+            reason=f"Period closed at {period_end}; cannot post {effective_date}.",
+            actor_uc_uid=posted_by_uc_uid,
+            actor_agent_id=posted_by_agent_id,
+            amount_cents=amount_cents,
+            category=category,
+        )
+        return PostingRefusal(
+            outcome="blocked_period_closed",
+            reason=f"Period closed at {period_end}; cannot post {effective_date}.",
+        )
 
     # ---- 4. Hash chain advance ----
     prev_hash = await get_last_chain_hash(session, entity_id)

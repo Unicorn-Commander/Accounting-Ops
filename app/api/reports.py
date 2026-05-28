@@ -1,8 +1,9 @@
-"""Financial reports (P&L, balance sheet, cash flow, 1099-NEC) over journal_entry.
+"""Financial reports (P&L, balance sheet, cash flow, trial balance, 1099-NEC).
 
   GET /api/workspaces/{wid}/reports/pl              — Profit & Loss
   GET /api/workspaces/{wid}/reports/balance-sheet   — Balance Sheet (as-of)
   GET /api/workspaces/{wid}/reports/cash-flow       — Cash Flow
+  GET /api/workspaces/{wid}/reports/trial-balance   — Trial Balance (as-of)
   GET /api/workspaces/{wid}/reports/1099-nec        — 1099-NEC contractors >= $600
 
 pl / balance-sheet / cash-flow accept period and entity_id query params:
@@ -419,9 +420,82 @@ async def balance_sheet(
         "assets": {"lines": assets, "total": str(assets_total)},
         "liabilities": {"lines": liabilities, "total": str(liab_total)},
         "equity": {"lines": equity, "total": str(equity_total)},
-        "balanced": str(drift) == "0",
+        "balanced": drift == Decimal(0),
         "drift": str(drift),
     }
+
+
+# ---------------------------------------------------------------------------
+# Cash-flow v2 classifier helpers
+# ---------------------------------------------------------------------------
+#
+# v2 classification rules (applied in order; first match wins):
+#
+#   investing:  counter account_type = 'asset'
+#               AND account_number starts with '15' (Fixed Assets / Accum. Depr.)
+#               This covers Fixed Assets (1500) and Accumulated Depreciation
+#               (1550) today; as the COA adds more 15xx intangible-asset lines
+#               they automatically fall into the investing bucket because the
+#               type='asset' + '15' prefix check stays accurate without edits.
+#
+#   financing:  counter account_type = 'equity'  (3xxx accounts), OR
+#               counter account_type = 'liability' AND account_number = '2400'
+#               (Notes Payable — long-term debt indicator), OR
+#               counter account_number IN ('6900', '7900')
+#               (inter-entity transfer accounts).
+#
+#   operating:  everything else (accounts payable 2xxx, A/R 1xxx short-term,
+#               revenue 4xxx, expense 6xxx, etc.).
+#
+# v1 fallback: if the COA JOIN yields no account_type for the counter (NULL),
+# the v1 prefix logic is used so existing behaviour is preserved for any
+# legacy entries whose counter canonical_form doesn't match a live COA row.
+
+
+# Account-number prefixes / exact numbers used by the v2 rules.
+_INVESTING_ACCOUNT_PREFIX = "15"  # Fixed Assets + Accumulated Depreciation
+_FINANCING_DEBT_ACCOUNT = "2400"   # Notes Payable (long-term debt indicator)
+_INTER_ENTITY_ACCOUNTS = frozenset({"6900", "7900"})  # inter-entity transfers
+
+
+def _classify_cash_flow_v2(
+    counter_number: str,
+    counter_type: str | None,
+) -> str:
+    """v2 cash-flow bucket for a counter-account number + account_type.
+
+    Returns 'investing', 'financing', or 'operating'.
+
+    Rules (first match wins):
+      investing  — type='asset' AND number starts with '15'
+      financing  — type='equity', OR
+                   type='liability' AND number='2400' (Notes Payable), OR
+                   number in inter-entity set (6900/7900)
+      operating  — everything else
+
+    Falls back to v1 prefix logic when counter_type is None (COA lookup miss).
+    """
+    if counter_type is not None:
+        # --- investing: fixed assets / accumulated depreciation ---
+        if counter_type == "asset" and counter_number.startswith(_INVESTING_ACCOUNT_PREFIX):
+            return "investing"
+        # --- financing: equity, long-term debt, inter-entity transfers ---
+        if counter_type == "equity":
+            return "financing"
+        if counter_type == "liability" and counter_number == _FINANCING_DEBT_ACCOUNT:
+            return "financing"
+        if counter_number in _INTER_ENTITY_ACCOUNTS:
+            return "financing"
+        # --- everything else: operating ---
+        return "operating"
+
+    # v1 fallback (COA row not found for counter)
+    counter_kind = _account_type_prefix(counter_number)
+    if counter_kind == "equity" or counter_number == _FINANCING_DEBT_ACCOUNT:
+        return "financing"
+    if counter_number in ("1500", "1550"):
+        return "investing"
+    return "operating"
 
 
 @router.get("/api/workspaces/{workspace_id}/reports/cash-flow")
@@ -431,13 +505,21 @@ async def cash_flow(
     entity_id: str | None = None,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
-    """Simple cash-flow statement: change in cash accounts (1010, 1011,
-    1020) split by operating / investing / financing.
+    """Cash-flow statement: change in cash accounts (10xx) split into
+    operating / investing / financing.
 
-    v1 classification: every non-cash account counter-side maps to
-    operating by default. (Investing = changes in 1500/1550 / financing
-    = changes in 3xxx / 2400. We'll refine the classifier as the COA
-    grows.)
+    v2 classifier (version: "v2") uses chart_of_account.account_type to
+    classify the counter account accurately:
+
+      investing:  counter type='asset' AND account_number starts with '15'
+                  (Fixed Assets, Accumulated Depreciation, future 15xx intangibles)
+      financing:  counter type='equity' (3xxx), OR
+                  type='liability' AND account='2400' (Notes Payable), OR
+                  inter-entity transfers (6900, 7900)
+      operating:  everything else
+
+    v1 prefix fallback is used when the COA JOIN yields no account_type for
+    a counter account (preserves behaviour for legacy entries).
     """
     require_role(workspace, "viewer")
     scope_restriction = assert_entity_in_scope(workspace, entity_id)
@@ -446,16 +528,19 @@ async def cash_flow(
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         entity_label = await _entity_label(session, entity_id)
-        # Net change in each cash account (10xx) over the period.
+        # v2: JOIN chart_of_account on the counter canonical_form's account_number
+        # to get account_type for classification.  LEFT JOIN so entries whose
+        # counter isn't in the live COA still appear (handled by v1 fallback).
         rows = (
             await session.execute(
                 text(
                     f"""
                     WITH cash_sides AS (
+                        -- Cash inflows: entries where the debit side is a cash account
                         SELECT
                             debit_account AS canonical_form,
-                            amount AS in_flow,
-                            0::numeric AS out_flow,
+                            amount        AS in_flow,
+                            0::numeric    AS out_flow,
                             credit_account AS counter
                         FROM journal_entry je
                         WHERE status = 'posted'
@@ -464,11 +549,12 @@ async def cash_flow(
                           AND debit_account LIKE '10%'
                           {entity_clause}
                         UNION ALL
+                        -- Cash outflows: entries where the credit side is a cash account
                         SELECT
                             credit_account AS canonical_form,
-                            0::numeric AS in_flow,
-                            amount AS out_flow,
-                            debit_account AS counter
+                            0::numeric     AS in_flow,
+                            amount         AS out_flow,
+                            debit_account  AS counter
                         FROM journal_entry je
                         WHERE status = 'posted'
                           AND effective_date >= :start
@@ -477,13 +563,18 @@ async def cash_flow(
                           {entity_clause}
                     )
                     SELECT
-                        canonical_form,
-                        counter,
-                        SUM(in_flow) AS sum_in,
-                        SUM(out_flow) AS sum_out
-                    FROM cash_sides
-                    GROUP BY canonical_form, counter
-                    ORDER BY canonical_form, counter
+                        cs.canonical_form,
+                        cs.counter,
+                        SUM(cs.in_flow)  AS sum_in,
+                        SUM(cs.out_flow) AS sum_out,
+                        -- v2: pull account_type from COA for the counter account
+                        coa.account_type AS counter_type
+                    FROM cash_sides cs
+                    LEFT JOIN chart_of_account coa
+                      ON coa.account_number = split_part(cs.counter, '·', 1)
+                     AND coa.is_active = true
+                    GROUP BY cs.canonical_form, cs.counter, coa.account_type
+                    ORDER BY cs.canonical_form, cs.counter
                     """
                 ),
                 {"start": start, "end": end, **entity_params},
@@ -502,19 +593,20 @@ async def cash_flow(
         out_flow = Decimal(str(r["sum_out"] or 0))
         net = in_flow - out_flow
         counter = r["counter"] or ""
-        counter_number = counter.split("·", 1)[0] if "·" in counter else ""
-        counter_kind = _account_type_prefix(counter_number)
+        counter_number = counter.split("·", 1)[0] if "·" in counter else counter
+        counter_type: str | None = r.get("counter_type")  # None when COA JOIN misses
+        bucket = _classify_cash_flow_v2(counter_number, counter_type)
         line = {
             "cash_account": r["canonical_form"],
             "counter_account": counter,
             "amount": str(net),
         }
-        if counter_kind in ("equity",) or counter_number == "2400":
-            financing.append(line)
-            fin_total += net
-        elif counter_number == "1500" or counter_number == "1550":
+        if bucket == "investing":
             investing.append(line)
             inv_total += net
+        elif bucket == "financing":
+            financing.append(line)
+            fin_total += net
         else:
             operating.append(line)
             op_total += net
@@ -526,10 +618,158 @@ async def cash_flow(
         "entity_label": entity_label,
         "entity_id": entity_id or "consolidated",
         "currency": "USD",
+        "version": "v2",
         "operating": {"lines": operating, "total": str(op_total)},
         "investing": {"lines": investing, "total": str(inv_total)},
         "financing": {"lines": financing, "total": str(fin_total)},
         "net_change_in_cash": str(op_total + inv_total + fin_total),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Trial Balance
+# ---------------------------------------------------------------------------
+#
+# A trial balance is the double-entry integrity check: for every posted entry
+# the debit side equals the credit side, so the grand total of all debits MUST
+# equal the grand total of all credits.  It lists one row per active
+# chart_of_account entry that has non-zero activity up to as_of.
+#
+# Sign convention (normal-balance notation):
+#   asset/expense:            normal balance = debit  → positive net = normal
+#   liability/equity/revenue: normal balance = credit → positive net = inverted
+# net_balance = total_debit − total_credit for every row.
+#
+# Exclusions (same as the cash-recon):
+#   source IN ('reversal', 'recategorization') — these are the accounting
+#   correction appendages; they cancel the original entry when included, but
+#   for a plain trial balance we follow the cash-recon convention and exclude
+#   them so a reversal/restatement pair doesn't double-count.
+#   NOTE: the spec says "excluding source IN ('reversal','recategorization')"
+#   matches the cash-recon exclusion.  Discuss with lead if all-entries view
+#   is desired for a future "include_corrections" flag.
+
+
+@router.get("/api/workspaces/{workspace_id}/reports/trial-balance")
+async def trial_balance(
+    workspace_id: UUID,
+    as_of: str | None = None,
+    entity_id: str | None = None,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Trial balance as of a date.  Defaults to today.
+
+    Returns one row per active chart_of_account with non-zero activity up to
+    as_of.  Each row:
+      account_number, canonical_form, account_type,
+      total_debit, total_credit, net_balance (debit − credit).
+
+    Grand totals (grand_total_debit, grand_total_credit) and a balanced bool
+    (total debits == total credits, the fundamental double-entry check) are
+    included.  Role floor: viewer.  Entity-scope honored.
+
+    Exclusion: entries with source IN ('reversal', 'recategorization') are
+    excluded — they are accounting-correction appendages that cancel in pairs;
+    including them would double-count corrections.  This matches the cash-recon
+    exclusion convention.
+    """
+    require_role(workspace, "viewer")
+    scope_restriction = assert_entity_in_scope(workspace, entity_id)
+    as_of_date = date.fromisoformat(as_of) if as_of else date.today()
+    entity_clause, entity_params = _entity_filter(entity_id, scope_restriction)
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        entity_label = await _entity_label(session, entity_id)
+
+        # Aggregate debits and credits per COA account across all posted entries
+        # up to as_of, excluding reversal/recategorization correction sources.
+        # We join chart_of_account via account_number prefix extracted from
+        # canonical_form (split_part on '·').  Only active COA rows with
+        # non-zero activity are returned (HAVING filters zero-net rows).
+        rows = (
+            await session.execute(
+                text(
+                    f"""
+                    WITH activity AS (
+                        -- Debit side of each posted entry
+                        SELECT
+                            split_part(je.debit_account, '·', 1) AS account_number,
+                            je.amount AS debit_amount,
+                            0::numeric               AS credit_amount
+                        FROM journal_entry je
+                        WHERE je.status = 'posted'
+                          AND je.effective_date <= :as_of
+                          AND je.source NOT IN ('reversal', 'recategorization')
+                          {entity_clause}
+                        UNION ALL
+                        -- Credit side of each posted entry
+                        SELECT
+                            split_part(je.credit_account, '·', 1) AS account_number,
+                            0::numeric               AS debit_amount,
+                            je.amount                AS credit_amount
+                        FROM journal_entry je
+                        WHERE je.status = 'posted'
+                          AND je.effective_date <= :as_of
+                          AND je.source NOT IN ('reversal', 'recategorization')
+                          {entity_clause}
+                    ),
+                    aggregated AS (
+                        SELECT
+                            a.account_number,
+                            SUM(a.debit_amount)  AS total_debit,
+                            SUM(a.credit_amount) AS total_credit
+                        FROM activity a
+                        GROUP BY a.account_number
+                        HAVING SUM(a.debit_amount) != 0 OR SUM(a.credit_amount) != 0
+                    )
+                    SELECT
+                        agg.account_number,
+                        coa.canonical_form,
+                        coa.account_type,
+                        agg.total_debit,
+                        agg.total_credit
+                    FROM aggregated agg
+                    JOIN chart_of_account coa
+                      ON coa.account_number = agg.account_number
+                     AND coa.is_active = true
+                    ORDER BY agg.account_number
+                    """
+                ),
+                {"as_of": as_of_date, **entity_params},
+            )
+        ).mappings().all()
+
+    accounts: list[dict] = []
+    grand_debit = Decimal("0")
+    grand_credit = Decimal("0")
+
+    for r in rows:
+        total_debit = Decimal(str(r["total_debit"] or 0))
+        total_credit = Decimal(str(r["total_credit"] or 0))
+        net_balance = total_debit - total_credit
+        grand_debit += total_debit
+        grand_credit += total_credit
+        accounts.append(
+            {
+                "account_number": r["account_number"],
+                "canonical_form": r["canonical_form"],
+                "account_type": r["account_type"],
+                "total_debit": str(total_debit),
+                "total_credit": str(total_credit),
+                "net_balance": str(net_balance),
+            }
+        )
+
+    balanced = grand_debit == grand_credit
+    return {
+        "as_of": as_of_date.isoformat(),
+        "entity_label": entity_label,
+        "entity_id": entity_id or "consolidated",
+        "currency": "USD",
+        "accounts": accounts,
+        "grand_total_debit": str(grand_debit),
+        "grand_total_credit": str(grand_credit),
+        "balanced": balanced,
     }
 
 

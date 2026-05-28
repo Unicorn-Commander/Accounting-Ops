@@ -10,6 +10,7 @@
   POST /api/workspaces/{wid}/journal-entries/reverse — reversing entry
   GET  /api/workspaces/{wid}/journal-entries/verify-chain?entity_id={uuid}
   GET  /api/workspaces/{wid}/posting-log    — recent post attempts (audit feed)
+  POST /api/workspaces/{wid}/entities/{eid}/close-period — close/lock a period (admin)
 """
 
 from __future__ import annotations
@@ -707,3 +708,151 @@ async def list_posting_log(
             )
         ).mappings().all()
     return {"entries": [dict(r) for r in rows]}
+
+
+# ===========================================================================
+# Period close / lock
+# ===========================================================================
+
+
+class ClosePeriodRequest(BaseModel):
+    period_end: str = Field(
+        ...,
+        description="ISO date (YYYY-MM-DD). Entries with effective_date <= this date "
+                    "will be blocked from posting after the period is closed.",
+    )
+    reason: str | None = Field(None, description="Optional human-readable reason for closing.")
+
+
+@router.post("/api/workspaces/{workspace_id}/entities/{entity_id}/close-period")
+async def close_period(
+    workspace_id: UUID,
+    entity_id: UUID,
+    body: ClosePeriodRequest,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Close (lock) an accounting period for an entity.
+
+    Inserts a ``closed_period`` row with period_end = body.period_end for the
+    entity.  After this, any attempt to post a journal entry with
+    ``effective_date <= period_end`` for the same entity will be refused with
+    ``blocked_period_closed``.
+
+    Role floor: admin.  Entity-scope enforced.
+
+    Returns:
+      - The inserted closed_period row (entity_id, period_end, closed_at,
+        closed_by_uc_uid, reason).
+      - ``entries_in_period``: count of posted journal entries whose
+        effective_date <= period_end (informational; does not list them).
+
+    NOTE: There is intentionally NO reopen-period endpoint in this version.
+    Reopening a closed period is a deliberate ops action and should be done
+    via a direct DB operation with appropriate approvals.
+    """
+    require_role(workspace, "admin")
+    assert_entity_in_scope(workspace, entity_id)
+
+    period_end_date = _parse_iso_date(body.period_end, "period_end")
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        # Verify the entity exists in this workspace
+        entity_row = (
+            await session.execute(
+                text(
+                    "SELECT id::text, display_name FROM entity WHERE id = :eid"
+                ),
+                {"eid": str(entity_id)},
+            )
+        ).mappings().first()
+        if entity_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Entity {entity_id} not found in this workspace.",
+            )
+
+        # Check for duplicate (same entity + period_end already closed)
+        existing = (
+            await session.execute(
+                text(
+                    """
+                    SELECT period_end, closed_at, closed_by_uc_uid
+                    FROM closed_period
+                    WHERE entity_id = :eid AND period_end = :pe
+                    """
+                ),
+                {"eid": str(entity_id), "pe": period_end_date},
+            )
+        ).mappings().first()
+        if existing is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Period ending {period_end_date} is already closed for entity "
+                    f"{entity_id} (closed at {existing['closed_at']} by "
+                    f"{existing['closed_by_uc_uid']})."
+                ),
+            )
+
+        # Insert the closed_period row
+        await session.execute(
+            text(
+                """
+                INSERT INTO closed_period (
+                    entity_id, period_end, closed_by_uc_uid, reason, workspace_id
+                ) VALUES (
+                    :eid, :pe, :uid, :reason, :wid
+                )
+                """
+            ),
+            {
+                "eid": str(entity_id),
+                "pe": period_end_date,
+                "uid": workspace.user_uc_uid,
+                "reason": body.reason,
+                "wid": str(workspace.workspace_id),
+            },
+        )
+
+        # Count entries already posted in this period (informational)
+        entries_count = (
+            await session.execute(
+                text(
+                    """
+                    SELECT count(*) FROM journal_entry
+                    WHERE entity_id = :eid
+                      AND effective_date <= :pe
+                      AND status = 'posted'
+                    """
+                ),
+                {"eid": str(entity_id), "pe": period_end_date},
+            )
+        ).scalar_one()
+
+        # Re-fetch the inserted row for the response
+        closed_row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT entity_id::text, period_end::text, closed_at,
+                           closed_by_uc_uid, reason
+                    FROM closed_period
+                    WHERE entity_id = :eid AND period_end = :pe
+                    """
+                ),
+                {"eid": str(entity_id), "pe": period_end_date},
+            )
+        ).mappings().first()
+
+    return {
+        "ok": True,
+        "entity_id": str(entity_id),
+        "entity_display_name": entity_row["display_name"],
+        "closed_period": dict(closed_row),
+        "entries_in_period": int(entries_count),
+        "note": (
+            f"Period ending {period_end_date} is now locked. Any post attempt "
+            f"with effective_date <= {period_end_date} for entity {entity_id} "
+            "will be refused with outcome='blocked_period_closed'."
+        ),
+    }
