@@ -790,13 +790,16 @@ async def apply_statement(
                 )
                 await session.commit()
             else:
-                # Pre-check found an existing row → idempotent skip.
+                # Pre-check found an existing row → idempotent skip. NOTE:
+                # queued_drift_cents is INTENTIONALLY NOT decremented here —
+                # the item IS still queued (pending in approval_queue from a
+                # prior run), so the journal IS still short by this amount.
+                # Backing it out would break the per-period recon math.
                 log.debug(
                     "Approval_queue dedup skip: %s", plan.source_external_id
                 )
                 skipped_idempotent += 1
                 queued -= 1
-                queued_drift_cents -= plan.amount_cents
         else:
             blocked += 1
             queued_drift_cents += plan.amount_cents
