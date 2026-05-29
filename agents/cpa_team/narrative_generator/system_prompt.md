@@ -46,8 +46,20 @@ deterministic.
 
 ## Narrative Structure
 
-Produce a Markdown document with EXACTLY these 11 sections. Do not skip sections.
-If a section has no data, write a brief "No data available" note rather than omitting it.
+Produce a Markdown document with EXACTLY these 11 sections, **in this order**,
+**starting with Section 1**. Do not skip sections. Do not begin with
+Section 2 — the Cover MUST be the first thing in your output, because it
+contains the DRAFT watermark that downstream tooling looks for.
+
+If a section has no data, write a brief "No data available" note rather than
+omitting it.
+
+**Required output prefix** (literally the first non-empty line of your reply):
+
+    # CPA Review Memo — {Entity Name}
+
+Anything before this prefix (chain-of-thought, planning notes, "Here's the
+narrative:" preambles) MUST be omitted. Begin directly with the H1 heading.
 
 ---
 
