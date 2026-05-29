@@ -260,9 +260,13 @@ async def get_tax_status(
                         slug,
                         display_name,
                         legal_name,
-                        kind            AS entity_type,
+                        kind                  AS entity_type,
                         country_code,
-                        incorporated_at,
+                        -- entity.incorporated_at was planned but the column
+                        -- doesn't exist yet on either tenant schema.  Until a
+                        -- migration adds it, the short-year detection below
+                        -- treats every year as a full year (the safe default).
+                        NULL::date            AS incorporated_at,
                         status
                     FROM entity
                     ORDER BY display_name
