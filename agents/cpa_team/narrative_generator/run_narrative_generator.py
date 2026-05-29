@@ -399,6 +399,94 @@ def _run_openai(
 
 
 # ---------------------------------------------------------------------------
+# Post-run Section-1 (Cover) injection guard
+# ---------------------------------------------------------------------------
+
+import re as _re
+from datetime import datetime as _dt, timezone as _tz
+
+# Match the literal opening of Section 1 — anything else in the first
+# non-blank line means the LLM skipped the cover.
+_COVER_OPENING_RX = _re.compile(r"^\s*#\s+CPA Review Memo", _re.MULTILINE)
+
+# Look for the entity name in the body — narratives typically mention it
+# repeatedly.  Match a capitalized phrase ending in Inc., LLC, Corp., or Co.
+_ENTITY_NAME_RX = _re.compile(
+    r"\b([A-Z][\w&.,'\- ]{2,80}?(?:Inc|LLC|Corp|Co|Ltd|L\.L\.C|L\.P)\.?)\b"
+)
+
+
+def _extract_entity_name_from_body(body: str) -> str | None:
+    """Best-effort entity-name extraction from narrative body, for cover
+    injection.  Returns the most frequent match (>=3 occurrences) or None."""
+    matches = _ENTITY_NAME_RX.findall(body[:20000])  # first 20K chars is enough
+    if not matches:
+        return None
+    counts: dict[str, int] = {}
+    for m in matches:
+        counts[m] = counts.get(m, 0) + 1
+    best = max(counts.items(), key=lambda kv: kv[1])
+    return best[0] if best[1] >= 2 else None
+
+
+def _build_cover(
+    entity_name: str | None,
+    entity_id: str,
+    tax_year: int,
+    cpa_name: str = "Morgan Qureshi",
+) -> str:
+    """Build a Section 1 cover block as a fallback when the LLM skipped it."""
+    name = entity_name or f"Entity {entity_id[:8]}"
+    short_id = entity_id[:8]
+    today_iso = _dt.now(tz=_tz.utc).date().isoformat()
+    return (
+        f"# CPA Review Memo — {name}\n"
+        f"### Tax Year {tax_year} · Form 1120 (Federal) + SC1120 (State)\n"
+        f"\n"
+        f"> **DRAFT — AI-PREPARED — FOR CPA REVIEW AND SIGNATURE ONLY**\n"
+        f"> Prepared by: Accounting-Ops Narrative Generator (AI, no PTIN)\n"
+        f"> Prepared for: {cpa_name}, CPA\n"
+        f"> Entity: {name} ({short_id})\n"
+        f"> Tax Year: {tax_year}\n"
+        f"> Generated: {today_iso}\n"
+        f">\n"
+        f"> This document synthesises AI-prepared specialist drafts. It has NOT been\n"
+        f"> reviewed by a licensed tax professional. Every position must be reviewed\n"
+        f"> before filing.\n"
+        f">\n"
+        f"> *Cover auto-injected by runner — the LLM skipped Section 1.*\n"
+        f"\n"
+        f"---\n"
+        f"\n"
+    )
+
+
+def _ensure_cover_present(
+    narrative_text: str,
+    entity_id: str,
+    tax_year: int,
+    *,
+    verbose: bool = False,
+) -> str:
+    """If narrative_text already starts with a Section 1 cover, return it
+    unchanged.  Otherwise prepend a generated cover and log a warning."""
+    if not narrative_text.strip():
+        return narrative_text
+    if _COVER_OPENING_RX.search(narrative_text[:2000]):
+        return narrative_text  # cover already present
+
+    entity_name = _extract_entity_name_from_body(narrative_text)
+    cover = _build_cover(entity_name, entity_id, tax_year)
+    if verbose:
+        print(
+            f"[narrative] cover-guard: Section 1 missing — injecting "
+            f"(entity_name={entity_name!r})",
+            file=sys.stderr,
+        )
+    return cover + narrative_text
+
+
+# ---------------------------------------------------------------------------
 # Post-run persistence (runner-side, no LLM tool call required)
 # ---------------------------------------------------------------------------
 
@@ -584,6 +672,16 @@ def run(
             "Re-run with --verbose to diagnose.\n\n"
             "DRAFT — not for distribution."
         )
+
+    # ------------------------------------------------------------------
+    # Cover-injection guard: prepend Section 1 if the LLM skipped it.
+    # The LLM has been observed to start at Section 2 (Executive Summary)
+    # ~50% of runs despite the prompt's explicit instructions.  The cover
+    # holds the DRAFT watermark that downstream tooling looks for.
+    # ------------------------------------------------------------------
+    narrative_text = _ensure_cover_present(
+        narrative_text, entity_id, tax_year, verbose=verbose,
+    )
 
     # ------------------------------------------------------------------
     # Write output file

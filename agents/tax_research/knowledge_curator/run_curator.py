@@ -53,6 +53,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Ensure /app (or equivalent project root) is on sys.path so `from app.exports
+# import embed_text` resolves regardless of cwd.  Without this, running the
+# curator from any directory other than /app silently degrades to embedding=None
+# (the URL-refresh sub-agent ran into this 2026-05-29 and lost embeddings on 7
+# newly-curated docs until re-run with explicit PYTHONPATH=/app).
+_CURATOR_FILE = Path(__file__).resolve()
+# .../{root}/agents/tax_research/knowledge_curator/run_curator.py  → root is parents[3]
+_PROJECT_ROOT = _CURATOR_FILE.parents[3]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import httpx
 import yaml
 
