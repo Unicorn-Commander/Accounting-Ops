@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
+  Download,
   FileText,
   HelpCircle,
   MessageSquare,
@@ -41,6 +42,71 @@ function centsToDollars(cents: number): string {
     maximumFractionDigits: 0
   }).format(abs);
   return dollars < 0 ? `(${formatted})` : formatted;
+}
+
+// ---------------------------------------------------------------------------
+// Specialist slug map: specialist_id (from specialist_run) → pdf slug
+// ---------------------------------------------------------------------------
+
+const SPECIALIST_SLUG_MAP: Record<string, string> = {
+  "tax-1120-preparer": "form-1120",
+  "tax-1099-specialist": "1099-nec",
+  "tax-sc1120-specialist": "sc1120",
+  "tax-officer-comp": "officer-compensation",
+  "tax-nol-schedule-l": "nol-schedule-l",
+  "tax-audit-defense-scdor": "audit-defense-scdor-ftf",
+  "tax-coordinator": "coordinator-summary",
+};
+
+// ---------------------------------------------------------------------------
+// PDF download link for a single specialist draft
+// ---------------------------------------------------------------------------
+
+function PdfDownloadLink({
+  workspaceId,
+  entityId,
+  year,
+  slug,
+}: {
+  workspaceId: string;
+  entityId: string;
+  year: number;
+  slug: string;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function handleClick() {
+    setBusy(true);
+    try {
+      const url = `/api/workspaces/${workspaceId}/entities/${entityId}/tax-drafts/${year}/${slug}.pdf`;
+      const resp = await fetch(url, { cache: "no-store" });
+      if (!resp.ok) return;
+      const blob = await resp.blob();
+      const disposition = resp.headers.get("content-disposition") ?? "";
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      const filename = match?.[1] ?? `${slug}-${year}-draft.pdf`;
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={busy}
+      title="Download PDF"
+      className="inline-flex items-center gap-1 rounded border border-default bg-elevated px-2 py-0.5 text-[10px] font-medium text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50"
+    >
+      <Download size={11} />
+      {busy ? "…" : "PDF"}
+    </button>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -564,36 +630,65 @@ function QuestionCard({
 function ItemCard({
   item,
   workspaceId,
+  entityId,
+  year,
   onResolved
 }: {
   item: TaxReviewItem;
   workspaceId: string;
+  entityId: string;
+  year: number;
   onResolved: (id: string, status: ResolveAction) => void;
 }) {
+  // Derive a PDF slug from submitter_id (specialist_id). The submitter_id for
+  // AI-generated items is the specialist_id string (e.g. "tax-1120-preparer").
+  const pdfSlug = SPECIALIST_SLUG_MAP[item.submitter_id] ?? null;
+
+  const pdfLink = pdfSlug ? (
+    <PdfDownloadLink
+      workspaceId={workspaceId}
+      entityId={entityId}
+      year={year}
+      slug={pdfSlug}
+    />
+  ) : null;
+
   switch (item.item_type) {
     case "form_line_proposal":
       return (
-        <FormLineProposalCard
-          item={item}
-          workspaceId={workspaceId}
-          onResolved={onResolved}
-        />
+        <div>
+          {pdfLink && <div className="mb-1.5 flex justify-end">{pdfLink}</div>}
+          <FormLineProposalCard
+            item={item}
+            workspaceId={workspaceId}
+            onResolved={onResolved}
+          />
+        </div>
       );
     case "flagged_position":
       return (
-        <FlaggedPositionCard
-          item={item}
-          workspaceId={workspaceId}
-          onResolved={onResolved}
-        />
+        <div>
+          {pdfLink && <div className="mb-1.5 flex justify-end">{pdfLink}</div>}
+          <FlaggedPositionCard
+            item={item}
+            workspaceId={workspaceId}
+            onResolved={onResolved}
+          />
+        </div>
       );
     case "memo":
       return (
-        <MemoCard item={item} workspaceId={workspaceId} onResolved={onResolved} />
+        <div>
+          {pdfLink && <div className="mb-1.5 flex justify-end">{pdfLink}</div>}
+          <MemoCard item={item} workspaceId={workspaceId} onResolved={onResolved} />
+        </div>
       );
     case "question":
       return (
-        <QuestionCard item={item} workspaceId={workspaceId} onResolved={onResolved} />
+        <div>
+          {pdfLink && <div className="mb-1.5 flex justify-end">{pdfLink}</div>}
+          <QuestionCard item={item} workspaceId={workspaceId} onResolved={onResolved} />
+        </div>
       );
     default:
       return null;
@@ -634,6 +729,7 @@ function TypeCountBar({ counts }: { counts: CountMap }) {
 export type SpecialistDraftViewProps = {
   items: TaxReviewItem[];
   workspaceId: string;
+  entityId: string;
   year: number;
 };
 
@@ -642,6 +738,7 @@ type StatusFilter = "pending" | "reviewed" | "all";
 export function SpecialistDraftView({
   items: initialItems,
   workspaceId,
+  entityId,
   year
 }: SpecialistDraftViewProps) {
   const [items, setItems] = useState<TaxReviewItem[]>(initialItems);
@@ -756,6 +853,8 @@ export function SpecialistDraftView({
                   key={item.id}
                   item={item}
                   workspaceId={workspaceId}
+                  entityId={entityId}
+                  year={year}
                   onResolved={handleResolved}
                 />
               ))}
