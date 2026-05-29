@@ -12,6 +12,7 @@ from app.api.irs_forms import router as irs_forms_router
 from app.api.specialist_runs import router as specialist_runs_router
 from app.api.specialist_pdf import router as specialist_pdf_router
 from app.api.tax_review import router as tax_review_router
+from app.api.tax_narrative import router as tax_narrative_router
 from app.api.tax_status import router as tax_status_router
 from app.api.cash_position import router as cash_position_router
 from app.api.category_overrides import router as category_overrides_router
@@ -75,6 +76,7 @@ app.include_router(approval_recommendations_router)
 app.include_router(specialist_runs_router)
 app.include_router(specialist_pdf_router)
 app.include_router(irs_forms_router)
+app.include_router(tax_narrative_router)
 app.include_router(tax_review_router)
 app.include_router(tax_status_router)
 app.include_router(reports_router)

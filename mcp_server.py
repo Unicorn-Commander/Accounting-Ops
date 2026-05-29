@@ -17,6 +17,7 @@ from app.tools import (
     get_p_and_l,
     get_period_journal,
     get_runway,
+    get_tax_review_queue,
     get_transaction,
     link_receipt_to_transaction,
     list_transactions,
@@ -68,6 +69,7 @@ def build_server():
     server.tool()(get_current_rule)
 
     # 1120 Preparer specialist tools
+    server.tool()(get_tax_review_queue)
     server.tool()(get_form_1120_data)
     server.tool()(get_period_journal)
     server.tool()(get_1099_payees)
