@@ -21,16 +21,40 @@ export type ActiveContext = {
   isConsolidated: boolean;
 };
 
+// Kind-priority ordering for default-entity selection.  Lower index = higher
+// priority.  Rationale: when a user has multiple entities, the operating
+// business (C-Corp / S-Corp / Sole-Prop) is almost always where their data
+// and attention sit.  Partnerships and personal entities are usually side-cars.
+const _KIND_PRIORITY: Record<string, number> = {
+  c_corp:       0,
+  s_corp:       1,
+  sole_prop:    2,
+  llc:          3,
+  partnership:  4,
+  trust:        5,
+  estate:       6,
+  personal:     7,
+};
+
+function _kindRank(kind: string): number {
+  return kind in _KIND_PRIORITY ? _KIND_PRIORITY[kind] : 99;
+}
+
 function pickDefaultEntity(entities: Entity[]): Entity | null {
   if (entities.length === 0) return null;
   if (entities.length === 1) return entities[0];
 
-  // Prefer the first non-personal entity (alphabetical order from API).
-  const nonPersonal = entities.find((e) => e.kind !== "personal");
-  if (nonPersonal) return nonPersonal;
-
-  // All entities are personal — fall back to first one.
-  return entities[0];
+  // Sort by (kind-priority, display_name) and take the top.  This means a
+  // user with [Aaron Personal, Brightwater Labs (partnership), Magic
+  // Unicorn Inc (c_corp), Majiks JV (partnership)] lands on Magic Unicorn
+  // Inc — the C-Corp — not on the alphabetically-first partnership.
+  const ranked = [...entities].sort((a, b) => {
+    const ra = _kindRank(a.kind);
+    const rb = _kindRank(b.kind);
+    if (ra !== rb) return ra - rb;
+    return a.display_name.localeCompare(b.display_name);
+  });
+  return ranked[0] ?? null;
 }
 
 export async function getActiveContext(): Promise<ActiveContext> {

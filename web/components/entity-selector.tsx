@@ -82,8 +82,19 @@ export function EntitySelector({
   // Default-entity policy: prefer first non-personal entity for visual fallback
   // when no activeEntityId is set. (See lib/active-context.ts for the canonical
   // server-side resolution.)
+  // Same kind-priority ordering as web/lib/active-context.ts.  Keeps the
+  // "what entity am I implicitly on?" answer consistent between the server's
+  // default and this client-side fallback display.
+  const _KIND_PRIORITY: Record<string, number> = {
+    c_corp: 0, s_corp: 1, sole_prop: 2, llc: 3,
+    partnership: 4, trust: 5, estate: 6, personal: 7,
+  };
   const defaultEntity =
-    entities.find((e) => e.kind !== "personal") ?? entities[0];
+    [...entities].sort((a, b) => {
+      const ra = a.kind in _KIND_PRIORITY ? _KIND_PRIORITY[a.kind] : 99;
+      const rb = b.kind in _KIND_PRIORITY ? _KIND_PRIORITY[b.kind] : 99;
+      return ra !== rb ? ra - rb : a.display_name.localeCompare(b.display_name);
+    })[0] ?? entities[0];
 
   const active =
     entities.find((e) => e.id === activeEntityId) ??

@@ -11,7 +11,6 @@ import { getActiveContext } from "@/lib/active-context";
 import { fetch1120Package } from "@/lib/taxes-1120";
 import { fetchTaxReviewQueue } from "@/lib/tax-review-queue";
 import { fetchSpecialistRuns } from "@/lib/specialist-runs";
-import { fetchNarrative } from "@/lib/tax-narrative";
 import { YearView } from "./year-view";
 
 export const dynamic = "force-dynamic";
@@ -75,22 +74,14 @@ export default async function TaxYearPage(props: {
       e instanceof Error ? e.message : "Failed to load Form 1120 package.";
   }
 
-  // Fetch specialist draft items, run history, and CPA narrative in parallel.
-  // All three are non-fatal — failures gracefully degrade.
-  const [reviewQueue, specialistRunsResp, narrativeResult] = await Promise.all([
+  // Fetch specialist draft items + run history in parallel.  The CPA
+  // narrative is fetched client-side by NarrativeView so the page renders
+  // fast and the markdown blob (often 30K–50K chars) doesn't sit in the
+  // server-streamed payload.
+  const [reviewQueue, specialistRunsResp] = await Promise.all([
     fetchTaxReviewQueue(workspace.id, entityId, taxYear),
     fetchSpecialistRuns(workspace.id, { entityId, taxYear }),
-    entityId !== "all"
-      ? fetchNarrative(workspace.id, entityId, taxYear)
-      : Promise.resolve({ state: "not_found" as const }),
   ]);
-
-  const narrativeMarkdown =
-    narrativeResult.state === "exists" ? narrativeResult.markdown : null;
-  const narrativeItemId =
-    narrativeResult.state === "exists" ? narrativeResult.itemId : null;
-  const narrativeCreatedAt =
-    narrativeResult.state === "exists" ? narrativeResult.createdAt : null;
 
   return (
     <AppShell>
@@ -118,6 +109,41 @@ export default async function TaxYearPage(props: {
           }
         />
 
+        {/*
+         * Wrong-entity-kind banner: /taxes/[year] is specifically the Form 1120
+         * (C-Corp) review surface.  If the active entity is anything else —
+         * personal, partnership, S-corp, LLC — there's no 1120 to render.
+         * Surface a one-click switch to the first C-Corp in the workspace
+         * (if any) instead of letting the user stare at empty cards.
+         */}
+        {(() => {
+          const isCCorp = ctx.activeEntity?.kind === "c_corp";
+          const cCorpEntity =
+            !isCCorp && !ctx.isConsolidated
+              ? ctx.entities.find((e) => e.kind === "c_corp")
+              : undefined;
+          if (isCCorp || ctx.isConsolidated) return null;
+          return (
+            <Card className="border-brand-500/40 bg-brand-500/5 mb-3">
+              <p className="text-sm text-ink-primary">
+                Form 1120 is the U.S. Corporation Income Tax Return — it only
+                applies to C-Corp entities. You&apos;re currently viewing{" "}
+                <strong>{entityDisplayName}</strong> ({ctx.activeEntity?.kind}).
+              </p>
+              {cCorpEntity ? (
+                <p className="mt-2 text-xs text-ink-secondary">
+                  Switch to <strong>{cCorpEntity.display_name}</strong> via the
+                  entity selector above to see the {year} Form 1120 package.
+                </p>
+              ) : (
+                <p className="mt-2 text-xs text-ink-tertiary">
+                  No C-Corp entity exists in this workspace.
+                </p>
+              )}
+            </Card>
+          );
+        })()}
+
         {fetchError ? (
           <Card>
             <p className="text-sm text-debit">{fetchError}</p>
@@ -136,9 +162,6 @@ export default async function TaxYearPage(props: {
             year={taxYear}
             taxReviewItems={reviewQueue.items}
             specialistRuns={specialistRunsResp.items}
-            narrativeMarkdown={narrativeMarkdown}
-            narrativeItemId={narrativeItemId}
-            narrativeCreatedAt={narrativeCreatedAt}
           />
         )}
       </PageShell>
