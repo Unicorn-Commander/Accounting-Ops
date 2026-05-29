@@ -183,8 +183,10 @@ def _build_user_message(
 
         Follow the call sequence in your system prompt exactly:
         1. get_1099_payees (always first)
-        2. get_period_journal (for any payee needing classification or
-           payment-method exclusion analysis)
+        2. get_period_journal with limit=80 — for any payee needing
+           classification or payment-method exclusion analysis. Do NOT
+           pull the full journal; the context window is limited. 80
+           representative entries is plenty for per-payee classification.
         3. draft_memo (reviewer narrative + per-payee summary)
         4. flag_for_cpa_review (one call per judgment item — corp/LLC
            classification unknown, attorney exception, 1099-K overlap,
