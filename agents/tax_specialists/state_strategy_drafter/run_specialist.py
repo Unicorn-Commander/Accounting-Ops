@@ -449,7 +449,12 @@ async def _run_openai_path(
                 kwargs: dict[str, Any] = {
                     "model": llm_model,
                     "messages": messages,
-                    "max_tokens": 8192,
+                    # 16384 lets the model emit 8–15 draft_memo + flag_for_cpa_review
+                    # tool calls plus the final markdown summary in a single
+                    # iteration.  The 2025-05-29 dogfood with 8192 hit the cap
+                    # mid-output and truncated the file to 95 bytes; see commit
+                    # history for the matching fix in the narrative runner.
+                    "max_tokens": 16384,
                 }
                 if use_function_calling and openai_tools:
                     kwargs["tools"] = openai_tools
@@ -615,7 +620,7 @@ def _run_anthropic_path(
 
     response = client.beta.messages.create(
         model=model_id,
-        max_tokens=8192,
+        max_tokens=16384,  # bumped from 8192 — see openai-path comment
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
         mcp_servers=[_mcp_server_config(mcp_url, service_token)],

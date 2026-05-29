@@ -480,7 +480,7 @@ async def _run_openai_path(
                 kwargs: dict[str, Any] = {
                     "model": llm_model,
                     "messages": messages,
-                    "max_tokens": 8192,
+                    "max_tokens": 16384,
                     # Request a larger per-request context window from llama.cpp.
                     # The Qwen3.6-35B-A3B server has --ctx-size 98304 with -np 4 slots
                     # (24576 per slot by default). The audit defense system prompt is
@@ -704,7 +704,7 @@ def _run_anthropic_path(
 
     response = client.beta.messages.create(
         model=model_id,
-        max_tokens=8192,
+        max_tokens=16384,
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
         mcp_servers=[_mcp_server_config(mcp_url, service_token)],
