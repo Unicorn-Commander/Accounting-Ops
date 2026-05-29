@@ -90,12 +90,17 @@ sources:
     jurisdiction: US
     topic: "174"
     tax_year: null
-    base_url: https://www.irs.gov/newsroom/frequently-asked-questions-changes-to-the-research-and-experimental-expenditures-credit
+    # rotated 2026-05-29: old URL
+    # https://www.irs.gov/newsroom/frequently-asked-questions-changes-to-the-research-and-experimental-expenditures-credit
+    # 404 after IRS site reorganization; the Research Credit page is the closest
+    # canonical successor and now incorporates §174/§174A guidance post-OBBBA.
+    base_url: https://www.irs.gov/businesses/research-credit
     refresh_days: 30
     crawl_hint: >
       Extract Q&A text covering the post-2022 mandatory capitalization
       requirement for §174 R&E expenditures. Note any pending legislative
-      changes (OBBBA provisions restoring immediate expensing).
+      changes (OBBBA provisions restoring immediate expensing via §174A
+      for tax years beginning after 2024).
 
   - name: "IRS Rev. Proc. 2024-9 — §174 safe harbor"
     jurisdiction: US
@@ -114,7 +119,11 @@ sources:
     jurisdiction: US
     topic: "163j"
     tax_year: null
-    base_url: https://www.irs.gov/newsroom/tax-cuts-and-jobs-act-provision-11-business-interest
+    # rotated 2026-05-29: old URL
+    # https://www.irs.gov/newsroom/tax-cuts-and-jobs-act-provision-11-business-interest
+    # 404 after IRS retired the per-provision TCJA pages; the Q&A page is the
+    # current canonical IRS §163(j) explainer.
+    base_url: https://www.irs.gov/newsroom/questions-and-answers-about-the-limitation-on-the-deduction-for-business-interest-expense
     refresh_days: 60
     crawl_hint: >
       Extract the small business exemption threshold (currently $30M average
@@ -128,12 +137,17 @@ sources:
     jurisdiction: US
     topic: bonus_depreciation
     tax_year: null
-    base_url: https://www.irs.gov/newsroom/tax-cuts-and-jobs-act-provision-13-new-100-percent-depreciation-deduction-for-businesses
+    # rotated 2026-05-29: old URL
+    # https://www.irs.gov/newsroom/tax-cuts-and-jobs-act-provision-13-new-100-percent-depreciation-deduction-for-businesses
+    # 404 after IRS retired the per-provision TCJA pages; the bonus FAQ page
+    # is the current canonical successor.
+    base_url: https://www.irs.gov/newsroom/additional-first-year-depreciation-deduction-bonus-faq
     refresh_days: 60
     crawl_hint: >
       Track the phase-down schedule: 100% (2018–2022), 80% (2023),
       60% (2024), 40% (2025), 20% (2026), 0% (2027+).
-      Note any OBBBA provisions restoring 100%.
+      Note OBBBA / P.L. 119-21 provisions restoring 100% for property
+      acquired and placed in service after January 19, 2025.
 
   - name: "IRS Publication 946 — How To Depreciate Property"
     jurisdiction: US
@@ -152,19 +166,28 @@ sources:
     jurisdiction: US
     topic: tcja_obbba_tracker
     tax_year: null
-    base_url: https://www.congress.gov/bill/119th-congress/house-bill/1
+    # rotated 2026-05-29: old URL
+    # https://www.congress.gov/bill/119th-congress/house-bill/1
+    # congress.gov bill landing pages now block non-browser HTTP clients (403).
+    # OBBBA was enacted as P.L. 119-21 on 2025-07-04, so the IRS provisions
+    # page is the better authoritative tracker going forward. Source authority
+    # accordingly shifts from Congress to IRS.
+    base_url: https://www.irs.gov/newsroom/one-big-beautiful-bill-provisions
     refresh_days: 14
     crawl_hint: >
-      Extract bill status, latest action, and key tax provisions:
-      §174 restoration, §163(j) ATI restoration to EBITDA, bonus
-      depreciation restoration, §199A permanence, state/local tax
-      deduction cap changes.
+      Extract IRS summary of OBBBA tax provisions as implemented:
+      §174A domestic R&E expensing restoration, §163(j) ATI add-backs,
+      100% bonus depreciation restoration, §199A treatment, and SALT
+      cap changes.
 
   - name: "IRS TCJA overview"
     jurisdiction: US
     topic: tcja_overview
     tax_year: null
-    base_url: https://www.irs.gov/newsroom/tax-cuts-and-jobs-act-tcja-overview
+    # rotated 2026-05-29: old URL
+    # https://www.irs.gov/newsroom/tax-cuts-and-jobs-act-tcja-overview
+    # 404 after IRS consolidated TCJA content under a single landing page.
+    base_url: https://www.irs.gov/tax-cuts-and-jobs-act
     refresh_days: 60
     crawl_hint: >
       Extract the summary of TCJA provisions that affect C-corporations:
@@ -244,25 +267,36 @@ sources:
     jurisdiction: US
     topic: reasonable_compensation
     tax_year: null
-    base_url: https://www.irs.gov/businesses/small-businesses-self-employed/reasonable-compensation
+    # rotated 2026-05-29: old URL
+    # https://www.irs.gov/businesses/small-businesses-self-employed/reasonable-compensation
+    # 404 after IRS reorganization; the S-corp compensation & medical insurance
+    # page is the current canonical IRS treatment of reasonable compensation
+    # factors for shareholder/officer compensation.
+    base_url: https://www.irs.gov/businesses/small-businesses-self-employed/s-corporation-compensation-and-medical-insurance-issues
     refresh_days: 90
     crawl_hint: >
-      Extract the multi-factor test for reasonable compensation (Mayson
-      factors), audit risk indicators, and the IRS LB&I job aid reference.
+      Extract the multi-factor test for reasonable compensation (training,
+      duties, time, dividend history, comparable wages, etc.), audit risk
+      indicators, and the IRS LB&I job aid reference for valuation professionals.
 
   # -----------------------------------------------------------------------
   # IRS — Net Operating Loss (§172)
   # -----------------------------------------------------------------------
-  - name: "IRS Publication 536 — Net Operating Losses"
+  - name: "IRS Instructions for Form 172 — Net Operating Losses"
     jurisdiction: US
     topic: nol_172
     tax_year: null
-    base_url: https://www.irs.gov/pub/irs-pdf/p536.pdf
+    # rotated 2026-05-29: old URL
+    # https://www.irs.gov/pub/irs-pdf/p536.pdf
+    # IRS retired Publication 536 after TY 2023; NOL guidance is now consolidated
+    # into the Instructions for Form 172, which is the canonical successor.
+    base_url: https://www.irs.gov/pub/irs-pdf/i172.pdf
     refresh_days: 180
     crawl_hint: >
-      PDF — extract the post-TCJA 80%-of-taxable-income limitation on NOL
-      deductions, indefinite carryforward rules, and the interaction with
-      §465 at-risk rules.
+      PDF (Instructions for Form 172) — extract the post-TCJA 80%-of-taxable-income
+      limitation on NOL deductions, indefinite carryforward rules, and the
+      interaction with §465 at-risk rules. Note that Pub 536 is no longer revised
+      and Form 172 instructions are the authoritative source going forward.
 
   # -----------------------------------------------------------------------
   # IRS — Wayfair / economic nexus (state sales tax)
@@ -271,6 +305,20 @@ sources:
     jurisdiction: US
     topic: wayfair_nexus
     tax_year: null
+    # TODO 2026-05-29: needs-manual-review — no canonical federal replacement.
+    # Old URL https://www.irs.gov/businesses/small-businesses-self-employed/sales-and-use-taxes-wayfair
+    # returns 404. State sales tax / Wayfair economic nexus is a state-law
+    # topic and irs.gov no longer maintains a dedicated explainer. Candidate
+    # successors that are NOT yet wired in because they're paywalled to our
+    # User-Agent (HTTP 403) or non-canonical:
+    #   - https://www.congress.gov/crs-product/IF11832 (CRS report — best
+    #     federal source but congress.gov returns 403 to non-browser clients)
+    #   - https://taxfoundation.org/taxedu/glossary/south-dakota-v-wayfair/
+    #     (think-tank, not government — skip per policy)
+    # For now leave this entry pointed at the 404 URL so the curator continues
+    # to flag it as fetch-error; the SC entry below already covers the practical
+    # nexus threshold used by Accounting-Ops customers.
+    paywalled: true   # treat as skip-don't-ingest until a canonical URL exists
     base_url: https://www.irs.gov/businesses/small-businesses-self-employed/sales-and-use-taxes-wayfair
     refresh_days: 90
     crawl_hint: >
