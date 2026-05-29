@@ -9,7 +9,8 @@ import { EntitySelector } from "@/components/entity-selector";
 import { Card, PageShell, SectionHeader } from "@/components/primitives";
 import { getActiveContext } from "@/lib/active-context";
 import { fetch1120Package } from "@/lib/taxes-1120";
-import { Form1120View } from "./form-1120-view";
+import { fetchTaxReviewQueue } from "@/lib/tax-review-queue";
+import { YearView } from "./year-view";
 
 export const dynamic = "force-dynamic";
 
@@ -61,14 +62,19 @@ export default async function TaxYearPage(props: {
     ? "All entities (consolidated)"
     : ctx.activeEntity?.display_name ?? "—";
 
+  const taxYear = parseInt(year, 10);
+
   let pkg = null;
   let fetchError: string | null = null;
   try {
-    pkg = await fetch1120Package(workspace.id, entityId, parseInt(year, 10));
+    pkg = await fetch1120Package(workspace.id, entityId, taxYear);
   } catch (e) {
     fetchError =
       e instanceof Error ? e.message : "Failed to load Form 1120 package.";
   }
+
+  // Fetch specialist draft items in parallel — failures return empty list (non-fatal).
+  const reviewQueue = await fetchTaxReviewQueue(workspace.id, entityId, taxYear);
 
   return (
     <AppShell>
@@ -105,13 +111,14 @@ export default async function TaxYearPage(props: {
             </p>
           </Card>
         ) : (
-          <Form1120View
+          <YearView
             pkg={pkg}
             workspaceId={workspace.id}
             workspaceSlug={workspace.slug}
             entityId={entityId}
             entityDisplayName={entityDisplayName}
-            year={parseInt(year, 10)}
+            year={taxYear}
+            taxReviewItems={reviewQueue.items}
           />
         )}
       </PageShell>
