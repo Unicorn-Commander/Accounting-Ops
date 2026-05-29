@@ -50,7 +50,7 @@ tax-agents = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["app*", "agents*"]
 
 [tool.ruff]
 line-length = 100
