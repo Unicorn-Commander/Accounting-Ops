@@ -25,6 +25,10 @@ dependencies = [
   "python-jose[cryptography]>=3.3.0",
   "sqlalchemy[asyncio]>=2.0.35",
   "uvicorn[standard]>=0.30.6",
+  # IRS form pre-fill: fill official PDF form fields + overlay DRAFT watermark
+  "pypdf>=4.3.0",
+  "PyPDFForm>=1.4.0",
+  "reportlab>=4.2.0",
 ]
 
 [project.optional-dependencies]

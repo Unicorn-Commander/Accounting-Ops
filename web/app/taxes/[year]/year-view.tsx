@@ -1,10 +1,11 @@
 "use client";
 
-// YearView — three-tab wrapper for the /taxes/[year] page.
+// YearView — four-tab wrapper for the /taxes/[year] page.
 //
 // Tab "Manual"          (default) — the existing Form1120View review surface.
 // Tab "Specialist draft"          — the SpecialistDraftView for the AI queue.
 // Tab "Run history"               — the RunHistoryView MLOps observability table.
+// Tab "IRS Forms"                 — IrsFormsSection: download pre-filled PDFs.
 //
 // Tabs use local state so navigating between them is instant (no server round-trip).
 // The active tab is NOT reflected in the URL — purely a UI concern within /taxes/[year].
@@ -15,10 +16,12 @@ import type { Form1120Package } from "@/lib/taxes-1120";
 import type { TaxReviewItem } from "@/lib/tax-review-queue";
 import type { SpecialistRun } from "@/lib/specialist-runs";
 import { Form1120View } from "./form-1120-view";
+import { IrsFormsSection } from "./irs-forms-section";
 import { SpecialistDraftView } from "./specialist-draft-view";
 import { RunHistoryView } from "./run-history-view";
+import { Card } from "@/components/primitives";
 
-type Tab = "manual" | "specialist" | "runs";
+type Tab = "manual" | "specialist" | "runs" | "irs-forms";
 
 export type YearViewProps = {
   pkg: Form1120Package | null;
@@ -57,7 +60,8 @@ export function YearView({
       id: "runs",
       label: "Run history",
       badge: runningCount > 0 ? runningCount : undefined
-    }
+    },
+    { id: "irs-forms", label: "IRS Forms" }
   ];
 
   return (
@@ -120,6 +124,19 @@ export function YearView({
           entityId={entityId}
           year={year}
         />
+      )}
+
+      {activeTab === "irs-forms" && (
+        <Card>
+          <h3 className="mb-4 text-xs font-semibold uppercase tracking-wider text-ink-secondary">
+            IRS Forms — Pre-filled DRAFT PDFs
+          </h3>
+          <IrsFormsSection
+            workspaceId={workspaceId}
+            entityId={entityId}
+            year={year}
+          />
+        </Card>
       )}
     </div>
   );

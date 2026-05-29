@@ -8,6 +8,7 @@ from app.a2a.server import router as a2a_router
 from app.api.account_mappings import router as account_mappings_router
 from app.api.approvals import router as approvals_router
 from app.api.approval_recommendations import router as approval_recommendations_router
+from app.api.irs_forms import router as irs_forms_router
 from app.api.specialist_runs import router as specialist_runs_router
 from app.api.tax_review import router as tax_review_router
 from app.api.tax_status import router as tax_status_router
@@ -71,6 +72,7 @@ app.include_router(journal_router)
 app.include_router(approvals_router)
 app.include_router(approval_recommendations_router)
 app.include_router(specialist_runs_router)
+app.include_router(irs_forms_router)
 app.include_router(tax_review_router)
 app.include_router(tax_status_router)
 app.include_router(reports_router)
