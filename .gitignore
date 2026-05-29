@@ -24,3 +24,4 @@ secrets/
 
 # Local agent hand-off prompts (not part of the app)
 agent-prompts/
+.claude/
