@@ -118,30 +118,31 @@ async def _approval_summary(
     entity_id: str,
     tax_year: int,
 ) -> dict[str, Any]:
-    """Return pending count + total for the approval_queue for one entity-year."""
-    # approval_queue uses a 'period' column (YYYY-MM-DD) or a 'year' column —
-    # check what exists. We try to match by year extracted from period.
-    # Gracefully fall back to 0 if the query fails.
-    try:
-        row = (
-            await session.execute(
-                text(
-                    """
-                    SELECT
-                        count(*) FILTER (WHERE status = 'pending')::int  AS pending,
-                        count(*)::int                                      AS total
-                    FROM approval_queue
-                    WHERE entity_id = :eid
-                      AND EXTRACT(YEAR FROM COALESCE(period, created_at)) = :yr
-                    """
-                ),
-                {"eid": entity_id, "yr": tax_year},
-            )
-        ).mappings().first()
-        if row:
-            return {"pending": row["pending"] or 0, "total": row["total"] or 0}
-    except Exception:  # noqa: BLE001
-        pass
+    """Return pending count + total for the approval_queue for one entity-year.
+
+    approval_queue has ``created_at`` but no ``period`` column (as of schema
+    today).  The earlier COALESCE(period, created_at) form was the cause of
+    /api/tax-status's 500: when ``period`` is missing the asyncpg statement
+    fails AND aborts the surrounding transaction, so the very next call
+    (``_queue_summary``) bombs with ``InFailedSQLTransactionError``.
+    """
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT
+                    count(*) FILTER (WHERE status = 'pending')::int  AS pending,
+                    count(*)::int                                      AS total
+                FROM approval_queue
+                WHERE entity_id = :eid
+                  AND EXTRACT(YEAR FROM created_at) = :yr
+                """
+            ),
+            {"eid": entity_id, "yr": tax_year},
+        )
+    ).mappings().first()
+    if row:
+        return {"pending": row["pending"] or 0, "total": row["total"] or 0}
     return {"pending": 0, "total": 0}
 
 
