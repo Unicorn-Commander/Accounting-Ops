@@ -13,6 +13,11 @@ output, and writes structured memos and CPA flags to the `tax_review_queue`.
 ```
 agents/tax_specialists/
 ├── README.md                          ← you are here
+├── coordinator/                       ← Tax Operations Coordinator (orchestrator)
+│   ├── persona.md                     ← role, guardrails ("dispatch and aggregate only")
+│   ├── system_prompt.md               ← verbatim system prompt for the coordinator LLM
+│   ├── dispatch_plan.py               ← deterministic rule-based dispatcher (no LLM)
+│   └── run_coordinator.py             ← CLI runner — launches specialists as subprocesses
 └── form_1120_preparer/
     ├── persona.md                     ← role, ethics, guardrails document
     ├── system_prompt.md               ← verbatim system prompt sent to the LLM
@@ -29,14 +34,66 @@ agents/tax_specialists/
 
 | Specialist | File | Status | Coverage |
 |---|---|---|---|
+| **Tax Operations Coordinator** | `coordinator/` | **MVP ready** | Orchestrator — dispatches requests to specialists + aggregates outputs |
 | Form 1120 Preparer | `form_1120_preparer/` | MVP ready | Federal C-corp return, Schedule L, 1099-NEC obligations |
 | 1099 Specialist | *(not yet built)* | Planned | Detailed 1099-NEC / 1099-MISC filing package per entity |
-| SC Tax Specialist | *(not yet built)* | Planned | South Carolina SC1120 state return draft |
+| SC State Specialist | *(not yet built)* | Planned | South Carolina SC1120 state return draft |
 | Payroll Advisor | *(not yet built)* | Planned | W-2 / 941 gap analysis and filing calendar |
+| Audit Defense Specialist | *(not yet built)* | Planned | Response to IRS / SCDOR notices; depends on SC State output |
 
 ---
 
-## Running a specialist
+## Running the Coordinator (recommended entry point)
+
+The Coordinator is the normal way to prepare a full tax package. It dispatches
+to the right specialists automatically based on your request.
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+export ACCTOPS_SERVICE_TOKEN="<keycloak-service-token>"
+
+# Full federal + 1099 + SC trio for Magic Unicorn Inc 2023:
+uv run python agents/tax_specialists/coordinator/run_coordinator.py \
+    --workspace-id 550e8400-e29b-41d4-a716-446655440000 \
+    --entity-id    aabbccdd-1234-5678-9abc-000000000001 \
+    --tax-year     2023 \
+    --request      "prepare 2023 returns for Magic Unicorn Inc" \
+    --output-dir   ./drafts/
+
+# Dry run — print dispatch plan without launching any specialist:
+uv run python agents/tax_specialists/coordinator/run_coordinator.py \
+    --workspace-id 550e8400-e29b-41d4-a716-446655440000 \
+    --entity-id    aabbccdd-1234-5678-9abc-000000000001 \
+    --tax-year     2023 \
+    --request      "prepare 2023 returns for Magic Unicorn Inc" \
+    --dry-run
+
+# With a self-hosted LLM backend (e.g. vLLM on midboy1):
+uv run python agents/tax_specialists/coordinator/run_coordinator.py \
+    --workspace-id 550e8400-e29b-41d4-a716-446655440000 \
+    --entity-id    aabbccdd-1234-5678-9abc-000000000001 \
+    --tax-year     2023 \
+    --request      "prepare 2023 returns for Magic Unicorn Inc" \
+    --backend      openai \
+    --llm-endpoint-url http://midboy1:8088/v1 \
+    --output-dir   ./drafts/
+```
+
+The coordinator will:
+1. Classify your request and build a dispatch plan (deterministic — no LLM).
+2. Sanity-check the entity has data via `get_form_1120_data`.
+3. Launch 1120 Preparer + 1099 Specialist in parallel (group 1).
+4. After group 1 completes, launch SC State Specialist (group 2).
+5. Write a coordinator summary memo via `draft_memo`.
+6. Save `./drafts/coordinator-{entity}-2023-{ts}.md` with all outputs linked.
+
+Gap notice: 1099 Specialist, SC State Specialist, and Audit Defense Specialist
+are not yet built. The coordinator writes gap notices for them and completes the
+run with whichever specialists are available.
+
+---
+
+## Running a specialist directly
 
 ### Form 1120 Preparer
 
