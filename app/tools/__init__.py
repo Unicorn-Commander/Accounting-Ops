@@ -14,6 +14,7 @@ from app.tools.tax_get_period_journal import get_period_journal
 from app.tools.tax_get_1099_payees import get_1099_payees
 from app.tools.tax_draft_memo import draft_memo
 from app.tools.tax_flag_for_cpa_review import flag_for_cpa_review
+from app.tools.tax_get_current_rule import get_current_rule
 
 __all__ = [
     "add_specialty_rule",
@@ -22,6 +23,7 @@ __all__ = [
     "draft_memo",
     "flag_for_cpa_review",
     "get_1099_payees",
+    "get_current_rule",
     "get_consolidated_p_and_l",
     "get_form_1120_data",
     "get_p_and_l",

@@ -91,6 +91,31 @@ Write a reviewer memo to the `tax_review_queue`. Use for:
 
 Returns a `memo_id` (UUID). Record every `memo_id` in the draft.
 
+### `get_current_rule(jurisdiction, topic, tax_year, query, limit)`
+
+**Call this BEFORE citing the $1M §162(m) deduction cap, Form 1125-E filing threshold,
+or reasonable compensation multi-factor test.**  IRS guidance on reasonable compensation
+is periodically updated; verify the current Mayson factors and LB&I job aid status.
+
+Key use cases for the Officer Compensation Specialist:
+```
+# Verify Form 1125-E filing threshold ($500K total receipts):
+get_current_rule(jurisdiction="US", topic="form_1125e", tax_year=2024,
+                 query="Form 1125-E filing requirement $500000 receipts threshold")
+
+# Verify §162(m) $1M deduction cap (publicly held corps):
+get_current_rule(jurisdiction="US", topic="reasonable_compensation",
+                 query="§162(m) deduction limitation publicly held corporation")
+
+# Verify current IRS reasonable compensation factors:
+get_current_rule(jurisdiction="US", topic="reasonable_compensation",
+                 query="Mayson factors IRS job aid reasonable compensation test")
+```
+
+If `knowledge_gap=True`: note the gap, call `flag_for_cpa_review` with
+`form_reference = "Knowledge Gap"`, and proceed with training-data knowledge
+marked `[KNOWLEDGE BASE GAP — verify with CPA before filing]`.
+
 ### `flag_for_cpa_review(entity_id, tax_year, form_reference, content, confidence, citations)`
 
 Write a CPA judgment flag to the `tax_review_queue`. Use for:
@@ -99,9 +124,10 @@ Write a CPA judgment flag to the `tax_review_queue`. Use for:
 - Any finding where `confidence = "low"`.
 - Any data gap (missing payroll records, no W-2 confirmation, unknown officer list).
 - Any out-of-scope request.
+- Any knowledge base gap (get_current_rule returned knowledge_gap=True).
 
 `form_reference` format: `"Form 1120, Line 12"`, `"Form 1125-E"`, `"Form 941"`,
-`"Schedule L, 3010 Owner Contribution"`, or `"Out-of-Scope"`.
+`"Schedule L, 3010 Owner Contribution"`, `"Out-of-Scope"`, or `"Knowledge Gap"`.
 
 Returns a `flag_id` (UUID). Record every `flag_id` in the CPA-flagged items section.
 

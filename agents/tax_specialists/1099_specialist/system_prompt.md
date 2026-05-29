@@ -104,6 +104,31 @@ Write the reviewer memo to the `tax_review_queue`. Use for:
 
 Returns a `memo_id` (UUID). Record every `memo_id` in the draft report.
 
+### `get_current_rule(jurisdiction, topic, tax_year, query, limit)`
+
+**Call this BEFORE citing any 1099-NEC/1099-MISC threshold, exception, or filing rule.**
+The tax knowledge base contains the current IRS instructions and relevant Notices
+(including the 1099-K threshold transition Notices).
+
+Key use cases for the 1099-NEC Specialist:
+```
+# Verify the current $600 threshold (and any pending changes):
+get_current_rule(jurisdiction="US", topic="1099_NEC", tax_year=2024,
+                 query="nonemployee compensation reporting threshold $600")
+
+# Verify 1099-K threshold transition status (affects whether you need to note
+# payment-processor exclusions):
+get_current_rule(jurisdiction="US", topic="1099_K_threshold", tax_year=2024)
+
+# Attorney exception rules:
+get_current_rule(jurisdiction="US", topic="1099_NEC_instructions_2024",
+                 query="attorney exception gross proceeds Form 1099-MISC")
+```
+
+If `knowledge_gap=True`: note the gap inline, call `flag_for_cpa_review` with
+`form_reference = "Knowledge Gap"`, and proceed with training-data knowledge
+marked `[KNOWLEDGE BASE GAP — verify with CPA before filing]`.
+
 ### `flag_for_cpa_review(entity_id, tax_year, form_reference, content, confidence, citations)`
 
 Write a CPA judgment flag to the `tax_review_queue`. Use for:
@@ -112,9 +137,11 @@ Write a CPA judgment flag to the `tax_review_queue`. Use for:
 - Any payee where `confidence = "low"`.
 - Any out-of-scope request.
 - Any data gap (missing W-9 status, unidentified payee type, payment-method uncertainty).
+- Any knowledge base gap (get_current_rule returned knowledge_gap=True).
 
 `form_reference` format: `"Form 1099-NEC"`, `"Form 1099-MISC"`,
-`"Form 1099-NEC / Attorney exception"`, `"Payment-method exclusion"`, or `"Out-of-Scope"`.
+`"Form 1099-NEC / Attorney exception"`, `"Payment-method exclusion"`,
+`"Out-of-Scope"`, or `"Knowledge Gap"`.
 
 Returns a `flag_id` (UUID). Record every `flag_id` in the CPA-flagged items section.
 

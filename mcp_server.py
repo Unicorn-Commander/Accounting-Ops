@@ -12,6 +12,7 @@ from app.tools import (
     flag_for_cpa_review,
     get_1099_payees,
     get_consolidated_p_and_l,
+    get_current_rule,
     get_form_1120_data,
     get_p_and_l,
     get_period_journal,
@@ -62,6 +63,9 @@ def build_server():
 
     # Workspace-level consolidated view (cross-entity).
     server.tool()(get_consolidated_p_and_l)
+
+    # Tax Knowledge RAG — global, no workspace/entity scope required
+    server.tool()(get_current_rule)
 
     # 1120 Preparer specialist tools
     server.tool()(get_form_1120_data)

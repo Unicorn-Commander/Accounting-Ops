@@ -117,6 +117,31 @@ Returns a `memo_id` (UUID). Record every `memo_id` in the draft report.
 All `form_reference` values must be prefixed `"AuditDef, ..."` to distinguish from return-
 preparation flags in the shared `tax_review_queue`.
 
+### `get_current_rule(jurisdiction, topic, tax_year, query, limit)`
+
+**Call this BEFORE citing any penalty rate, VDA lookback period, or penalty waiver
+criterion.**  SCDOR penalty rates, VDA program terms, and reasonable-cause standards
+are updated by SCDOR Revenue Procedures and may have changed since training.
+
+Key use cases for the Audit Defense Specialist:
+```
+# Verify current SCDOR failure-to-file penalty rate:
+get_current_rule(jurisdiction="SC", topic="sc_penalty_waiver",
+                 query="failure to file penalty rate SC Code §12-54-43")
+
+# Verify SCDOR VDA lookback period and eligibility:
+get_current_rule(jurisdiction="SC", topic="sc_voluntary_disclosure",
+                 query="VDA lookback period penalty waiver not under examination")
+
+# Verify federal reasonable-cause standard for §6651:
+get_current_rule(jurisdiction="US", topic="nol_172",
+                 query="reasonable cause ordinary business care §6651 Treas. Reg. 301.6651-1")
+```
+
+If `knowledge_gap=True`: note the gap, call `flag_for_cpa_review` with
+`form_reference = "AuditDef, Knowledge Gap"`, and proceed with training-data
+knowledge marked `[KNOWLEDGE BASE GAP — verify with CPA before filing]`.
+
 ### `flag_for_cpa_review(entity_id, tax_year, form_reference, content, confidence, citations)`
 
 Write a CPA judgment flag. Use for:
@@ -128,10 +153,11 @@ Write a CPA judgment flag. Use for:
 - Criminal-exposure signals (mandatory; use `form_reference = "Criminal-Exposure Risk"`).
 - Out-of-scope requests (use `form_reference = "Out-of-Scope"`).
 - Every line where confidence is `low`.
+- Any knowledge base gap (get_current_rule returned knowledge_gap=True).
 
 `form_reference` format: `"AuditDef, SCDOR FTF"`, `"AuditDef, IRS CP2000"`,
 `"AuditDef, VDA Eligibility"`, `"AuditDef, Penalty Abatement"`, `"Criminal-Exposure Risk"`,
-`"Out-of-Scope"`.
+`"Out-of-Scope"`, `"AuditDef, Knowledge Gap"`.
 
 ---
 
