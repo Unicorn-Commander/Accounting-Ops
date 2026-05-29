@@ -58,6 +58,11 @@ class Settings(BaseModel):
     llm_model: str = "Qwen3.6-35B-A3B-Vision"
     llm_api_key: str = ""          # blank = local/no-auth; set in env for cloud
     llm_timeout_s: int = 30
+
+    # ---- CPA Export service ----
+    # URL of the accounting-ops-cpa-export sidecar. Defaults to the docker DNS
+    # name used in the compose stack; override with CPA_EXPORT_URL in production.
+    cpa_export_url: str = "http://accounting-ops-cpa-export:8001"
     # 512 gives the JSON response room even if thinking suppression is unavailable.
     # With chat_template_kwargs enable_thinking=False (sent by the categorizer),
     # the actual output is ~150 tokens; the higher ceiling is a safety net for
@@ -105,4 +110,5 @@ def get_settings() -> Settings:
         llm_api_key=os.getenv("LLM_API_KEY", defaults.llm_api_key),
         llm_timeout_s=int(os.getenv("LLM_TIMEOUT_S", str(defaults.llm_timeout_s))),
         llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", str(defaults.llm_max_tokens))),
+        cpa_export_url=os.getenv("CPA_EXPORT_URL", defaults.cpa_export_url),
     )
