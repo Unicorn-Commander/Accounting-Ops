@@ -1,0 +1,168 @@
+# Tax Specialists
+
+Agent-based tax-preparation specialists for Accounting-Ops. Each specialist is a single-
+purpose LLM-driven agent that reads from the platform's MCP tools, produces a DRAFT
+output, and writes structured memos and CPA flags to the `tax_review_queue`.
+
+**None of these specialists are CPAs. All output is a DRAFT for licensed CPA review.**
+
+---
+
+## What's here
+
+```
+agents/tax_specialists/
+├── README.md                          ← you are here
+└── form_1120_preparer/
+    ├── persona.md                     ← role, ethics, guardrails document
+    ├── system_prompt.md               ← verbatim system prompt sent to the LLM
+    ├── run_specialist.py              ← CLI runner (Anthropic SDK + MCP)
+    └── worked_examples/
+        ├── 2023_pre_revenue_c_corp.md
+        ├── 2024_revenue_with_contractor_payments.md
+        └── 2025_inter_entity_transfer.md
+```
+
+---
+
+## Specialist inventory
+
+| Specialist | File | Status | Coverage |
+|---|---|---|---|
+| Form 1120 Preparer | `form_1120_preparer/` | MVP ready | Federal C-corp return, Schedule L, 1099-NEC obligations |
+| 1099 Specialist | *(not yet built)* | Planned | Detailed 1099-NEC / 1099-MISC filing package per entity |
+| SC Tax Specialist | *(not yet built)* | Planned | South Carolina SC1120 state return draft |
+| Payroll Advisor | *(not yet built)* | Planned | W-2 / 941 gap analysis and filing calendar |
+
+---
+
+## Running a specialist
+
+### Form 1120 Preparer
+
+```bash
+# Prerequisites
+export ANTHROPIC_API_KEY="sk-ant-..."
+export ACCTOPS_SERVICE_TOKEN="<keycloak-service-token>"
+# Optional: override the MCP endpoint (default: http://localhost:8000/mcp)
+export ACCTOPS_MCP_URL="http://localhost:8000/mcp"
+
+# Run (requires uv + the tax-agents extras installed)
+uv run python agents/tax_specialists/form_1120_preparer/run_specialist.py \
+    --workspace-id 550e8400-e29b-41d4-a716-446655440000 \
+    --entity-id    aabbccdd-1234-5678-9abc-000000000001 \
+    --tax-year     2023 \
+    --output       ./drafts/mu-inc-2023-1120-draft.md \
+    --model        sonnet
+```
+
+Use `--model opus` for higher-quality output on complex returns (inter-entity transfers,
+multiple entities, large journal sets). Sonnet is the default for cost efficiency.
+
+### Getting a service token
+
+```bash
+# Exchange your Keycloak credentials for a token (uchub realm, accounting-ops-app client)
+curl -s \
+  -d "client_id=accounting-ops-app" \
+  -d "client_secret=<secret>" \
+  -d "grant_type=client_credentials" \
+  "https://auth.unicorncommander.ai/realms/uchub/protocol/openid-connect/token" \
+  | jq -r .access_token
+```
+
+---
+
+## Standard guardrails for all specialists
+
+Every specialist in this directory MUST adhere to the following non-negotiable rules.
+These are enforced in each specialist's `persona.md` and `system_prompt.md`.
+
+1. **DRAFT-only.** All output is stamped DRAFT — CPA REVIEW REQUIRED. No specialist
+   produces final output.
+
+2. **No signing or filing.** Specialists have no authority to sign, transmit, or file
+   any tax document.
+
+3. **Cite-as-you-go.** Every numeric position carries confidence, source citations
+   (journal entry IDs, COA categories), and IRS §code / Publication references.
+
+4. **Flag judgment calls.** Material ambiguities go to `flag_for_cpa_review` via MCP —
+   never silently placed on a line.
+
+5. **No tax advice.** Output is addressed to the CPA, not to the entity owner.
+
+6. **Real citations only.** §codes and IRS Publications cited by number only. No
+   invented references.
+
+7. **Append-only audit trail.** All memos and flags written via `draft_memo` and
+   `flag_for_cpa_review` MCP tools are immutable queue rows.
+
+---
+
+## How to add a new specialist
+
+1. **Create the directory:**
+   ```
+   agents/tax_specialists/<specialist_name>/
+   ```
+
+2. **Write `persona.md`:** Role definition, scope, guardrails. Keep to 1–2 pages.
+   Copy the guardrail structure from `form_1120_preparer/persona.md`; extend only
+   what is specific to the new specialist's form/scope.
+
+3. **Write `system_prompt.md`:** The verbatim LLM system prompt. Required sections:
+   - Preamble (identity + hard guardrails distilled from persona.md)
+   - Tools available + when to use each
+   - Output schema (Markdown structure + required fields)
+   - Category-specific treatments (the specialist-equivalent of the 4-flagged-category
+     section in the 1120 preparer)
+   - Refusal patterns
+
+4. **Write worked examples** in `worked_examples/`: at minimum 2 examples covering
+   a normal case and an edge/judgment case. Format: synthetic scenario → tool call
+   sequence → expected output + key teaching points.
+
+5. **Write `run_specialist.py`:** Copy the pattern from `form_1120_preparer/run_specialist.py`.
+   Key customization points:
+   - `_ALLOWED_TOOLS`: list only the MCP tools this specialist needs. Principle of
+     least privilege — do not include write tools the specialist does not require.
+   - `_build_user_message`: adjust the task framing for the new form/scope.
+   - `_MODEL_MAP`: same map; pick the same defaults unless the new specialist's
+     task has materially different complexity.
+
+6. **Update this README:** Add the new specialist to the inventory table.
+
+7. **Do not add HTTP routes or DB tables.** All backend tool additions are owned by the
+   `app/` directory. This `agents/` tree is additive-only.
+
+---
+
+## Architecture note
+
+Each specialist is a standalone stateless agent:
+
+```
+run_specialist.py
+    │
+    ├── [Anthropic SDK]  ──→  Claude (model)
+    │                              │
+    │                              ├── tool call: get_form_1120_data(...)
+    │                              ├── tool call: get_1099_payees(...)
+    │                              ├── tool call: draft_memo(...)
+    │                              └── tool call: flag_for_cpa_review(...)
+    │                              │
+    │         [MCP HTTP transport] │
+    │                              ▼
+    └── [Accounting-Ops /mcp]  ──→  FastMCP server (mcp_server.py)
+                                         │
+                                         └── Postgres (journal, tax_review_queue)
+```
+
+The model drives its own tool-call loop via the Anthropic SDK's native MCP integration.
+The runner script does not implement a tool-call loop — it delegates entirely to the SDK.
+
+For a more complex multi-agent workflow (e.g., a CPA review agent that reads the
+`tax_review_queue` and responds to flags), this same pattern applies: write a new
+`run_specialist.py` that connects to the same MCP endpoint with a different system prompt
+and a different `_ALLOWED_TOOLS` list.
