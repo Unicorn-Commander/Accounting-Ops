@@ -91,6 +91,16 @@ import textwrap
 from datetime import date
 from typing import Any
 
+# Bootstrap repo root so we can import shared runner utilities even when this
+# script is invoked directly (uv run python agents/...).
+_HERE = pathlib.Path(__file__).resolve().parent
+_REPO_ROOT = _HERE.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from agents._shared.api_keys import HELP_TEXT_LLM_API_KEY, resolve_llm_api_key
+from agents._shared.limits import MAX_OUTPUT_TOKENS
+
 # ---------------------------------------------------------------------------
 # Soft dependency checks — deferred to the backend that actually needs them
 # ---------------------------------------------------------------------------
@@ -480,7 +490,7 @@ async def _run_openai_path(
                 kwargs: dict[str, Any] = {
                     "model": llm_model,
                     "messages": messages,
-                    "max_tokens": 16384,
+                    "max_tokens": MAX_OUTPUT_TOKENS,
                     # Request a larger per-request context window from llama.cpp.
                     # The Qwen3.6-35B-A3B server has --ctx-size 98304 with -np 4 slots
                     # (24576 per slot by default). The audit defense system prompt is
@@ -704,7 +714,7 @@ def _run_anthropic_path(
 
     response = client.beta.messages.create(
         model=model_id,
-        max_tokens=16384,
+        max_tokens=MAX_OUTPUT_TOKENS,
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
         mcp_servers=[_mcp_server_config(mcp_url, service_token)],
@@ -813,7 +823,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "to the specified output file. DRAFT-only — never sends or files anything."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=textwrap.dedent("""\
+        epilog=textwrap.dedent(f"""\
             Environment variables:
               ACCTOPS_SERVICE_TOKEN   Bearer token for the /mcp endpoint              [required]
               ACCTOPS_MCP_URL         MCP endpoint base URL                           [default: http://localhost:8000/mcp]
@@ -825,6 +835,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
               LLM_ENDPOINT_URL        Base URL for OpenAI-compatible local endpoint   [default: http://localhost:8088/v1]
               LLM_MODEL               Model name at the local endpoint                [default: Qwen3.6-35B-A3B-Vision]
               LLM_API_KEY             API key for the local endpoint                  [default: local-qwen]
+              OPENROUTER_API_KEY      Fleet-wide OpenRouter key (alternative to LLM_API_KEY)
+
+            {HELP_TEXT_LLM_API_KEY}
 
             Notice types (--notice-type):
               scdor-ftf       SCDOR failure-to-file / SC1120-CTD delinquency notice (default)
@@ -901,7 +914,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--llm-api-key",
         default=None,
-        help="API key for the local endpoint.",
+        help=(
+            "API key for the local endpoint. DEPRECATED — visible via `ps`. "
+            "Prefer $LLM_API_KEY, $OPENROUTER_API_KEY, or --llm-api-key-file."
+        ),
+    )
+    parser.add_argument(
+        "--llm-api-key-file",
+        default=None,
+        help=(
+            "Path to a file (chmod 600 recommended) containing the LLM API "
+            "key. Takes precedence over --llm-api-key."
+        ),
     )
     parser.add_argument(
         "--instruction-format",
@@ -975,10 +999,10 @@ def main(argv: list[str] | None = None) -> None:
         or os.environ.get("LLM_MODEL")
         or _DEFAULT_LLM_MODEL
     )
-    llm_api_key = (
-        args.llm_api_key
-        or os.environ.get("LLM_API_KEY")
-        or _DEFAULT_LLM_API_KEY
+    llm_api_key = resolve_llm_api_key(
+        args.llm_api_key,
+        args.llm_api_key_file,
+        default=_DEFAULT_LLM_API_KEY,
     )
 
     run(

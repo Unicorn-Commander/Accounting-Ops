@@ -74,6 +74,16 @@ import textwrap
 from datetime import date
 from typing import Any
 
+# Bootstrap repo root so we can import shared runner utilities even when this
+# script is invoked directly (uv run python agents/...).
+_HERE_BOOTSTRAP = pathlib.Path(__file__).resolve().parent
+_REPO_ROOT_BOOTSTRAP = _HERE_BOOTSTRAP.parent.parent.parent
+if str(_REPO_ROOT_BOOTSTRAP) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT_BOOTSTRAP))
+
+from agents._shared.api_keys import HELP_TEXT_LLM_API_KEY, resolve_llm_api_key
+from agents._shared.limits import MAX_OUTPUT_TOKENS
+
 try:
     import anthropic as _anthropic_module
 except ImportError:
@@ -110,10 +120,11 @@ _ALLOWED_TOOLS: list[str] = [
 
 _MAX_LOOP_ITERATIONS = 20
 
-# Output token budget for the LLM.  The narrative itself is ~5K–10K tokens;
-# 16 384 leaves headroom for the structured Markdown plus any per-iteration
-# tool-call boilerplate.  Both Claude Sonnet 4.6 and Opus 4.7 support this.
-_MAX_OUTPUT_TOKENS = 16384
+# Output token budget for the LLM.  Sourced from the shared limits module so
+# fleet-wide tuning is a one-file change (agents/_shared/limits.py). The
+# narrative itself is ~5K–10K tokens; the shared 16384 leaves headroom for the
+# structured Markdown plus any per-iteration tool-call boilerplate.
+_MAX_OUTPUT_TOKENS = MAX_OUTPUT_TOKENS
 
 
 # ---------------------------------------------------------------------------
@@ -776,13 +787,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "drafts into a single CPA review memo."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=textwrap.dedent("""\
+        epilog=textwrap.dedent(f"""\
             Environment variables:
               ACCTOPS_SERVICE_TOKEN    Bearer token (accountant role floor)   [required]
               ACCTOPS_MCP_URL          MCP server URL                          [default: http://localhost:8000/mcp]
               LLM_ENDPOINT_URL         OpenAI-compatible endpoint URL          [default: http://localhost:8088/v1]
               LLM_MODEL                Model name                              [default: anthropic/claude-sonnet-4.6]
               LLM_API_KEY              API key                                 [default: local-key]
+              OPENROUTER_API_KEY       Fleet-wide OpenRouter key (alternative to LLM_API_KEY)
+
+            {HELP_TEXT_LLM_API_KEY}
         """),
     )
     parser.add_argument("--workspace-id", required=True, help="Workspace UUID")
@@ -812,7 +826,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--llm-api-key", default=None,
-        help="API key for the endpoint",
+        help=(
+            "API key for the endpoint. DEPRECATED — visible via `ps`. "
+            "Prefer $LLM_API_KEY, $OPENROUTER_API_KEY, or --llm-api-key-file."
+        ),
+    )
+    parser.add_argument(
+        "--llm-api-key-file", default=None,
+        help=(
+            "Path to a file (chmod 600 recommended) containing the LLM API "
+            "key. Takes precedence over --llm-api-key."
+        ),
     )
     parser.add_argument(
         "--verbose", action="store_true",
@@ -865,11 +889,10 @@ def main(argv: list[str] | None = None) -> None:
         or os.environ.get("LLM_MODEL")
         or _DEFAULT_LLM_MODEL
     )
-    llm_api_key = (
-        args.llm_api_key
-        or os.environ.get("LLM_API_KEY")
-        or os.environ.get("OPENROUTER_KEY")
-        or _DEFAULT_LLM_API_KEY
+    llm_api_key = resolve_llm_api_key(
+        args.llm_api_key,
+        args.llm_api_key_file,
+        default=_DEFAULT_LLM_API_KEY,
     )
 
     run(

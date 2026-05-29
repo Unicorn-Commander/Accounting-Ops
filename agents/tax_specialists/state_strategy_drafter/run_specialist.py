@@ -91,6 +91,16 @@ import textwrap
 from datetime import date
 from typing import Any
 
+# Bootstrap repo root so we can import shared runner utilities even when this
+# script is invoked directly (uv run python agents/...).
+_HERE = pathlib.Path(__file__).resolve().parent
+_REPO_ROOT = _HERE.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from agents._shared.api_keys import HELP_TEXT_LLM_API_KEY, resolve_llm_api_key
+from agents._shared.limits import MAX_OUTPUT_TOKENS
+
 # ---------------------------------------------------------------------------
 # Soft dependency checks
 # ---------------------------------------------------------------------------
@@ -449,12 +459,9 @@ async def _run_openai_path(
                 kwargs: dict[str, Any] = {
                     "model": llm_model,
                     "messages": messages,
-                    # 16384 lets the model emit 8–15 draft_memo + flag_for_cpa_review
-                    # tool calls plus the final markdown summary in a single
-                    # iteration.  The 2025-05-29 dogfood with 8192 hit the cap
-                    # mid-output and truncated the file to 95 bytes; see commit
-                    # history for the matching fix in the narrative runner.
-                    "max_tokens": 16384,
+                    # See agents/_shared/limits.py for the rationale behind
+                    # MAX_OUTPUT_TOKENS (16384, not 8192).
+                    "max_tokens": MAX_OUTPUT_TOKENS,
                 }
                 if use_function_calling and openai_tools:
                     kwargs["tools"] = openai_tools
@@ -620,7 +627,7 @@ def _run_anthropic_path(
 
     response = client.beta.messages.create(
         model=model_id,
-        max_tokens=16384,  # bumped from 8192 — see openai-path comment
+        max_tokens=MAX_OUTPUT_TOKENS,
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
         mcp_servers=[_mcp_server_config(mcp_url, service_token)],
@@ -746,7 +753,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "to the specified output file."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=textwrap.dedent("""\
+        epilog=textwrap.dedent(f"""\
             State codes:
               sc   South Carolina (fully populated ruleset)
               ga   Georgia (placeholder / TODO)
@@ -766,6 +773,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
               LLM_ENDPOINT_URL        Base URL for OpenAI-compatible endpoint         [default: http://localhost:8088/v1]
               LLM_MODEL               Model name at the endpoint                      [default: Qwen3.6-35B-A3B-Vision]
               LLM_API_KEY             API key for the endpoint                        [default: local-qwen]
+              OPENROUTER_API_KEY      Fleet-wide OpenRouter key (alternative to LLM_API_KEY)
+
+            {HELP_TEXT_LLM_API_KEY}
 
             Examples:
               # SC strategy via OpenRouter (Claude Sonnet):
@@ -776,7 +786,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 --tax-year 2024 --state sc \\
                 --llm-endpoint-url https://openrouter.ai/api/v1 \\
                 --llm-model anthropic/claude-sonnet-4-6 \\
-                --llm-api-key "$OPENROUTER_KEY" \\
+                --llm-api-key-file ~/.openrouter.key \\
                 --output /drafts/mu-inc-2024-sc-strategy.md --verbose
         """),
     )
@@ -851,7 +861,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--llm-api-key",
         default=None,
-        help="API key for the endpoint.",
+        help=(
+            "API key for the endpoint. DEPRECATED — visible via `ps`. "
+            "Prefer $LLM_API_KEY, $OPENROUTER_API_KEY, or --llm-api-key-file."
+        ),
+    )
+    parser.add_argument(
+        "--llm-api-key-file",
+        default=None,
+        help=(
+            "Path to a file (chmod 600 recommended) containing the LLM API "
+            "key. Takes precedence over --llm-api-key."
+        ),
     )
     parser.add_argument(
         "--instruction-format",
@@ -928,10 +949,10 @@ def main(argv: list[str] | None = None) -> None:
         or os.environ.get("LLM_MODEL")
         or _DEFAULT_LLM_MODEL
     )
-    llm_api_key = (
-        args.llm_api_key
-        or os.environ.get("LLM_API_KEY")
-        or _DEFAULT_LLM_API_KEY
+    llm_api_key = resolve_llm_api_key(
+        args.llm_api_key,
+        args.llm_api_key_file,
+        default=_DEFAULT_LLM_API_KEY,
     )
 
     run(
