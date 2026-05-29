@@ -36,8 +36,17 @@ dev = [
 # Tax-agent specialist runner dependencies.
 # Not in main deps — only needed for agents/tax_specialists/*/run_specialist.py.
 # Install with: uv pip install accounting-ops[tax-agents]
+#
+# anthropic  — Anthropic SDK with native MCP client integration (beta)
+# openai     — OpenAI-compatible client for local endpoints (e.g. llama-server)
+# mcp[cli]   — MCP Python SDK; the [cli] extra includes the client transport
+#              (streamable_http) needed for the manual tool-call loop in the
+#              openai backend.  The main deps already pin mcp>=1.2.0 for the
+#              server side; the [cli] extra just adds client-transport extras.
 tax-agents = [
-  "anthropic>=0.44.0",   # SDK with native MCP client integration (beta)
+  "anthropic>=0.44.0",
+  "openai>=1.40.0",
+  "mcp[cli]>=0.6.0",
 ]
 
 [tool.setuptools.packages.find]
