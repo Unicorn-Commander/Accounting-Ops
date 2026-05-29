@@ -84,21 +84,35 @@ SPECIALIST_REGISTRY: list[SpecialistMeta] = [
         display_name="1099 Specialist",
         runner_path="agents/tax_specialists/1099_specialist/run_specialist.py",
         parallel_group=1,
-        available=False,  # Not yet built — produces gap notice
+        available=True,  # built 2026-05-29
     ),
     SpecialistMeta(
         slug="sc_state_specialist",
         display_name="SC State Specialist",
         runner_path="agents/tax_specialists/sc_state_specialist/run_specialist.py",
         parallel_group=2,  # Must wait for group-1 (1120 Preparer) to finish
-        available=False,  # Not yet built — produces gap notice
+        available=True,  # built 2026-05-29
     ),
     SpecialistMeta(
-        slug="audit_defense",
+        slug="audit_defense_specialist",
         display_name="Audit Defense Specialist",
-        runner_path="agents/tax_specialists/audit_defense/run_specialist.py",
+        runner_path="agents/tax_specialists/audit_defense_specialist/run_specialist.py",
         parallel_group=3,  # Runs after SC State (group 2)
-        available=False,  # Not yet built — produces gap notice
+        available=False,  # sub-agent still in flight — flip when landed
+    ),
+    SpecialistMeta(
+        slug="officer_compensation_specialist",
+        display_name="Officer Compensation Specialist",
+        runner_path="agents/tax_specialists/officer_compensation_specialist/run_specialist.py",
+        parallel_group=1,
+        available=True,  # built 2026-05-29
+    ),
+    SpecialistMeta(
+        slug="nol_schedule_l_analyst",
+        display_name="NOL + Schedule L Analyst",
+        runner_path="agents/tax_specialists/nol_schedule_l_analyst/run_specialist.py",
+        parallel_group=2,  # Needs federal data first
+        available=True,  # built 2026-05-29
     ),
     SpecialistMeta(
         slug="payroll_advisor",
