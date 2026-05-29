@@ -33,6 +33,12 @@ dev = [
   "pytest-asyncio>=0.24.0",
   "ruff>=0.6.9",
 ]
+# Tax-agent specialist runner dependencies.
+# Not in main deps — only needed for agents/tax_specialists/*/run_specialist.py.
+# Install with: uv pip install accounting-ops[tax-agents]
+tax-agents = [
+  "anthropic>=0.44.0",   # SDK with native MCP client integration (beta)
+]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
