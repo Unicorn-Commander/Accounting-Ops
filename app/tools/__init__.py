@@ -8,12 +8,22 @@ from app.tools.reporting import (
 )
 from app.tools.specialty_rules import add_specialty_rule, query_specialty_rules
 from app.tools.transactions import get_transaction, list_transactions
+from app.tools.tax_get_form_1120_data import get_form_1120_data
+from app.tools.tax_get_period_journal import get_period_journal
+from app.tools.tax_get_1099_payees import get_1099_payees
+from app.tools.tax_draft_memo import draft_memo
+from app.tools.tax_flag_for_cpa_review import flag_for_cpa_review
 
 __all__ = [
     "add_specialty_rule",
     "categorize_transaction",
+    "draft_memo",
+    "flag_for_cpa_review",
+    "get_1099_payees",
     "get_consolidated_p_and_l",
+    "get_form_1120_data",
     "get_p_and_l",
+    "get_period_journal",
     "get_runway",
     "get_transaction",
     "link_receipt_to_transaction",

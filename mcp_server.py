@@ -7,8 +7,13 @@ from app.config import get_settings
 from app.tools import (
     add_specialty_rule,
     categorize_transaction,
+    draft_memo,
+    flag_for_cpa_review,
+    get_1099_payees,
     get_consolidated_p_and_l,
+    get_form_1120_data,
     get_p_and_l,
+    get_period_journal,
     get_runway,
     get_transaction,
     link_receipt_to_transaction,
@@ -53,6 +58,13 @@ def build_server():
 
     # Workspace-level consolidated view (cross-entity).
     server.tool()(get_consolidated_p_and_l)
+
+    # 1120 Preparer specialist tools
+    server.tool()(get_form_1120_data)
+    server.tool()(get_period_journal)
+    server.tool()(get_1099_payees)
+    server.tool()(draft_memo)
+    server.tool()(flag_for_cpa_review)
 
     @server.tool()
     async def propose_payment_tool(
