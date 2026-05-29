@@ -171,7 +171,12 @@ def _build_user_message(
 ) -> str:
     """Construct the user-turn message sent to the specialist."""
     return textwrap.dedent(f"""\
-        Please prepare a DRAFT Form 1120 for the following entity.
+        Please prepare a DRAFT SC1120 (South Carolina C-corp income tax return)
+        for the following entity. Apply SC's 5% corporate rate and SC
+        modifications to the federal Form 1120 figures (Schedule B addbacks
+        for §168(k) bonus depreciation, SC NOL rules), the SC license fee,
+        and a sales & use tax sweep. If a prior-year SC return is non-filed
+        (e.g. MU Inc TY 2023), draft a failure-to-file cure package.
 
         workspace_id : {workspace_id}
         entity_id    : {entity_id}
@@ -179,14 +184,16 @@ def _build_user_message(
         run_date     : {date.today().isoformat()}
 
         Follow the call sequence in your system prompt exactly:
-        1. get_form_1120_data
-        2. get_1099_payees
-        3. get_period_journal (only if needed -- document why)
-        4. draft_memo (reviewer narrative)
-        5. flag_for_cpa_review (one call per flagged item)
-        6. Emit the full DRAFT output in the Markdown schema from your system prompt.
+        1. get_form_1120_data (federal data is your STARTING POINT; apply SC
+           modifications).
+        2. get_period_journal (always — for the sales/use tax sweep).
+        3. draft_memo (SC narrative + modifications + sales/use findings +
+           failure-to-file cure if applicable).
+        4. flag_for_cpa_review (one call per judgment item — SC modifications,
+           use tax exposure, FTF cure path, VDA eligibility).
+        5. Emit the full DRAFT in the Markdown schema from your system prompt.
 
-        Stamp the output DRAFT -- CPA REVIEW REQUIRED at the top and bottom.
+        Stamp DRAFT -- CPA REVIEW REQUIRED at the top and bottom.
         Include all memo IDs and flag IDs in the footer.
     """)
 

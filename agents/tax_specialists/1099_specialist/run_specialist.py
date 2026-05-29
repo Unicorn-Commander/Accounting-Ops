@@ -171,7 +171,10 @@ def _build_user_message(
 ) -> str:
     """Construct the user-turn message sent to the specialist."""
     return textwrap.dedent(f"""\
-        Please prepare a DRAFT Form 1120 for the following entity.
+        Please identify all 1099-NEC + 1099-MISC filing obligations for the
+        following entity. Use get_1099_payees as the primary tool; drill into
+        per-payee payment details via get_period_journal when entity
+        classification or attorney rule requires it.
 
         workspace_id : {workspace_id}
         entity_id    : {entity_id}
@@ -179,14 +182,17 @@ def _build_user_message(
         run_date     : {date.today().isoformat()}
 
         Follow the call sequence in your system prompt exactly:
-        1. get_form_1120_data
-        2. get_1099_payees
-        3. get_period_journal (only if needed -- document why)
-        4. draft_memo (reviewer narrative)
-        5. flag_for_cpa_review (one call per flagged item)
-        6. Emit the full DRAFT output in the Markdown schema from your system prompt.
+        1. get_1099_payees (always first)
+        2. get_period_journal (for any payee needing classification or
+           payment-method exclusion analysis)
+        3. draft_memo (reviewer narrative + per-payee summary)
+        4. flag_for_cpa_review (one call per judgment item — corp/LLC
+           classification unknown, attorney exception, 1099-K overlap,
+           below-threshold MISC items the CPA should still see)
+        5. Emit the full DRAFT output in the Markdown schema from your
+           system prompt.
 
-        Stamp the output DRAFT -- CPA REVIEW REQUIRED at the top and bottom.
+        Stamp DRAFT -- CPA REVIEW REQUIRED at the top and bottom.
         Include all memo IDs and flag IDs in the footer.
     """)
 
