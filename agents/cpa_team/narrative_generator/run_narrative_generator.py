@@ -405,9 +405,11 @@ def _run_openai(
 import re as _re
 from datetime import datetime as _dt, timezone as _tz
 
-# Match the literal opening of Section 1 — anything else in the first
-# non-blank line means the LLM skipped the cover.
-_COVER_OPENING_RX = _re.compile(r"^\s*#\s+CPA Review Memo", _re.MULTILINE)
+# Literal heading text we expect for Section 1.  We deliberately do NOT use a
+# regex with ``^`` / MULTILINE because greedy whitespace consumption of leading
+# newlines makes ``match.start()`` ambiguous (would land one byte before the
+# ``#`` and leave a stray newline in the output).
+_COVER_HEADING = "# CPA Review Memo"
 
 # Look for the entity name in the body — narratives typically mention it
 # repeatedly.  Match a capitalized phrase ending in Inc., LLC, Corp., or Co.
@@ -468,18 +470,41 @@ def _ensure_cover_present(
     *,
     verbose: bool = False,
 ) -> str:
-    """If narrative_text already starts with a Section 1 cover, return it
-    unchanged.  Otherwise prepend a generated cover and log a warning."""
+    """Normalize the narrative so it starts at the Section 1 H1 (cover):
+
+      1. If a ``# CPA Review Memo`` H1 exists in the first 2K chars, strip
+         everything before it (LLM preamble like "I will now compose ...").
+      2. If no such H1 exists, prepend an auto-generated cover.
+
+    Returns the normalized text.  Empty input is passed through.
+    """
     if not narrative_text.strip():
         return narrative_text
-    if _COVER_OPENING_RX.search(narrative_text[:2000]):
-        return narrative_text  # cover already present
+
+    # Find the H1 by literal substring.  We require a preceding "\n" so we
+    # don't match "## CPA Review Memo" or accidental in-paragraph mentions.
+    head = narrative_text[:2000]
+    if head.startswith(_COVER_HEADING):
+        return narrative_text  # cover already at position 0
+    idx = head.find("\n" + _COVER_HEADING)
+    if idx >= 0:
+        # +1 to skip the matched leading newline so the result starts with "#"
+        cut_at = idx + 1
+        stripped = narrative_text[:cut_at]
+        if verbose and stripped.strip():
+            preview = stripped.strip()[:120].replace("\n", " ")
+            print(
+                f"[narrative] cover-guard: stripping {len(stripped)} chars "
+                f"of preamble before H1 (preview: {preview!r})",
+                file=sys.stderr,
+            )
+        return narrative_text[cut_at:]
 
     entity_name = _extract_entity_name_from_body(narrative_text)
     cover = _build_cover(entity_name, entity_id, tax_year)
     if verbose:
         print(
-            f"[narrative] cover-guard: Section 1 missing — injecting "
+            f"[narrative] cover-guard: Section 1 H1 missing — injecting "
             f"(entity_name={entity_name!r})",
             file=sys.stderr,
         )
