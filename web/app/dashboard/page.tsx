@@ -1,24 +1,14 @@
 import Link from "next/link";
-import { ArrowRight, ArrowUpRight, Wifi } from "lucide-react";
+import { ArrowRight, ArrowUpRight, Sparkles, Wifi } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { AgentActivitySection } from "@/components/agent-activity-section";
 import { EntitySelector } from "@/components/entity-selector";
-import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip, ConfidenceDot } from "@/components/primitives";
+import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
 import { getActiveContext } from "@/lib/active-context";
 import { getCashPosition, formatUSD } from "@/lib/cash-position";
 import { getProfitAndLoss } from "@/lib/journal";
 import { getRecentTransactions, shortDate, type LiveTransaction } from "@/lib/transactions";
 import { cn } from "@/lib/cn";
-
-const RECENT_TXNS = [
-  { id: "tx-1", date: "May 21", payee: "Stripe payout (Listing-Ops)", category: "Revenue · Marketplace", amount: "+$12,408.22", tone: "credit", conf: 0.97, materiality: "M" as const, recon: "reconciled" as const },
-  { id: "tx-2", date: "May 21", payee: "Anthropic", category: "SaaS · AI", amount: "-$200.00", tone: "debit", conf: 0.93, materiality: "L" as const, recon: "reconciled" as const },
-  { id: "tx-3", date: "May 21", payee: "Hostinger", category: "Infrastructure", amount: "-$8.99", tone: "debit", conf: 0.95, materiality: "L" as const, recon: "reconciled" as const },
-  { id: "tx-4", date: "May 20", payee: "Stripe payout (Majiks Studio)", category: "Revenue · Music", amount: "+$1,082.40", tone: "credit", conf: 0.99, materiality: "L" as const, recon: "reconciled" as const },
-  { id: "tx-5", date: "May 20", payee: "Cisco Meraki", category: "Infrastructure", amount: "-$420.00", tone: "debit", conf: 0.71, materiality: "L" as const, recon: "needs_review" as const },
-  { id: "tx-6", date: "May 19", payee: "Mercury · ACH transfer", category: "Inter-entity", amount: "+$5,000.00", tone: "credit", conf: 0.62, materiality: "M" as const, recon: "needs_review" as const },
-  { id: "tx-7", date: "May 19", payee: "Postmark", category: "SaaS · Email", amount: "-$15.00", tone: "debit", conf: 0.98, materiality: "L" as const, recon: "reconciled" as const }
-];
 
 export default async function DashboardPage() {
   const ctx = await getActiveContext();
@@ -49,14 +39,20 @@ export default async function DashboardPage() {
           title="Dashboard"
           subtitle={subtitle}
           action={
-            <EntitySelector
-              entities={ctx.entities}
-              activeEntityId={ctx.isConsolidated ? "consolidated" : ctx.activeEntity?.id}
-              canConsolidate={canConsolidate}
-            />
+            ctx.activeWorkspace ? (
+              <EntitySelector
+                entities={ctx.entities}
+                activeEntityId={ctx.isConsolidated ? "consolidated" : ctx.activeEntity?.id}
+                canConsolidate={canConsolidate}
+              />
+            ) : null
           }
         />
 
+        {!ctx.activeWorkspace ? (
+          <EmptyWorkspaceState />
+        ) : (
+          <>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <KpiCard
             label="Cash (assets)"
@@ -160,7 +156,7 @@ export default async function DashboardPage() {
               <div className="flex items-center justify-between border-b border-subtle px-6 py-4">
                 <div>
                   <h2 className="text-base font-semibold">Recent transactions</h2>
-                  <p className="mt-0.5 text-xs text-ink-tertiary">Last 7 days across connected accounts</p>
+                  <p className="mt-0.5 text-xs text-ink-tertiary">Last 30 days across connected accounts</p>
                 </div>
                 <Link
                   href="/transactions"
@@ -176,8 +172,8 @@ export default async function DashboardPage() {
                       <th className="px-6 py-2.5 text-left font-medium">Date</th>
                       <th className="px-2 py-2.5 text-left font-medium">Payee · Account</th>
                       <th className="px-2 py-2.5 text-left font-medium">Status</th>
+                      <th className="px-2 py-2.5 text-left font-medium">Category</th>
                       <th className="px-2 py-2.5 text-center font-medium">M</th>
-                      <th className="px-2 py-2.5 text-center font-medium">Conf</th>
                       <th className="px-6 py-2.5 text-right font-medium">Amount</th>
                     </tr>
                   </thead>
@@ -188,6 +184,12 @@ export default async function DashboardPage() {
                       const absAmt = Math.abs(amt);
                       const materiality: "L" | "M" | "H" =
                         absAmt < 100 ? "L" : absAmt < 1000 ? "M" : "H";
+                      const catTone =
+                        t.category_status === "auto"
+                          ? "credit"
+                          : t.category_status === "suggest"
+                            ? "pending"
+                            : "ink";
                       return (
                         <tr
                           key={t.id}
@@ -211,11 +213,17 @@ export default async function DashboardPage() {
                               <StatusChip tone="ink">Posted</StatusChip>
                             )}
                           </td>
-                          <td className="px-2 py-3 text-center">
-                            <MaterialityBadge level={materiality} />
+                          <td className="px-2 py-3">
+                            {t.category ? (
+                              <StatusChip tone={catTone as "credit" | "pending" | "ink"}>
+                                {t.category.length > 18 ? `${t.category.slice(0, 17)}…` : t.category}
+                              </StatusChip>
+                            ) : (
+                              <span className="text-[11px] text-ink-disabled">uncategorized</span>
+                            )}
                           </td>
                           <td className="px-2 py-3 text-center">
-                            <ConfidenceDot value={0} />
+                            <MaterialityBadge level={materiality} />
                           </td>
                           <td
                             className={cn(
@@ -232,17 +240,24 @@ export default async function DashboardPage() {
                   </tbody>
                 </table></div>
               ) : (
-                <div className="px-6 py-8 text-center text-xs text-ink-tertiary">
-                  {txnData?.configured
-                    ? "No transactions in the last 30 days across connected accounts."
-                    : "No live transaction feed yet."}{" "}
+                <div className="px-6 py-10 text-center">
+                  <p className="text-sm text-ink-secondary mb-1">
+                    {txnData?.configured
+                      ? "No transactions in the last 30 days."
+                      : "No live transaction feed yet."}
+                  </p>
+                  <p className="text-xs text-ink-tertiary mb-4">
+                    {txnData?.configured
+                      ? "Activity across your connected accounts will show up here as it posts."
+                      : "Connect a bank aggregator to start populating your transaction history."}
+                  </p>
                   <Link
                     href="/connectors"
-                    className="text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
+                    className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
                   >
-                    Connect a bank
-                  </Link>{" "}
-                  to populate.
+                    {txnData?.configured ? "Manage connectors" : "Connect a bank"}
+                    <ArrowRight size={11} />
+                  </Link>
                 </div>
               )}
             </Card>
@@ -302,12 +317,17 @@ export default async function DashboardPage() {
                     );
                   })
                 ) : (
-                  <li className="px-5 py-6 text-center text-xs text-ink-tertiary">
-                    No bank accounts connected yet.{" "}
-                    <Link href="/connectors" className="text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline">
+                  <li className="px-5 py-8 text-center">
+                    <p className="text-xs text-ink-secondary mb-3">
+                      No bank accounts connected yet.
+                    </p>
+                    <Link
+                      href="/connectors"
+                      className="inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
+                    >
                       Connect SimpleFIN
-                    </Link>{" "}
-                    to see live balances.
+                      <ArrowRight size={11} />
+                    </Link>
                   </li>
                 )}
               </ul>
@@ -315,7 +335,7 @@ export default async function DashboardPage() {
 
             <Card padded={false}>
               <div className="flex items-center gap-2 border-b border-subtle px-5 py-3">
-                <span className="h-1.5 w-1.5 rounded-full bg-ink-disabled" />
+                <Sparkles size={12} className="text-agent-500" />
                 <h2 className="text-sm font-semibold">Compliance watch</h2>
                 <Link
                   href="/specialty-rules"
@@ -331,7 +351,7 @@ export default async function DashboardPage() {
                   or any other rule on{" "}
                   <Link
                     href="/specialty-rules"
-                    className="text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
+                    className="text-brand-400 underline-offset-2 hover:underline"
                   >
                     Specialty rules
                   </Link>{" "}
@@ -345,7 +365,37 @@ export default async function DashboardPage() {
         <div className="mt-8">
           <AgentActivitySection />
         </div>
+          </>
+        )}
       </PageShell>
     </AppShell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Empty / no-workspace state
+// ---------------------------------------------------------------------------
+
+function EmptyWorkspaceState() {
+  return (
+    <Card>
+      <div className="flex flex-col items-center gap-3 py-10 text-center">
+        <Sparkles size={32} className="text-ink-disabled" />
+        <p className="text-base font-medium text-ink-secondary">
+          No workspaces yet.
+        </p>
+        <p className="max-w-md text-xs text-ink-tertiary">
+          Workspaces are how Accounting-Ops scopes your entities, journal,
+          and approvals. Sign in with the workspace owner&apos;s account, or
+          have them provision a membership for you.
+        </p>
+        <Link
+          href="/login"
+          className="mt-1 inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
+        >
+          Sign in to your workspace
+        </Link>
+      </div>
+    </Card>
   );
 }
