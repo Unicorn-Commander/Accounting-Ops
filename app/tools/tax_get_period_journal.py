@@ -73,10 +73,16 @@ async def get_period_journal(
 
     clamped_limit = max(1, min(int(limit), _MAX_LIMIT))
 
+    # asyncpg requires datetime.date for date columns; the tool accepts ISO
+    # 8601 strings as inputs (per MCP schema), so convert here.
+    from datetime import date as _date
+    _start = _date.fromisoformat(start_date) if isinstance(start_date, str) else start_date
+    _end = _date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+
     params: dict[str, Any] = {
         "entity_id": str(entity_id),
-        "start_date": start_date,
-        "end_date": end_date,
+        "start_date": _start,
+        "end_date": _end,
         "limit": clamped_limit,
     }
 
