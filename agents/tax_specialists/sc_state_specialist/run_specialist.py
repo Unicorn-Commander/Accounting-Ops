@@ -186,7 +186,10 @@ def _build_user_message(
         Follow the call sequence in your system prompt exactly:
         1. get_form_1120_data (federal data is your STARTING POINT; apply SC
            modifications).
-        2. get_period_journal (always — for the sales/use tax sweep).
+        2. get_period_journal with limit=80 — for the sales/use tax sweep.
+           Do NOT request the full journal; the context window is limited.
+           80 representative entries is enough for sales/use sampling and
+           keeps the conversation under the context cap.
         3. draft_memo (SC narrative + modifications + sales/use findings +
            failure-to-file cure if applicable).
         4. flag_for_cpa_review (one call per judgment item — SC modifications,
