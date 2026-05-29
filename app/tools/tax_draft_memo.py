@@ -96,10 +96,11 @@ async def draft_memo(
                     ) VALUES (
                         :workspace_id, :entity_id, :tax_year,
                         'memo', NULL,
-                        :content::jsonb, :confidence, :citations::jsonb,
+                        CAST(:content AS jsonb), :confidence,
+                        CAST(:citations AS jsonb),
                         'pending', :submitter_kind, :submitter_id
                     )
-                    RETURNING id::text AS id
+                    RETURNING CAST(id AS text) AS id
                     """
                 ),
                 {
