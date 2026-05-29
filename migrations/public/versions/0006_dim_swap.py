@@ -42,7 +42,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0006_tax_knowledge_embedding_dim_swap"
+revision: str = "0006_dim_swap"
 down_revision: str | None = "0005_tax_knowledge_base"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
