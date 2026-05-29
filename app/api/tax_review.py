@@ -33,7 +33,7 @@ import datetime as dt
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -74,7 +74,10 @@ async def list_tax_review_items(
     workspace_id: UUID,
     entity_id: UUID | None = None,
     tax_year: int | None = None,
-    status_filter: str = "pending",
+    # URL exposes ?status= (idiomatic + matches the web client).
+    # Internal name stays status_filter to avoid collision with the
+    # fastapi.status import used for HTTP codes.
+    status_filter: str = Query("pending", alias="status"),
     item_type: str | None = None,
     limit: int = 100,
     offset: int = 0,
@@ -82,7 +85,7 @@ async def list_tax_review_items(
 ) -> dict:
     """List tax review queue items for a workspace (optionally one entity).
 
-    Read floor is viewer. Defaults to status='pending'; pass status_filter=all
+    Read floor is viewer. Defaults to status='pending'; pass ?status=all
     to see the full history.
 
     Entity-scope (BOLA): mirrors approvals.py. A scoped member is restricted

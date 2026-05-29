@@ -317,11 +317,16 @@ function FormLineProposalCard({
   onResolved: (id: string, status: ResolveAction) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const c = item.content as {
-    proposed_amount_cents?: number;
-    line_label?: string;
-    source_categories?: Array<{ category: string; amount_cents: number; entry_count?: number }>;
-    notes?: string;
+  // Backend tools write `label`; some earlier scaffolding used `line_label`.
+  // Read both so the UI is resilient while the specialist's canonical shape settles.
+  const cRaw = item.content as Record<string, unknown>;
+  const c = {
+    proposed_amount_cents: cRaw.proposed_amount_cents as number | undefined,
+    line_label: (cRaw.label ?? cRaw.line_label) as string | undefined,
+    source_categories: cRaw.source_categories as
+      | Array<{ category: string; amount_cents: number; entry_count?: number }>
+      | undefined,
+    notes: cRaw.notes as string | undefined,
   };
 
   const isPending = item.status === "pending";
@@ -413,10 +418,13 @@ function FlaggedPositionCard({
   workspaceId: string;
   onResolved: (id: string, status: ResolveAction) => void;
 }) {
-  const c = item.content as {
-    description?: string;
-    judgment?: string;
-    notes?: string;
+  // Backend's flag tool writes {issue, affected_line, context, recommendation};
+  // earlier scaffolding used {description, judgment, notes}. Accept both.
+  const cRaw = item.content as Record<string, unknown>;
+  const c = {
+    description: (cRaw.description ?? cRaw.issue) as string | undefined,
+    judgment: (cRaw.judgment ?? cRaw.recommendation) as string | undefined,
+    notes: (cRaw.notes ?? cRaw.context) as string | undefined,
   };
   const isPending = item.status === "pending";
 
@@ -468,9 +476,11 @@ function MemoCard({
   workspaceId: string;
   onResolved: (id: string, status: ResolveAction) => void;
 }) {
-  const c = item.content as {
-    title?: string;
-    body?: string;
+  // Backend's draft_memo writes {topic, text}; earlier scaffolding used {title, body}.
+  const cRaw = item.content as Record<string, unknown>;
+  const c = {
+    title: (cRaw.title ?? cRaw.topic) as string | undefined,
+    body: (cRaw.body ?? cRaw.text) as string | undefined,
   };
   const isPending = item.status === "pending";
 
@@ -511,9 +521,11 @@ function QuestionCard({
   workspaceId: string;
   onResolved: (id: string, status: ResolveAction) => void;
 }) {
-  const c = item.content as {
-    body?: string;
-    context?: string;
+  // Backend's question shape is {text}; earlier scaffolding used {body, context}.
+  const cRaw = item.content as Record<string, unknown>;
+  const c = {
+    body: (cRaw.body ?? cRaw.text ?? cRaw.question) as string | undefined,
+    context: cRaw.context as string | undefined,
   };
   const isPending = item.status === "pending";
 
