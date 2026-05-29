@@ -11,6 +11,7 @@ import { getActiveContext } from "@/lib/active-context";
 import { fetch1120Package } from "@/lib/taxes-1120";
 import { fetchTaxReviewQueue } from "@/lib/tax-review-queue";
 import { fetchSpecialistRuns } from "@/lib/specialist-runs";
+import { fetchNarrative } from "@/lib/tax-narrative";
 import { YearView } from "./year-view";
 
 export const dynamic = "force-dynamic";
@@ -74,11 +75,22 @@ export default async function TaxYearPage(props: {
       e instanceof Error ? e.message : "Failed to load Form 1120 package.";
   }
 
-  // Fetch specialist draft items + run history in parallel — failures return empty lists (non-fatal).
-  const [reviewQueue, specialistRunsResp] = await Promise.all([
+  // Fetch specialist draft items, run history, and CPA narrative in parallel.
+  // All three are non-fatal — failures gracefully degrade.
+  const [reviewQueue, specialistRunsResp, narrativeResult] = await Promise.all([
     fetchTaxReviewQueue(workspace.id, entityId, taxYear),
     fetchSpecialistRuns(workspace.id, { entityId, taxYear }),
+    entityId !== "all"
+      ? fetchNarrative(workspace.id, entityId, taxYear)
+      : Promise.resolve({ state: "not_found" as const }),
   ]);
+
+  const narrativeMarkdown =
+    narrativeResult.state === "exists" ? narrativeResult.markdown : null;
+  const narrativeItemId =
+    narrativeResult.state === "exists" ? narrativeResult.itemId : null;
+  const narrativeCreatedAt =
+    narrativeResult.state === "exists" ? narrativeResult.createdAt : null;
 
   return (
     <AppShell>
@@ -124,6 +136,9 @@ export default async function TaxYearPage(props: {
             year={taxYear}
             taxReviewItems={reviewQueue.items}
             specialistRuns={specialistRunsResp.items}
+            narrativeMarkdown={narrativeMarkdown}
+            narrativeItemId={narrativeItemId}
+            narrativeCreatedAt={narrativeCreatedAt}
           />
         )}
       </PageShell>

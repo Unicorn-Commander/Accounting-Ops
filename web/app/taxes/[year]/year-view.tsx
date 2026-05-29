@@ -1,8 +1,9 @@
 "use client";
 
-// YearView — four-tab wrapper for the /taxes/[year] page.
+// YearView — five-tab wrapper for the /taxes/[year] page.
 //
-// Tab "Manual"          (default) — the existing Form1120View review surface.
+// Tab "Narrative"       (default when narrative exists) — CPA Narrative memo.
+// Tab "Manual"          (default when no narrative) — Form1120View review surface.
 // Tab "Specialist draft"          — the SpecialistDraftView for the AI queue.
 // Tab "Run history"               — the RunHistoryView MLOps observability table.
 // Tab "IRS Forms"                 — IrsFormsSection: download pre-filled PDFs.
@@ -18,11 +19,12 @@ import type { TaxReviewItem } from "@/lib/tax-review-queue";
 import type { SpecialistRun } from "@/lib/specialist-runs";
 import { Form1120View } from "./form-1120-view";
 import { IrsFormsSection } from "./irs-forms-section";
+import { NarrativeView } from "./narrative-view";
 import { SpecialistDraftView } from "./specialist-draft-view";
 import { RunHistoryView } from "./run-history-view";
 import { Card } from "@/components/primitives";
 
-type Tab = "manual" | "specialist" | "runs" | "irs-forms";
+type Tab = "narrative" | "manual" | "specialist" | "runs" | "irs-forms";
 
 export type YearViewProps = {
   pkg: Form1120Package | null;
@@ -33,6 +35,10 @@ export type YearViewProps = {
   year: number;
   taxReviewItems: TaxReviewItem[];
   specialistRuns: SpecialistRun[];
+  /** SSR-fetched narrative markdown — null if none generated yet. */
+  narrativeMarkdown: string | null;
+  narrativeItemId: string | null;
+  narrativeCreatedAt: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -115,26 +121,37 @@ export function YearView({
   entityDisplayName,
   year,
   taxReviewItems,
-  specialistRuns
+  specialistRuns,
+  narrativeMarkdown,
+  narrativeItemId,
+  narrativeCreatedAt,
 }: YearViewProps) {
-  const [activeTab, setActiveTab] = useState<Tab>("manual");
+  // Default to "narrative" tab when a narrative already exists; otherwise "manual".
+  const [activeTab, setActiveTab] = useState<Tab>(
+    narrativeMarkdown ? "narrative" : "manual"
+  );
 
   const pendingCount = taxReviewItems.filter((it) => it.status === "pending").length;
   const runningCount = specialistRuns.filter((r) => r.status === "running").length;
 
-  const tabs: { id: Tab; label: string; badge?: number }[] = [
+  const tabs: { id: Tab; label: string; badge?: number; highlight?: boolean }[] = [
+    {
+      id: "narrative",
+      label: "Narrative",
+      highlight: !narrativeMarkdown, // pulse when no narrative yet
+    },
     { id: "manual", label: "Manual" },
     {
       id: "specialist",
       label: "Specialist draft",
-      badge: pendingCount > 0 ? pendingCount : undefined
+      badge: pendingCount > 0 ? pendingCount : undefined,
     },
     {
       id: "runs",
       label: "Run history",
-      badge: runningCount > 0 ? runningCount : undefined
+      badge: runningCount > 0 ? runningCount : undefined,
     },
-    { id: "irs-forms", label: "IRS Forms" }
+    { id: "irs-forms", label: "IRS Forms" },
   ];
 
   return (
@@ -151,7 +168,9 @@ export function YearView({
                 "relative inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium",
                 activeTab === t.id
                   ? "border-brand-500 bg-brand-500/10 text-brand-300"
-                  : "border-default bg-surface text-ink-secondary hover:bg-elevated"
+                  : t.highlight
+                    ? "border-brand-500/40 bg-brand-500/[0.05] text-brand-400 hover:bg-brand-500/10"
+                    : "border-default bg-surface text-ink-secondary hover:bg-elevated"
               )}
             >
               {t.label}
@@ -182,6 +201,17 @@ export function YearView({
       </div>
 
       {/* Tab panels */}
+      {activeTab === "narrative" && (
+        <NarrativeView
+          initialMarkdown={narrativeMarkdown}
+          initialItemId={narrativeItemId}
+          initialCreatedAt={narrativeCreatedAt}
+          workspaceId={workspaceId}
+          entityId={entityId}
+          year={year}
+        />
+      )}
+
       {activeTab === "manual" && (
         <Form1120View
           pkg={pkg}

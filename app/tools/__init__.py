@@ -15,6 +15,7 @@ from app.tools.tax_get_1099_payees import get_1099_payees
 from app.tools.tax_draft_memo import draft_memo
 from app.tools.tax_flag_for_cpa_review import flag_for_cpa_review
 from app.tools.tax_get_current_rule import get_current_rule
+from app.tools.tax_get_queue_for_year import get_tax_review_queue
 
 __all__ = [
     "add_specialty_rule",
@@ -32,6 +33,7 @@ __all__ = [
     "get_transaction",
     "link_receipt_to_transaction",
     "list_transactions",
+    "get_tax_review_queue",
     "propose_payment",
     "query_specialty_rules",
 ]
