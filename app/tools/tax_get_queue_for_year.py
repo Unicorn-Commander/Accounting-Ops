@@ -20,7 +20,7 @@ from sqlalchemy import text
 
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace
-from app.workspace_session import workspace_session  # noqa: F811 — used as context manager
+from app.workspace_session import workspace_session
 
 _MAX_ITEMS = 500  # safety cap; 55-160 items typical per entity-year
 

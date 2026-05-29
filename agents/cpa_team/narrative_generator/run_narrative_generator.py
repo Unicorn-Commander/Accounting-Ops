@@ -65,6 +65,7 @@ the API endpoint handles force_regenerate logic).
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import pathlib
@@ -95,14 +96,24 @@ _DEFAULT_LLM_API_KEY = "local-key"
 _SYSTEM_PROMPT_PATH = pathlib.Path(__file__).parent / "system_prompt.md"
 
 # Tools the narrative generator is allowed to call.
+#
+# Note: ``draft_memo`` is deliberately omitted.  The runner persists the
+# generated narrative directly after the LLM loop (see ``_persist_narrative``);
+# this avoids the LLM having to emit the full 5K–10K-token narrative *inside*
+# a tool-call arguments JSON, which previously blew the ``max_tokens`` budget
+# on OpenRouter and resulted in an empty ``function.arguments`` payload.
 _ALLOWED_TOOLS: list[str] = [
     "get_form_1120_data",
     "get_tax_review_queue",
     "get_period_journal",
-    "draft_memo",
 ]
 
 _MAX_LOOP_ITERATIONS = 20
+
+# Output token budget for the LLM.  The narrative itself is ~5K–10K tokens;
+# 16 384 leaves headroom for the structured Markdown plus any per-iteration
+# tool-call boilerplate.  Both Claude Sonnet 4.6 and Opus 4.7 support this.
+_MAX_OUTPUT_TOKENS = 16384
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +214,7 @@ def _run_anthropic(
     client = anthropic.Anthropic()
     response = client.beta.messages.create(
         model=resolved_model,
-        max_tokens=8192,
+        max_tokens=_MAX_OUTPUT_TOKENS,
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
         mcp_servers=[_mcp_server_config(mcp_url, service_token)],
@@ -270,8 +281,7 @@ def _run_openai(
         )
         sys.exit(1)
 
-    import asyncio
-    import httpx
+    import httpx  # noqa: F401  (transitive dependency used via openai)
     import openai
 
     system_prompt = _load_system_prompt()
@@ -323,7 +333,7 @@ def _run_openai(
                         messages=messages,
                         tools=openai_tools if openai_tools else None,
                         tool_choice="auto" if openai_tools else None,
-                        max_tokens=8192,
+                        max_tokens=_MAX_OUTPUT_TOKENS,
                         temperature=0.1,
                     )
 
@@ -386,6 +396,91 @@ def _run_openai(
                 return narrative_text
 
     return asyncio.run(_async_run())
+
+
+# ---------------------------------------------------------------------------
+# Post-run persistence (runner-side, no LLM tool call required)
+# ---------------------------------------------------------------------------
+
+
+async def _persist_narrative_via_mcp(
+    mcp_url: str,
+    service_token: str,
+    workspace_id: str,
+    entity_id: str,
+    tax_year: int,
+    narrative_text: str,
+    *,
+    verbose: bool = False,
+) -> str | None:
+    """Persist the generated narrative as a ``memo`` row via the MCP draft_memo
+    tool.  Returns the item_id on success, ``None`` on failure (printed to
+    stderr — non-fatal because the Markdown file on disk is the primary
+    deliverable).
+
+    Why this lives outside the LLM loop: emitting a 5K–10K-token narrative
+    *inside* a tool-call ``arguments`` JSON exceeds the model's ``max_tokens``
+    budget on many endpoints and silently truncates to an empty payload.  By
+    persisting from the runner we make the write deterministic and decoupled
+    from output-token limits.
+    """
+    try:
+        import mcp.client.streamable_http as _mcp_transport
+        from mcp.client.session import ClientSession as _MCPSession
+    except ImportError:
+        print(
+            "[narrative] persist: mcp package not available — skipping DB insert",
+            file=sys.stderr,
+        )
+        return None
+
+    transport = _mcp_transport.streamablehttp_client(
+        url=mcp_url,
+        headers={"Authorization": f"Bearer {service_token}"},
+    )
+    try:
+        async with transport as (read, write, _):
+            async with _MCPSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(
+                    "draft_memo",
+                    {
+                        "workspace_id": workspace_id,
+                        "entity_id": entity_id,
+                        "tax_year": tax_year,
+                        "topic": f"cpa_narrative_{tax_year}",
+                        "content": narrative_text,
+                        "confidence": "high",
+                    },
+                )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[narrative] persist: draft_memo MCP call FAILED: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    # Result payload from FastMCP is a list of TextContent; the tool returns
+    # ``{"ok": True, "item_id": "<uuid>", ...}``.
+    try:
+        contents = result.content if hasattr(result, "content") else []
+        for c in contents:
+            text_payload = getattr(c, "text", None) or str(c)
+            if "item_id" in text_payload:
+                import json as _json
+                try:
+                    data = _json.loads(text_payload)
+                    item_id = data.get("item_id")
+                    if verbose:
+                        print(f"[narrative] persist: memo row id = {item_id}")
+                    return item_id
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception:  # noqa: BLE001
+        pass
+    if verbose:
+        print("[narrative] persist: draft_memo returned without item_id")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +591,31 @@ def run(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(narrative_text, encoding="utf-8")
     print(f"[narrative] Narrative written to: {output_path}")
+
+    # ------------------------------------------------------------------
+    # Persist narrative as a memo via MCP (runner-side; the LLM does not
+    # call draft_memo — see _ALLOWED_TOOLS comment for the rationale).
+    # ------------------------------------------------------------------
+    if narrative_text and "Generation Failed" not in narrative_text[:200]:
+        item_id = asyncio.run(
+            _persist_narrative_via_mcp(
+                mcp_url=mcp_url,
+                service_token=service_token,
+                workspace_id=workspace_id,
+                entity_id=entity_id,
+                tax_year=tax_year,
+                narrative_text=narrative_text,
+                verbose=verbose,
+            )
+        )
+        if item_id:
+            print(f"[narrative] Persisted to tax_review_queue item_id={item_id}")
+        else:
+            print(
+                "[narrative] WARNING: persist step did not return an item_id "
+                "— check MCP / draft_memo logs. The Markdown file is still on disk.",
+                file=sys.stderr,
+            )
 
     # ------------------------------------------------------------------
     # Print analysis

@@ -31,14 +31,16 @@ This is your source for:
 Use only if a specific line amount needs a sanity check or if the 1120 data is missing
 a figure. Do NOT fetch the full journal — only targeted queries for specific items.
 
-### 4. `draft_memo(workspace_id, entity_id, tax_year, topic, content, citations, confidence)`
-Write the completed narrative to the queue as:
-```
-topic    = "cpa_narrative_{tax_year}"
-content  = {"topic": "cpa_narrative_{tax_year}", "text": "<full Markdown narrative>"}
-confidence = "high"
-```
-This is the LAST call you make — after the narrative is fully composed.
+### 4. Persistence — **handled by the runner; do NOT call `draft_memo`**
+Your final assistant text response IS the narrative. The runner reads that
+final text, writes it to disk at the configured `--output` path, AND persists
+it to `tax_review_queue` as a `memo` row with `topic="cpa_narrative_{tax_year}"`.
+You do not need to call any persistence tool — emitting the Markdown is enough.
+
+Why this matters: emitting a 5K–10K-token narrative *inside* a tool-call
+arguments JSON exceeds the `max_tokens` budget on most endpoints and silently
+truncates to an empty payload. Letting the runner persist makes the write
+deterministic.
 
 ---
 
@@ -256,8 +258,7 @@ Execute in this exact order:
 2. `get_tax_review_queue(workspace_id, entity_id, tax_year, include_resolved=true)` — get all queue items
 3. If specific amounts are missing or suspicious: `get_period_journal(...)` for targeted checks only
 4. Compose the full 11-section Markdown narrative in memory
-5. `draft_memo(workspace_id, entity_id, tax_year, topic="cpa_narrative_{tax_year}", content={"topic": "cpa_narrative_{tax_year}", "text": "<full Markdown>"},  confidence="high")` — write to queue
-6. Return the full Markdown text as your final output (also written to --output file by the runner)
+5. Return the full Markdown text as your final assistant message. The runner persists it to both the `--output` file and the `tax_review_queue` (topic `cpa_narrative_{tax_year}`).
 
 Do NOT call `flag_for_cpa_review` — the narrative is a synthesis memo, not a new flag.
-Do NOT call `draft_memo` more than once per run.
+Do NOT call `draft_memo` — the runner handles persistence after your final message.
