@@ -44,6 +44,8 @@ import textwrap
 from datetime import date
 from typing import Any
 
+from agents.tax_specialists._shared.run_telemetry import RunTelemetry
+
 # ---------------------------------------------------------------------------
 # Dependency check — give a clear error before the import explosion
 # ---------------------------------------------------------------------------
@@ -210,6 +212,9 @@ def run(
     system_prompt = _load_system_prompt()
     user_message = _build_user_message(workspace_id, entity_id, tax_year)
 
+    # Derive the backend API base URL from the MCP URL (strip /mcp suffix).
+    base_url = mcp_url.rstrip("/").removesuffix("/mcp") or "http://localhost:8000"
+
     if verbose:
         print(f"[runner] Model     : {model_id}")
         print(f"[runner] MCP URL   : {mcp_url}")
@@ -220,54 +225,85 @@ def run(
 
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
 
-    # The Anthropic SDK's MCP integration lets the model call remote MCP tools
-    # natively — no local tool-call loop required on our side.
-    # ``betas=["mcp-client-2025-04-04"]`` enables the feature.
-    # The model will make tool calls, receive results, and continue reasoning
-    # until it produces a final text response.
-    response = client.beta.messages.create(
+    telemetry = RunTelemetry(
+        base_url=base_url,
+        service_token=service_token,
+        workspace_id=workspace_id,
+        entity_id=entity_id,
+        tax_year=tax_year,
+        specialist_id="tax-1120-preparer",
+        backend="anthropic",
         model=model_id,
-        max_tokens=8192,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
-        mcp_servers=[_mcp_server_config(mcp_url, service_token)],
-        betas=["mcp-client-2025-04-04"],
+        endpoint_url=mcp_url,
+        input_summary={
+            "workspace_id": workspace_id,
+            "entity_id": entity_id,
+            "tax_year": tax_year,
+            "args": {"model_key": model_key, "output": str(output_path)},
+        },
     )
 
-    # Report tool calls made
-    tool_summaries = _collect_tool_use_summaries(response)
-    if tool_summaries:
-        print(f"[runner] Tool calls made: {len(tool_summaries)}")
-        for ts in tool_summaries:
-            print(f"  [{ts['tool']}] id={ts['id']}  inputs={ts['input_keys']}")
-        print()
-
-    # Extract the final text
-    draft_text = _extract_text_from_response(response)
-    if not draft_text.strip():
-        print(
-            "ERROR: The specialist returned an empty response. "
-            "Check that the /mcp endpoint is reachable and the service token is valid.",
-            file=sys.stderr,
+    with telemetry:
+        # The Anthropic SDK's MCP integration lets the model call remote MCP tools
+        # natively — no local tool-call loop required on our side.
+        # ``betas=["mcp-client-2025-04-04"]`` enables the feature.
+        # The model will make tool calls, receive results, and continue reasoning
+        # until it produces a final text response.
+        response = client.beta.messages.create(
+            model=model_id,
+            max_tokens=8192,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+            mcp_servers=[_mcp_server_config(mcp_url, service_token)],
+            betas=["mcp-client-2025-04-04"],
         )
-        sys.exit(1)
 
-    # Write output
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(draft_text, encoding="utf-8")
-    print(f"[runner] Draft written to: {output_path}")
+        # Ingest response into telemetry (tool calls + token counts)
+        telemetry.ingest_anthropic_response(response)
 
-    # Report token usage
-    usage = response.usage
-    print(
-        f"[runner] Token usage — input: {usage.input_tokens}  "
-        f"output: {usage.output_tokens}"
-    )
+        # Report tool calls made
+        tool_summaries = _collect_tool_use_summaries(response)
+        if tool_summaries:
+            print(f"[runner] Tool calls made: {len(tool_summaries)}")
+            for ts in tool_summaries:
+                print(f"  [{ts['tool']}] id={ts['id']}  inputs={ts['input_keys']}")
+            print()
 
-    # Surface memo/flag IDs from the footer line if present
-    for line in draft_text.splitlines():
-        if "Memo IDs:" in line or "Flag IDs:" in line:
-            print(f"[runner] {line.strip()}")
+        # Extract the final text
+        draft_text = _extract_text_from_response(response)
+        if not draft_text.strip():
+            print(
+                "ERROR: The specialist returned an empty response. "
+                "Check that the /mcp endpoint is reachable and the service token is valid.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # Write output
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(draft_text, encoding="utf-8")
+        print(f"[runner] Draft written to: {output_path}")
+
+        # Report token usage
+        usage = response.usage
+        print(
+            f"[runner] Token usage — input: {usage.input_tokens}  "
+            f"output: {usage.output_tokens}"
+        )
+
+        # Surface memo/flag IDs from the footer line if present
+        for line in draft_text.splitlines():
+            if "Memo IDs:" in line or "Flag IDs:" in line:
+                print(f"[runner] {line.strip()}")
+
+        # Record output summary for telemetry
+        telemetry.set_output_summary({
+            "output_file": str(output_path),
+            "output_bytes": len(draft_text.encode("utf-8")),
+        })
+
+    if telemetry.run_id:
+        print(f"[runner] Telemetry run id: {telemetry.run_id}")
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ import { Card, PageShell, SectionHeader } from "@/components/primitives";
 import { getActiveContext } from "@/lib/active-context";
 import { fetch1120Package } from "@/lib/taxes-1120";
 import { fetchTaxReviewQueue } from "@/lib/tax-review-queue";
+import { fetchSpecialistRuns } from "@/lib/specialist-runs";
 import { YearView } from "./year-view";
 
 export const dynamic = "force-dynamic";
@@ -73,8 +74,11 @@ export default async function TaxYearPage(props: {
       e instanceof Error ? e.message : "Failed to load Form 1120 package.";
   }
 
-  // Fetch specialist draft items in parallel — failures return empty list (non-fatal).
-  const reviewQueue = await fetchTaxReviewQueue(workspace.id, entityId, taxYear);
+  // Fetch specialist draft items + run history in parallel — failures return empty lists (non-fatal).
+  const [reviewQueue, specialistRunsResp] = await Promise.all([
+    fetchTaxReviewQueue(workspace.id, entityId, taxYear),
+    fetchSpecialistRuns(workspace.id, { entityId, taxYear }),
+  ]);
 
   return (
     <AppShell>
@@ -119,6 +123,7 @@ export default async function TaxYearPage(props: {
             entityDisplayName={entityDisplayName}
             year={taxYear}
             taxReviewItems={reviewQueue.items}
+            specialistRuns={specialistRunsResp.items}
           />
         )}
       </PageShell>

@@ -1,23 +1,24 @@
 "use client";
 
-// YearView — two-tab wrapper for the /taxes/[year] page.
+// YearView — three-tab wrapper for the /taxes/[year] page.
 //
-// Tab "Manual"  (default) — the existing Form1120View review surface.
-// Tab "Specialist draft"  — the new SpecialistDraftView for the AI queue.
+// Tab "Manual"          (default) — the existing Form1120View review surface.
+// Tab "Specialist draft"          — the SpecialistDraftView for the AI queue.
+// Tab "Run history"               — the RunHistoryView MLOps observability table.
 //
-// Tabs use a URL-searchParam approach would require a server round-trip;
-// instead we use local state so navigating between tabs is instant.
-// The active tab is NOT reflected in the URL — the tab is purely a UI
-// concern within /taxes/[year].
+// Tabs use local state so navigating between them is instant (no server round-trip).
+// The active tab is NOT reflected in the URL — purely a UI concern within /taxes/[year].
 
 import { useState } from "react";
 import { cn } from "@/lib/cn";
 import type { Form1120Package } from "@/lib/taxes-1120";
 import type { TaxReviewItem } from "@/lib/tax-review-queue";
+import type { SpecialistRun } from "@/lib/specialist-runs";
 import { Form1120View } from "./form-1120-view";
 import { SpecialistDraftView } from "./specialist-draft-view";
+import { RunHistoryView } from "./run-history-view";
 
-type Tab = "manual" | "specialist";
+type Tab = "manual" | "specialist" | "runs";
 
 export type YearViewProps = {
   pkg: Form1120Package | null;
@@ -27,6 +28,7 @@ export type YearViewProps = {
   entityDisplayName: string;
   year: number;
   taxReviewItems: TaxReviewItem[];
+  specialistRuns: SpecialistRun[];
 };
 
 export function YearView({
@@ -36,11 +38,13 @@ export function YearView({
   entityId,
   entityDisplayName,
   year,
-  taxReviewItems
+  taxReviewItems,
+  specialistRuns
 }: YearViewProps) {
   const [activeTab, setActiveTab] = useState<Tab>("manual");
 
   const pendingCount = taxReviewItems.filter((it) => it.status === "pending").length;
+  const runningCount = specialistRuns.filter((r) => r.status === "running").length;
 
   const tabs: { id: Tab; label: string; badge?: number }[] = [
     { id: "manual", label: "Manual" },
@@ -48,6 +52,11 @@ export function YearView({
       id: "specialist",
       label: "Specialist draft",
       badge: pendingCount > 0 ? pendingCount : undefined
+    },
+    {
+      id: "runs",
+      label: "Run history",
+      badge: runningCount > 0 ? runningCount : undefined
     }
   ];
 
@@ -100,6 +109,15 @@ export function YearView({
         <SpecialistDraftView
           items={taxReviewItems}
           workspaceId={workspaceId}
+          year={year}
+        />
+      )}
+
+      {activeTab === "runs" && (
+        <RunHistoryView
+          initialRuns={specialistRuns}
+          workspaceId={workspaceId}
+          entityId={entityId}
           year={year}
         />
       )}
