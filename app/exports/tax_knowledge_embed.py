@@ -44,8 +44,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Backend-specific defaults
 # ---------------------------------------------------------------------------
-_INFINITY_DEFAULT_BASE_URL = "http://infinity:7997"
-_INFINITY_DEFAULT_MODEL = "BAAI/bge-large-en-v1.5"
+# Default points at the bge-m3 service on midboy2 (port 8082).
+# bge-m3 is 1024-dim like bge-large but supports 8192-token inputs
+# vs bge-large's 512 — materially better for long tax-document retrieval.
+_INFINITY_DEFAULT_BASE_URL = "http://100.66.42.57:8082"
+_INFINITY_DEFAULT_MODEL = "BAAI/bge-m3"
 _INFINITY_EXPECTED_DIM = 1024
 
 _OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
