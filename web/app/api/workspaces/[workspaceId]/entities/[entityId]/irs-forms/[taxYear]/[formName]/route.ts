@@ -54,7 +54,7 @@ export async function GET(
       workspaceId: string;
       entityId: string;
       taxYear: string;
-      "formName.pdf": string;
+      formName: string;
     }>;
   }
 ): Promise<NextResponse | Response> {
@@ -65,11 +65,10 @@ export async function GET(
 
   const params = await ctx.params;
   const { workspaceId, entityId, taxYear } = params;
-  // Next.js captures the segment including ".pdf" in the key that matches the
-  // folder name "[formName].pdf". Retrieve via the folder key.
-  const formNameWithExt: string =
-    (params as Record<string, string>)["formName.pdf"] ?? "";
-  // Strip the .pdf suffix that Next.js includes from the route segment name
+  // The folder is named [formName] (Next.js can't handle "." in segment names);
+  // the browser URL still ends in ".pdf" and that suffix is captured as part
+  // of the dynamic segment value. Strip it for the form-name allowlist check.
+  const formNameWithExt: string = params.formName ?? "";
   const formName = formNameWithExt.replace(/\.pdf$/i, "");
 
   // Validate path params

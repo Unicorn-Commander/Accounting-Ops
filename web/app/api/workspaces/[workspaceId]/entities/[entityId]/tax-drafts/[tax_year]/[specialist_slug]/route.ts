@@ -29,7 +29,7 @@ export async function GET(
       workspaceId: string;
       entityId: string;
       tax_year: string;
-      "specialist_slug].pdf": string; // Next.js segment name matches directory
+      specialist_slug: string;
     }>;
   }
 ) {
@@ -42,11 +42,13 @@ export async function GET(
     workspaceId,
     entityId,
     tax_year,
-    "specialist_slug].pdf": slugPdf,
+    specialist_slug: slugPdf,
   } = await ctx.params;
 
-  // slugPdf already contains the ".pdf" suffix because the folder is named
-  // [specialist_slug].pdf — Next.js captures the segment including the suffix.
+  // The folder was originally [specialist_slug].pdf but Next.js can't handle
+  // "." in a segment name. Folder is [specialist_slug]; the URL still includes
+  // the literal ".pdf" suffix in the captured value (e.g. "form-1120.pdf"),
+  // which we forward to the backend route which expects {slug}.pdf in its path.
   const upstream = `${INTERNAL_BASE}/api/workspaces/${workspaceId}/entities/${entityId}/tax-drafts/${tax_year}/${slugPdf}`;
 
   let resp: Response;
