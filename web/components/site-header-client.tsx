@@ -25,6 +25,7 @@ const NAV_SECTIONS = [
       ["Reports", "/reports"],
       ["Trial Balance", "/reports/trial-balance"],
       ["Taxes", "/taxes"],
+      ["Knowledge", "/knowledge"],
       ["CPA Export", "/cpa-export"],
     ],
   },

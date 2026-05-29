@@ -145,7 +145,22 @@ export default async function ReportsPage(props: {
 
         {(!pl && view === "pl") || (!bs && view === "bs") || (!cf && view === "cf") || (!ten99 && view === "1099-nec") ? (
           <Card>
-            <p className="text-sm text-ink-tertiary">Loading report…</p>
+            <div className="py-8 text-center">
+              <p className="text-sm font-medium text-ink-secondary">
+                No data to report yet for this period.
+              </p>
+              <p className="mx-auto mt-1 max-w-md text-xs text-ink-tertiary">
+                Reports pull live from the journal&apos;s hash-chained entries.
+                Once you post entries (manually or via the approval queue) for
+                the selected entity and date range, they&apos;ll appear here.
+              </p>
+              <Link
+                href="/approvals"
+                className="mt-4 inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
+              >
+                Review pending approvals
+              </Link>
+            </div>
           </Card>
         ) : null}
       </PageShell>

@@ -269,18 +269,24 @@ export default async function ApprovalsPage({
 
             {totalPending === 0 ? (
               <Card>
-                <p className="text-sm text-ink-tertiary">
-                  Nothing waiting on you — books are caught up. Material
-                  recategorizations, proposed compliance rules, and bank import
-                  reviews show up here. Lower-value items are in the{" "}
-                  <Link
-                    href="/reconciliation-queue"
-                    className="text-brand-400 underline-offset-2 hover:underline"
-                  >
-                    Reconciliation queue
-                  </Link>
-                  .
-                </p>
+                <div className="flex flex-col items-center gap-3 py-10 text-center">
+                  <ShieldCheck size={28} className="text-credit" />
+                  <p className="text-base font-medium text-ink-secondary">
+                    Books are caught up. Nothing waiting on you.
+                  </p>
+                  <p className="max-w-md text-xs text-ink-tertiary">
+                    Material recategorizations, proposed compliance rules, and
+                    bank-import reviews land here. Lower-value items live in
+                    the{" "}
+                    <Link
+                      href="/reconciliation-queue"
+                      className="text-brand-400 underline-offset-2 hover:underline"
+                    >
+                      Reconciliation queue
+                    </Link>
+                    .
+                  </p>
+                </div>
               </Card>
             ) : activeTab === "recommendations" ? (
               /* ---- AI Recommendations tab ---- */

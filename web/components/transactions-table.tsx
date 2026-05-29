@@ -5,7 +5,6 @@ import Link from "next/link";
 import { Filter, Search, X } from "lucide-react";
 import {
   Card,
-  ConfidenceDot,
   MaterialityBadge,
   StatusChip
 } from "@/components/primitives";
@@ -118,15 +117,21 @@ export function LiveTransactionsTable({
   if (!configured) {
     return (
       <Card padded={false}>
-        <div className="px-6 py-12 text-center text-sm text-ink-tertiary">
-          No bank accounts connected yet.{" "}
+        <div className="px-6 py-12 text-center">
+          <p className="text-base font-medium text-ink-secondary">
+            No bank accounts connected yet.
+          </p>
+          <p className="mx-auto mt-1 max-w-md text-xs text-ink-tertiary">
+            Once you connect a bank aggregator, this view will show every
+            transaction (posted + pending) across your accounts, with auto
+            categorization and per-entity filtering.
+          </p>
           <Link
             href="/connectors"
-            className="text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
+            className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
           >
             Connect a bank
-          </Link>{" "}
-          to populate this view.
+          </Link>
         </div>
       </Card>
     );
@@ -230,8 +235,28 @@ export function LiveTransactionsTable({
       </div>
 
       {filtered.length === 0 ? (
-        <div className="px-6 py-12 text-center text-sm text-ink-tertiary">
-          No transactions match these filters.
+        <div className="px-6 py-12 text-center">
+          <p className="text-sm font-medium text-ink-secondary">
+            {filtersActive
+              ? "No transactions match these filters."
+              : transactions.length === 0
+                ? "No transactions in the selected window."
+                : "Nothing here."}
+          </p>
+          <p className="mt-1 text-xs text-ink-tertiary">
+            {filtersActive
+              ? "Try clearing a filter or widening the date window."
+              : "Activity across your connected accounts will show up here as it posts."}
+          </p>
+          {filtersActive && (
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="mt-4 inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
+            >
+              <X size={11} /> Clear filters
+            </button>
+          )}
           {emptyAction}
         </div>
       ) : (
@@ -249,7 +274,6 @@ export function LiveTransactionsTable({
               )}
               <th className="px-2 py-2.5 text-left font-medium">Status</th>
               <th className="px-2 py-2.5 text-center font-medium">M</th>
-              <th className="px-2 py-2.5 text-center font-medium">Conf</th>
               <th className="px-5 py-2.5 text-right font-medium">Amount</th>
             </tr>
           </thead>
@@ -317,9 +341,6 @@ export function LiveTransactionsTable({
                   </td>
                   <td className="px-2 py-3 text-center">
                     <MaterialityBadge level={materiality} />
-                  </td>
-                  <td className="px-2 py-3 text-center">
-                    <ConfidenceDot value={0} />
                   </td>
                   <td
                     className={cn(
