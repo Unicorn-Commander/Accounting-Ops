@@ -3,7 +3,7 @@
 /**
  * IrsFormsSection — "IRS Forms" card in the /taxes/[year] page.
  *
- * Shows download buttons for:
+ * Shows Download + View buttons for:
  *   - Form 1120 (income / deductions pre-filled)
  *   - Schedule L (balance sheet pre-filled)
  *   - Form 1125-E (officer compensation pre-filled, if relevant)
@@ -14,11 +14,15 @@
  * The proxy streams the filled PDF (or zip) back from app:8000 with
  * Content-Disposition: attachment so the browser triggers a save dialog.
  *
+ * "View" opens the PDF in a new browser tab using ?disposition=inline on the
+ * same proxy URL. The zip package has no View button (browsers can't display
+ * zip files inline).
+ *
  * Every form carries a DRAFT watermark — the UI surfaces this reminder.
  */
 
 import { useState } from "react";
-import { Download, FileText, Package, AlertTriangle } from "lucide-react";
+import { Download, Eye, FileText, Package, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/cn";
 
 type IrsFormsDef = {
@@ -67,16 +71,21 @@ export function IrsFormsSection({ workspaceId, entityId, year }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Build the proxy URL for a form (no disposition — default attachment).
+  function formUrl(formKey: string): string {
+    return (
+      `/api/workspaces/${encodeURIComponent(workspaceId)}` +
+      `/entities/${encodeURIComponent(entityId)}` +
+      `/irs-forms/${encodeURIComponent(year)}` +
+      `/${encodeURIComponent(formKey)}.pdf`
+    );
+  }
+
   async function handleDownload(formKey: string, isZip?: boolean) {
     setError(null);
     setBusy(formKey);
     try {
-      const url =
-        `/api/workspaces/${encodeURIComponent(workspaceId)}` +
-        `/entities/${encodeURIComponent(entityId)}` +
-        `/irs-forms/${encodeURIComponent(year)}` +
-        `/${encodeURIComponent(formKey)}.pdf`;
-
+      const url = formUrl(formKey);
       const res = await fetch(url, { cache: "no-store" });
 
       if (!res.ok) {
@@ -115,6 +124,12 @@ export function IrsFormsSection({ workspaceId, entityId, year }: Props) {
     }
   }
 
+  function handleView(formKey: string) {
+    // Open the PDF inline in a new tab via ?disposition=inline.
+    const url = formUrl(formKey) + "?disposition=inline";
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
   return (
     <div className="space-y-4">
       {/* DRAFT notice */}
@@ -128,24 +143,21 @@ export function IrsFormsSection({ workspaceId, entityId, year }: Props) {
         </p>
       </div>
 
-      {/* Form download buttons */}
-      <div className="grid gap-2 sm:grid-cols-2">
+      {/* Form rows — each has a View button (PDF only) + Download button */}
+      <div className="flex flex-col gap-2">
         {FORMS.map((form) => {
           const isBusy = busy === form.key;
           return (
-            <button
+            <div
               key={form.key}
-              type="button"
-              onClick={() => handleDownload(form.key, form.isZip)}
-              disabled={isBusy || busy !== null}
               className={cn(
-                "group flex w-full items-center gap-3 rounded-lg border px-3 py-3 text-left",
-                "transition-colors",
+                "flex w-full items-center gap-3 rounded-lg border px-3 py-3",
                 form.isZip
-                  ? "border-brand-500/50 bg-brand-500/[0.06] hover:bg-brand-500/[0.12] disabled:opacity-50"
-                  : "border-default bg-surface hover:bg-elevated disabled:opacity-50"
+                  ? "border-brand-500/50 bg-brand-500/[0.06]"
+                  : "border-default bg-surface"
               )}
             >
+              {/* Icon */}
               <span
                 className={cn(
                   "flex h-7 w-7 shrink-0 items-center justify-center rounded-md border",
@@ -160,6 +172,8 @@ export function IrsFormsSection({ workspaceId, entityId, year }: Props) {
                   form.icon
                 )}
               </span>
+
+              {/* Label + description */}
               <div className="min-w-0 flex-1">
                 <p
                   className={cn(
@@ -173,16 +187,40 @@ export function IrsFormsSection({ workspaceId, entityId, year }: Props) {
                   {form.description}
                 </p>
               </div>
-              <Download
-                size={13}
-                className={cn(
-                  "shrink-0 transition-opacity",
-                  isBusy
-                    ? "opacity-0"
-                    : "opacity-0 group-hover:opacity-100 text-ink-tertiary"
+
+              {/* Action buttons */}
+              <div className="flex shrink-0 items-center gap-1.5">
+                {/* "View" — PDF only (zip can't be rendered inline) */}
+                {!form.isZip && (
+                  <button
+                    type="button"
+                    onClick={() => handleView(form.key)}
+                    disabled={isBusy}
+                    title="Open in browser tab"
+                    className="inline-flex items-center gap-1 rounded border border-default bg-elevated px-2 py-1 text-[10px] font-medium text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50"
+                  >
+                    <Eye size={11} />
+                    View
+                  </button>
                 )}
-              />
-            </button>
+                {/* "Download" */}
+                <button
+                  type="button"
+                  onClick={() => handleDownload(form.key, form.isZip)}
+                  disabled={isBusy || busy !== null}
+                  title={form.isZip ? "Download zip" : "Download PDF"}
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium disabled:opacity-50",
+                    form.isZip
+                      ? "border-brand-500/50 bg-brand-500/15 text-brand-300 hover:bg-brand-500/25"
+                      : "border-default bg-elevated text-ink-secondary hover:bg-surface hover:text-ink-primary"
+                  )}
+                >
+                  <Download size={11} />
+                  {isBusy ? "…" : form.isZip ? "Download" : "PDF"}
+                </button>
+              </div>
+            </div>
           );
         })}
       </div>
@@ -208,7 +246,8 @@ export function IrsFormsSection({ workspaceId, entityId, year }: Props) {
         the CPA export package. Lines without data are left blank for the CPA.
         EIN and officer SSNs must be entered manually — encrypted fields are never
         transmitted to PDFs. The CPA completes Lines 29–38 (tax computation,
-        NOL, and payments) before filing.
+        NOL, and payments) before filing. Use "View" to open a PDF in-browser;
+        use "PDF" / "Download" to save locally.
       </p>
     </div>
   );

@@ -42,7 +42,7 @@ from typing import Any
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from sqlalchemy import text
 
@@ -384,6 +384,13 @@ async def get_specialist_pdf(
     entity_id: UUID,
     tax_year: int,
     specialist_slug: str,
+    disposition: str = Query(
+        "attachment",
+        description=(
+            "Content-Disposition mode. Pass 'inline' to view in a browser tab "
+            "instead of triggering a download. Default: 'attachment'."
+        ),
+    ),
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> Response:
     """Render a single specialist Markdown draft as a PDF and return it.
@@ -391,7 +398,8 @@ async def get_specialist_pdf(
     The specialist_slug maps to a draft file at:
       /drafts/mu-inc-{year}-{slug}-draft.md
 
-    Returns application/pdf with Content-Disposition: attachment.
+    Returns application/pdf.  Content-Disposition is 'attachment' by default
+    (browser downloads); pass ?disposition=inline to render in-tab.
     Role floor: viewer.
     """
     require_role(workspace, "viewer")
@@ -438,12 +446,78 @@ async def get_specialist_pdf(
     safe_name = entity_name.replace(" ", "").replace(",", "")
     filename = f"{safe_name}-{tax_year}-{specialist_slug}-draft.pdf"
 
+    # Sanitise the disposition param — only 'inline' or 'attachment' are valid.
+    cd_mode = "inline" if disposition.lower().strip() == "inline" else "attachment"
+
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": f'{cd_mode}; filename="{filename}"',
             "Content-Length": str(len(pdf_bytes)),
+            "X-Draft-Notice": (
+                "DRAFT - for CPA review only. "
+                "Do not file without professional review and signature."
+            ),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Markdown source endpoint
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/api/workspaces/{workspace_id}/entities/{entity_id}"
+    "/tax-drafts/{tax_year}/{specialist_slug}.md"
+)
+async def get_specialist_markdown(
+    workspace_id: UUID,
+    entity_id: UUID,
+    tax_year: int,
+    specialist_slug: str,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> Response:
+    """Return the raw Markdown source for a specialist draft.
+
+    Returns text/markdown; charset=utf-8.
+    404 if the draft file does not exist on the filesystem.
+
+    This endpoint backs the in-browser Markdown viewer modal — it serves the
+    source text so the viewer can render it client-side (react-markdown).
+
+    Role floor: viewer.  Entity scope: standard assert_entity_in_scope.
+    """
+    require_role(workspace, "viewer")
+    assert_entity_in_scope(workspace, entity_id)
+
+    if specialist_slug not in _SLUG_META:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown specialist slug '{specialist_slug}'. "
+                   f"Valid: {', '.join(_SLUG_META.keys())}",
+        )
+
+    draft_path = _draft_path(tax_year, specialist_slug)
+    if draft_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No draft file found for specialist '{specialist_slug}' "
+                f"tax year {tax_year}. Run the specialist to generate one."
+            ),
+        )
+
+    md_content = draft_path.read_text(encoding="utf-8")
+
+    return Response(
+        content=md_content.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "X-Draft-Notice": (
+                "DRAFT - for CPA review only. Do not file without professional review and signature."
+            ),
+            "Cache-Control": "no-store",
         },
     )
 

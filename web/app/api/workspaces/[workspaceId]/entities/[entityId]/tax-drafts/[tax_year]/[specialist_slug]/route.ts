@@ -1,10 +1,17 @@
-// Pass-through proxy: GET specialist draft PDF from the FastAPI backend.
+// Pass-through proxy: GET specialist draft PDF or Markdown from the FastAPI backend.
 //
 // Browser → /api/workspaces/{wid}/entities/{eid}/tax-drafts/{year}/{slug}.pdf
 //         → app:8000/api/workspaces/{wid}/entities/{eid}/tax-drafts/{year}/{slug}.pdf
 //
-// Preserves Content-Disposition and Content-Type so the browser triggers a
-// native file download rather than trying to display JSON.
+// Browser → /api/workspaces/{wid}/entities/{eid}/tax-drafts/{year}/{slug}.md
+//         → app:8000/api/workspaces/{wid}/entities/{eid}/tax-drafts/{year}/{slug}.md
+//
+// The proxy is extension-agnostic: whatever suffix the client requests
+// (e.g. ".pdf", ".md") is forwarded verbatim to the backend.
+//
+// Query params (e.g. ?disposition=inline) are forwarded to the backend.
+//
+// Preserves Content-Disposition, Content-Type, and X-Draft-Notice headers.
 
 import { auth } from "@/lib/auth";
 import { type NextRequest, NextResponse } from "next/server";
@@ -20,10 +27,12 @@ const PASSTHROUGH_HEADERS = new Set([
   "content-length",
   "etag",
   "last-modified",
+  "x-draft-notice",
+  "cache-control",
 ]);
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   ctx: {
     params: Promise<{
       workspaceId: string;
@@ -42,14 +51,20 @@ export async function GET(
     workspaceId,
     entityId,
     tax_year,
-    specialist_slug: slugPdf,
+    specialist_slug: slugWithExt,
   } = await ctx.params;
 
-  // The folder was originally [specialist_slug].pdf but Next.js can't handle
-  // "." in a segment name. Folder is [specialist_slug]; the URL still includes
-  // the literal ".pdf" suffix in the captured value (e.g. "form-1120.pdf"),
-  // which we forward to the backend route which expects {slug}.pdf in its path.
-  const upstream = `${INTERNAL_BASE}/api/workspaces/${workspaceId}/entities/${entityId}/tax-drafts/${tax_year}/${slugPdf}`;
+  // The folder is [specialist_slug]; the URL includes the file extension
+  // (e.g. "form-1120.pdf" or "form-1120.md") captured in the segment value.
+  // We forward the full value verbatim to the backend so it reaches the correct
+  // .pdf or .md route.
+  //
+  // Also forward query params (e.g. ?disposition=inline).
+  const qs = req.nextUrl.searchParams.toString();
+  const upstream =
+    `${INTERNAL_BASE}/api/workspaces/${workspaceId}/entities/${entityId}` +
+    `/tax-drafts/${tax_year}/${slugWithExt}` +
+    (qs ? `?${qs}` : "");
 
   let resp: Response;
   try {
@@ -58,13 +73,21 @@ export async function GET(
       cache: "no-store",
     });
   } catch (err) {
-    console.error("[specialist-pdf proxy] upstream fetch failed:", err);
+    console.error("[specialist-draft proxy] upstream fetch failed:", err);
     return NextResponse.json({ error: "upstream_unreachable" }, { status: 502 });
   }
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
-    return new NextResponse(text || `upstream ${resp.status}`, {
+    // Try to parse as JSON for a nicer error body.
+    let body = text || `upstream ${resp.status}`;
+    try {
+      const parsed = JSON.parse(text);
+      body = parsed.detail ?? body;
+    } catch {
+      // not JSON — use raw text
+    }
+    return new NextResponse(body, {
       status: resp.status,
       headers: { "content-type": "text/plain" },
     });

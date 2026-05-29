@@ -206,6 +206,14 @@ async def generate_irs_form(
             "cpa-export amounts. Defaults to true."
         ),
     ),
+    disposition: str = Query(
+        "attachment",
+        description=(
+            "Content-Disposition mode. Pass 'inline' to view in a browser tab "
+            "instead of triggering a download. Default: 'attachment'. "
+            "Ignored for 1120-package (zip always downloads)."
+        ),
+    ),
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> Response:
     """Generate a DRAFT pre-filled IRS PDF for the given entity and tax year.
@@ -274,20 +282,23 @@ async def generate_irs_form(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Content-Disposition: attachment so browsers download rather than display
+    # Content-Disposition: attachment by default; inline if requested (PDFs only).
+    # Zip files always use attachment — browsers can't render zip inline.
     slug = entity_display_name.lower().replace(" ", "-")[:40]
     if content_type == "application/zip":
         filename = f"irs-forms-{slug}-{tax_year}.zip"
+        cd_mode = "attachment"
     else:
         filename = f"form-{fn}-{slug}-{tax_year}-draft.pdf"
+        cd_mode = "inline" if disposition.lower().strip() == "inline" else "attachment"
 
     return Response(
         content=pdf_bytes,
         media_type=content_type,
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": f'{cd_mode}; filename="{filename}"',
             "X-Draft-Notice": (
-                "DRAFT — for CPA review only. "
+                "DRAFT - for CPA review only. "
                 "Do not file without professional review and signature."
             ),
             "Cache-Control": "no-store",
