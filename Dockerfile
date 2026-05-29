@@ -5,7 +5,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir .
+# Install with [tax-agents] extras baked in — the 1120 Preparer + 1099 + SC
+# specialists' runners need anthropic/openai/mcp client libs at runtime when
+# `docker exec` invokes them inside this container.
+RUN pip install --no-cache-dir ".[tax-agents]"
 COPY . .
 
 EXPOSE 8000

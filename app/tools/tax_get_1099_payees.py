@@ -89,8 +89,11 @@ async def get_1099_payees(
     await authorize_workspace(workspace_id, entity_id, min_role="viewer")
 
     # Date range: full calendar year for tax_year
-    start_date = f"{tax_year}-01-01"
-    end_date = f"{tax_year}-12-31"
+    # asyncpg requires actual date objects; passing strings yields
+    # 'invalid input for query argument' DataError.
+    from datetime import date as _date
+    start_date = _date(tax_year, 1, 1)
+    end_date = _date(tax_year, 12, 31)
 
     # Build category filter as positional placeholders.
     # We use ILIKE for resilience against minor capitalization differences, but

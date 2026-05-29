@@ -113,10 +113,11 @@ async def flag_for_cpa_review(
                     ) VALUES (
                         :workspace_id, :entity_id, :tax_year,
                         'flagged_position', :form_reference,
-                        :content::jsonb, :confidence, :citations::jsonb,
+                        CAST(:content AS jsonb), :confidence,
+                        CAST(:citations AS jsonb),
                         'pending', :submitter_kind, :submitter_id
                     )
-                    RETURNING id::text AS id
+                    RETURNING CAST(id AS text) AS id
                     """
                 ),
                 {
