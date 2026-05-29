@@ -25,3 +25,8 @@ secrets/
 # Local agent hand-off prompts (not part of the app)
 agent-prompts/
 .claude/
+
+# IRS form PDFs — downloaded by scripts/download_irs_forms.sh.
+# These are public-domain government documents but too large for git.
+# Each developer/server must run the download script after checkout.
+data/irs_forms/*.pdf
