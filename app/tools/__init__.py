@@ -1,3 +1,4 @@
+from app.tools.analyze_pending_approvals import analyze_pending_approvals
 from app.tools.categorization import categorize_transaction
 from app.tools.payments import propose_payment
 from app.tools.receipts import link_receipt_to_transaction
@@ -16,6 +17,7 @@ from app.tools.tax_flag_for_cpa_review import flag_for_cpa_review
 
 __all__ = [
     "add_specialty_rule",
+    "analyze_pending_approvals",
     "categorize_transaction",
     "draft_memo",
     "flag_for_cpa_review",

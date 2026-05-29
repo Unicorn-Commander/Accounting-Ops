@@ -6,6 +6,7 @@ from uuid import UUID
 from app.config import get_settings
 from app.tools import (
     add_specialty_rule,
+    analyze_pending_approvals,
     categorize_transaction,
     draft_memo,
     flag_for_cpa_review,
@@ -45,6 +46,9 @@ def build_server():
             "to. Reads operate on the posted append-only journal."
         ),
     )
+
+    # Approval batch pre-analyzer — writes recommendations, never approves.
+    server.tool()(analyze_pending_approvals)
 
     # Entity-scoped tools — caller passes workspace_id + entity_id.
     server.tool()(list_transactions)
