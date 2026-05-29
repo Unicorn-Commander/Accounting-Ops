@@ -99,6 +99,27 @@ Write a reviewer memo to the `tax_review_queue`. Use for:
 
 Returns a `memo_id` (UUID). Record every `memo_id` in the draft report footer.
 
+### `get_current_rule(jurisdiction, topic, tax_year, query, limit)`
+
+**Call this BEFORE applying the §172 80% limitation or any TCJA/OBBBA NOL provision.**
+The OBBBA and other pending legislation may alter the §172 rules; verify the current
+status before building the NOL stack.
+
+Key use cases for the NOL Analyst:
+```
+# Verify the post-TCJA 80% limitation is still in effect:
+get_current_rule(jurisdiction="US", topic="nol_172", tax_year=2024,
+                 query="80 percent taxable income limitation carryforward")
+
+# Check whether any OBBBA provision modifies NOL rules:
+get_current_rule(jurisdiction="US", topic="tcja_obbba_tracker",
+                 query="NOL net operating loss modification enacted")
+```
+
+If `knowledge_gap=True`: note the gap, call `flag_for_cpa_review` with
+`form_reference = "Knowledge Gap"`, and proceed with training-data knowledge
+marked `[KNOWLEDGE BASE GAP — verify with CPA before filing]`.
+
 ### `flag_for_cpa_review(entity_id, tax_year, form_reference, content, confidence, citations)`
 
 Write a CPA judgment flag to the `tax_review_queue`. Use for:
@@ -110,9 +131,11 @@ Write a CPA judgment flag to the `tax_review_queue`. Use for:
 - Out-of-scope requests (§382, §163(j)-NOL interaction, consolidated groups, foreign
   NOLs, ATNOL, state NOLs).
 - Any year for which `get_form_1120_data` returns no data.
+- Any knowledge base gap (get_current_rule returned knowledge_gap=True).
 
 `form_reference` format: `"Form 1120, Line 29a"` (NOL deduction),
-`"Schedule L, Line <N>"`, `"NOL Stack — Year <YYYY>"`, or `"Out-of-Scope"`.
+`"Schedule L, Line <N>"`, `"NOL Stack — Year <YYYY>"`, `"Out-of-Scope"`, or
+`"Knowledge Gap"`.
 
 Returns a `flag_id` (UUID). Record every `flag_id` in the CPA-flagged items table.
 

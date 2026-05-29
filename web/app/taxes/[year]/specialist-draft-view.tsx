@@ -13,6 +13,7 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
+  Eye,
   FileText,
   HelpCircle,
   MessageSquare,
@@ -21,6 +22,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Card } from "@/components/primitives";
+import { DraftMarkdownViewer } from "@/components/draft-markdown-viewer";
 import type {
   TaxReviewItem,
   TaxReviewItemType,
@@ -59,23 +61,26 @@ const SPECIALIST_SLUG_MAP: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// PDF download link for a single specialist draft
+// PDF download + View button pair for a single specialist draft
 // ---------------------------------------------------------------------------
 
-function PdfDownloadLink({
+function DraftActions({
   workspaceId,
   entityId,
   year,
   slug,
+  title,
 }: {
   workspaceId: string;
   entityId: string;
   year: number;
   slug: string;
+  title: string;
 }) {
   const [busy, setBusy] = useState(false);
+  const [viewerOpen, setViewerOpen] = useState(false);
 
-  async function handleClick() {
+  async function handlePdfDownload() {
     setBusy(true);
     try {
       const url = `/api/workspaces/${workspaceId}/entities/${entityId}/tax-drafts/${year}/${slug}.pdf`;
@@ -96,16 +101,38 @@ function PdfDownloadLink({
   }
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      disabled={busy}
-      title="Download PDF"
-      className="inline-flex items-center gap-1 rounded border border-default bg-elevated px-2 py-0.5 text-[10px] font-medium text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50"
-    >
-      <Download size={11} />
-      {busy ? "…" : "PDF"}
-    </button>
+    <>
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => setViewerOpen(true)}
+          title="View draft inline"
+          className="inline-flex items-center gap-1 rounded border border-default bg-elevated px-2 py-0.5 text-[10px] font-medium text-ink-secondary hover:bg-surface hover:text-ink-primary"
+        >
+          <Eye size={11} />
+          View
+        </button>
+        <button
+          type="button"
+          onClick={handlePdfDownload}
+          disabled={busy}
+          title="Download PDF"
+          className="inline-flex items-center gap-1 rounded border border-default bg-elevated px-2 py-0.5 text-[10px] font-medium text-ink-secondary hover:bg-surface hover:text-ink-primary disabled:opacity-50"
+        >
+          <Download size={11} />
+          {busy ? "…" : "PDF"}
+        </button>
+      </div>
+      <DraftMarkdownViewer
+        open={viewerOpen}
+        onClose={() => setViewerOpen(false)}
+        workspaceId={workspaceId}
+        entityId={entityId}
+        year={year}
+        slug={slug}
+        title={title}
+      />
+    </>
   );
 }
 
@@ -627,6 +654,17 @@ function QuestionCard({
 // Item dispatcher
 // ---------------------------------------------------------------------------
 
+// Slug → human-readable title (mirrors backend _SLUG_META).
+const SPECIALIST_TITLE_MAP: Record<string, string> = {
+  "form-1120": "Form 1120 — Federal Corporate Income Tax Return",
+  "1099-nec": "1099-NEC Nonemployee Compensation Analysis",
+  "sc1120": "SC1120 — South Carolina Corporate Income Tax Return",
+  "officer-compensation": "Officer Compensation Schedule",
+  "nol-schedule-l": "Net Operating Loss & Schedule L Analysis",
+  "audit-defense-scdor-ftf": "Audit Defense — SCDOR Failure-to-File",
+  "coordinator-summary": "Tax Operations Coordinator Summary",
+};
+
 function ItemCard({
   item,
   workspaceId,
@@ -640,16 +678,17 @@ function ItemCard({
   year: number;
   onResolved: (id: string, status: ResolveAction) => void;
 }) {
-  // Derive a PDF slug from submitter_id (specialist_id). The submitter_id for
-  // AI-generated items is the specialist_id string (e.g. "tax-1120-preparer").
-  const pdfSlug = SPECIALIST_SLUG_MAP[item.submitter_id] ?? null;
+  // Derive a PDF/markdown slug from submitter_id (specialist_id).
+  const slug = SPECIALIST_SLUG_MAP[item.submitter_id] ?? null;
+  const title = slug ? (SPECIALIST_TITLE_MAP[slug] ?? slug) : "";
 
-  const pdfLink = pdfSlug ? (
-    <PdfDownloadLink
+  const draftActions = slug ? (
+    <DraftActions
       workspaceId={workspaceId}
       entityId={entityId}
       year={year}
-      slug={pdfSlug}
+      slug={slug}
+      title={title}
     />
   ) : null;
 
@@ -657,7 +696,7 @@ function ItemCard({
     case "form_line_proposal":
       return (
         <div>
-          {pdfLink && <div className="mb-1.5 flex justify-end">{pdfLink}</div>}
+          {draftActions && <div className="mb-1.5 flex justify-end">{draftActions}</div>}
           <FormLineProposalCard
             item={item}
             workspaceId={workspaceId}
@@ -668,7 +707,7 @@ function ItemCard({
     case "flagged_position":
       return (
         <div>
-          {pdfLink && <div className="mb-1.5 flex justify-end">{pdfLink}</div>}
+          {draftActions && <div className="mb-1.5 flex justify-end">{draftActions}</div>}
           <FlaggedPositionCard
             item={item}
             workspaceId={workspaceId}
@@ -679,14 +718,14 @@ function ItemCard({
     case "memo":
       return (
         <div>
-          {pdfLink && <div className="mb-1.5 flex justify-end">{pdfLink}</div>}
+          {draftActions && <div className="mb-1.5 flex justify-end">{draftActions}</div>}
           <MemoCard item={item} workspaceId={workspaceId} onResolved={onResolved} />
         </div>
       );
     case "question":
       return (
         <div>
-          {pdfLink && <div className="mb-1.5 flex justify-end">{pdfLink}</div>}
+          {draftActions && <div className="mb-1.5 flex justify-end">{draftActions}</div>}
           <QuestionCard item={item} workspaceId={workspaceId} onResolved={onResolved} />
         </div>
       );

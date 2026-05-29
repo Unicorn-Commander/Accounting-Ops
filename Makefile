@@ -1,9 +1,10 @@
 # Accounting-Ops — test + CI targets.
 #
-#   make test          unit/smoke tests (no stack needed)
-#   make integration   stand up the stack, provision it, run integration tests, tear down
-#   make integration-keep   same, but leave the stack running afterwards
+#   make test              unit/smoke tests (no stack needed)
+#   make integration       stand up the stack, provision it, run integration tests, tear down
+#   make integration-keep  same, but leave the stack running afterwards
 #   make integration-up / integration-down   manage the stack by hand
+#   make knowledge-refresh run the Tax Knowledge Curator (requires running app container)
 #
 # Integration tests require Docker. They SKIP cleanly when the stack is not up,
 # so `make test` is always safe on a bare machine.
@@ -51,3 +52,38 @@ integration: integration-up
 # Same but leaves the stack running for debugging.
 .PHONY: integration-keep
 integration-keep: integration-up integration-test
+
+# ---------------------------------------------------------------------------
+# Tax Knowledge Curator
+# ---------------------------------------------------------------------------
+# Runs the curator inside the already-running app container.
+# The container must be up (`docker compose up -d app`).
+#
+# ADMIN_DATABASE_URL must be set in the container environment (or .env) so the
+# curator can UPDATE (supersede) existing rows — the runtime app role has
+# SELECT+INSERT only.  OPENROUTER_API_KEY must also be set for embedding.
+#
+# Output is written to /drafts/curator-digests/ inside the container and also
+# printed to stdout.
+#
+# Weekly cron (add to /etc/cron.d/accounting-ops on bigboy or midboy1):
+#   0 3 * * 0   muut   docker exec accounting_ops-app-1 \
+#       python /app/agents/tax_research/knowledge_curator/run_curator.py \
+#       --output /drafts/curator-digests/
+#
+CURATOR_CONTAINER ?= accounting_ops-app-1
+CURATOR_OUTPUT    ?= /drafts/curator-digests/
+
+.PHONY: knowledge-refresh
+knowledge-refresh:
+	@echo "Running Tax Knowledge Curator in container $(CURATOR_CONTAINER)..."
+	docker exec $(CURATOR_CONTAINER) \
+		python /app/agents/tax_research/knowledge_curator/run_curator.py \
+		--output $(CURATOR_OUTPUT)
+
+.PHONY: knowledge-refresh-dry
+knowledge-refresh-dry:
+	@echo "Dry-run: Tax Knowledge Curator in container $(CURATOR_CONTAINER)..."
+	docker exec $(CURATOR_CONTAINER) \
+		python /app/agents/tax_research/knowledge_curator/run_curator.py \
+		--dry-run

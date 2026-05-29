@@ -95,10 +95,12 @@ export async function GET(
     `/irs-forms/${encodeURIComponent(taxYear)}` +
     `/${encodeURIComponent(formName)}.pdf`;
 
-  // Forward any recognized query params
+  // Forward recognized query params
   const qs = new URLSearchParams();
   const iqo = req.nextUrl.searchParams.get("include_queue_overrides");
   if (iqo !== null) qs.set("include_queue_overrides", iqo);
+  const disp = req.nextUrl.searchParams.get("disposition");
+  if (disp !== null) qs.set("disposition", disp);
 
   const targetUrl = `${INTERNAL_BASE}${backendPath}${qs.size ? "?" + qs.toString() : ""}`;
 

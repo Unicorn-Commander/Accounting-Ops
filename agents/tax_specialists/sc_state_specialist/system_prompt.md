@@ -99,6 +99,35 @@ Returns a `memo_id` (UUID). Record every `memo_id` in the draft report.
 All `form_reference` values must be prefixed `"SC1120, ..."` to distinguish from federal
 1120 flags in the shared `tax_review_queue`.
 
+### `get_current_rule(jurisdiction, topic, tax_year, query, limit)`
+
+**Call this BEFORE citing any SC-specific rule, rate, conformity date, or modification.**
+SC tax law deviates from federal in important ways (bonus depreciation add-back, IRC
+conformity date, 5% rate). The knowledge base is updated weekly from SCDOR sources.
+
+Key use cases for the SC State Specialist:
+```
+# Verify SC corporate income tax rate and IRC conformity date:
+get_current_rule(jurisdiction="SC", topic="sc1120", tax_year=2024,
+                 query="corporate income tax rate IRC conformity date")
+
+# Verify SC bonus depreciation add-back rules:
+get_current_rule(jurisdiction="SC", topic="sc_irc_conformity",
+                 query="bonus depreciation add-back §168(k) modification")
+
+# Verify SC nexus and Wayfair threshold:
+get_current_rule(jurisdiction="SC", topic="sc_sales_tax_nexus",
+                 query="economic nexus threshold sales tax Wayfair")
+
+# VDP for failure-to-file years:
+get_current_rule(jurisdiction="SC", topic="sc_voluntary_disclosure",
+                 query="lookback period penalty waiver eligibility")
+```
+
+If `knowledge_gap=True`: note the gap, call `flag_for_cpa_review` with
+`form_reference = "Knowledge Gap"`, and proceed with training-data knowledge
+marked `[KNOWLEDGE BASE GAP — verify with CPA before filing]`.
+
 ### `flag_for_cpa_review(entity_id, tax_year, form_reference, content, confidence, citations)`
 
 Write a CPA judgment flag to the `tax_review_queue`. Use for:
@@ -108,9 +137,10 @@ Write a CPA judgment flag to the `tax_review_queue`. Use for:
 - Any out-of-scope request.
 - Any data gap (missing prior-year NOL schedule, missing SC nexus determination, etc.).
 - The failure-to-file situation (flag every year the SC1120 is missing).
+- Any knowledge base gap (get_current_rule returned knowledge_gap=True).
 
 `form_reference` format: `"SC1120, Line <N>"` or `"SC1120-V"` or `"SC Sales & Use Tax"` or
-`"SC1120, Failure-to-File"` or `"Out-of-Scope"`.
+`"SC1120, Failure-to-File"` or `"Out-of-Scope"` or `"Knowledge Gap"`.
 
 Returns a `flag_id` (UUID). Record every `flag_id` in the CPA-flagged items section.
 

@@ -1,0 +1,288 @@
+# Tax Knowledge Curator — Ingestion Sources
+#
+# Each entry defines one authoritative source to crawl.
+# Fields:
+#   name           - human-readable label (used in digest reports)
+#   jurisdiction   - 'US', 'SC', 'GA', 'DE', etc.  Federal = 'US'.
+#   topic          - slug matching the `topic` column in tax_knowledge_document
+#                    (must be consistent across runs for dedup to work)
+#   tax_year       - integer or null for evergreen rules
+#   base_url       - the page to fetch
+#   refresh_days   - minimum days between re-fetches (curator skips if last
+#                    ingestion was less than this many days ago AND digest unchanged)
+#   crawl_hint     - optional human note about what to extract from the page
+#   paywalled      - set to true to SKIP (curator logs but never ingests these)
+#
+# To add a new source: append to this file and re-run make knowledge-refresh.
+# The curator will ingest it on the next run.
+#
+# Jurisdiction codes:
+#   US    = IRS / federal
+#   SC    = South Carolina DOR
+#   GA    = Georgia DOR (future)
+#   DE    = Delaware Division of Revenue (future)
+#   CFR   = Code of Federal Regulations (title 26)
+
+sources:
+
+  # -----------------------------------------------------------------------
+  # IRS — Form 1120 (federal corporate return)
+  # -----------------------------------------------------------------------
+  - name: "IRS Form 1120 instructions"
+    jurisdiction: US
+    topic: form_1120
+    tax_year: null
+    base_url: https://www.irs.gov/forms-pubs/about-form-1120
+    refresh_days: 30
+    crawl_hint: >
+      Extract the main instructions text from the about-form page.
+      Follow the 'Instructions for Form 1120' PDF link if present and
+      extract the line-by-line instructions section.
+
+  - name: "IRS Form 1120 line-by-line instructions (2024)"
+    jurisdiction: US
+    topic: form_1120_instructions_2024
+    tax_year: 2024
+    base_url: https://www.irs.gov/pub/irs-pdf/i1120.pdf
+    refresh_days: 90
+    crawl_hint: >
+      PDF — extract text content. Focus on line descriptions, amounts,
+      and statutory references. Skip cover page boilerplate.
+
+  # -----------------------------------------------------------------------
+  # IRS — 1099-NEC / 1099-MISC
+  # -----------------------------------------------------------------------
+  - name: "IRS 1099-NEC about page"
+    jurisdiction: US
+    topic: 1099_NEC
+    tax_year: null
+    base_url: https://www.irs.gov/forms-pubs/about-form-1099-nec
+    refresh_days: 30
+    crawl_hint: >
+      Extract the rules summary, threshold amounts, and due dates.
+      Note any IRS Notices referenced (especially threshold phase-in
+      notices for 1099-K transition).
+
+  - name: "IRS 1099-NEC + 1099-MISC instructions (2024)"
+    jurisdiction: US
+    topic: 1099_NEC_instructions_2024
+    tax_year: 2024
+    base_url: https://www.irs.gov/pub/irs-pdf/i1099mec.pdf
+    refresh_days: 90
+    crawl_hint: >
+      PDF — extract payee type rules, exceptions (corporations, payments
+      via credit card, etc.), threshold amounts ($600), and due dates.
+
+  - name: "IRS Notice 2024-85 — 1099-K threshold"
+    jurisdiction: US
+    topic: 1099_K_threshold
+    tax_year: 2024
+    base_url: https://www.irs.gov/pub/irs-drop/n-24-85.pdf
+    refresh_days: 180
+    crawl_hint: >
+      IRS Notice confirming the 1099-K reporting threshold transition
+      ($5,000 for 2024, $2,500 for 2025, $600 for 2026+).
+
+  # -----------------------------------------------------------------------
+  # IRS — §174 R&D Capitalization (TCJA)
+  # -----------------------------------------------------------------------
+  - name: "IRS §174 R&D capitalization FAQ"
+    jurisdiction: US
+    topic: "174"
+    tax_year: null
+    base_url: https://www.irs.gov/newsroom/frequently-asked-questions-changes-to-the-research-and-experimental-expenditures-credit
+    refresh_days: 30
+    crawl_hint: >
+      Extract Q&A text covering the post-2022 mandatory capitalization
+      requirement for §174 R&E expenditures. Note any pending legislative
+      changes (OBBBA provisions restoring immediate expensing).
+
+  - name: "IRS Rev. Proc. 2024-9 — §174 safe harbor"
+    jurisdiction: US
+    topic: "174_safe_harbor"
+    tax_year: 2024
+    base_url: https://www.irs.gov/pub/irs-drop/rp-24-09.pdf
+    refresh_days: 180
+    crawl_hint: >
+      Revenue Procedure providing a safe harbor for §174 R&E
+      expenditure determination.
+
+  # -----------------------------------------------------------------------
+  # IRS — §163(j) Business Interest Limitation
+  # -----------------------------------------------------------------------
+  - name: "IRS §163(j) business interest limitation — about page"
+    jurisdiction: US
+    topic: "163j"
+    tax_year: null
+    base_url: https://www.irs.gov/newsroom/tax-cuts-and-jobs-act-provision-11-business-interest
+    refresh_days: 60
+    crawl_hint: >
+      Extract the small business exemption threshold (currently $30M average
+      annual gross receipts), ATI computation rules, and any OBBBA
+      modifications restoring the pre-2022 EBITDA-based ATI.
+
+  # -----------------------------------------------------------------------
+  # IRS — Bonus Depreciation (§168(k))
+  # -----------------------------------------------------------------------
+  - name: "IRS bonus depreciation — about page"
+    jurisdiction: US
+    topic: bonus_depreciation
+    tax_year: null
+    base_url: https://www.irs.gov/newsroom/tax-cuts-and-jobs-act-provision-13-new-100-percent-depreciation-deduction-for-businesses
+    refresh_days: 60
+    crawl_hint: >
+      Track the phase-down schedule: 100% (2018–2022), 80% (2023),
+      60% (2024), 40% (2025), 20% (2026), 0% (2027+).
+      Note any OBBBA provisions restoring 100%.
+
+  - name: "IRS Publication 946 — How To Depreciate Property"
+    jurisdiction: US
+    topic: depreciation_pub946
+    tax_year: null
+    base_url: https://www.irs.gov/pub/irs-pdf/p946.pdf
+    refresh_days: 180
+    crawl_hint: >
+      PDF — extract bonus depreciation rules, §179 limits, MACRS tables.
+      Focus on Chapter 4 (§179 deduction) and Chapter 3 (bonus depreciation).
+
+  # -----------------------------------------------------------------------
+  # TCJA / OBBBA tracking
+  # -----------------------------------------------------------------------
+  - name: "OBBBA — One Big Beautiful Bill Act (HR 1)"
+    jurisdiction: US
+    topic: tcja_obbba_tracker
+    tax_year: null
+    base_url: https://www.congress.gov/bill/119th-congress/house-bill/1
+    refresh_days: 14
+    crawl_hint: >
+      Extract bill status, latest action, and key tax provisions:
+      §174 restoration, §163(j) ATI restoration to EBITDA, bonus
+      depreciation restoration, §199A permanence, state/local tax
+      deduction cap changes.
+
+  - name: "IRS TCJA overview"
+    jurisdiction: US
+    topic: tcja_overview
+    tax_year: null
+    base_url: https://www.irs.gov/newsroom/tax-cuts-and-jobs-act-tcja-overview
+    refresh_days: 60
+    crawl_hint: >
+      Extract the summary of TCJA provisions that affect C-corporations:
+      21% flat rate, §163(j), §174, bonus depreciation, §199A (pass-through),
+      and any sunset provisions.
+
+  # -----------------------------------------------------------------------
+  # South Carolina — Corporate income tax
+  # -----------------------------------------------------------------------
+  - name: "SCDOR Corporate Tax Center"
+    jurisdiction: SC
+    topic: sc1120
+    tax_year: null
+    base_url: https://dor.sc.gov/tax-index/business-income-taxes/corporate
+    refresh_days: 30
+    crawl_hint: >
+      Extract the SC corporate income tax rate (currently 5% per SC Code
+      §12-6-530), apportionment rules, IRC conformity date, and any
+      SC-specific modifications (additions/subtractions) to federal taxable income.
+
+  - name: "SCDOR SC1120 instructions"
+    jurisdiction: SC
+    topic: sc1120_instructions
+    tax_year: null
+    base_url: https://dor.sc.gov/forms-site/forms/sc1120i.pdf
+    refresh_days: 60
+    crawl_hint: >
+      PDF — extract line-by-line instructions, SC modifications,
+      apportionment factor rules, and filing deadlines.
+
+  - name: "SCDOR IRC Conformity Guide 2021–2024"
+    jurisdiction: SC
+    topic: sc_irc_conformity
+    tax_year: null
+    base_url: https://dor.sc.gov/sites/dor/files/Documents/Policy%20Manuals/Conformity%20Guide%2021-23.pdf
+    refresh_days: 90
+    crawl_hint: >
+      PDF — extract SC IRC conformity date and the list of federal provisions
+      that SC has NOT adopted (§163(j) limitation, bonus depreciation
+      phase-down, §199A, GILTI, etc.).
+
+  - name: "SCDOR Voluntary Disclosure Program"
+    jurisdiction: SC
+    topic: sc_voluntary_disclosure
+    tax_year: null
+    base_url: https://dor.sc.gov/businesses/nexus/voluntary-disclosure
+    refresh_days: 90
+    crawl_hint: >
+      Extract VDP eligibility rules, lookback period, penalty waiver terms,
+      and contact information.
+
+  - name: "SCDOR Penalty Waiver — SC Revenue Procedure 95-2"
+    jurisdiction: SC
+    topic: sc_penalty_waiver
+    tax_year: null
+    base_url: https://dor.sc.gov/administrative-interest-penalties-waivers-penalty-waiver-0
+    refresh_days: 180
+    crawl_hint: >
+      Extract the reasonable-cause criteria for penalty waiver under
+      SC Revenue Procedure 95-2 and SC Code §12-54-160.
+
+  # -----------------------------------------------------------------------
+  # IRS — Officer compensation / reasonable compensation
+  # -----------------------------------------------------------------------
+  - name: "IRS Form 1125-E instructions"
+    jurisdiction: US
+    topic: form_1125e
+    tax_year: null
+    base_url: https://www.irs.gov/pub/irs-pdf/i1125e.pdf
+    refresh_days: 180
+    crawl_hint: >
+      PDF — extract instructions for reporting officer compensation on Form
+      1125-E, the $1M compensation deduction limit (§162(m)), and the
+      definition of 'officer' under IRC §3401(c).
+
+  - name: "IRS reasonable compensation guidance"
+    jurisdiction: US
+    topic: reasonable_compensation
+    tax_year: null
+    base_url: https://www.irs.gov/businesses/small-businesses-self-employed/reasonable-compensation
+    refresh_days: 90
+    crawl_hint: >
+      Extract the multi-factor test for reasonable compensation (Mayson
+      factors), audit risk indicators, and the IRS LB&I job aid reference.
+
+  # -----------------------------------------------------------------------
+  # IRS — Net Operating Loss (§172)
+  # -----------------------------------------------------------------------
+  - name: "IRS Publication 536 — Net Operating Losses"
+    jurisdiction: US
+    topic: nol_172
+    tax_year: null
+    base_url: https://www.irs.gov/pub/irs-pdf/p536.pdf
+    refresh_days: 180
+    crawl_hint: >
+      PDF — extract the post-TCJA 80%-of-taxable-income limitation on NOL
+      deductions, indefinite carryforward rules, and the interaction with
+      §465 at-risk rules.
+
+  # -----------------------------------------------------------------------
+  # IRS — Wayfair / economic nexus (state sales tax)
+  # -----------------------------------------------------------------------
+  - name: "IRS Sales Tax Nexus — Wayfair summary"
+    jurisdiction: US
+    topic: wayfair_nexus
+    tax_year: null
+    base_url: https://www.irs.gov/businesses/small-businesses-self-employed/sales-and-use-taxes-wayfair
+    refresh_days: 90
+    crawl_hint: >
+      Summarize the South Dakota v. Wayfair threshold ($100K or 200 transactions)
+      and note that states vary.  Cross-reference SC nexus threshold.
+
+  - name: "SCDOR Sales Tax Nexus — SC economic nexus"
+    jurisdiction: SC
+    topic: sc_sales_tax_nexus
+    tax_year: null
+    base_url: https://dor.sc.gov/businesses/nexus
+    refresh_days: 60
+    crawl_hint: >
+      Extract SC economic nexus threshold for sales tax (currently $100K
+      in gross receipts or 200 transactions in prior or current calendar year).

@@ -95,6 +95,37 @@ Write a reviewer memo to the `tax_review_queue`. Use for:
 
 Returns a `memo_id` (UUID). Record every `memo_id` in the draft report.
 
+### `get_current_rule(jurisdiction, topic, tax_year, query, limit)`
+
+**Use this BEFORE citing any specific tax rule, threshold, or statutory provision.**
+The tax knowledge base is updated weekly by the Tax Knowledge Curator agent from
+authoritative IRS and SCDOR sources. Your training data may be outdated — always
+verify against the knowledge base.
+
+When to call:
+- Before stating any §code threshold or limitation (§163(j) ATI percentages, §179
+  limits, bonus depreciation percentages, 1099-NEC $600 threshold, etc.)
+- When you encounter a statutory provision where the TCJA/OBBBA transition may have
+  changed the rule (§174 capitalization, §163(j) ATI base, bonus depreciation phase-down)
+- When you are uncertain whether a pending legislative change has been enacted
+
+Example calls:
+```
+get_current_rule(jurisdiction="US", topic="163j", tax_year=2024,
+                 query="ATI limitation percentage small business exemption")
+get_current_rule(jurisdiction="US", topic="bonus_depreciation", tax_year=2024)
+get_current_rule(jurisdiction="US", topic="174", tax_year=2024,
+                 query="mandatory capitalization R&E expenditures TCJA")
+```
+
+If the tool returns `knowledge_gap=True` (no documents found for that rule):
+- Note the gap inline in the draft.
+- Call `flag_for_cpa_review` with `form_reference = "Knowledge Gap"` and a note:
+  "The tax knowledge base does not contain a current entry for [jurisdiction/topic/year].
+  CPA should verify [specific rule] from authoritative source before filing."
+- Proceed using your training-data knowledge but mark it explicitly:
+  `[KNOWLEDGE BASE GAP — verify with CPA before filing]`.
+
 ### `flag_for_cpa_review(entity_id, tax_year, form_reference, content, confidence, citations)`
 
 Write a CPA judgment flag to the `tax_review_queue`. Use for:
@@ -103,9 +134,10 @@ Write a CPA judgment flag to the `tax_review_queue`. Use for:
 - Any line where `confidence = "low"`.
 - Any out-of-scope request.
 - Any data gap (missing prior-year balance, unreconciled amount, etc.).
+- Any knowledge base gap (get_current_rule returned knowledge_gap=True).
 
 `form_reference` format: `"Form 1120, Line <N>"` or `"Schedule L, Line <N>"` or
-`"1099-NEC"` or `"Out-of-Scope"`.
+`"1099-NEC"` or `"Out-of-Scope"` or `"Knowledge Gap"`.
 
 Returns a `flag_id` (UUID). Record every `flag_id` in the CPA-flagged items section.
 
