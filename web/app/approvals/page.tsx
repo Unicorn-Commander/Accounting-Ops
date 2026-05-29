@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowRight, FileText, ShieldCheck, Banknote } from "lucide-react";
+import { ArrowRight, FileText, ShieldCheck, Banknote, Sparkles } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import {
   Card,
@@ -10,13 +10,21 @@ import {
 } from "@/components/primitives";
 import { ApprovalActions } from "@/components/approval-actions";
 import { BankTxnBatchPanel } from "@/components/bank-txn-batch-panel";
+import { RecommendationsView } from "@/app/approvals/recommendations-view";
 import { getActiveContext } from "@/lib/active-context";
 import {
   getApprovals,
   getApprovalCategories,
   type Approval
 } from "@/lib/approvals";
+import { getApprovalRecommendations } from "@/lib/approval-recommendations";
 import { formatAmount } from "@/lib/journal";
+
+// -----------------------------------------------------------------------
+// Tab definitions
+// -----------------------------------------------------------------------
+
+type Tab = "rows" | "recommendations";
 
 // -----------------------------------------------------------------------
 // Helpers for journal_recategorization + compliance_rule rows
@@ -108,19 +116,94 @@ function ApprovalCard({
 }
 
 // -----------------------------------------------------------------------
+// Tab bar (server-rendered pill nav using search params)
+// -----------------------------------------------------------------------
+
+function TabBar({
+  active,
+  btiCount,
+  recCount
+}: {
+  active: Tab;
+  btiCount: number;
+  recCount: number;
+}) {
+  const tabs: { id: Tab; label: string; count?: number; icon: React.ReactNode }[] = [
+    {
+      id: "rows",
+      label: "Transactions",
+      count: btiCount,
+      icon: <Banknote size={13} />
+    },
+    {
+      id: "recommendations",
+      label: "AI Recommendations",
+      count: recCount,
+      icon: <Sparkles size={13} />
+    }
+  ];
+
+  return (
+    <div className="flex items-center gap-1 rounded-xl border border-default bg-elevated p-1">
+      {tabs.map((t) => (
+        <Link
+          key={t.id}
+          href={`/approvals${t.id !== "rows" ? `?tab=${t.id}` : ""}`}
+          className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+            active === t.id
+              ? "bg-surface text-ink-primary shadow-sm"
+              : "text-ink-tertiary hover:text-ink-secondary"
+          }`}
+        >
+          {t.icon}
+          {t.label}
+          {t.count != null && t.count > 0 && (
+            <span
+              className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                active === t.id
+                  ? t.id === "recommendations"
+                    ? "bg-credit/20 text-credit"
+                    : "bg-pending/20 text-pending"
+                  : "bg-white/5 text-ink-tertiary"
+              }`}
+            >
+              {t.count}
+            </span>
+          )}
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------
 // Page
 // -----------------------------------------------------------------------
 
-export default async function ApprovalsPage() {
+export default async function ApprovalsPage({
+  searchParams
+}: {
+  searchParams: Promise<{ tab?: string }>;
+}) {
   const ctx = await getActiveContext();
   const workspace = ctx.activeWorkspace;
   const entityId = ctx.isConsolidated ? undefined : ctx.activeEntity?.id;
+  const sp = await searchParams;
+  const activeTab: Tab =
+    sp.tab === "recommendations" ? "recommendations" : "rows";
 
-  const [data, categories] = await Promise.all([
+  const [data, categories, recsData] = await Promise.all([
     workspace
       ? getApprovals(workspace.id, { entityId, status: "pending" })
       : null,
-    workspace ? getApprovalCategories(workspace.id) : []
+    workspace ? getApprovalCategories(workspace.id) : [],
+    workspace
+      ? getApprovalRecommendations(workspace.id, {
+          entityId,
+          status: "pending",
+          limit: 500
+        })
+      : null
   ]);
 
   const approvals = data?.approvals ?? [];
@@ -137,6 +220,9 @@ export default async function ApprovalsPage() {
   );
 
   const totalPending = approvals.length;
+  const recCount = recsData?.recommendations.length ?? 0;
+  const recClusters = recsData?.clusters ?? [];
+  const recRows = recsData?.recommendations ?? [];
 
   return (
     <AppShell>
@@ -163,23 +249,17 @@ export default async function ApprovalsPage() {
               No active workspace. Pick one from the switcher above.
             </p>
           </Card>
-        ) : totalPending === 0 ? (
-          <Card>
-            <p className="text-sm text-ink-tertiary">
-              Nothing waiting on you — books are caught up. Material
-              recategorizations, proposed compliance rules, and bank import
-              reviews show up here. Lower-value items are in the{" "}
-              <Link
-                href="/reconciliation-queue"
-                className="text-brand-400 underline-offset-2 hover:underline"
-              >
-                Reconciliation queue
-              </Link>
-              .
-            </p>
-          </Card>
         ) : (
-          <div className="flex flex-col gap-8">
+          <div className="flex flex-col gap-6">
+            {/* Tab bar (only when there are BTIs — no point showing tabs with 0 BTI) */}
+            {btiApprovals.length > 0 && (
+              <TabBar
+                active={activeTab}
+                btiCount={btiApprovals.length}
+                recCount={recCount}
+              />
+            )}
+
             {!canDecide && (
               <div className="rounded-xl border border-pending/40 bg-pending/[0.06] px-5 py-3 text-xs text-ink-secondary">
                 You can review these, but only an <strong>admin</strong> can
@@ -187,51 +267,79 @@ export default async function ApprovalsPage() {
               </div>
             )}
 
-            {/* ---- bank_transaction_import section ---- */}
-            {btiApprovals.length > 0 && (
-              <section>
-                <div className="mb-3 flex items-center gap-2">
-                  <Banknote size={16} className="text-ink-secondary" />
-                  <h2 className="text-sm font-semibold">
-                    Bank import review
-                  </h2>
-                  <StatusChip tone="pending">
-                    {btiApprovals.length} pending
-                  </StatusChip>
-                </div>
-                <BankTxnBatchPanel
-                  approvals={btiApprovals}
-                  workspaceId={workspace.id}
-                  canDecide={canDecide}
-                  categories={categories}
-                />
-              </section>
-            )}
-
-            {/* ---- journal_recategorization + compliance_rule section ---- */}
-            {otherApprovals.length > 0 && (
-              <section>
+            {totalPending === 0 ? (
+              <Card>
+                <p className="text-sm text-ink-tertiary">
+                  Nothing waiting on you — books are caught up. Material
+                  recategorizations, proposed compliance rules, and bank import
+                  reviews show up here. Lower-value items are in the{" "}
+                  <Link
+                    href="/reconciliation-queue"
+                    className="text-brand-400 underline-offset-2 hover:underline"
+                  >
+                    Reconciliation queue
+                  </Link>
+                  .
+                </p>
+              </Card>
+            ) : activeTab === "recommendations" ? (
+              /* ---- AI Recommendations tab ---- */
+              <RecommendationsView
+                recommendations={recRows}
+                clusters={recClusters}
+                workspaceId={workspace.id}
+                canDecide={canDecide}
+              />
+            ) : (
+              /* ---- Rows / Grouped tab (original content) ---- */
+              <div className="flex flex-col gap-8">
+                {/* ---- bank_transaction_import section ---- */}
                 {btiApprovals.length > 0 && (
-                  <div className="mb-3 flex items-center gap-2">
-                    <h2 className="text-sm font-semibold">
-                      Other pending approvals
-                    </h2>
-                    <StatusChip tone="pending">
-                      {otherApprovals.length} pending
-                    </StatusChip>
-                  </div>
-                )}
-                <div className="flex flex-col gap-3">
-                  {otherApprovals.map((a) => (
-                    <ApprovalCard
-                      key={a.id}
-                      approval={a}
+                  <section>
+                    <div className="mb-3 flex items-center gap-2">
+                      <Banknote size={16} className="text-ink-secondary" />
+                      <h2 className="text-sm font-semibold">
+                        Bank import review
+                      </h2>
+                      <StatusChip tone="pending">
+                        {btiApprovals.length} pending
+                      </StatusChip>
+                    </div>
+                    <BankTxnBatchPanel
+                      approvals={btiApprovals}
                       workspaceId={workspace.id}
                       canDecide={canDecide}
+                      categories={categories}
                     />
-                  ))}
-                </div>
-              </section>
+                  </section>
+                )}
+
+                {/* ---- journal_recategorization + compliance_rule section ---- */}
+                {otherApprovals.length > 0 && (
+                  <section>
+                    {btiApprovals.length > 0 && (
+                      <div className="mb-3 flex items-center gap-2">
+                        <h2 className="text-sm font-semibold">
+                          Other pending approvals
+                        </h2>
+                        <StatusChip tone="pending">
+                          {otherApprovals.length} pending
+                        </StatusChip>
+                      </div>
+                    )}
+                    <div className="flex flex-col gap-3">
+                      {otherApprovals.map((a) => (
+                        <ApprovalCard
+                          key={a.id}
+                          approval={a}
+                          workspaceId={workspace.id}
+                          canDecide={canDecide}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                )}
+              </div>
             )}
           </div>
         )}
