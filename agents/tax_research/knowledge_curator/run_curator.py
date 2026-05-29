@@ -422,13 +422,26 @@ async def run_curator(
                     await asyncio.sleep(_REQUEST_DELAY_S)
                     continue
 
-                # Generate embedding
+                # Generate embedding.
+                #
+                # Infinity (BAAI/bge-large-en-v1.5) accepts up to ~122,880 chars
+                # per input.  We embed up to 100K chars here (5K safety margin)
+                # — the "intro" vector for the doc.  If the doc is longer, the
+                # tail content stays unindexed at curator time; run
+                # `chunk_oversized_docs.py` afterwards to split it into chunks
+                # whose deep content is indexed via parent_document_id.
                 embedding: list[float] | None = None
                 try:
                     from app.exports.tax_knowledge_embed import embed_text
                     logger.info("Generating embedding for: %s", name)
-                    # Embed up to ~8000 chars (model token limit ~8191)
-                    embed_text_input = content[:8000]
+                    _EMBED_MAX_CHARS = 100_000
+                    if len(content) > _EMBED_MAX_CHARS:
+                        logger.info(
+                            "%s is %d chars — embedding first %d only "
+                            "(run chunk_oversized_docs.py for full coverage)",
+                            name, len(content), _EMBED_MAX_CHARS,
+                        )
+                    embed_text_input = content[:_EMBED_MAX_CHARS]
                     embedding = await embed_text(embed_text_input)
                     if embedding is None:
                         logger.warning("Embedding returned None for %s", name)
