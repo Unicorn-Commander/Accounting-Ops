@@ -94,19 +94,24 @@ export function KpiCard({
 export function SectionHeader({
   title,
   subtitle,
-  action
+  action,
+  breadcrumb
 }: {
   title: string;
   subtitle?: string;
   action?: React.ReactNode;
+  breadcrumb?: React.ReactNode;
 }) {
   return (
-    <div className="mb-5 md:mb-6 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
-      <div>
-        <h1 className="text-xl md:text-2xl font-semibold tracking-tight">{title}</h1>
-        {subtitle ? <p className="mt-1 text-xs md:text-sm text-ink-secondary">{subtitle}</p> : null}
+    <div className="mb-5 md:mb-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
+        <div className="min-w-0">
+          <h1 className="text-xl md:text-2xl font-semibold tracking-tight">{title}</h1>
+          {subtitle ? <p className="mt-1 text-xs md:text-sm text-ink-secondary">{subtitle}</p> : null}
+        </div>
+        {action ? <div className="flex flex-wrap items-center gap-2">{action}</div> : null}
       </div>
-      {action ? <div className="flex flex-wrap items-center gap-2">{action}</div> : null}
+      {breadcrumb ? <div className="mt-3">{breadcrumb}</div> : null}
     </div>
   );
 }

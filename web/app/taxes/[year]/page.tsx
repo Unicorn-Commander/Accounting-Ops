@@ -84,7 +84,7 @@ export default async function TaxYearPage(props: {
   ]);
 
   return (
-    <AppShell>
+    <AppShell taxYear={taxYear}>
       <PageShell>
         <div className="mb-4">
           <Link
