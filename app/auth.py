@@ -240,6 +240,11 @@ async def authenticate_token(token: str) -> AuthContext:
     directly from its ASGI auth middleware. Both paths therefore validate
     identically — there is exactly one token-validation implementation.
 
+    Auth strategy chain (first match wins; same AuthContext result type):
+      1. Service token (fast-path; shared-secret for internal workers)
+      2. Keycloak-issued bearer (the user/agent flow)
+      3. Brigade-issued JWT (federated MCP gateway; ed25519 / RS256)
+
     Raises HTTPException(401) on any failure (so the FastAPI wrapper propagates
     it unchanged; the MCP middleware translates the status into a JSON 401).
     """
@@ -331,9 +336,28 @@ async def authenticate_token(token: str) -> AuthContext:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Token audience does not include this resource server",
             )
-    except HTTPException:
+    except HTTPException as http_exc:
+        # Keycloak rejected the token. For 401s (token-recognition failures —
+        # missing kid, unknown kid, signature failure) we fall through to
+        # Brigade. For 403s (audience mismatch — token IS a valid Keycloak
+        # token but not for this resource), propagate immediately: a 403 means
+        # the caller authenticated successfully on the Keycloak path, just to
+        # the wrong resource; trying Brigade then would let them retry as a
+        # different identity which is wrong.
+        if http_exc.status_code != 401:
+            raise
+        brigade_ctx = await _try_brigade(token)
+        if brigade_ctx is not None:
+            return brigade_ctx
         raise
     except (JWTError, httpx.HTTPError, KeyError) as exc:
+        # Keycloak verifier couldn't authenticate this token. Before giving up,
+        # try the Brigade JWT verifier — it covers a different issuer + audience
+        # + signing scheme. A success here returns a clean AuthContext; a miss
+        # falls through to the 401 below.
+        brigade_ctx = await _try_brigade(token)
+        if brigade_ctx is not None:
+            return brigade_ctx
         _log.info("JWT validation failed: %s: %s", exc.__class__.__name__, exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token"
@@ -369,6 +393,51 @@ async def validate_bearer_token(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token"
         )
     return await authenticate_token(credentials.credentials)
+
+
+async def _try_brigade(token: str) -> AuthContext | None:
+    """Try the Brigade JWT verifier. Return an AuthContext on success, None on miss.
+
+    The Brigade ``sub`` claim is the federated user id. We resolve it the same
+    way Keycloak's uc_uid resolves — by looking up (or auto-provisioning) the
+    public.user_account row. We DO NOT auto-provision here: if the sub doesn't
+    resolve to a known uc_uid, fail closed (None) so Brigade can't create
+    accounts on this side just by minting a JWT. Brigade is expected to map its
+    user identifier to an established uc_uid before minting; the manifest's
+    auth.federated_auth contract surfaces this explicitly.
+    """
+    try:
+        from app.security.brigade_jwt import verify_brigade_jwt
+    except ImportError:  # pragma: no cover - defensive
+        return None
+
+    claims = await verify_brigade_jwt(token)
+    if claims is None:
+        return None
+
+    # The sub claim IS the uc_uid in Brigade's contract. If Brigade chooses to
+    # use a different field (e.g. uc_uid claim or org_id/user_id), prefer
+    # claims['uc_uid'] when present; otherwise fall back to sub. Either way,
+    # the value must resolve to an existing user_account in the workspace's
+    # tenancy layer for any tool call to succeed.
+    uc_uid = claims.get("uc_uid") or claims.get("sub")
+    if not isinstance(uc_uid, str) or not uc_uid:
+        return None
+
+    # RFC 8693 act claim — Brigade may carry the acting agent identity here.
+    act = claims.get("act") or {}
+    agent_id: str | None = None
+    if isinstance(act, dict):
+        agent_id = act.get("sub") or act.get("client_id")
+    # Brigade may carry scopes as a space-delimited string or an array.
+    scope_raw = claims.get("scope") or claims.get("scopes") or ""
+    if isinstance(scope_raw, list):
+        scopes = tuple(str(s) for s in scope_raw)
+    else:
+        scopes = tuple(str(scope_raw).split())
+    ctx = AuthContext(uc_uid=uc_uid, agent_id=agent_id, scopes=scopes, claims=claims)
+    _stamp_audit_actor(ctx)
+    return ctx
 
 
 def _stamp_audit_actor(ctx: AuthContext) -> None:
