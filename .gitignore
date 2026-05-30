@@ -30,3 +30,12 @@ agent-prompts/
 # These are public-domain government documents but too large for git.
 # Each developer/server must run the download script after checkout.
 data/irs_forms/*.pdf
+
+# SCDOR form PDFs — downloaded by scripts/download_scdor_forms.sh.
+# Same posture as IRS forms (public-domain, fetched on demand).
+data/scdor_forms/*.pdf
+
+# Generated DRAFT prefilled forms — built on demand by
+# scripts/generate_submission_drafts.py.  Each one carries a DRAFT watermark
+# and must not be checked in (changes per-run + carries entity data).
+drafts/forms/*.pdf

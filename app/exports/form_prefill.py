@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import NameObject
+from pypdf.generic import BooleanObject, NameObject
 
 from app.exports.form_1120_field_map import (
     FORM_1120_FIELDS,
@@ -318,11 +318,13 @@ def _fill_pdf_fields(
             NameObject("/AcroForm"): reader.trailer["/Root"]["/AcroForm"]
         })
 
-    # Set NeedAppearances so PDF viewers re-render the typed text
+    # Set NeedAppearances so PDF viewers re-render the typed text.
+    # NB: NeedAppearances is a PDF boolean (not a /Name) — using NameObject("true")
+    # raised pypdf.errors.DeprecationError on pypdf 5+.
     try:
         acroform = writer._root_object["/AcroForm"].get_object()
         acroform.update({
-            NameObject("/NeedAppearances"): NameObject("true")
+            NameObject("/NeedAppearances"): BooleanObject(True)
         })
     except (KeyError, AttributeError):
         pass
@@ -361,7 +363,7 @@ def _apply_watermark(source_pdf_bytes: bytes) -> bytes:
         })
         try:
             acroform = writer._root_object["/AcroForm"].get_object()
-            acroform.update({NameObject("/NeedAppearances"): NameObject("true")})
+            acroform.update({NameObject("/NeedAppearances"): BooleanObject(True)})
         except (KeyError, AttributeError):
             pass
 

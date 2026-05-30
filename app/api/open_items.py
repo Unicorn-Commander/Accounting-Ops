@@ -350,6 +350,9 @@ class OpenItemsResponse(BaseModel):
     waiting_on_mosin: list[dict[str, Any]]
     waiting_on_attorney: list[dict[str, Any]]
     resolved_this_week: list[dict[str, Any]]
+    # Tax submissions in flight (paper/MyDORWAY/efile records from
+    # tax_filing_submission). Sourced from app/api/tax_filing_submissions.py.
+    submissions_in_flight: list[dict[str, Any]] = []
 
 
 @router.get("/api/workspaces/{workspace_id}/open-items")
@@ -522,6 +525,67 @@ async def get_open_items(
             )
         ).mappings().all()
 
+        # Submissions in flight (open envelopes / uploads from
+        # tax_filing_submission). Same entity / year scoping as the queue
+        # query above. Gracefully degrades if the table doesn't yet exist
+        # (migration 0011 not applied) — return empty list rather than 500.
+        submissions_in_flight_rows: list[dict[str, Any]] = []
+        try:
+            tfs_where = ["tfs.status NOT IN ('closed')"]
+            tfs_params: dict[str, Any] = {}
+            if entity_id:
+                tfs_where.append("tfs.entity_id = :tfs_eid")
+                tfs_params["tfs_eid"] = str(entity_id)
+            if scope_restriction is not None:
+                tfs_where.append("tfs.entity_id = ANY(:tfs_scope)")
+                tfs_params["tfs_scope"] = [str(e) for e in scope_restriction]
+            if tax_year:
+                tfs_where.append("tfs.tax_year = :tfs_ty")
+                tfs_params["tfs_ty"] = tax_year
+            tfs_where_sql = " AND ".join(tfs_where)
+            submissions_in_flight_rows = (
+                (
+                    await session.execute(
+                        text(
+                            f"""
+                            SELECT
+                                tfs.id::text,
+                                tfs.entity_id::text,
+                                e.display_name AS entity_display_name,
+                                e.slug AS entity_slug,
+                                tfs.jurisdiction, tfs.tax_year,
+                                tfs.submission_title, tfs.forms_enclosed,
+                                tfs.filing_method, tfs.tracking_number,
+                                tfs.status,
+                                tfs.submitted_at, tfs.expected_response_by,
+                                tfs.last_tracking_status, tfs.delivered_at,
+                                tfs.acknowledged_at
+                            FROM tax_filing_submission tfs
+                            LEFT JOIN entity e ON e.id = tfs.entity_id
+                            WHERE {tfs_where_sql}
+                            ORDER BY
+                                CASE tfs.status
+                                    WHEN 'awaiting_followup' THEN 0
+                                    WHEN 'in_transit'        THEN 1
+                                    WHEN 'submitted'         THEN 2
+                                    WHEN 'delivered'         THEN 3
+                                    WHEN 'acknowledged'      THEN 4
+                                    WHEN 'draft'             THEN 5
+                                    ELSE 6
+                                END,
+                                tfs.expected_response_by ASC NULLS LAST
+                            LIMIT 50
+                            """
+                        ),
+                        tfs_params,
+                    )
+                ).mappings().all()
+            )
+        except Exception:
+            # Table not present yet, or some other RLS / migration gap —
+            # surface as empty rather than failing the whole open-items load.
+            submissions_in_flight_rows = []
+
     # ------- Bucketing -------
     sections: dict[str, list[dict[str, Any]]] = {
         "time_sensitive": [],
@@ -630,6 +694,20 @@ async def get_open_items(
             row["resolved_at"] = row["resolved_at"].isoformat()
         resolved_out.append(row)
 
+    # Submissions in flight — flatten datetimes for the wire
+    submissions_out: list[dict[str, Any]] = []
+    for r in submissions_in_flight_rows:
+        row = dict(r)
+        for k in ("submitted_at", "expected_response_by", "delivered_at",
+                  "acknowledged_at"):
+            if isinstance(row.get(k), dt.datetime):
+                row[k] = row[k].isoformat()
+        submissions_out.append(row)
+
+    awaiting_followup_count = sum(
+        1 for s in submissions_out if s.get("status") == "awaiting_followup"
+    )
+
     counts = {
         "time_sensitive": len(sections["time_sensitive"]),
         "documents_pending": len(documents_out) - received_count,
@@ -640,12 +718,17 @@ async def get_open_items(
         "waiting_on_attorney": len(sections["attorney"]),
         "informational": len(sections["info"]),
         "resolved_this_week": len(resolved_out),
+        "submissions_in_flight": len(submissions_out),
+        "submissions_awaiting_followup": awaiting_followup_count,
         # The headline number that drives the dashboard widget — only items
         # that require AARON to act, not things waiting on someone else.
+        # Submissions awaiting follow-up count as action-required (Aaron must
+        # call the taxing authority).
         "action_required": (
             len(sections["time_sensitive"])
             + (len(documents_out) - received_count)
             + (len(decisions_out) - decisions_decided)
+            + awaiting_followup_count
         ),
     }
 
@@ -660,6 +743,7 @@ async def get_open_items(
         waiting_on_mosin=sections["mosin"],
         waiting_on_attorney=sections["attorney"],
         resolved_this_week=resolved_out,
+        submissions_in_flight=submissions_out,
     )
 
 
