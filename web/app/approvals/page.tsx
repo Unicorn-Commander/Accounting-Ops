@@ -1,5 +1,12 @@
 import Link from "next/link";
-import { ArrowRight, FileText, ShieldCheck, Banknote, Sparkles } from "lucide-react";
+import {
+  ArrowRight,
+  FileText,
+  ShieldCheck,
+  Banknote,
+  Sparkles,
+  Layers
+} from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import {
   Card,
@@ -11,6 +18,7 @@ import {
 import { ApprovalActions } from "@/components/approval-actions";
 import { BankTxnBatchPanel } from "@/components/bank-txn-batch-panel";
 import { RecommendationsView } from "@/app/approvals/recommendations-view";
+import { ClusterReview } from "@/components/approvals/cluster-review";
 import { getActiveContext } from "@/lib/active-context";
 import {
   getApprovals,
@@ -18,13 +26,14 @@ import {
   type Approval
 } from "@/lib/approvals";
 import { getApprovalRecommendations } from "@/lib/approval-recommendations";
+import { getApprovalClusters } from "@/lib/approval-clusters";
 import { formatAmount } from "@/lib/journal";
 
 // -----------------------------------------------------------------------
 // Tab definitions
 // -----------------------------------------------------------------------
 
-type Tab = "rows" | "recommendations";
+type Tab = "review" | "rows" | "recommendations";
 
 // -----------------------------------------------------------------------
 // Helpers for journal_recategorization + compliance_rule rows
@@ -121,35 +130,43 @@ function ApprovalCard({
 
 function TabBar({
   active,
+  reviewCount,
   btiCount,
   recCount
 }: {
   active: Tab;
+  reviewCount: number;
   btiCount: number;
   recCount: number;
 }) {
   const tabs: { id: Tab; label: string; count?: number; icon: React.ReactNode }[] = [
     {
+      id: "review",
+      label: "Review",
+      count: reviewCount,
+      icon: <Layers size={13} />
+    },
+    {
       id: "rows",
-      label: "Transactions",
+      label: "All rows",
       count: btiCount,
       icon: <Banknote size={13} />
     },
     {
       id: "recommendations",
-      label: "AI Recommendations",
+      label: "AI scoring",
       count: recCount,
       icon: <Sparkles size={13} />
     }
   ];
 
   return (
-    <div className="flex items-center gap-1 rounded-xl border border-default bg-elevated p-1">
+    <div className="flex items-center gap-1 overflow-x-auto rounded-xl border border-default bg-elevated p-1">
       {tabs.map((t) => (
         <Link
           key={t.id}
-          href={`/approvals${t.id !== "rows" ? `?tab=${t.id}` : ""}`}
-          className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+          href={`/approvals${t.id !== "review" ? `?tab=${t.id}` : ""}`}
+          className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
             active === t.id
               ? "bg-surface text-ink-primary shadow-sm"
               : "text-ink-tertiary hover:text-ink-secondary"
@@ -163,7 +180,7 @@ function TabBar({
                 active === t.id
                   ? t.id === "recommendations"
                     ? "bg-credit/20 text-credit"
-                    : "bg-pending/20 text-pending"
+                    : "bg-brand-500/20 text-brand-300"
                   : "bg-white/5 text-ink-tertiary"
               }`}
             >
@@ -190,9 +207,13 @@ export default async function ApprovalsPage({
   const entityId = ctx.isConsolidated ? undefined : ctx.activeEntity?.id;
   const sp = await searchParams;
   const activeTab: Tab =
-    sp.tab === "recommendations" ? "recommendations" : "rows";
+    sp.tab === "rows"
+      ? "rows"
+      : sp.tab === "recommendations"
+        ? "recommendations"
+        : "review"; // default to the new cluster-card UX
 
-  const [data, categories, recsData] = await Promise.all([
+  const [data, categories, recsData, clusters] = await Promise.all([
     workspace
       ? getApprovals(workspace.id, { entityId, status: "pending" })
       : null,
@@ -203,7 +224,8 @@ export default async function ApprovalsPage({
           status: "pending",
           limit: 500
         })
-      : null
+      : null,
+    workspace ? getApprovalClusters(workspace.id, { entityId }) : null
   ]);
 
   const approvals = data?.approvals ?? [];
@@ -223,6 +245,11 @@ export default async function ApprovalsPage({
   const recCount = recsData?.recommendations.length ?? 0;
   const recClusters = recsData?.clusters ?? [];
   const recRows = recsData?.recommendations ?? [];
+
+  // Review-tab count = number of (cluster + singleton) decisions remaining
+  const reviewCount = clusters
+    ? clusters.clusters.length + clusters.singletons.length
+    : 0;
 
   return (
     <AppShell>
@@ -251,10 +278,11 @@ export default async function ApprovalsPage({
           </Card>
         ) : (
           <div className="flex flex-col gap-6">
-            {/* Tab bar (only when there are BTIs — no point showing tabs with 0 BTI) */}
-            {btiApprovals.length > 0 && (
+            {/* Tab bar (show only when there is something to switch to). */}
+            {(reviewCount > 0 || btiApprovals.length > 0) && (
               <TabBar
                 active={activeTab}
+                reviewCount={reviewCount}
                 btiCount={btiApprovals.length}
                 recCount={recCount}
               />
@@ -267,7 +295,7 @@ export default async function ApprovalsPage({
               </div>
             )}
 
-            {totalPending === 0 ? (
+            {totalPending === 0 && reviewCount === 0 ? (
               <Card>
                 <div className="flex flex-col items-center gap-3 py-10 text-center">
                   <ShieldCheck size={28} className="text-credit" />
@@ -288,8 +316,40 @@ export default async function ApprovalsPage({
                   </p>
                 </div>
               </Card>
+            ) : activeTab === "review" && clusters ? (
+              /* ---- Cluster cards + singleton swipe (default tab) ---- */
+              <>
+                <ClusterReview
+                  data={clusters}
+                  categories={categories}
+                  workspaceId={workspace.id}
+                  canDecide={canDecide}
+                />
+                {otherApprovals.length > 0 && (
+                  <section className="mt-2">
+                    <div className="mb-3 flex items-center gap-2">
+                      <h2 className="text-sm font-semibold">
+                        Other pending approvals
+                      </h2>
+                      <StatusChip tone="pending">
+                        {otherApprovals.length} pending
+                      </StatusChip>
+                    </div>
+                    <div className="flex flex-col gap-3">
+                      {otherApprovals.map((a) => (
+                        <ApprovalCard
+                          key={a.id}
+                          approval={a}
+                          workspaceId={workspace.id}
+                          canDecide={canDecide}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                )}
+              </>
             ) : activeTab === "recommendations" ? (
-              /* ---- AI Recommendations tab ---- */
+              /* ---- AI Recommendations tab (legacy view) ---- */
               <RecommendationsView
                 recommendations={recRows}
                 clusters={recClusters}
@@ -297,7 +357,7 @@ export default async function ApprovalsPage({
                 canDecide={canDecide}
               />
             ) : (
-              /* ---- Rows / Grouped tab (original content) ---- */
+              /* ---- Rows / Grouped tab (legacy flat list) ---- */
               <div className="flex flex-col gap-8">
                 {/* ---- bank_transaction_import section ---- */}
                 {btiApprovals.length > 0 && (
