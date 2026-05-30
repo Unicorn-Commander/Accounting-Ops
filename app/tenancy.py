@@ -41,9 +41,42 @@ class EntityContext:
     entity_slug: str
 
 
-# Role hierarchy: owner > admin > accountant > viewer. Higher roles inherit
-# permissions of lower roles. Use require_role(ctx, "accountant") for write ops.
-_ROLE_RANK = {"viewer": 0, "accountant": 1, "admin": 2, "owner": 3}
+# Role hierarchy. Higher numbers inherit permissions of lower numbers.
+# Use require_role(ctx, "accountant") for write ops.
+#
+# 3-persona expansion (2026-05-30) added:
+#   - platform_admin: highest — global Magic Unicorn operators (Aaron, Shafen)
+#   - client_owner:   alias of owner for end-customer-purchased workspaces
+#                     (semantic distinction — same privilege level)
+#   - cpa:            external accountant invited across multiple workspaces
+#                     (same write level as the existing accountant role)
+#   - bookkeeper:     propose categorizations + draft only; cannot approve
+#                     decisions (sits between viewer and accountant)
+#   - client_user:    end-user inside a customer workspace — read + answer
+#                     decisions + upload docs (above viewer, below bookkeeper)
+#
+# Existing roles keep their EXACT numeric rank so no role-floor check
+# regresses. New roles slot in around them.
+_ROLE_RANK = {
+    "viewer": 0,
+    "client_user": 1,
+    "bookkeeper": 2,
+    "accountant": 3,
+    "cpa": 3,           # cpa == accountant rank (same write privileges)
+    "admin": 4,
+    "owner": 5,
+    "client_owner": 5,  # client_owner == owner rank (semantic alias)
+    "platform_admin": 100,
+}
+
+
+# Convenience: roles whose presence on a workspace implies "platform" view
+# (every workspace is visible to them regardless of explicit membership).
+PLATFORM_ROLES = frozenset({"platform_admin"})
+
+
+def is_platform_admin(role: str) -> bool:
+    return role in PLATFORM_ROLES
 
 
 def role_at_least(role: str, minimum: str) -> bool:
@@ -221,7 +254,20 @@ async def resolve_workspace(
 
 
 # Role hierarchy mirrored from app.auth._ROLE_ORDER. Lowest-priv first.
-_ROLE_ORDER = ("viewer", "accountant", "admin", "owner")
+# Keeps the EXACT original 4 roles in their original positions so existing
+# service tokens with role_floor="viewer"/"accountant"/"admin"/"owner"
+# behave identically; new roles are interleaved per _ROLE_RANK.
+_ROLE_ORDER = (
+    "viewer",
+    "client_user",
+    "bookkeeper",
+    "accountant",
+    "cpa",
+    "admin",
+    "owner",
+    "client_owner",
+    "platform_admin",
+)
 
 
 def _cap_role(actual: str, ceiling: str) -> str:
