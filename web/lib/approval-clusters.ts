@@ -152,7 +152,8 @@ export function flagLabel(flag: string): string {
     refund: "Refund",
     dispute: "Dispute",
     missing_data: "Missing data",
-    block_reason: "Blocked",
+    high_value: "High value",
+    substantiation: "§274(d) needed",
     high_materiality: "High materiality"
   };
   return map[flag] ?? flag.replace(/_/g, " ");

@@ -90,12 +90,29 @@ def _payload_flags(payload: dict | None) -> list[str]:
 
     A non-empty list means this item must NOT be folded into a bulk approve;
     it has to be reviewed individually.
+
+    Conservative criteria (the human reviewer's attestation does NOT replace
+    these kinds of due-diligence checks):
+      - materiality_tier == 'H' — high-dollar item must be individually attested
+      - block_reason == 'block_high_value' — over per-txn dollar threshold
+      - payload.refund_for set — refund/reversal that must be matched to the
+        original charge before posting
+      - payload.dispute true — vendor charge under dispute
+      - payload.missing_data true — required fields are absent
+
+    Other block_reasons (block_274d substantiation, category_not_in_…,
+    queue_for_confirm) are SOFT flags — every bank import in the queue has
+    one of these, that's literally why it got queued. Bulk approving these
+    with human attestation IS the resolution; flagging them all would defeat
+    the cluster-card UX. The substantiation/category flags are surfaced
+    elsewhere (per-row rationale) so the reviewer still sees them.
     """
     if not payload:
         return []
     flags: list[str] = []
-    if payload.get("block_reason"):
-        flags.append("block_reason")
+    block_reason = (payload.get("block_reason") or "").lower()
+    if block_reason in ("block_high_value", "high_value"):
+        flags.append("high_value")
     if payload.get("refund_for"):
         flags.append("refund")
     if payload.get("dispute"):
