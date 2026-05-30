@@ -254,6 +254,19 @@ PERSONAS: tuple[Persona, ...] = (
         "tax_specialists/audit_defense_specialist",
         tools=_READ_TOOLS + _QUEUE_DRAFT_TOOLS,
     ),
+    _persona(
+        "personal-1040-specialist",
+        "Personal 1040 Specialist",
+        "Individual returns with military retirement / VA disability / SC veteran provisions.",
+        "tax_specialists/personal_1040_specialist",
+        tools=(
+            "get_period_journal",
+            "get_tax_review_queue",
+            "draft_memo",
+            "flag_for_cpa_review",
+            "get_current_rule",
+        ),
+    ),
 )
 
 
