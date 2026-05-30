@@ -139,26 +139,36 @@ export default async function JournalPage(props: {
               name="q"
               defaultValue={sp.q ?? ""}
               placeholder="Search payee, description, account…"
+              aria-label="Search journal entries"
               className="min-w-[240px] flex-1 rounded-md border border-default bg-canvas px-3 py-1.5 text-sm focus:border-brand-500 focus:outline-none"
             />
-            <input
-              type="date"
-              name="start"
-              defaultValue={sp.start ?? ""}
-              className="rounded-md border border-default bg-surface px-2 py-1.5 text-xs"
-            />
-            <input
-              type="date"
-              name="end"
-              defaultValue={sp.end ?? ""}
-              className="rounded-md border border-default bg-surface px-2 py-1.5 text-xs"
-            />
+            <label className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-ink-tertiary">
+              From
+              <input
+                type="date"
+                name="start"
+                defaultValue={sp.start ?? ""}
+                aria-label="From date"
+                className="rounded-md border border-default bg-surface px-2 py-1.5 text-xs"
+              />
+            </label>
+            <label className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-ink-tertiary">
+              To
+              <input
+                type="date"
+                name="end"
+                defaultValue={sp.end ?? ""}
+                aria-label="To date"
+                className="rounded-md border border-default bg-surface px-2 py-1.5 text-xs"
+              />
+            </label>
             <select
               name="category"
               defaultValue={sp.category ?? ""}
+              aria-label="Filter by category"
               className="rounded-md border border-default bg-surface px-3 py-1.5 text-xs"
             >
-              <option value="">All categories</option>
+              <option value="">Category: all ({categories.length})</option>
               {categories.map((c) => (
                 <option key={c} value={c}>
                   {c}
@@ -168,9 +178,10 @@ export default async function JournalPage(props: {
             <select
               name="status"
               defaultValue={sp.status ?? ""}
+              aria-label="Filter by status"
               className="rounded-md border border-default bg-surface px-3 py-1.5 text-xs"
             >
-              <option value="">All statuses</option>
+              <option value="">Status: all</option>
               <option value="posted">Posted</option>
               <option value="reversed">Reversed</option>
             </select>

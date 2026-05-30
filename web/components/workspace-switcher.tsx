@@ -2,13 +2,24 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { ChevronDown, Plus, ShieldCheck } from "lucide-react";
+import { Building2, ChevronDown, Plus, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { Workspace } from "@/lib/api";
 
+// Role chip color map — owner stands out, viewer is faded.
+const ROLE_CHIP: Record<string, string> = {
+  owner: "bg-brand-500/15 text-brand-300",
+  admin: "bg-agent-500/15 text-agent-500",
+  accountant: "bg-pending/15 text-pending",
+  viewer: "bg-white/5 text-ink-tertiary",
+};
+
+const HIERARCHY_TOOLTIP =
+  "A workspace contains one or more business entities; switching workspace changes which set of entities you can pick from.";
+
 export function WorkspaceSwitcher({
   workspaces,
-  activeWorkspaceId
+  activeWorkspaceId,
 }: {
   workspaces: Workspace[];
   activeWorkspaceId?: string;
@@ -39,11 +50,22 @@ export function WorkspaceSwitcher({
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 rounded-md border border-default bg-surface px-3 py-1.5 text-sm transition hover:bg-elevated"
+        title={HIERARCHY_TOOLTIP}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className="flex items-center gap-1.5 rounded-md border border-default bg-surface px-2.5 py-1.5 text-sm transition hover:bg-elevated"
       >
-        <span className="h-2 w-2 rounded-full bg-credit shadow-[0_0_4px_hsl(157_64%_52%_/_0.6)]" />
-        <span className="font-medium">{active.display_name}</span>
-        <span className="text-[10px] uppercase tracking-wider text-ink-tertiary">
+        <Building2 size={13} className="text-ink-tertiary shrink-0" />
+        <span className="hidden md:inline text-[11px] uppercase tracking-wider text-ink-tertiary">
+          Workspace:
+        </span>
+        <span className="font-medium truncate max-w-[140px]">{active.display_name}</span>
+        <span
+          className={cn(
+            "hidden sm:inline rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider",
+            ROLE_CHIP[active.role] ?? ROLE_CHIP.viewer
+          )}
+        >
           {active.role}
         </span>
         <ChevronDown
@@ -57,14 +79,17 @@ export function WorkspaceSwitcher({
 
       {open && (
         <div className="absolute right-0 z-40 mt-1.5 w-80 rounded-lg border border-default bg-elevated shadow-card">
-          <div className="border-b border-subtle px-3 py-2">
+          <div className="border-b border-subtle px-3 py-2.5">
             <p className="text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
-              Switch workspace ({workspaces.length})
+              Switch workspace ({workspaces.length} available)
+            </p>
+            <p className="mt-1 text-[11px] leading-snug text-ink-tertiary">
+              A workspace contains one or more business entities.
             </p>
           </div>
-          <ul className="max-h-80 overflow-y-auto py-1">
+          <ul className="max-h-80 overflow-y-auto py-1" role="listbox">
             {workspaces.map((ws) => (
-              <li key={ws.id}>
+              <li key={ws.id} role="option" aria-selected={ws.id === active.id}>
                 <button
                   onClick={() => selectWorkspace(ws.id)}
                   className={cn(
@@ -72,26 +97,36 @@ export function WorkspaceSwitcher({
                     ws.id === active.id && "bg-white/[0.02]"
                   )}
                 >
-                  <span
-                    className={cn(
-                      "h-1.5 w-1.5 rounded-full",
-                      ws.id === active.id ? "bg-credit" : "bg-ink-disabled"
-                    )}
+                  <Building2
+                    size={14}
+                    className={
+                      ws.id === active.id
+                        ? "text-brand-300"
+                        : "text-ink-tertiary"
+                    }
                   />
-                  <div className="flex-1">
+                  <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="font-medium">{ws.display_name}</span>
+                      <span className="font-medium truncate">{ws.display_name}</span>
+                      <span
+                        className={cn(
+                          "shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider",
+                          ROLE_CHIP[ws.role] ?? ROLE_CHIP.viewer
+                        )}
+                      >
+                        {ws.role}
+                      </span>
                       {ws.hipaa_protected && (
                         <ShieldCheck
                           size={11}
-                          className="text-agent-500"
+                          className="text-agent-500 shrink-0"
                           aria-label="HIPAA-protected"
                         />
                       )}
                     </div>
-                    <div className="text-[11px] text-ink-tertiary">
+                    <div className="mt-0.5 text-[11px] text-ink-tertiary">
                       {ws.entity_count} {ws.entity_count === 1 ? "entity" : "entities"}{" "}
-                      · {ws.role} · {ws.isolation_tier}
+                      · {ws.isolation_tier}
                     </div>
                   </div>
                 </button>

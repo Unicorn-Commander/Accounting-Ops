@@ -1,4 +1,4 @@
-import { ArrowUp, Bot, Paperclip, User } from "lucide-react";
+import { ArrowUp, Bot, MessageSquare, Paperclip, User } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { ChatMessage } from "@/lib/agent-chat";
 
@@ -6,12 +6,34 @@ import type { ChatMessage } from "@/lib/agent-chat";
 export function ChatThread({
   messages,
   className,
-  compact = false
+  compact = false,
 }: {
   messages: ChatMessage[];
   className?: string;
   compact?: boolean;
 }) {
+  if (messages.length === 0) {
+    return (
+      <div
+        className={cn(
+          "flex flex-col items-center justify-center gap-3 text-center",
+          compact ? "p-6" : "p-10",
+          className
+        )}
+      >
+        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-agent-500/10 text-agent-500 ring-1 ring-inset ring-agent-500/30">
+          <MessageSquare size={18} />
+        </div>
+        <div>
+          <p className="text-sm font-medium text-ink-primary">No messages yet</p>
+          <p className="mt-1 max-w-xs text-[11px] leading-relaxed text-ink-tertiary">
+            Ask anything below to start a new chat. The orchestrator will route your
+            question to the right specialist agent.
+          </p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className={cn("space-y-5 overflow-y-auto", compact ? "p-4" : "p-6", className)}>
       {messages.map((msg, i) => (
@@ -52,7 +74,7 @@ export function ChatThread({
 /** Composer (textarea + attach + send) — shared by page + popout. */
 export function ChatComposer({
   compact = false,
-  showRuntimeNote = true
+  showRuntimeNote = true,
 }: {
   compact?: boolean;
   showRuntimeNote?: boolean;

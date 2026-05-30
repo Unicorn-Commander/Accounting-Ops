@@ -5,48 +5,19 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Menu, X } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { SidebarMobileNav } from "@/components/app-sidebar";
 
-const NAV_SECTIONS = [
-  {
-    label: null,
-    items: [
-      ["Dashboard", "/dashboard"],
-      ["Transactions", "/transactions"],
-      ["Reconciliation", "/reconciliation-queue"],
-      ["Approvals", "/approvals"],
-      ["Agent activity", "/agent-activity"],
-      ["Journal", "/journal"],
-      ["Chart of Accounts", "/coa"],
-    ],
-  },
-  {
-    label: "Reports",
-    items: [
-      ["Reports", "/reports"],
-      ["Trial Balance", "/reports/trial-balance"],
-      ["Taxes", "/taxes"],
-      ["CPA Export", "/cpa-export"],
-    ],
-  },
-  {
-    label: "Admin",
-    adminOnly: true,
-    items: [["Period Close", "/admin/period-close"]],
-  },
-  {
-    label: null,
-    items: [
-      ["Connectors", "/connectors"],
-      ["Help", "/help"],
-    ],
-  },
+// Marketing-only nav lives here; the app variant uses the persistent
+// AppSidebar for primary navigation.
+const MARKETING_NAV: Array<[string, string]> = [
+  ["Sign in", "/login"],
 ];
 
 export function SiteHeaderClient({
   variant,
   userBlock,
   children,
-  canAdmin = false
+  canAdmin = false,
 }: {
   variant: "app" | "marketing";
   userBlock: React.ReactNode;
@@ -56,7 +27,7 @@ export function SiteHeaderClient({
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  // Close mobile drawer when route changes
+  // Close mobile drawer on route change
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
@@ -81,7 +52,14 @@ export function SiteHeaderClient({
           variant === "marketing" ? "bg-canvas/60" : "bg-canvas/85"
         )}
       >
-        <div className="mx-auto flex max-w-7xl items-center gap-2 px-4 py-3 md:gap-4 md:px-6 md:py-3.5">
+        <div
+          className={cn(
+            "flex h-14 items-center gap-2 px-4 md:gap-4 md:px-5",
+            // Marketing header centers in 7xl; app header spans full so the
+            // chips sit at the right edge above the right edge of content.
+            variant === "marketing" && "mx-auto max-w-7xl"
+          )}
+        >
           {/* Mobile hamburger (app variant only) */}
           {variant === "app" && (
             <button
@@ -105,49 +83,18 @@ export function SiteHeaderClient({
             </span>
           </Link>
 
-          {variant === "app" && (
-            <nav className="ml-6 hidden flex-1 items-center gap-1 lg:flex">
-              {NAV_SECTIONS.filter((section) => !section.adminOnly || canAdmin).map(
-                (section) => (
-                  <div key={section.label ?? section.items.map(([, href]) => href).join("|")} className="flex items-center gap-1">
-                    {section.label ? (
-                      <span className="px-1.5 text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
-                        {section.label}
-                      </span>
-                    ) : null}
-                    {section.items.map(([label, href]) => {
-                      const active =
-                        pathname === href || pathname?.startsWith(href + "/");
-                      return (
-                        <Link
-                          key={href}
-                          href={href}
-                          className={cn(
-                            "rounded-md px-2.5 py-1.5 text-sm transition",
-                            active
-                              ? "bg-white/5 text-ink-primary"
-                              : "text-ink-secondary hover:text-ink-primary hover:bg-white/[0.03]"
-                          )}
-                        >
-                          {label}
-                        </Link>
-                      );
-                    })}
-                  </div>
-                )
-              )}
-            </nav>
-          )}
-
           <div className="ml-auto flex items-center gap-2 md:gap-3">
             {variant === "marketing" ? (
               <>
-                <Link
-                  href="/login"
-                  className="hidden sm:inline-block text-sm text-ink-secondary hover:text-ink-primary"
-                >
-                  Sign in
-                </Link>
+                {MARKETING_NAV.map(([label, href]) => (
+                  <Link
+                    key={href}
+                    href={href}
+                    className="hidden sm:inline-block text-sm text-ink-secondary hover:text-ink-primary"
+                  >
+                    {label}
+                  </Link>
+                ))}
                 <a
                   href="mailto:aaron@magicunicorn.tech?subject=Accounting-Ops dev preview"
                   className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600 transition"
@@ -161,7 +108,7 @@ export function SiteHeaderClient({
                   <span className="h-1.5 w-1.5 rounded-full bg-credit shadow-[0_0_6px_hsl(157_64%_52%_/_0.8)]" />
                   <span>All agents online</span>
                 </div>
-                {/* Workspace/Entity selectors — hide on small screens since drawer has them */}
+                {/* Workspace + Entity chips — full version on md+ */}
                 <div className="hidden md:flex items-center gap-2">{children}</div>
                 {userBlock}
               </>
@@ -170,7 +117,7 @@ export function SiteHeaderClient({
         </div>
       </header>
 
-      {/* Mobile drawer */}
+      {/* Mobile drawer (app variant only) */}
       {variant === "app" && mobileOpen && (
         <div className="fixed inset-0 z-40 lg:hidden">
           {/* Backdrop */}
@@ -181,7 +128,7 @@ export function SiteHeaderClient({
             className="absolute inset-0 bg-canvas/85 backdrop-blur-sm"
           />
           {/* Drawer */}
-          <div className="relative ml-auto h-full w-[88%] max-w-xs overflow-y-auto border-l border-subtle bg-surface px-5 py-5 shadow-card">
+          <div className="relative h-full w-[88%] max-w-xs overflow-y-auto border-r border-subtle bg-surface px-4 py-5 shadow-card">
             <div className="mb-4 flex items-center justify-between">
               <span className="text-sm font-semibold">Menu</span>
               <button
@@ -194,44 +141,14 @@ export function SiteHeaderClient({
               </button>
             </div>
 
-            {/* Workspace + Entity at the top of the drawer (mobile-only place) */}
+            {/* Workspace + Entity at top */}
             {children && (
               <div className="mb-5 flex flex-col gap-2 border-b border-subtle pb-5">
                 {children}
               </div>
             )}
 
-            <nav className="flex flex-col gap-1">
-              {NAV_SECTIONS.filter((section) => !section.adminOnly || canAdmin).map(
-                (section) => (
-                  <div key={section.label ?? section.items.map(([, href]) => href).join("|")}>
-                    {section.label ? (
-                      <p className="px-3 pb-1 pt-3 text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
-                        {section.label}
-                      </p>
-                    ) : null}
-                    {section.items.map(([label, href]) => {
-                      const active =
-                        pathname === href || pathname?.startsWith(href + "/");
-                      return (
-                        <Link
-                          key={href}
-                          href={href}
-                          className={cn(
-                            "block rounded-md px-3 py-2.5 text-sm transition",
-                            active
-                              ? "bg-brand-500/10 text-brand-300"
-                              : "text-ink-secondary hover:bg-white/[0.04] hover:text-ink-primary"
-                          )}
-                        >
-                          {label}
-                        </Link>
-                      );
-                    })}
-                  </div>
-                )
-              )}
-            </nav>
+            <SidebarMobileNav canAdmin={canAdmin} onNavigate={() => setMobileOpen(false)} />
           </div>
         </div>
       )}

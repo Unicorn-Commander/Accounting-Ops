@@ -1,16 +1,20 @@
+import { Bot, Plus } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
 import { ChatComposer, ChatThread } from "@/components/agent-chat-thread";
 import { getActiveContext } from "@/lib/active-context";
 import { CHAT_MESSAGES } from "@/lib/agent-chat";
-import { cn } from "@/lib/cn";
 
 export default async function ChatPage() {
   const ctx = await getActiveContext();
   const canConsolidate = ctx.activeWorkspace
     ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
     : false;
+
+  // CHAT_MESSAGES is intentionally empty until the live chat endpoint ships.
+  const messages = CHAT_MESSAGES;
+
   return (
     <AppShell>
       <PageShell>
@@ -31,8 +35,22 @@ export default async function ChatPage() {
         />
 
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
-          <Card padded={false} className="flex flex-col lg:col-span-3">
-            <ChatThread messages={CHAT_MESSAGES} className="flex-1" />
+          <Card padded={false} className="flex flex-col lg:col-span-3 min-h-[480px]">
+            <div className="flex items-center justify-between border-b border-subtle px-5 py-3">
+              <div className="flex items-center gap-2">
+                <Bot size={14} className="text-agent-500" />
+                <h2 className="text-sm font-semibold">New chat</h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Start a new chat session"
+                className="inline-flex items-center gap-1 rounded-md border border-default bg-surface px-2 py-1 text-[11px] text-ink-secondary hover:bg-elevated hover:text-ink-primary"
+              >
+                <Plus size={11} />
+                New chat
+              </button>
+            </div>
+            <ChatThread messages={messages} className="flex-1" />
             <ChatComposer />
           </Card>
 
@@ -43,49 +61,16 @@ export default async function ChatPage() {
                 Files and queries the agent is touching right now
               </p>
             </div>
-            <div className="space-y-3 p-5 text-sm">
-              <WorkspaceItem title="Reading transactions" body="MU Inc · May 17-19 · 64 rows" badge="Postgres" />
-              <WorkspaceItem title="Matching counterparty" body="Mercury account 2847 -> MU Inc Operating" badge="FalkorDB graph" />
-              <WorkspaceItem title="Drafting recategorization" body="Current: 9999·Misc Outflow · Proposed: 1500·Inter-entity transfer · MU->Majiks JV" badge="Proposal" tone="agent" />
-              <WorkspaceItem title="Will queue if confident" body="Confidence threshold 0.85 · ETA 12s" badge="Awaiting" tone="pending" />
+            <div className="px-5 py-8 text-center text-xs text-ink-tertiary">
+              <p>Nothing in flight.</p>
+              <p className="mt-1">
+                When you start a chat, this panel shows the live tools, files,
+                and database queries the agent is using.
+              </p>
             </div>
           </Card>
         </div>
       </PageShell>
     </AppShell>
-  );
-}
-
-function WorkspaceItem({
-  title,
-  body,
-  badge,
-  tone = "ink"
-}: {
-  title: string;
-  body: string;
-  badge: string;
-  tone?: "agent" | "pending" | "ink";
-}) {
-  const map: Record<string, string> = {
-    agent: "bg-agent-500/15 text-agent-500",
-    pending: "bg-pending/15 text-pending",
-    ink: "bg-white/5 text-ink-secondary"
-  };
-  return (
-    <div className="rounded-md border border-subtle bg-canvas/40 p-3">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">{title}</h3>
-        <span
-          className={cn(
-            "rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider",
-            map[tone]
-          )}
-        >
-          {badge}
-        </span>
-      </div>
-      <p className="mt-1 font-mono text-[11px] text-ink-secondary">{body}</p>
-    </div>
   );
 }
