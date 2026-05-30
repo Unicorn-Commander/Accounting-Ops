@@ -36,7 +36,7 @@ import tempfile
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -102,7 +102,7 @@ async def _fetch_latest_narrative(
 
 @router.get(
     "/api/workspaces/{workspace_id}/entities/{entity_id}/tax-narrative/{tax_year}",
-    response_class=None,
+    response_class=Response,
 )
 async def get_tax_narrative(
     workspace_id: UUID,
