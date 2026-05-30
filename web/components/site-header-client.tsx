@@ -12,6 +12,7 @@ const NAV_SECTIONS = [
     items: [
       ["Dashboard", "/dashboard"],
       ["My Items", "/open-items"],
+      ["Chat", "/chat"],
       ["Transactions", "/transactions"],
       ["Reconciliation", "/reconciliation-queue"],
       ["Approvals", "/approvals"],
