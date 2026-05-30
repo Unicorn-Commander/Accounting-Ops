@@ -43,8 +43,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import context, op
 
-revision: str = "0011_tax_filing_submission"
-down_revision: str | None = "0010_approval_recommendation"
+revision: str = "0013_tax_filing_submission"
+down_revision: str | None = "0012_chat_sessions"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
