@@ -759,7 +759,10 @@ def _parse_iso_or_none(value: str | None) -> dt.datetime | None:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/api/workspaces/{workspace_id}/ai-activity/stream")
+@router.get(
+    "/api/workspaces/{workspace_id}/ai-activity/stream",
+    response_class=StreamingResponse,
+)
 async def stream_ai_activity(
     workspace_id: UUID,
     entity_id: UUID | None = None,

@@ -419,7 +419,10 @@ def _sse_frame(event: str, data: dict | str) -> bytes:
     return f"event: {event}\n{data_lines}\n\n".encode("utf-8")
 
 
-@router.post("/api/workspaces/{workspace_id}/chat/sessions/{session_id}/messages")
+@router.post(
+    "/api/workspaces/{workspace_id}/chat/sessions/{session_id}/messages",
+    response_class=StreamingResponse,
+)
 async def send_chat_message(
     workspace_id: UUID,
     session_id: UUID,
