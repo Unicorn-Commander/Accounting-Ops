@@ -8,6 +8,7 @@ from app.a2a.server import router as a2a_router
 from app.api.account_mappings import router as account_mappings_router
 from app.api.approvals import router as approvals_router
 from app.api.approval_recommendations import router as approval_recommendations_router
+from app.api.discovery import router as discovery_router
 from app.api.irs_forms import router as irs_forms_router
 from app.api.specialist_runs import router as specialist_runs_router
 from app.api.specialist_pdf import router as specialist_pdf_router
@@ -18,6 +19,7 @@ from app.api.category_overrides import router as category_overrides_router
 from app.api.credentials import router as credentials_router
 from app.api.journal import router as journal_router
 from app.api.reports import router as reports_router
+from app.api.test_brigade_jwt import router as test_brigade_jwt_router
 from app.api.tools import consolidated_router, router as tools_router
 from app.api.transactions import router as transactions_router
 from app.api.workspaces import router as workspaces_router
@@ -82,6 +84,11 @@ app.include_router(cash_position_router)
 app.include_router(transactions_router)
 app.include_router(tools_router)
 app.include_router(consolidated_router)
+# Discovery (no auth — Brigade federation manifest at /.well-known/mcps.json)
+app.include_router(discovery_router)
+# Brigade JWT verifier test endpoint (admin-only; used by Brigade to confirm
+# our verifier is wired correctly before pushing real federated traffic).
+app.include_router(test_brigade_jwt_router)
 
 
 @app.get("/healthz", tags=["system"])
