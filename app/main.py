@@ -20,6 +20,8 @@ from app.api.tax_knowledge import router as tax_knowledge_router
 from app.api.tax_review import router as tax_review_router
 from app.api.tax_narrative import router as tax_narrative_router
 from app.api.tax_status import router as tax_status_router
+from app.api.tax_filing_submissions import router as tax_filing_submissions_router
+from app.api.usps_tracking import router as usps_tracking_router
 from app.api.cash_position import router as cash_position_router
 from app.api.category_overrides import router as category_overrides_router
 from app.api.clients import router as clients_router
@@ -92,6 +94,8 @@ app.include_router(irs_forms_router)
 app.include_router(tax_narrative_router)
 app.include_router(tax_review_router)
 app.include_router(tax_status_router)
+app.include_router(tax_filing_submissions_router)
+app.include_router(usps_tracking_router)
 app.include_router(tax_knowledge_router)
 app.include_router(open_items_router)
 app.include_router(ai_activity_router)
