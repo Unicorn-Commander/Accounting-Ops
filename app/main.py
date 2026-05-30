@@ -6,6 +6,7 @@ from app.auth import AuthContext, validate_bearer_token
 from app.mcp_auth import MCPAuthMiddleware
 from app.a2a.server import router as a2a_router
 from app.api.account_mappings import router as account_mappings_router
+from app.api.ai_activity import router as ai_activity_router
 from app.api.approvals import router as approvals_router
 from app.api.approval_recommendations import router as approval_recommendations_router
 from app.api.chat import router as chat_router
@@ -85,6 +86,7 @@ app.include_router(tax_review_router)
 app.include_router(tax_status_router)
 app.include_router(tax_knowledge_router)
 app.include_router(open_items_router)
+app.include_router(ai_activity_router)
 app.include_router(reports_router)
 app.include_router(cash_position_router)
 app.include_router(transactions_router)

@@ -15,10 +15,11 @@
 // router.refresh() afterwards so the next render shows the truth.
 
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
+  Bot,
   Calendar,
   CheckCircle2,
   ChevronRight,
@@ -30,10 +31,13 @@ import {
   PartyPopper,
   Scale,
   Sparkles,
+  Undo2,
   User
 } from "lucide-react";
+import { AIActivityTimeline } from "@/components/ai-activity-timeline";
 import { Card, StatusChip } from "@/components/primitives";
 import { cn } from "@/lib/cn";
+import type { AIActivityResponse } from "@/lib/ai-activity";
 import type {
   DecisionItem,
   DocChecklistItem,
@@ -447,11 +451,21 @@ function DecisionsSection({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  // Transient "1-second undo" toast — appears after Aaron accepts an AI
+  // recommendation and offers a 5-second window to revert before the
+  // refresh hides it. The mechanism: post a new "rejected"-marker for
+  // the decision, which the latest-wins aggregator picks up.
+  const [toast, setToast] = useState<{
+    key: string;
+    label: string;
+    expiresAt: number;
+  } | null>(null);
 
   const record = async (
     decision: DecisionItem,
     verdict: "accept" | "other",
-    notes?: string
+    notes?: string,
+    options: { suppressRefresh?: boolean; showUndoToast?: boolean } = {}
   ) => {
     setBusyKey(decision.key);
     try {
@@ -460,10 +474,45 @@ function DecisionsSection({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ key: decision.key, verdict, notes })
       });
-      startTransition(() => router.refresh());
+      if (options.showUndoToast) {
+        setToast({
+          key: decision.key,
+          label: decision.recommendation,
+          expiresAt: Date.now() + 5000
+        });
+      }
+      if (!options.suppressRefresh) {
+        startTransition(() => router.refresh());
+      }
     } finally {
       setBusyKey(null);
     }
+  };
+
+  // Auto-dismiss the toast after its window passes.
+  // (Effect lives at the top of the component so the toast clears even
+  // when Aaron walks away.)
+  useEffect(() => {
+    if (!toast) return;
+    const wait = Math.max(0, toast.expiresAt - Date.now());
+    const t = setTimeout(() => {
+      setToast(null);
+      startTransition(() => router.refresh());
+    }, wait);
+    return () => clearTimeout(t);
+  }, [toast, router]);
+
+  const undoAccept = async (key: string) => {
+    const dec = decisions.find((d) => d.key === key);
+    if (!dec) return;
+    setToast(null);
+    // Record a "other" verdict with an explicit undo note. The
+    // aggregator's latest-wins logic flips the decision back to "other
+    // choice", which the UI shows as not-accepted.
+    await record(dec, "other", "Undone by user within toast window", {
+      suppressRefresh: false,
+      showUndoToast: false
+    });
   };
 
   if (decisions.length === 0) {
@@ -530,7 +579,12 @@ function DecisionsSection({
                     <button
                       type="button"
                       disabled={isBusy}
-                      onClick={() => record(dec, "accept")}
+                      onClick={() =>
+                        record(dec, "accept", undefined, {
+                          showUndoToast: true,
+                          suppressRefresh: true
+                        })
+                      }
                       className={cn(
                         "rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow transition hover:bg-brand-600",
                         isBusy && "opacity-60"
@@ -589,6 +643,35 @@ function DecisionsSection({
           </Card>
         );
       })}
+
+      {/* 1-second undo toast. Sits at the bottom-right; sticky inside the
+          section so it's tied to the decisions context. */}
+      {toast ? (
+        <div
+          className="pointer-events-none fixed bottom-6 right-6 z-40 max-w-sm"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="pointer-events-auto flex items-center gap-3 rounded-lg border border-credit/40 bg-credit/[0.08] px-4 py-3 shadow-card backdrop-blur">
+            <CheckCircle2 size={16} className="shrink-0 text-credit" />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-semibold text-credit">
+                Accepted: {toast.label}
+              </p>
+              <p className="mt-0.5 text-[11px] text-ink-tertiary">
+                Auto-applies in ~5s. Click undo if you changed your mind.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => undoAccept(toast.key)}
+              className="inline-flex items-center gap-1 rounded-md border border-credit/40 bg-canvas/40 px-2.5 py-1 text-[11px] font-medium text-credit transition hover:bg-canvas/60"
+            >
+              <Undo2 size={11} /> Undo
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -716,11 +799,15 @@ function ResolvedList({ rows }: { rows: ResolvedRow[] }) {
 export function OpenItemsView({
   data,
   workspaceId,
-  currentTaxYear
+  currentTaxYear,
+  aiActivity,
+  entityId
 }: {
   data: OpenItemsResponse;
   workspaceId: string;
   currentTaxYear: number | null;
+  aiActivity: AIActivityResponse | null;
+  entityId?: string;
 }) {
   const allClear =
     data.counts.action_required === 0 &&
@@ -731,7 +818,7 @@ export function OpenItemsView({
     <div className="space-y-8">
       {/* Top stat strip + filter */}
       <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-2.5 md:grid-cols-5">
+        <div className="grid grid-cols-2 gap-2.5 md:grid-cols-6">
           <CountTile
             label="Action required"
             value={data.counts.action_required}
@@ -756,6 +843,12 @@ export function OpenItemsView({
             label="Resolved this week"
             value={data.counts.resolved_this_week}
             tone="credit"
+          />
+          <CountTile
+            label="AI actions"
+            value={aiActivity?.total_returned ?? 0}
+            tone="ink"
+            href="#ai-activity"
           />
         </div>
         <YearFilter currentTaxYear={currentTaxYear} />
@@ -864,6 +957,27 @@ export function OpenItemsView({
           subtitle="Wins from the last 7 days — progress, not just pile-of-work."
         />
         <ResolvedList rows={data.resolved_this_week} />
+      </section>
+
+      {/* Section 7 — Recent AI Activity */}
+      <section id="ai-activity">
+        <SectionHeading
+          icon={<Bot size={15} />}
+          title="Recent AI Activity"
+          count={aiActivity?.total_returned ?? 0}
+          tone="agent"
+          subtitle="Every action an AI agent took on your behalf. Click a row to see why, what changed, and (when reversible) undo it."
+        />
+        <AIActivityTimeline
+          workspaceId={workspaceId}
+          initial={aiActivity}
+          entityId={entityId}
+          emptyMsg={
+            aiActivity === null
+              ? "AI activity feed unavailable — backend returned no data."
+              : "No AI agent actions yet for the selected scope. Once an agent drafts a memo, posts a JE, or runs a specialist, you'll see it here."
+          }
+        />
       </section>
 
       {/* Footer disclaimer */}

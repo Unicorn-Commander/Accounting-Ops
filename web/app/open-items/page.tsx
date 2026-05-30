@@ -8,6 +8,7 @@ import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, PageShell, SectionHeader } from "@/components/primitives";
+import { fetchAIActivity } from "@/lib/ai-activity";
 import { getActiveContext } from "@/lib/active-context";
 import { fetchOpenItems } from "@/lib/open-items";
 import { OpenItemsView } from "./open-items-view";
@@ -63,10 +64,16 @@ export default async function OpenItemsPage({
       ? ctx.activeEntity.id
       : undefined;
 
-  const data = await fetchOpenItems(workspace.id, {
-    entityId: entityFilter,
-    taxYear: taxYearFilter
-  });
+  const [data, aiActivity] = await Promise.all([
+    fetchOpenItems(workspace.id, {
+      entityId: entityFilter,
+      taxYear: taxYearFilter
+    }),
+    fetchAIActivity(workspace.id, {
+      entityId: entityFilter,
+      limit: 50
+    })
+  ]);
 
   const subtitle = ctx.activeWorkspace
     ? `${ctx.activeWorkspace.display_name} · viewing ${
@@ -98,6 +105,8 @@ export default async function OpenItemsPage({
             data={data}
             workspaceId={workspace.id}
             currentTaxYear={taxYearFilter ?? null}
+            aiActivity={aiActivity}
+            entityId={entityFilter}
           />
         ) : (
           <Card>

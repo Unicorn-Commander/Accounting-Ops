@@ -307,13 +307,31 @@ export function ChatClient({
           throw new Error(detail || `HTTP ${res.status}`);
         }
         // Optimistic toast — we just inline the OK on the message.
-        const data = (await res.json()) as { memo_id: string; tax_year: number };
+        const data = (await res.json()) as {
+          memo_id: string;
+          tax_year: number;
+          bucket?: string;
+          open_items_url?: string;
+        };
+        const bucketLabel: Record<string, string> = {
+          time_sensitive: "Time-sensitive",
+          decision: "Decisions awaiting you",
+          document_ask: "Documents to provide",
+          informational: "Recent AI activity (informational)"
+        };
+        const sectionName = data.bucket
+          ? bucketLabel[data.bucket] ?? "Open Items"
+          : "Open Items";
+        const openItemsLink = data.open_items_url || "/open-items";
         setMessages((prev) =>
           prev.map((msg) =>
             msg.id === m.id && msg.kind === "assistant"
               ? {
                   ...msg,
-                  text: msg.text + `\n\n_Memo saved to tax review queue (id ${data.memo_id})._`
+                  text:
+                    msg.text +
+                    `\n\n_Memo saved to **[${sectionName}](${openItemsLink})** ` +
+                    `(id ${data.memo_id.slice(0, 8)})._`
                 }
               : msg
           )
