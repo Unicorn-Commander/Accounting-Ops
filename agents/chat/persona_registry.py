@@ -173,6 +173,25 @@ def _persona(
 
 PERSONAS: tuple[Persona, ...] = (
     _persona(
+        "setup-assistant",
+        "Setup Assistant",
+        "Conversationally provisions a new workspace, entity, COA, and connectors. Run this first.",
+        "cpa_team/setup_assistant",
+        tools=(
+            "create_entity_with_coa",
+            "list_chart_of_accounts",
+            "list_workspace_entities",
+            "list_my_workspaces",
+            "create_workspace",
+            "create_coa_account",
+            "suggest_connectors",
+            "draft_memo",
+            "flag_for_cpa_review",
+            "mark_intake_complete",
+        ),
+        needs_tax_year=False,
+    ),
+    _persona(
         "cpa-tax-resolver",
         "CPA Tax Resolver",
         "Resolves queue items + cites rules; default conversational entry point.",
@@ -294,4 +313,7 @@ def list_personas() -> list[dict[str, str]]:
 
 
 # Default persona selected when /chat is opened fresh (no session id).
-DEFAULT_PERSONA_SLUG = PERSONAS[0].slug
+# Explicitly set to the CPA Tax Resolver so the prepended Setup Assistant
+# does not become the implicit default for an established workspace's chat.
+# Setup Assistant has its own entry point: /setup (and is opened explicitly).
+DEFAULT_PERSONA_SLUG = "cpa-tax-resolver"

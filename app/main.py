@@ -29,6 +29,7 @@ from app.api.credentials import router as credentials_router
 from app.api.journal import router as journal_router
 from app.api.members import router as members_router
 from app.api.reports import router as reports_router
+from app.api.setup import router as setup_router
 from app.api.test_brigade_jwt import router as test_brigade_jwt_router
 from app.api.tools import consolidated_router, router as tools_router
 from app.api.transactions import router as transactions_router
@@ -100,6 +101,7 @@ app.include_router(tax_knowledge_router)
 app.include_router(open_items_router)
 app.include_router(ai_activity_router)
 app.include_router(reports_router)
+app.include_router(setup_router)
 app.include_router(cash_position_router)
 app.include_router(transactions_router)
 app.include_router(tools_router)

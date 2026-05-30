@@ -11,6 +11,12 @@ from app.tools.coa import (
     list_chart_of_accounts,
     update_coa_account,
 )
+from app.tools.create_entity_with_coa import create_entity_with_coa
+from app.tools.setup_assistant import (
+    create_workspace,
+    mark_intake_complete,
+    suggest_connectors,
+)
 from app.tools.connectors import (
     create_category_override,
     get_cash_position,
@@ -76,6 +82,8 @@ __all__ = [
     "close_period",
     "create_category_override",
     "create_coa_account",
+    "create_entity_with_coa",
+    "create_workspace",
     "decide_approval",
     "draft_memo",
     "finish_specialist_run",
@@ -115,8 +123,10 @@ __all__ = [
     "list_tax_knowledge_topics",
     "list_transactions",
     "list_workspace_entities",
+    "mark_intake_complete",
     "post_journal_entry",
     "propose_payment",
+    "suggest_connectors",
     "query_specialty_rules",
     "resolve_tax_review_item",
     "search_tax_knowledge",
