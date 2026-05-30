@@ -8,15 +8,63 @@ const INTERNAL_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL ??
   "http://app:8000";
 
+export type WorkspaceRole =
+  | "platform_admin"
+  | "owner"
+  | "client_owner"
+  | "admin"
+  | "cpa"
+  | "accountant"
+  | "bookkeeper"
+  | "client_user"
+  | "viewer";
+
 export type Workspace = {
   id: string;
   slug: string;
   display_name: string;
-  role: "owner" | "admin" | "accountant" | "viewer";
+  role: WorkspaceRole;
   isolation_tier: "shared" | "premium" | "enterprise";
   hipaa_protected: boolean;
   entity_count: number;
   last_active_at: string | null;
+};
+
+export type Member = {
+  membership_id: string;
+  user_id: string;
+  uc_uid: string;
+  email: string | null;
+  display_name: string | null;
+  role: WorkspaceRole;
+  entity_scope: string[] | null;
+  invited_by_uc_uid: string | null;
+  created_at: string;
+  last_active_at: string | null;
+};
+
+export type Invitation = {
+  id: string;
+  email: string;
+  role: WorkspaceRole;
+  entity_scope: string[] | null;
+  expires_at: string;
+  accepted_at: string | null;
+  cancelled_at: string | null;
+  resent_count: number;
+  last_resent_at: string | null;
+  created_by_uc_uid: string;
+  created_at: string;
+};
+
+export type ClientsDashboard = {
+  persona: "platform_admin" | "cpa" | "client";
+  workspaces: (Workspace & {
+    open_items_count: number;
+    entity_scope?: string[] | null;
+  })[];
+  total_workspaces: number;
+  total_open_items: number;
 };
 
 export type Entity = {
@@ -57,5 +105,47 @@ export async function getMyWorkspaces(): Promise<Workspace[]> {
 export async function getWorkspaceEntities(workspaceId: string): Promise<Entity[]> {
   return (
     (await apiFetch<Entity[]>(`/api/workspaces/${workspaceId}/entities`)) ?? []
+  );
+}
+
+export async function getWorkspaceMembers(
+  workspaceId: string
+): Promise<Member[]> {
+  return (
+    (await apiFetch<Member[]>(`/api/workspaces/${workspaceId}/members`)) ?? []
+  );
+}
+
+export async function getWorkspaceInvitations(
+  workspaceId: string,
+  includeExpired = false
+): Promise<Invitation[]> {
+  const qs = includeExpired ? "?include_expired=true" : "";
+  return (
+    (await apiFetch<Invitation[]>(
+      `/api/workspaces/${workspaceId}/invitations${qs}`
+    )) ?? []
+  );
+}
+
+export async function getClientsDashboard(): Promise<ClientsDashboard | null> {
+  return await apiFetch<ClientsDashboard>("/api/me/clients");
+}
+
+export type CpaRecentActivityItem = {
+  id: string;
+  workspace_id: string;
+  workspace_name: string;
+  tool: string;
+  outcome: string;
+  model_version: string | null;
+  created_at: string;
+};
+
+export async function getCpaRecentActivity(
+  days = 30
+): Promise<{ items: CpaRecentActivityItem[]; days: number } | null> {
+  return await apiFetch<{ items: CpaRecentActivityItem[]; days: number }>(
+    `/api/me/cpa-recent-activity?days=${days}`
   );
 }

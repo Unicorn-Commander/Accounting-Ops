@@ -11,6 +11,7 @@ const NAV_SECTIONS = [
     label: null,
     items: [
       ["Dashboard", "/dashboard"],
+      ["Clients", "/clients"],
       ["Transactions", "/transactions"],
       ["Reconciliation", "/reconciliation-queue"],
       ["Approvals", "/approvals"],
@@ -31,7 +32,10 @@ const NAV_SECTIONS = [
   {
     label: "Admin",
     adminOnly: true,
-    items: [["Period Close", "/admin/period-close"]],
+    items: [
+      ["Members", "/settings/members"],
+      ["Period Close", "/admin/period-close"],
+    ],
   },
   {
     label: null,

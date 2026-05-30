@@ -55,7 +55,19 @@ bearer = HTTPBearer(auto_error=False)
 
 # Role hierarchy for the role_floor cap. Lower index = lower privilege.
 # Must stay in sync with the ROLE_ORDER used in app.tenancy.require_role.
-_ROLE_ORDER = ("viewer", "accountant", "admin", "owner")
+# Multi-persona expansion (2026-05-30): see app/tenancy.py for the rationale
+# behind the ordering. Existing role_floor values keep working unchanged.
+_ROLE_ORDER = (
+    "viewer",
+    "client_user",
+    "bookkeeper",
+    "accountant",
+    "cpa",
+    "admin",
+    "owner",
+    "client_owner",
+    "platform_admin",
+)
 
 
 @dataclass(frozen=True)

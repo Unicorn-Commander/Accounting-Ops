@@ -28,11 +28,14 @@ export async function SiteHeader({
   ) : null;
 
   const ctx = session?.user ? await getActiveContext() : null;
+  // Treat the new persona roles symmetrically: client_owner == owner;
+  // platform_admin is always elevated.
+  const ADMIN_ROLES = ["owner", "client_owner", "admin", "platform_admin"];
   const canConsolidate = ctx?.activeWorkspace
-    ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
+    ? ADMIN_ROLES.includes(ctx.activeWorkspace.role)
     : false;
   const canAdmin = ctx?.activeWorkspace
-    ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
+    ? ADMIN_ROLES.includes(ctx.activeWorkspace.role)
     : false;
 
   return (
