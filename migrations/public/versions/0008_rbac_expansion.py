@@ -1,7 +1,7 @@
 """public schema: 3-persona RBAC expansion + workspace_invitation table
 
-Revision ID: 0006_rbac_expansion
-Revises: 0005_tax_knowledge_base
+Revision ID: 0008_rbac_expansion
+Revises: 0007_tax_chunking
 Create Date: 2026-05-30
 
 Three-persona customer model (platform admin, customer/owner, external CPA):
@@ -29,8 +29,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0006_rbac_expansion"
-down_revision: str | None = "0005_tax_knowledge_base"
+revision: str = "0008_rbac_expansion"
+down_revision: str | None = "0007_tax_chunking"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

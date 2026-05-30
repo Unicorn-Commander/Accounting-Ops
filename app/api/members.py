@@ -242,7 +242,7 @@ async def update_member(
                 "uid": str(user_id),
             }
             if patch.role is not None:
-                sets.append("role = :role::workspace_role")
+                sets.append("role = CAST(:role AS workspace_role)")
                 params["role"] = patch.role
             if patch.entity_scope is not None:
                 # Empty list -> [] means "no entities" (deny-all). null is full scope.
@@ -470,7 +470,7 @@ async def create_invitation(
                         id, workspace_id, email, role, entity_scope,
                         token_hash, expires_at, created_by_uc_uid
                     ) VALUES (
-                        :id, :wid, :email, :role::workspace_role,
+                        :id, :wid, :email, CAST(:role AS workspace_role),
                         CAST(:scope AS jsonb),
                         :token_hash, :expires_at, :created_by
                     )
@@ -797,34 +797,72 @@ async def accept_invitation(
                     detail="This invitation is for a different email address.",
                 )
 
-            # Upsert membership. If one exists (same workspace+user), bump
-            # role/scope to match the invite — this enables the "add role
-            # via invite for an existing member" flow.
-            import json
+            # Upsert membership. If one exists (same workspace+user), only
+            # PROMOTE — never demote. Accepting a cpa-role invite when you're
+            # already the owner must not silently drop you to cpa. The
+            # existing role wins iff its rank is >= the invitation's rank.
+            from app.tenancy import _ROLE_RANK
 
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO public.workspace_membership (
-                        id, workspace_id, user_id, role, entity_scope,
-                        invited_by_uc_uid, created_at
-                    ) VALUES (
-                        gen_random_uuid(), :wid, :uid, :role::workspace_role,
-                        CAST(:scope AS jsonb), :inv_by, now()
+            existing_row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT role::text AS role, entity_scope
+                        FROM public.workspace_membership
+                        WHERE workspace_id = :wid AND user_id = :uid
+                        """
+                    ),
+                    {"wid": str(inv.workspace_id), "uid": str(user_id)},
+                )
+            ).first()
+
+            import json
+            invite_rank = _ROLE_RANK.get(inv.role, -1)
+            if existing_row is None:
+                # Brand-new membership.
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO public.workspace_membership (
+                            id, workspace_id, user_id, role, entity_scope,
+                            invited_by_uc_uid, created_at
+                        ) VALUES (
+                            gen_random_uuid(), :wid, :uid,
+                            CAST(:role AS workspace_role),
+                            CAST(:scope AS jsonb), :inv_by, now()
+                        )
+                        """
+                    ),
+                    {
+                        "wid": str(inv.workspace_id),
+                        "uid": str(user_id),
+                        "role": inv.role,
+                        "scope": json.dumps(inv.entity_scope) if inv.entity_scope is not None else None,
+                        "inv_by": "invitation",
+                    },
+                )
+            else:
+                existing_rank = _ROLE_RANK.get(existing_row.role, -1)
+                if invite_rank > existing_rank:
+                    # Promotion — apply the new role + scope.
+                    await session.execute(
+                        text(
+                            """
+                            UPDATE public.workspace_membership
+                               SET role = CAST(:role AS workspace_role),
+                                   entity_scope = CAST(:scope AS jsonb)
+                             WHERE workspace_id = :wid AND user_id = :uid
+                            """
+                        ),
+                        {
+                            "wid": str(inv.workspace_id),
+                            "uid": str(user_id),
+                            "role": inv.role,
+                            "scope": json.dumps(inv.entity_scope) if inv.entity_scope is not None else None,
+                        },
                     )
-                    ON CONFLICT (workspace_id, user_id) DO UPDATE
-                       SET role = EXCLUDED.role,
-                           entity_scope = EXCLUDED.entity_scope
-                    """
-                ),
-                {
-                    "wid": str(inv.workspace_id),
-                    "uid": str(user_id),
-                    "role": inv.role,
-                    "scope": json.dumps(inv.entity_scope) if inv.entity_scope is not None else None,
-                    "inv_by": "invitation",
-                },
-            )
+                # Else: no-op — accepting an equal-or-lower-rank invite while
+                # already a higher-rank member just marks the invite accepted.
             await session.execute(
                 text(
                     """

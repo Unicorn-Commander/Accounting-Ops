@@ -173,3 +173,43 @@ def test_all_new_roles_are_inviteable():
 )
 def test_role_at_least_matrix(actual: str, floor: str, expected: bool):
     assert role_at_least(actual, floor) is expected
+
+
+# ---------------------------------------------------------------------------
+# No-downgrade rule for the accept_invitation upsert path.
+#
+# These check the rank comparison used in app/api/members.py::accept_invitation
+# to decide whether to promote vs. no-op. They guard against the regression
+# where accepting a lower-rank invite would silently demote a higher-rank
+# member (e.g. owner accepts a cpa invite -> would drop to cpa).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "existing,invited,should_promote",
+    [
+        # Brand-new persona invites against a lower existing rank — promote.
+        ("viewer", "cpa", True),
+        ("viewer", "admin", True),
+        ("client_user", "bookkeeper", True),
+        ("bookkeeper", "accountant", True),
+        ("accountant", "owner", True),
+        # Equal rank — no promotion needed.
+        ("accountant", "cpa", False),
+        ("owner", "client_owner", False),
+        # Lower invite vs higher existing — must NOT demote.
+        ("owner", "cpa", False),
+        ("owner", "viewer", False),
+        ("admin", "bookkeeper", False),
+        ("client_owner", "client_user", False),
+        ("platform_admin", "owner", False),
+    ],
+)
+def test_accept_invitation_no_downgrade(
+    existing: str, invited: str, should_promote: bool
+):
+    from app.tenancy import _ROLE_RANK
+
+    existing_rank = _ROLE_RANK.get(existing, -1)
+    invite_rank = _ROLE_RANK.get(invited, -1)
+    assert (invite_rank > existing_rank) is should_promote
