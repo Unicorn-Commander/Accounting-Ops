@@ -831,14 +831,44 @@ async def save_chat_message_as_memo(
         topic = (body.topic or loaded.get("title") or "Chat conversation memo")[:240]
         tax_year = loaded.get("tax_year") or dt.date.today().year
 
+        # Categorize the memo so the /open-items aggregator routes it to the
+        # right section. The aggregator's _bucket_for_item inspects
+        # form_reference prefixes — leveraging the same convention here means
+        # chat-saved memos flow into the dashboard the same way as any other
+        # tax_review_queue entry.
+        #
+        # Heuristic on the memo text (lowercase substring match):
+        #   * "decide", "deduct currently", "elect" -> Decisions awaiting Aaron
+        #   * "send", "provide", "upload", "pull",
+        #     "obtain", "need to get"               -> Documents (informational)
+        #   * "critical", "urgent", "deadline"      -> Time-sensitive
+        #   * else                                   -> Mosin review (default)
+        lower = memo_text.lower()
+        if any(w in lower for w in ("critical", "urgent", "deadline", "immediately")):
+            bucket = "time_sensitive"
+            form_reference = f"CRITICAL: {topic[:160]}"
+        elif any(w in lower for w in ("decide", "election", "deduct currently",
+                                       "skip", "should we", "should i", "yes or no")):
+            bucket = "decision"
+            form_reference = f"Decision: {topic[:160]}"
+        elif any(w in lower for w in ("need to get", "upload", "obtain ", "send the",
+                                       "provide ", "physically pull")):
+            bucket = "document_ask"
+            form_reference = f"Document Ask: {topic[:160]}"
+        else:
+            bucket = "informational"
+            form_reference = f"Chat memo: {topic[:160]}"
+
         content_payload = {
             "topic": topic,
             "text": memo_text.strip(),
+            "bucket": bucket,
             "source": {
                 "kind": "chat",
                 "session_id": str(session_id),
                 "message_id": str(body.message_id),
                 "agent_persona": loaded.get("agent_persona"),
+                "chat_url": f"/chat?session={session_id}",
             },
         }
 
@@ -853,7 +883,7 @@ async def save_chat_message_as_memo(
                         status, submitter_kind, submitter_id
                     ) VALUES (
                         :wid, :eid, :tax_year,
-                        'memo', NULL,
+                        'memo', :form_ref,
                         CAST(:content AS jsonb), 'medium',
                         CAST('[]' AS jsonb),
                         'pending', 'human', :uid
@@ -865,6 +895,7 @@ async def save_chat_message_as_memo(
                     "wid": str(workspace.workspace_id),
                     "eid": loaded["entity_id"],
                     "tax_year": tax_year,
+                    "form_ref": form_reference,
                     "content": json.dumps(content_payload),
                     "uid": workspace.user_uc_uid,
                 },
@@ -876,4 +907,7 @@ async def save_chat_message_as_memo(
         "memo_id": row["id"],
         "tax_year": tax_year,
         "entity_id": loaded["entity_id"],
+        "bucket": bucket,
+        "form_reference": form_reference,
+        "open_items_url": "/open-items",
     }
