@@ -7,6 +7,7 @@ import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip }
 import { getActiveContext } from "@/lib/active-context";
 import { getCashPosition, formatUSD } from "@/lib/cash-position";
 import { getProfitAndLoss } from "@/lib/journal";
+import { fetchOpenItems } from "@/lib/open-items";
 import { getRecentTransactions, shortDate, type LiveTransaction } from "@/lib/transactions";
 import { cn } from "@/lib/cn";
 
@@ -28,6 +29,9 @@ export default async function DashboardPage() {
         getProfitAndLoss(ctx.activeWorkspace.id, "ytd", entityFilter)
       ])
     : [null, null];
+  const openItemsCounts = ctx.activeWorkspace
+    ? await fetchOpenItems(ctx.activeWorkspace.id, { entityId: entityFilter })
+    : null;
   const liveTxns: LiveTransaction[] = txnData?.transactions ?? [];
   const subtitle = ctx.activeWorkspace
     ? `${ctx.activeWorkspace.display_name} · ${ctx.entities.length} ${ctx.entities.length === 1 ? "entity" : "entities"} · viewing ${ctx.isConsolidated ? "all entities (consolidated)" : ctx.activeEntity?.display_name ?? "—"}`
@@ -53,6 +57,72 @@ export default async function DashboardPage() {
           <EmptyWorkspaceState />
         ) : (
           <>
+            {/* Open-items highlight banner — surfaces "what needs Aaron right now" */}
+            {openItemsCounts && openItemsCounts.counts.action_required > 0 ? (
+              <Link
+                href="/open-items"
+                className="group mb-5 block rounded-xl border border-debit/50 bg-gradient-to-r from-debit/[0.08] via-pending/[0.05] to-brand-500/[0.06] px-5 py-4 transition hover:border-debit/70 hover:shadow-brand-glow"
+              >
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-debit/15 text-debit">
+                    <span className="font-mono text-base font-bold">
+                      {openItemsCounts.counts.action_required}
+                    </span>
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-ink-primary">
+                      You have {openItemsCounts.counts.action_required} open{" "}
+                      {openItemsCounts.counts.action_required === 1
+                        ? "item"
+                        : "items"}{" "}
+                      requiring your action
+                    </p>
+                    <p className="mt-0.5 text-xs text-ink-secondary">
+                      {[
+                        openItemsCounts.counts.time_sensitive > 0
+                          ? `${openItemsCounts.counts.time_sensitive} time-sensitive`
+                          : null,
+                        openItemsCounts.counts.documents_pending > 0
+                          ? `${openItemsCounts.counts.documents_pending} ${openItemsCounts.counts.documents_pending === 1 ? "doc" : "docs"} to provide`
+                          : null,
+                        openItemsCounts.counts.decisions_pending > 0
+                          ? `${openItemsCounts.counts.decisions_pending} ${openItemsCounts.counts.decisions_pending === 1 ? "decision" : "decisions"}`
+                          : null
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-xs font-medium text-brand-300 group-hover:text-brand-400">
+                    Open the list <ArrowRight size={12} className="inline" />
+                  </span>
+                </div>
+              </Link>
+            ) : openItemsCounts && openItemsCounts.counts.action_required === 0 ? (
+              <Link
+                href="/open-items"
+                className="mb-5 block rounded-xl border border-credit/30 bg-credit/[0.04] px-5 py-3 transition hover:border-credit/50"
+              >
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-credit/15 text-credit">
+                    ✓
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-credit">
+                      No open items requiring action.
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-ink-tertiary">
+                      {openItemsCounts.counts.waiting_on_mosin} waiting on Mosin ·{" "}
+                      {openItemsCounts.counts.resolved_this_week} resolved this week
+                    </p>
+                  </div>
+                  <span className="text-xs text-ink-tertiary">
+                    Open the list <ArrowRight size={11} className="inline" />
+                  </span>
+                </div>
+              </Link>
+            ) : null}
+
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <KpiCard
             label="Cash (assets)"

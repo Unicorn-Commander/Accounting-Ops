@@ -7,22 +7,60 @@ from app.config import get_settings
 from app.tools import (
     add_specialty_rule,
     analyze_pending_approvals,
+    bulk_decide_approvals,
     categorize_transaction,
+    close_period,
+    create_category_override,
+    create_coa_account,
+    decide_approval,
     draft_memo,
+    finish_specialist_run,
     flag_for_cpa_review,
+    get_1099_nec_report,
     get_1099_payees,
+    get_balance_sheet,
+    get_cash_flow,
+    get_cash_position,
     get_consolidated_p_and_l,
     get_current_rule,
     get_form_1120_data,
+    get_journal_entry,
     get_p_and_l,
     get_period_journal,
     get_runway,
+    get_specialist_run,
+    get_tax_knowledge_doc,
+    get_tax_narrative,
     get_tax_review_queue,
+    get_tax_status,
     get_transaction,
+    get_trial_balance,
     link_receipt_to_transaction,
+    list_account_mappings,
+    list_approval_recommendations,
+    list_category_overrides,
+    list_chart_of_accounts,
+    list_closed_periods,
+    list_credentials,
+    list_journal_entries,
+    list_my_workspaces,
+    list_pending_approvals,
+    list_posting_log,
+    list_recent_transactions,
+    list_specialist_runs,
+    list_tax_knowledge_topics,
     list_transactions,
+    list_workspace_entities,
+    post_journal_entry,
     propose_payment,
     query_specialty_rules,
+    resolve_tax_review_item,
+    search_tax_knowledge,
+    start_specialist_run,
+    trigger_tax_narrative,
+    update_coa_account,
+    upsert_account_mappings,
+    verify_journal_chain,
 )
 
 
@@ -45,36 +83,114 @@ def build_server():
             "a workspace_id (+ entity_id for entity-scoped tools). The caller's "
             "OAuth2 bearer (uchub realm) is authorized against workspace "
             "membership on every call — you can only reach workspaces you belong "
-            "to. Reads operate on the posted append-only journal."
+            "to. Reads operate on the posted append-only journal. Discovery: "
+            "use list_my_workspaces + list_workspace_entities to find what you "
+            "can reach before calling entity-scoped tools."
         ),
     )
 
-    # Approval batch pre-analyzer — writes recommendations, never approves.
-    server.tool()(analyze_pending_approvals)
+    # =====================================================================
+    # Discovery (workspace + entity enumeration the caller can reach)
+    # =====================================================================
+    server.tool()(list_my_workspaces)
+    server.tool()(list_workspace_entities)
 
-    # Entity-scoped tools — caller passes workspace_id + entity_id.
+    # =====================================================================
+    # Approval queue
+    # =====================================================================
+    server.tool()(analyze_pending_approvals)        # writes recommendations only
+    server.tool()(list_pending_approvals)
+    server.tool()(list_approval_recommendations)
+    server.tool()(decide_approval)
+    server.tool()(bulk_decide_approvals)
+
+    # =====================================================================
+    # Entity-scoped reads (transactions / specialty rules)
+    # =====================================================================
     server.tool()(list_transactions)
     server.tool()(get_transaction)
+    server.tool()(list_recent_transactions)
+    server.tool()(get_cash_position)
+    server.tool()(query_specialty_rules)
+
+    # =====================================================================
+    # Entity-scoped writes (categorize / link receipt / propose rule)
+    # =====================================================================
     server.tool()(categorize_transaction)
     server.tool()(link_receipt_to_transaction)
-    server.tool()(query_specialty_rules)
     server.tool()(add_specialty_rule)
+
+    # =====================================================================
+    # Reports (entity or consolidated)
+    # =====================================================================
     server.tool()(get_p_and_l)
     server.tool()(get_runway)
-
-    # Workspace-level consolidated view (cross-entity).
     server.tool()(get_consolidated_p_and_l)
+    server.tool()(get_balance_sheet)
+    server.tool()(get_cash_flow)
+    server.tool()(get_trial_balance)
+    server.tool()(get_1099_nec_report)
 
-    # Tax Knowledge RAG — global, no workspace/entity scope required
+    # =====================================================================
+    # Chart of accounts (entity-scoped)
+    # =====================================================================
+    server.tool()(list_chart_of_accounts)
+    server.tool()(create_coa_account)
+    server.tool()(update_coa_account)
+
+    # =====================================================================
+    # Journal + period close
+    # =====================================================================
+    server.tool()(list_journal_entries)
+    server.tool()(get_journal_entry)
+    server.tool()(verify_journal_chain)
+    server.tool()(list_posting_log)
+    server.tool()(post_journal_entry)
+    server.tool()(list_closed_periods)
+    server.tool()(close_period)
+
+    # =====================================================================
+    # Connectors / mappings / overrides / credentials
+    # =====================================================================
+    server.tool()(list_credentials)                 # metadata only
+    server.tool()(list_account_mappings)
+    server.tool()(upsert_account_mappings)
+    server.tool()(list_category_overrides)
+    server.tool()(create_category_override)
+
+    # =====================================================================
+    # Tax Knowledge RAG (global, no workspace scoping)
+    # =====================================================================
     server.tool()(get_current_rule)
+    server.tool()(list_tax_knowledge_topics)
+    server.tool()(search_tax_knowledge)
+    server.tool()(get_tax_knowledge_doc)
 
-    # 1120 Preparer specialist tools
+    # =====================================================================
+    # 1120 Preparer + tax review queue
+    # =====================================================================
     server.tool()(get_tax_review_queue)
+    server.tool()(resolve_tax_review_item)
     server.tool()(get_form_1120_data)
     server.tool()(get_period_journal)
     server.tool()(get_1099_payees)
     server.tool()(draft_memo)
     server.tool()(flag_for_cpa_review)
+
+    # =====================================================================
+    # CPA Narrative + tax status dashboard
+    # =====================================================================
+    server.tool()(get_tax_narrative)
+    server.tool()(trigger_tax_narrative)
+    server.tool()(get_tax_status)
+
+    # =====================================================================
+    # Specialist run observability
+    # =====================================================================
+    server.tool()(list_specialist_runs)
+    server.tool()(get_specialist_run)
+    server.tool()(start_specialist_run)
+    server.tool()(finish_specialist_run)
 
     @server.tool()
     async def propose_payment_tool(

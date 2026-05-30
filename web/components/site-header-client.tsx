@@ -11,6 +11,7 @@ const NAV_SECTIONS = [
     label: null,
     items: [
       ["Dashboard", "/dashboard"],
+      ["My Items", "/open-items"],
       ["Transactions", "/transactions"],
       ["Reconciliation", "/reconciliation-queue"],
       ["Approvals", "/approvals"],
