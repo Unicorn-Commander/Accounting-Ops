@@ -9,6 +9,7 @@ from app.api.account_mappings import router as account_mappings_router
 from app.api.approvals import router as approvals_router
 from app.api.approval_recommendations import router as approval_recommendations_router
 from app.api.irs_forms import router as irs_forms_router
+from app.api.open_items import router as open_items_router
 from app.api.specialist_runs import router as specialist_runs_router
 from app.api.specialist_pdf import router as specialist_pdf_router
 from app.api.tax_review import router as tax_review_router
@@ -77,6 +78,7 @@ app.include_router(specialist_pdf_router)
 app.include_router(irs_forms_router)
 app.include_router(tax_review_router)
 app.include_router(tax_status_router)
+app.include_router(open_items_router)
 app.include_router(reports_router)
 app.include_router(cash_position_router)
 app.include_router(transactions_router)
