@@ -48,6 +48,10 @@ async def _cash_position_from_journal(
     balance-sheet's cash line. Runs inside workspace_session (search_path + RLS).
     """
     async with workspace_session(SessionLocal, workspace_id) as session:
+        # Bug 13 fix: use the indexed debit_account_number /
+        # credit_account_number columns (migration 0015) instead of LIKE '10%'
+        # text matches on canonical_form. Cash accounts are the 10xx block per
+        # the COA convention (1000-1099 inclusive).
         row = (
             await session.execute(
                 text(
@@ -58,14 +62,14 @@ async def _cash_position_from_journal(
                         WHERE status = 'posted'
                           AND entity_id = :eid
                           AND effective_date <= :as_of
-                          AND debit_account LIKE '10%'
+                          AND debit_account_number BETWEEN 1000 AND 1099
                         UNION ALL
                         SELECT 0::numeric AS debit, amount AS credit
                         FROM journal_entry
                         WHERE status = 'posted'
                           AND entity_id = :eid
                           AND effective_date <= :as_of
-                          AND credit_account LIKE '10%'
+                          AND credit_account_number BETWEEN 1000 AND 1099
                     )
                     SELECT COALESCE(SUM(debit) - SUM(credit), 0) AS cash
                     FROM cash_sides
