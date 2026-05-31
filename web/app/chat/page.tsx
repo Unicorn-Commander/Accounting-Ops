@@ -1,13 +1,14 @@
 import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
-import { ChatComposer, ChatThread } from "@/components/agent-chat-thread";
+import { ChatShell } from "@/components/chat-shell";
 import { getActiveContext } from "@/lib/active-context";
-import { CHAT_MESSAGES } from "@/lib/agent-chat";
+import { fetchPersonas } from "@/lib/personas-fetch";
 import { cn } from "@/lib/cn";
 
 export default async function ChatPage() {
   const ctx = await getActiveContext();
+  const personas = await fetchPersonas();
   const canConsolidate = ctx.activeWorkspace
     ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
     : false;
@@ -16,10 +17,14 @@ export default async function ChatPage() {
       <PageShell>
         <SectionHeader
           title="Chat with your agents"
-          subtitle="Ask anything. The orchestrator routes to the right specialist. Every action returns through the approval queue."
+          subtitle="Pick a persona and ask. Strategic agents synthesize. Specialists dig deep. Operational keeps the lights on. Every action returns through the approval queue."
           action={
             <div className="flex items-center gap-2 text-xs">
-              <StatusChip tone="agent">3 agents online</StatusChip>
+              <StatusChip tone="agent">
+                {personas.brigade_online
+                  ? "Brigade online"
+                  : "Brigade offline"}
+              </StatusChip>
               <EntitySelector
                 entities={ctx.entities}
                 activeEntityId={ctx.isConsolidated ? "consolidated" : ctx.activeEntity?.id}
@@ -32,8 +37,12 @@ export default async function ChatPage() {
 
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
           <Card padded={false} className="flex flex-col lg:col-span-3">
-            <ChatThread messages={CHAT_MESSAGES} className="flex-1" />
-            <ChatComposer />
+            <ChatShell
+              personas={personas.personas}
+              brigadeOnline={personas.brigade_online}
+              brigadeReason={personas.brigade_reason}
+              initialSlug="cfo-agent"
+            />
           </Card>
 
           <Card padded={false} className="lg:col-span-2">
@@ -44,10 +53,35 @@ export default async function ChatPage() {
               </p>
             </div>
             <div className="space-y-3 p-5 text-sm">
-              <WorkspaceItem title="Reading transactions" body="MU Inc · May 17-19 · 64 rows" badge="Postgres" />
-              <WorkspaceItem title="Matching counterparty" body="Mercury account 2847 -> MU Inc Operating" badge="FalkorDB graph" />
-              <WorkspaceItem title="Drafting recategorization" body="Current: 9999·Misc Outflow · Proposed: 1500·Inter-entity transfer · MU->Majiks JV" badge="Proposal" tone="agent" />
-              <WorkspaceItem title="Will queue if confident" body="Confidence threshold 0.85 · ETA 12s" badge="Awaiting" tone="pending" />
+              <WorkspaceItem
+                title="CFO Agent ready"
+                body="Strategic synthesis across cash, runway, P&L, board narrative. Reaches for cross-app tools when Brigade is online."
+                badge="Strategic"
+                tone="agent"
+              />
+              <WorkspaceItem
+                title={personas.brigade_online ? "Brigade catalog ready" : "Brigade unavailable"}
+                body={
+                  personas.brigade_online
+                    ? "Cross-app tools (project.*, meeting.*, contact.*) are reachable for callers with brigade:cross_app scope."
+                    : `Local tools only · ${personas.brigade_reason}`
+                }
+                badge={personas.brigade_online ? "Federated" : "Local"}
+                tone={personas.brigade_online ? "agent" : "ink"}
+              />
+              <WorkspaceItem
+                title="Persona registry"
+                body={`${personas.personas.length} personas loaded across ${
+                  new Set(personas.personas.map((p) => p.tier)).size
+                } tiers.`}
+                badge="Registry"
+              />
+              <WorkspaceItem
+                title="LLM routing"
+                body="CFO Agent: Claude Opus 4.7 by default (override via CFO_AGENT_MODEL). Falls back to Sonnet 4.5 when Opus is unreachable."
+                badge="Runtime"
+                tone="pending"
+              />
             </div>
           </Card>
         </div>

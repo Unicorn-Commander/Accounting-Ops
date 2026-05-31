@@ -260,6 +260,41 @@ async def authenticate_token(token: str) -> AuthContext:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="python-jose is required for token validation",
         )
+
+    # Brigade-issued token path — verifier returns None when the feature is OFF
+    # (BRIGADE_TRUSTED_ISSUER unset / unreachable / token isn't Brigade-issued).
+    # In those cases we fall through to the Keycloak path below unchanged.
+    try:
+        from app.security.brigade_jwt import verify_brigade_jwt
+    except ImportError:  # pragma: no cover - module must exist
+        verify_brigade_jwt = None  # type: ignore[assignment]
+    if verify_brigade_jwt is not None:
+        try:
+            brigade_claims = await verify_brigade_jwt(token)
+        except Exception as exc:  # pragma: no cover - hardening only
+            _log.info("brigade verifier raised %s, falling through to Keycloak", exc)
+            brigade_claims = None
+        if brigade_claims is not None:
+            b_uc_uid = brigade_claims.get("uc_uid") or brigade_claims.get("sub")
+            if b_uc_uid:
+                b_act = brigade_claims.get("act") or {}
+                b_agent_id: str | None = None
+                if isinstance(b_act, dict):
+                    b_agent_id = b_act.get("sub") or b_act.get("client_id")
+                raw_scope = brigade_claims.get("scope") or ""
+                if isinstance(raw_scope, list):
+                    b_scopes = tuple(str(s) for s in raw_scope)
+                else:
+                    b_scopes = tuple(str(raw_scope).split())
+                ctx = AuthContext(
+                    uc_uid=b_uc_uid,
+                    agent_id=b_agent_id,
+                    scopes=b_scopes,
+                    claims=brigade_claims,
+                )
+                _stamp_audit_actor(ctx)
+                return ctx
+
     settings = get_settings()
     try:
         header = jwt.get_unverified_header(token)

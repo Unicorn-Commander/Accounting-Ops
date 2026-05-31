@@ -8,6 +8,7 @@ from app.a2a.server import router as a2a_router
 from app.api.account_mappings import router as account_mappings_router
 from app.api.approvals import router as approvals_router
 from app.api.approval_recommendations import router as approval_recommendations_router
+from app.api.chat import router as chat_router
 from app.api.irs_forms import router as irs_forms_router
 from app.api.specialist_runs import router as specialist_runs_router
 from app.api.specialist_pdf import router as specialist_pdf_router
@@ -43,12 +44,34 @@ _mcp_http_app = (
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    session_manager = getattr(_mcp_server, "session_manager", None)
-    if session_manager is None:
-        yield
-        return
-    async with session_manager.run():
-        yield
+    # Brigade outbound (consumer) client. Safe no-op when BRIGADE_BASE_URL
+    # is unset (the default until commander wires the hub up). When set,
+    # this fires the first discovery + starts a background refresh loop.
+    shutdown_brigade_client = None
+    try:
+        from app.security.brigade_client import (
+            init_brigade_client,
+            shutdown_brigade_client as _shutdown_brigade,
+        )
+
+        await init_brigade_client()
+        shutdown_brigade_client = _shutdown_brigade
+    except Exception:  # noqa: BLE001 - brigade client must never block startup
+        pass
+
+    try:
+        session_manager = getattr(_mcp_server, "session_manager", None)
+        if session_manager is None:
+            yield
+            return
+        async with session_manager.run():
+            yield
+    finally:
+        if shutdown_brigade_client is not None:
+            try:
+                await shutdown_brigade_client()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 app = FastAPI(
@@ -82,6 +105,7 @@ app.include_router(cash_position_router)
 app.include_router(transactions_router)
 app.include_router(tools_router)
 app.include_router(consolidated_router)
+app.include_router(chat_router)
 
 
 @app.get("/healthz", tags=["system"])
@@ -107,6 +131,68 @@ async def well_known_mcp() -> dict:
             "token_url": f"{settings.keycloak_realm_url}/protocol/openid-connect/token",
             "scopes": ["accounting:read", "accounting:write", "accounting:admin"],
         },
+        "addressing": {
+            "resource_pattern": "/api/workspaces/{workspace_id}/entities/{entity_id}/...",
+            "consolidated_pattern": "/api/workspaces/{workspace_id}/consolidated/...",
+        },
+    }
+
+
+@app.get("/.well-known/mcps.json", tags=["discovery"])
+async def well_known_mcps() -> dict:
+    """Brigade-ingest manifest — lists ALL exposed MCP tools + their schemas.
+
+    Brigade polls this URL and re-publishes our tools as ``account.<name>``
+    in the aggregated catalog at brigade.unicorncommander.ai. The midboy1
+    deployment has a richer programmatic version of this in
+    ``app/api/discovery.py``; this worktree falls back to a hand-curated
+    list of the 17 registered MCP tools so federation is testable end-to-end
+    without that module.
+    """
+    tools_curated = [
+        "analyze_pending_approvals",
+        "list_transactions", "get_transaction",
+        "categorize_transaction", "link_receipt_to_transaction",
+        "query_specialty_rules", "add_specialty_rule",
+        "get_p_and_l", "get_runway", "get_consolidated_p_and_l",
+        "get_current_rule", "get_form_1120_data",
+        "get_period_journal", "get_1099_payees",
+        "draft_memo", "flag_for_cpa_review",
+        "propose_payment_tool",
+    ]
+    return {
+        "schema_version": "1.0",
+        "app_id": "accounting-ops",
+        "name": "Accounting-Ops",
+        "version": "0.1.0",
+        "description": (
+            "Agent-first financial operations for Magic Unicorn — journal, "
+            "approvals, tax review queue, runway, P&L, 1120 working data."
+        ),
+        "mcp_endpoint": f"{settings.public_base_url}/mcp",
+        "tool_namespace": "account",
+        "auth": {
+            "type": "oauth2",
+            "issuer": str(settings.keycloak_realm_url),
+            "audience": settings.accepted_audience,
+            "token_url": f"{settings.keycloak_realm_url}/protocol/openid-connect/token",
+            "scopes": [
+                "accounting:read",
+                "accounting:write",
+                "accounting:admin",
+                "brigade:cross_app",
+            ],
+            "federated_auth": {
+                "trusted_issuer": "https://brigade.unicorncommander.ai",
+                "expected_audience": "accounting-ops",
+                "jwks_url": "https://brigade.unicorncommander.ai/.well-known/jwks.json",
+            },
+        },
+        "tools": [
+            {"name": n, "description": "", "input_schema": {"type": "object"}}
+            for n in tools_curated
+        ],
+        "tool_count": len(tools_curated),
         "addressing": {
             "resource_pattern": "/api/workspaces/{workspace_id}/entities/{entity_id}/...",
             "consolidated_pattern": "/api/workspaces/{workspace_id}/consolidated/...",
