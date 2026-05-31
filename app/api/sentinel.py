@@ -204,7 +204,9 @@ async def list_findings(
     limit = max(1, min(limit, 500))
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
-        where = ["created_at >= now() - make_interval(days => :days)"]
+        # Qualify with f.* — the SELECT below joins sentinel_check_run cr
+        # which also has a created_at column → AmbiguousColumnError otherwise.
+        where = ["f.created_at >= now() - make_interval(days => :days)"]
         params: dict[str, Any] = {"days": days, "limit": limit, "offset": max(0, offset)}
         if status_filter.lower() != "all":
             where.append("f.status = :st")
