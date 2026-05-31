@@ -22,11 +22,25 @@ export default function SpecialtyRulesPage() {
           title="Specialty rules"
           subtitle="Per-tenant policy engine. Vertical compliance lives here. Each rule has temporal validity and an auditable change history."
           action={
-            <Button variant="primary" size="sm">
-              <Plus size={13} /> Add rule
-            </Button>
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center gap-1 rounded-full border border-pending/40 bg-pending/[0.08] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-pending">
+                Preview
+              </span>
+              <Button variant="primary" size="sm">
+                <Plus size={13} /> Add rule
+              </Button>
+            </div>
           }
         />
+
+        {/* Preview banner — audit quick-win #6 + issue 16: rule editing is
+            inert sample data, not a wired policy engine. */}
+        <div className="mb-4 rounded-lg border border-pending/40 bg-pending/[0.04] px-4 py-3 text-xs text-pending">
+          <strong className="font-semibold">Preview:</strong> rules below are
+          a static reference of what specialty rules will look like. Editing,
+          activation, and trigger counts are not wired to the policy engine
+          yet.
+        </div>
 
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
           {RULES.map((r) => (

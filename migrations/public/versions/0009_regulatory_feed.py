@@ -1,7 +1,7 @@
 """public schema: regulatory feed cache.
 
-Revision ID: 0008_regulatory_feed
-Revises: 0007_tax_chunking
+Revision ID: 0009_regulatory_feed
+Revises: 0008_rbac_expansion
 Create Date: 2026-05-30
 
 Caches polled regulatory feed entries (IRS Newsroom RSS, SCDOR notices sitemap
@@ -16,6 +16,13 @@ Grants:
   INSERT, UPDATE to accounting_ops_app  (Sentinel adds new entries + marks classified)
 
 Idempotent + re-runnable.
+
+Audit 2026-05-31 Bug 5: renumbered 0008 -> 0009 to resolve two-heads ambiguity
+on ``alembic -c alembic-public.ini heads``. The other 0008 (rbac_expansion)
+landed first chronologically, so this becomes 0009 with down_revision
+"0008_rbac_expansion". midboy1 production already applied this migration as
+0009_regulatory_feed (it was renumbered there earlier by the live-deploy step);
+fresh deploys + drift checks now match.
 """
 from collections.abc import Sequence
 
@@ -23,8 +30,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0008_regulatory_feed"
-down_revision: str | None = "0007_tax_chunking"
+revision: str = "0009_regulatory_feed"
+down_revision: str | None = "0008_rbac_expansion"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

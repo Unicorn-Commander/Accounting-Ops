@@ -5,6 +5,7 @@ import { useState, useTransition } from "react";
 import { Building2, ChevronDown, Plus, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { Workspace } from "@/lib/api";
+import { queueGlobalToast } from "@/components/global-toast";
 
 // Role chip color map — owner stands out, viewer is faded.
 const ROLE_CHIP: Record<string, string> = {
@@ -40,8 +41,22 @@ export function WorkspaceSwitcher({
     workspaces.find((w) => w.id === activeWorkspaceId) ?? workspaces[0];
 
   function selectWorkspace(workspaceId: string) {
+    if (workspaceId === active.id) {
+      setOpen(false);
+      return;
+    }
+    const target = workspaces.find((w) => w.id === workspaceId);
     document.cookie = `aops_workspace=${workspaceId}; Path=/; SameSite=Lax; Max-Age=2592000`;
     document.cookie = `aops_entity=; Path=/; SameSite=Lax; Max-Age=0`;
+    // Queue the workspace-switch toast.  Per audit issue H6, we explicitly
+    // note that the entity scope reset so the user knows why the active
+    // entity changed underneath them.
+    if (target) {
+      queueGlobalToast(
+        `Switched to ${target.display_name}. Entity reset to default.`,
+        "brand"
+      );
+    }
     setOpen(false);
     startTransition(() => router.refresh());
   }
@@ -53,7 +68,7 @@ export function WorkspaceSwitcher({
         title={HIERARCHY_TOOLTIP}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="flex items-center gap-1.5 rounded-md border border-default bg-surface px-2.5 py-1.5 text-sm transition hover:bg-elevated"
+        className="flex items-center gap-1.5 rounded-md border border-default bg-surface px-2.5 py-1.5 text-sm transition hover:bg-elevated focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
       >
         <Building2 size={13} className="text-ink-tertiary shrink-0" />
         <span className="hidden md:inline text-[11px] uppercase tracking-wider text-ink-tertiary">
@@ -93,7 +108,7 @@ export function WorkspaceSwitcher({
                 <button
                   onClick={() => selectWorkspace(ws.id)}
                   className={cn(
-                    "flex w-full items-center gap-3 px-3 py-2.5 text-left text-sm transition hover:bg-white/[0.03]",
+                    "flex w-full items-center gap-3 px-3 py-2.5 text-left text-sm transition hover:bg-white/[0.03] focus:outline-none focus-visible:bg-white/[0.04]",
                     ws.id === active.id && "bg-white/[0.02]"
                   )}
                 >
@@ -134,14 +149,21 @@ export function WorkspaceSwitcher({
             ))}
           </ul>
           <div className="border-t border-subtle p-2">
+            {/* Audit quick-win #4: replace window.alert() with a disabled
+                control + tooltip.  We surface the rough timeline instead of
+                a popup. */}
             <button
-              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-ink-secondary hover:bg-white/[0.03] hover:text-ink-primary"
-              onClick={() =>
-                window.alert("Workspace creation lands in Phase 1.")
-              }
+              type="button"
+              disabled
+              title="Workspace creation lands in Phase 1."
+              aria-disabled="true"
+              className="flex w-full cursor-not-allowed items-center gap-2 rounded px-2 py-1.5 text-sm text-ink-tertiary opacity-60"
             >
               <Plus size={13} />
-              Create workspace
+              <span className="flex-1 text-left">Create workspace</span>
+              <span className="rounded-full bg-white/[0.04] px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-ink-tertiary">
+                Phase 1
+              </span>
             </button>
           </div>
         </div>

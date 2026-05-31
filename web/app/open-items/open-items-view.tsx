@@ -37,6 +37,7 @@ import {
 import { AIActivityTimeline } from "@/components/ai-activity-timeline";
 import { Card, StatusChip } from "@/components/primitives";
 import { cn } from "@/lib/cn";
+import { DecisionNoteDialog } from "@/app/open-items/decision-note-dialog";
 import type { AIActivityResponse } from "@/lib/ai-activity";
 import type {
   DecisionItem,
@@ -451,7 +452,7 @@ function DecisionsSection({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  // Transient "1-second undo" toast — appears after Aaron accepts an AI
+  // Transient 5-second undo toast — appears after Aaron accepts an AI
   // recommendation and offers a 5-second window to revert before the
   // refresh hides it. The mechanism: post a new "rejected"-marker for
   // the decision, which the latest-wins aggregator picks up.
@@ -460,6 +461,8 @@ function DecisionsSection({
     label: string;
     expiresAt: number;
   } | null>(null);
+  // Decision-note dialog state (replaces window.prompt() per audit issue 14).
+  const [noteDialog, setNoteDialog] = useState<DecisionItem | null>(null);
 
   const record = async (
     decision: DecisionItem,
@@ -586,7 +589,7 @@ function DecisionsSection({
                         })
                       }
                       className={cn(
-                        "rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow transition hover:bg-brand-600",
+                        "rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow transition hover:bg-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
                         isBusy && "opacity-60"
                       )}
                     >
@@ -595,17 +598,9 @@ function DecisionsSection({
                     <button
                       type="button"
                       disabled={isBusy}
-                      onClick={() => {
-                        const note = window.prompt(
-                          `Different choice for: ${dec.question}\n\nDescribe your decision (optional):`,
-                          ""
-                        );
-                        if (note !== null) {
-                          record(dec, "other", note || undefined);
-                        }
-                      }}
+                      onClick={() => setNoteDialog(dec)}
                       className={cn(
-                        "rounded-md border border-strong bg-white/[0.03] px-3 py-1.5 text-xs font-medium text-ink-secondary transition hover:bg-white/[0.06] hover:text-ink-primary",
+                        "rounded-md border border-strong bg-white/[0.03] px-3 py-1.5 text-xs font-medium text-ink-secondary transition hover:bg-white/[0.06] hover:text-ink-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
                         isBusy && "opacity-60"
                       )}
                     >
@@ -644,8 +639,23 @@ function DecisionsSection({
         );
       })}
 
-      {/* 1-second undo toast. Sits at the bottom-right; sticky inside the
-          section so it's tied to the decisions context. */}
+      {/* Decision-note modal — opened from the "Different choice…" button.
+          Replaces the previous window.prompt() per audit issue 14. */}
+      <DecisionNoteDialog
+        open={noteDialog !== null}
+        question={noteDialog?.question ?? ""}
+        onCancel={() => setNoteDialog(null)}
+        onSubmit={(note) => {
+          const target = noteDialog;
+          setNoteDialog(null);
+          if (target) {
+            record(target, "other", note || undefined);
+          }
+        }}
+      />
+
+      {/* 5-second undo toast. Sits at the bottom-right; fixed-positioned but
+          owned by this section so it's tied to the decisions context. */}
       {toast ? (
         <div
           className="pointer-events-none fixed bottom-6 right-6 z-40 max-w-sm"

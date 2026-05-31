@@ -197,16 +197,17 @@ function ClusterCard({
             <span className="font-semibold text-ink-primary">{category}</span>
           </div>
 
-          <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-ink-secondary">
+          {/* Audit quick-win #2: hide raw cluster_id from the primary line
+              — surface via title-tooltip only. */}
+          <div
+            className="mt-2 flex flex-wrap items-center gap-3 text-sm text-ink-secondary"
+            title={`Cluster ID: ${cluster.cluster_id}`}
+          >
             <span className="font-mono font-medium text-ink-primary">
               {formatCents(totalCents)}
             </span>
             <span className="text-ink-tertiary">·</span>
             <span>{cluster.count} transaction{cluster.count !== 1 ? "s" : ""}</span>
-            <span className="text-ink-tertiary">·</span>
-            <span className="font-mono text-[11px] text-ink-tertiary">
-              {cluster.cluster_id}
-            </span>
           </div>
 
           {/* Rationale excerpt (first sample row) */}

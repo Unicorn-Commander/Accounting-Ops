@@ -3,6 +3,7 @@ import { SiteHeader } from "@/components/site-header";
 import { AppSidebar } from "@/components/app-sidebar";
 import { AgentChatPopout } from "@/components/agent-chat-popout";
 import { ContextBreadcrumb } from "@/components/context-breadcrumb";
+import { GlobalToast } from "@/components/global-toast";
 import { getActiveContext } from "@/lib/active-context";
 import { auth } from "@/lib/auth";
 
@@ -40,6 +41,7 @@ export async function AppShell({
         </main>
       </div>
       <AgentChatPopout />
+      <GlobalToast />
     </>
   );
 }

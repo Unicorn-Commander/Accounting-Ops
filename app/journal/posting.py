@@ -292,23 +292,12 @@ async def post_journal_entry(
     # closed window).  This runs after the idempotency check so a re-delivered
     # already-posted entry still returns blocked_idempotent (which is harmless),
     # not blocked_period_closed (which would be confusing for a no-op).
-    closed_row = (
-        await session.execute(
-            text(
-                """
-                SELECT period_end
-                FROM closed_period
-                WHERE entity_id = :eid
-                  AND period_end >= :effective_date
-                ORDER BY period_end ASC
-                LIMIT 1
-                """
-            ),
-            {"eid": entity_id, "effective_date": effective_date},
-        )
-    ).first()
-    if closed_row is not None:
-        period_end = closed_row[0]
+    # Audit 2026-05-31 Bug 4: extracted to ``assert_period_open`` and reused by
+    # ``_apply_recategorization`` so a recat can't bypass the close gate.
+    period_end = await assert_period_open(
+        session, entity_id=entity_id, effective_date=effective_date
+    )
+    if period_end is not None:
         await _log_post_attempt(
             session,
             workspace_id=workspace_id,
@@ -589,6 +578,41 @@ async def _is_cash_side(
     return bool(row) and row["account_type"] in ("asset", "liability")
 
 
+async def assert_period_open(
+    session: AsyncSession, *, entity_id: str, effective_date
+):
+    """Return the closed_period.period_end date IF the effective_date falls
+    inside (or before) a closed window for this entity, otherwise return None.
+
+    The post path checks this and refuses with PostingRefusal('blocked_period_closed').
+    The recategorization path (``_apply_recategorization``) MUST run this BEFORE
+    appending the reversal+restatement pair so a held material recat approved
+    after a period close can't silently change closed books — Bug 4 in
+    audits/code-audit-2026-05-31.md.
+
+    A returned date means "blocked"; ``None`` means "open" (caller proceeds).
+    Kept as a thin SELECT so both call sites stay cheap on the hot path; we do
+    not raise here so each caller can decide between a PostingRefusal (the
+    posting path) and a clean rollback (the recategorization path).
+    """
+    closed_row = (
+        await session.execute(
+            text(
+                """
+                SELECT period_end
+                FROM closed_period
+                WHERE entity_id = :eid
+                  AND period_end >= :effective_date
+                ORDER BY period_end ASC
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "effective_date": effective_date},
+        )
+    ).first()
+    return closed_row[0] if closed_row is not None else None
+
+
 async def _apply_recategorization(
     session: AsyncSession,
     *,
@@ -636,8 +660,48 @@ async def _apply_recategorization(
 
     Returns CorrectionOutcome on success, or PostingRefusal('blocked_idempotent')
     if a chain race occurs or this entry was already recategorized (the
-    'reversal:<orig_id>' source_external_id already exists).
+    'reversal:<orig_id>' source_external_id already exists), or
+    PostingRefusal('blocked_period_closed') if the original entry's effective_date
+    falls inside a closed window — audit 2026-05-31 Bug 4. Returning a
+    PostingRefusal here means the approve-apply caller can abort/roll back the
+    approval decision atomically rather than half-applying a recat that mutates
+    closed books.
     """
+    # ---- Period-close guard (audit 2026-05-31 Bug 4) ----
+    # post_journal_entry checks this before appending; the recat path must do
+    # the same or a held material recat approved after a period close would
+    # silently change closed books (the reversal+restatement use the ORIGINAL
+    # effective_date, which is inside the now-closed window). Return a
+    # PostingRefusal so the outer decision (e.g. decide_approval) rolls back.
+    closed_period_end = await assert_period_open(
+        session, entity_id=entity_id, effective_date=effective_date
+    )
+    if closed_period_end is not None:
+        await _log_post_attempt(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            source="recategorization",
+            source_external_id=f"recat:{orig_id}",
+            outcome="blocked_period_closed",
+            journal_entry_id=orig_id,
+            reason=(
+                f"Period closed at {closed_period_end}; cannot recategorize "
+                f"entry effective {effective_date}."
+            ),
+            actor_uc_uid=actor_uc_uid,
+            actor_agent_id=actor_agent_id,
+            amount_cents=amount_cents,
+            category=new_category,
+        )
+        return PostingRefusal(
+            outcome="blocked_period_closed",
+            reason=(
+                f"Period closed at {closed_period_end}; cannot recategorize "
+                f"entry effective {effective_date}."
+            ),
+        )
+
     # Restatement keeps the cash side and swaps the income-statement side.
     if debit_is_cash:
         restated_debit, restated_credit = debit_account, new_cat_canonical

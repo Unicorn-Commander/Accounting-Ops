@@ -63,6 +63,20 @@ MAX_ATTEMPTS = int(os.getenv("MAIL_DRAINER_MAX_ATTEMPTS", "5"))
 BATCH_LIMIT = int(os.getenv("MAIL_DRAINER_BATCH_LIMIT", "25"))
 
 
+def _recipient_domain(addr: str | None) -> str:
+    """Audit 2026-05-31 Bug 16: log only the recipient DOMAIN. The full
+    address + subject stay in the ``email_outbox`` row (auditable, not in
+    stdout). Mirrors ``app.mailer._recipient_domain`` but kept local because
+    this script is intentionally free of ``app.*`` imports (sync SQLAlchemy).
+    """
+    if not addr:
+        return "<none>"
+    s = str(addr).strip()
+    if "@" not in s:
+        return "<malformed>"
+    return s.rsplit("@", 1)[-1].rstrip(">").lower() or "<malformed>"
+
+
 @dataclass(frozen=True)
 class SmtpConfig:
     host: str | None
@@ -277,16 +291,20 @@ def _drain_once(engine: Engine, cfg: SmtpConfig) -> dict[str, int]:
                     failed += 1
                     if was_terminal:
                         terminal += 1
+                    # Audit 2026-05-31 Bug 16: log only outbox id + recipient
+                    # domain + status; full to_email + subject stay in the
+                    # email_outbox row (auditable, not in stdout).
                     _log.warning(
-                        "send failed id=%s to=%s err=%s terminal=%s",
-                        rid, row["to_email"], err, was_terminal,
+                        "send failed id=%s to_domain=%s status=failed terminal=%s err=%s",
+                        rid, _recipient_domain(row["to_email"]), was_terminal, err,
                     )
                 else:
                     _mark_sent(conn, str(rid))
                     sent += 1
+                    # Audit 2026-05-31 Bug 16: log domain + status only.
                     _log.info(
-                        "sent id=%s to=%s subject=%r",
-                        rid, row["to_email"], row["subject"],
+                        "sent id=%s to_domain=%s status=sent",
+                        rid, _recipient_domain(row["to_email"]),
                     )
 
     return {
