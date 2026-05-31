@@ -12,6 +12,7 @@ from app.api.approval_clusters import router as approval_clusters_router
 from app.api.approval_recommendations import router as approval_recommendations_router
 from app.api.chat import router as chat_router
 from app.api.discovery import router as discovery_router
+from app.api.ebay_oauth import router as ebay_oauth_router
 from app.api.irs_forms import router as irs_forms_router
 from app.api.open_items import router as open_items_router
 from app.api.specialist_runs import router as specialist_runs_router
@@ -106,6 +107,8 @@ app.include_router(cash_position_router)
 app.include_router(transactions_router)
 app.include_router(tools_router)
 app.include_router(consolidated_router)
+# eBay Finances OAuth (callback is unauthenticated — security via signed state token)
+app.include_router(ebay_oauth_router)
 # Discovery (no auth — Brigade federation manifest at /.well-known/mcps.json)
 app.include_router(discovery_router)
 # Brigade JWT verifier test endpoint (admin-only; used by Brigade to confirm
