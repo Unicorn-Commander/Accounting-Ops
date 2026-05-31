@@ -12,10 +12,12 @@ import {
 import { AppShell } from "@/components/app-shell";
 import { ConnectSimplefinModal } from "@/components/connect-simplefin-modal";
 import { EbayStatusCard } from "@/components/ebay-status-card";
+import { StripeStatusCard } from "@/components/stripe-status-card";
 import { Card, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
 import { CONNECTORS, getConnectorStatuses, type Connector, type ConnectorStatus } from "@/lib/connectors";
 import { getActiveContext } from "@/lib/active-context";
 import { getEbayStatus, type EbayConnectorStatus } from "@/lib/ebay-connector";
+import { getStripeStatus, type StripeConnectorStatus } from "@/lib/stripe-connector";
 import { cn } from "@/lib/cn";
 
 const CATEGORY_ICON: Record<Connector["category"], React.ComponentType<{ size?: number; className?: string }>> = {
@@ -29,13 +31,14 @@ const CATEGORY_ICON: Record<Connector["category"], React.ComponentType<{ size?: 
 export default async function ConnectorsPage({
   searchParams
 }: {
-  searchParams: Promise<{ ebay?: string; ebay_error?: string; seller?: string }>;
+  searchParams: Promise<{ ebay?: string; ebay_error?: string; seller?: string; stripe?: string }>;
 }) {
   const sp = await searchParams;
   const statuses = await getConnectorStatuses();
   const ctx = await getActiveContext();
   const workspace = ctx.activeWorkspace;
   const ebayStatus = workspace ? await getEbayStatus(workspace.id) : null;
+  const stripeStatus = workspace ? await getStripeStatus(workspace.id) : null;
   const activeEntityId = ctx.activeEntity?.id ?? null;
   // First non-personal entity used as a "default for new connect" hint when no
   // entity is selected. Mirrors the EntitySelector default-pick logic.
@@ -82,8 +85,17 @@ export default async function ConnectorsPage({
               workspaceId={workspace?.id}
               workspaceName={workspace?.display_name}
               ebayStatus={connector.id === "ebay-finances" ? ebayStatus : null}
-              activeEntityId={connector.id === "ebay-finances" ? activeEntityId : null}
-              defaultEntityId={connector.id === "ebay-finances" ? defaultEntityId : null}
+              stripeStatus={connector.id === "stripe" ? stripeStatus : null}
+              activeEntityId={
+                connector.id === "ebay-finances" || connector.id === "stripe"
+                  ? activeEntityId
+                  : null
+              }
+              defaultEntityId={
+                connector.id === "ebay-finances" || connector.id === "stripe"
+                  ? defaultEntityId
+                  : null
+              }
             />
           ))}
         </div>
@@ -107,6 +119,7 @@ function ConnectorCard({
   workspaceId,
   workspaceName,
   ebayStatus,
+  stripeStatus,
   activeEntityId,
   defaultEntityId
 }: {
@@ -115,6 +128,7 @@ function ConnectorCard({
   workspaceId?: string;
   workspaceName?: string;
   ebayStatus?: EbayConnectorStatus | null;
+  stripeStatus?: StripeConnectorStatus | null;
   activeEntityId?: string | null;
   defaultEntityId?: string | null;
 }) {
@@ -167,6 +181,15 @@ function ConnectorCard({
               defaultEntityId={defaultEntityId ?? null}
             />
           )}
+          {connector.id === "stripe" && workspaceId && (
+            <StripeStatusCard
+              status={stripeStatus ?? null}
+              workspaceId={workspaceId}
+              workspaceName={workspaceName ?? "this workspace"}
+              entityId={activeEntityId ?? null}
+              defaultEntityId={defaultEntityId ?? null}
+            />
+          )}
 
           <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-subtle pt-4">
             {connector.id === "simplefin" && workspaceId ? (
@@ -180,9 +203,9 @@ function ConnectorCard({
                   </button>
                 }
               />
-            ) : connector.id === "ebay-finances" ? (
-              // eBay "Connect" button lives inside the EbayStatusCard above; this
-              // slot only carries the secondary Docs / Signup links.
+            ) : connector.id === "ebay-finances" || connector.id === "stripe" ? (
+              // Connect button lives inside the per-connector status card above;
+              // this slot only carries the secondary Docs / Signup links.
               null
             ) : (
               <button
