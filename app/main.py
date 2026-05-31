@@ -18,6 +18,7 @@ from app.api.category_overrides import router as category_overrides_router
 from app.api.credentials import router as credentials_router
 from app.api.journal import router as journal_router
 from app.api.reports import router as reports_router
+from app.api.sentinel import router as sentinel_router
 from app.api.tools import consolidated_router, router as tools_router
 from app.api.transactions import router as transactions_router
 from app.api.workspaces import router as workspaces_router
@@ -80,6 +81,7 @@ app.include_router(tax_status_router)
 app.include_router(reports_router)
 app.include_router(cash_position_router)
 app.include_router(transactions_router)
+app.include_router(sentinel_router)
 app.include_router(tools_router)
 app.include_router(consolidated_router)
 
