@@ -26,6 +26,7 @@ type SearchParams = {
   start?: string;
   end?: string;
   category?: string;
+  account?: string;
   status?: string;
   q?: string;
 };
@@ -48,6 +49,7 @@ export default async function JournalPage(props: {
         startDate: sp.start,
         endDate: sp.end,
         category: sp.category,
+        account: sp.account,
         statusFilter: sp.status,
         search: sp.q,
         limit: 200
@@ -186,13 +188,25 @@ export default async function JournalPage(props: {
               <option value="posted">Posted</option>
               <option value="reversed">Reversed</option>
             </select>
+            {sp.account ? (
+              <>
+                {/* Preserve the drill-down account filter across form submits */}
+                <input type="hidden" name="account" value={sp.account} />
+                <span
+                  className="inline-flex items-center gap-1.5 rounded-md border border-brand-500/40 bg-brand-500/10 px-2 py-1 text-[10px] font-medium text-brand-300"
+                  title={`Drill-down: showing entries that hit ${sp.account}`}
+                >
+                  account: <code className="font-mono">{sp.account}</code>
+                </span>
+              </>
+            ) : null}
             <button
               type="submit"
               className="rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
             >
               Apply
             </button>
-            {(sp.q || sp.start || sp.end || sp.category || sp.status) && (
+            {(sp.q || sp.start || sp.end || sp.category || sp.account || sp.status) && (
               <Link
                 href="/journal"
                 className="rounded-md border border-default bg-surface px-3 py-1.5 text-xs text-ink-tertiary hover:bg-elevated"

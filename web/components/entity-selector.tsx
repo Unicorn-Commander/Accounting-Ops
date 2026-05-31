@@ -21,18 +21,34 @@ const KIND_LABEL: Record<string, string> = {
 
 const CONSOLIDATED_ID = "consolidated";
 
+/**
+ * An entity is the "Setup Sandbox" placeholder when the slug is `setup-sandbox`.
+ * That label leaks the implementation; UI surfaces show "Setup in progress —
+ * entity not finalized" instead.
+ */
+function isSetupSandbox(entity: { slug?: string }): boolean {
+  return entity.slug === "setup-sandbox";
+}
+
 export function EntitySelector({
   entities,
   activeEntityId,
   showConsolidated = true,
   canConsolidate = true,
-  size = "md"
+  size = "md",
+  // When true (default), entities flagged as the "Setup Sandbox" placeholder
+  // are hidden from the dropdown options (but still selectable if currently
+  // active, so the user can see the bound state). The Setup Assistant page
+  // intentionally passes `false` so the placeholder remains visible during
+  // setup.
+  hideSetupSandbox = true
 }: {
   entities: Entity[];
   activeEntityId?: string;
   showConsolidated?: boolean;
   canConsolidate?: boolean;
   size?: "sm" | "md";
+  hideSetupSandbox?: boolean;
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -70,6 +86,14 @@ export function EntitySelector({
       </div>
     );
   }
+
+  // Filter list shown in the dropdown. The currently-active entity is always
+  // shown even when it's a setup-sandbox placeholder.
+  const visibleEntities = hideSetupSandbox
+    ? entities.filter(
+        (e) => !isSetupSandbox(e) || e.id === activeEntityId
+      )
+    : entities;
 
   const consolidated = canConsolidate && showConsolidated
     ? {
@@ -110,6 +134,13 @@ export function EntitySelector({
 
   const isPersonal = "kind" in active && active.kind === "personal";
   const isConsolidated = active.id === CONSOLIDATED_ID;
+  const isActiveSetupSandbox = "slug" in active && isSetupSandbox(active);
+
+  // Display name the user sees in the trigger button — for the setup sandbox
+  // we explicitly avoid leaking the implementation label.
+  const triggerDisplayName = isActiveSetupSandbox
+    ? "Setup in progress"
+    : active.display_name;
 
   return (
     <div className="relative" ref={rootRef}>
@@ -136,7 +167,12 @@ export function EntitySelector({
         ) : (
           <Building2 size={size === "sm" ? 12 : 14} className="text-agent-500" />
         )}
-        <span className="font-medium max-w-[200px] truncate">{active.display_name}</span>
+        <span className="font-medium max-w-[200px] truncate">{triggerDisplayName}</span>
+        {isActiveSetupSandbox && (
+          <span className="rounded-sm bg-pending/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-pending">
+            DRAFT
+          </span>
+        )}
         <ChevronDown
           size={size === "sm" ? 11 : 13}
           className={cn(
@@ -154,14 +190,15 @@ export function EntitySelector({
         >
           <div className="border-b border-subtle px-3 py-2 flex items-center justify-between">
             <p className="text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
-              Entity ({entities.length})
+              Entity ({visibleEntities.length})
             </p>
             <p className="text-[10px] text-ink-disabled">click to switch</p>
           </div>
           <ul className="max-h-80 overflow-y-auto py-1">
-            {entities.map((entity) => {
+            {visibleEntities.map((entity) => {
               const isActive = entity.id === active.id;
               const entityIsPersonal = entity.kind === "personal";
+              const entityIsSandbox = isSetupSandbox(entity);
               return (
                 <li key={entity.id}>
                   <button
@@ -186,8 +223,13 @@ export function EntitySelector({
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <span className={cn("font-medium truncate", isActive && "text-brand-200")}>
-                          {entity.display_name}
+                          {entityIsSandbox ? "Setup in progress" : entity.display_name}
                         </span>
+                        {entityIsSandbox && (
+                          <span className="shrink-0 rounded-sm bg-pending/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-pending">
+                            DRAFT
+                          </span>
+                        )}
                         {entity.hipaa_protected && (
                           <ShieldCheck
                             size={11}
@@ -197,8 +239,10 @@ export function EntitySelector({
                         )}
                       </div>
                       <div className="text-[10px] uppercase tracking-wider text-ink-tertiary">
-                        {KIND_LABEL[entity.kind] ?? entity.kind}
-                        {entity.functional_currency !== "USD" &&
+                        {entityIsSandbox
+                          ? "Entity not finalized"
+                          : (KIND_LABEL[entity.kind] ?? entity.kind)}
+                        {!entityIsSandbox && entity.functional_currency !== "USD" &&
                           ` · ${entity.functional_currency}`}
                       </div>
                     </div>

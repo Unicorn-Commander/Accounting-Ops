@@ -5,7 +5,8 @@ import {
   ShieldCheck,
   Banknote,
   Sparkles,
-  Layers
+  Layers,
+  SkipForward
 } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import {
@@ -20,6 +21,7 @@ import { ApprovalActions } from "@/components/approval-actions";
 import { BankTxnBatchPanel } from "@/components/bank-txn-batch-panel";
 import { RecommendationsView } from "@/app/approvals/recommendations-view";
 import { ClusterReview } from "@/components/approvals/cluster-review";
+import { SkippedQueue } from "@/components/approvals/skipped-queue";
 import { getActiveContext } from "@/lib/active-context";
 import {
   getApprovals,
@@ -34,7 +36,7 @@ import { formatAmount } from "@/lib/journal";
 // Tab definitions
 // -----------------------------------------------------------------------
 
-type Tab = "review" | "rows" | "recommendations";
+type Tab = "review" | "rows" | "recommendations" | "skipped";
 
 // -----------------------------------------------------------------------
 // Helpers for journal_recategorization + compliance_rule rows
@@ -133,12 +135,14 @@ function TabBar({
   active,
   reviewCount,
   btiCount,
-  recCount
+  recCount,
+  skippedCount
 }: {
   active: Tab;
   reviewCount: number;
   btiCount: number;
   recCount: number;
+  skippedCount: number;
 }) {
   const tabs: { id: Tab; label: string; count?: number; icon: React.ReactNode }[] = [
     {
@@ -158,6 +162,12 @@ function TabBar({
       label: "AI scoring",
       count: recCount,
       icon: <Sparkles size={13} />
+    },
+    {
+      id: "skipped",
+      label: "Skipped",
+      count: skippedCount,
+      icon: <SkipForward size={13} />
     }
   ];
 
@@ -212,11 +222,16 @@ export default async function ApprovalsPage({
       ? "rows"
       : sp.tab === "recommendations"
         ? "recommendations"
-        : "review"; // default to the new cluster-card UX
+        : sp.tab === "skipped"
+          ? "skipped"
+          : "review"; // default to the new cluster-card UX
 
-  const [data, categories, recsData, clusters] = await Promise.all([
+  const [data, skippedData, categories, recsData, clusters] = await Promise.all([
     workspace
       ? getApprovals(workspace.id, { entityId, status: "pending" })
+      : null,
+    workspace
+      ? getApprovals(workspace.id, { entityId, status: "skipped" })
       : null,
     workspace ? getApprovalCategories(workspace.id) : [],
     workspace
@@ -230,6 +245,8 @@ export default async function ApprovalsPage({
   ]);
 
   const approvals = data?.approvals ?? [];
+  const skippedApprovals = skippedData?.approvals ?? [];
+  const skippedCount = skippedData?.total ?? skippedApprovals.length;
   const canDecide = workspace
     ? ["owner", "admin"].includes(workspace.role)
     : false;
@@ -280,12 +297,13 @@ export default async function ApprovalsPage({
         ) : (
           <div className="flex flex-col gap-6">
             {/* Tab bar (show only when there is something to switch to). */}
-            {(reviewCount > 0 || btiApprovals.length > 0) && (
+            {(reviewCount > 0 || btiApprovals.length > 0 || skippedCount > 0) && (
               <TabBar
                 active={activeTab}
                 reviewCount={reviewCount}
                 btiCount={btiApprovals.length}
                 recCount={recCount}
+                skippedCount={skippedCount}
               />
             )}
 
@@ -362,6 +380,13 @@ export default async function ApprovalsPage({
               <RecommendationsView
                 recommendations={recRows}
                 clusters={recClusters}
+                workspaceId={workspace.id}
+                canDecide={canDecide}
+              />
+            ) : activeTab === "skipped" ? (
+              /* ---- Skipped queue (decide later) ---- */
+              <SkippedQueue
+                approvals={skippedApprovals}
                 workspaceId={workspace.id}
                 canDecide={canDecide}
               />

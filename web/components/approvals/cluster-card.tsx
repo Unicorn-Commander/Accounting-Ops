@@ -151,9 +151,37 @@ export function ClusterCard({
     setError(null);
 
     if (decision === "skip") {
-      // Pure client-side; no API call. Parent hides the card.
-      setDecided("skip");
-      onDecided("skip", cluster.approvable_count);
+      // Durable skip — hit the bulk-decide endpoint with decision="skip".
+      // Backend flips each row to status='skipped' and writes a decision_audit
+      // row per item. Returns full result so we can surface partial failures.
+      startTransition(async () => {
+        try {
+          const res = await fetch(
+            `/api/workspaces/${workspaceId}/approvals/bulk-decide`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                cluster_id: cluster.cluster_id,
+                decision: "skip",
+                note: `Cluster skip via /approvals UX (${cluster.cluster_id})`,
+              }),
+            }
+          );
+          const body = (await res.json().catch(() => ({}))) as {
+            ok?: boolean;
+            skipped?: number;
+            failed?: number;
+            detail?: string;
+          };
+          if (!res.ok) throw new Error(body.detail ?? `HTTP ${res.status}`);
+          setDecided("skip");
+          onDecided("skip", body.skipped ?? cluster.approvable_count);
+          router.refresh();
+        } catch (e) {
+          setError(e instanceof Error ? e.message : "Skip failed");
+        }
+      });
       return;
     }
 
