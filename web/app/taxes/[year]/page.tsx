@@ -1,5 +1,18 @@
-// /taxes/[year] — Per-year Form 1120 view.
-// Server component that loads the package and passes it to the client UI.
+// /taxes/[year] — Per-year tax review surface.
+//
+// Routes by entity.kind to the appropriate form variant:
+//   c_corp        -> Form 1120 (full year view: Narrative/Manual/Specialist/Runs/IRS Forms)
+//   s_corp        -> Form 1120-S placeholder + chat handoff
+//   llc           -> Form 1065 placeholder + chat handoff
+//   partnership   -> Form 1065 placeholder + chat handoff
+//   sole_prop     -> Schedule C placeholder + chat handoff
+//   personal      -> Form 1040 placeholder + chat handoff
+//   nonprofit     -> Form 990 placeholder + chat handoff
+//   trust/estate  -> Form 1041 placeholder + chat handoff
+//   unknown       -> Form 1120 fallback with banner
+//
+// Consolidated views always render the Form 1120 surface (it aggregates
+// all entities; the C-Corp narrative is the most informative shape).
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -8,10 +21,7 @@ import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, PageShell, SectionHeader } from "@/components/primitives";
 import { getActiveContext } from "@/lib/active-context";
-import { fetch1120Package } from "@/lib/taxes-1120";
-import { fetchTaxReviewQueue } from "@/lib/tax-review-queue";
-import { fetchSpecialistRuns } from "@/lib/specialist-runs";
-import { YearView } from "./year-view";
+import { EntityKindRouter, titleFor } from "./entity-kind-router";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +47,7 @@ export default async function TaxYearPage(props: {
       <AppShell>
         <PageShell>
           <SectionHeader
-            title={`Form 1120 — ${year}`}
+            title={`Taxes — ${year}`}
             subtitle="No workspace selected"
           />
           <Card>
@@ -57,31 +67,14 @@ export default async function TaxYearPage(props: {
     );
   }
 
-  const entityId =
-    ctx.isConsolidated || !ctx.activeEntity ? "all" : ctx.activeEntity.id;
-  const entityDisplayName = ctx.isConsolidated
-    ? "All entities (consolidated)"
-    : ctx.activeEntity?.display_name ?? "—";
-
   const taxYear = parseInt(year, 10);
 
-  let pkg = null;
-  let fetchError: string | null = null;
-  try {
-    pkg = await fetch1120Package(workspace.id, entityId, taxYear);
-  } catch (e) {
-    fetchError =
-      e instanceof Error ? e.message : "Failed to load Form 1120 package.";
-  }
-
-  // Fetch specialist draft items + run history in parallel.  The CPA
-  // narrative is fetched client-side by NarrativeView so the page renders
-  // fast and the markdown blob (often 30K–50K chars) doesn't sit in the
-  // server-streamed payload.
-  const [reviewQueue, specialistRunsResp] = await Promise.all([
-    fetchTaxReviewQueue(workspace.id, entityId, taxYear),
-    fetchSpecialistRuns(workspace.id, { entityId, taxYear }),
-  ]);
+  // Title + subtitle reflect the form variant routed to (not always 1120).
+  const { title, subtitle } = titleFor(
+    ctx.isConsolidated,
+    ctx.activeEntity,
+    taxYear
+  );
 
   return (
     <AppShell taxYear={taxYear}>
@@ -96,8 +89,8 @@ export default async function TaxYearPage(props: {
         </div>
 
         <SectionHeader
-          title={`Form 1120 — ${year}`}
-          subtitle={`${entityDisplayName} · U.S. Corporation Income Tax Return (CPA review package)`}
+          title={title}
+          subtitle={subtitle}
           action={
             <EntitySelector
               entities={ctx.entities}
@@ -109,61 +102,17 @@ export default async function TaxYearPage(props: {
           }
         />
 
-        {/*
-         * Wrong-entity-kind banner: /taxes/[year] is specifically the Form 1120
-         * (C-Corp) review surface.  If the active entity is anything else —
-         * personal, partnership, S-corp, LLC — there's no 1120 to render.
-         * Surface a one-click switch to the first C-Corp in the workspace
-         * (if any) instead of letting the user stare at empty cards.
-         */}
-        {(() => {
-          const isCCorp = ctx.activeEntity?.kind === "c_corp";
-          const cCorpEntity =
-            !isCCorp && !ctx.isConsolidated
-              ? ctx.entities.find((e) => e.kind === "c_corp")
-              : undefined;
-          if (isCCorp || ctx.isConsolidated) return null;
-          return (
-            <Card className="border-brand-500/40 bg-brand-500/5 mb-3">
-              <p className="text-sm text-ink-primary">
-                Form 1120 is the U.S. Corporation Income Tax Return — it only
-                applies to C-Corp entities. You&apos;re currently viewing{" "}
-                <strong>{entityDisplayName}</strong> ({ctx.activeEntity?.kind}).
-              </p>
-              {cCorpEntity ? (
-                <p className="mt-2 text-xs text-ink-secondary">
-                  Switch to <strong>{cCorpEntity.display_name}</strong> via the
-                  entity selector above to see the {year} Form 1120 package.
-                </p>
-              ) : (
-                <p className="mt-2 text-xs text-ink-tertiary">
-                  No C-Corp entity exists in this workspace.
-                </p>
-              )}
-            </Card>
-          );
-        })()}
-
-        {fetchError ? (
-          <Card>
-            <p className="text-sm text-debit">{fetchError}</p>
-            <p className="mt-1 text-xs text-ink-tertiary">
-              Make sure the entity has posted journal entries for {year} and the
-              cpa-export service is running.
-            </p>
-          </Card>
-        ) : (
-          <YearView
-            pkg={pkg}
-            workspaceId={workspace.id}
-            workspaceSlug={workspace.slug}
-            entityId={entityId}
-            entityDisplayName={entityDisplayName}
-            year={taxYear}
-            taxReviewItems={reviewQueue.items}
-            specialistRuns={specialistRunsResp.items}
-          />
-        )}
+        {/* The router itself is a server component — it picks the form
+            variant per entity.kind and either renders the full YearView
+            (C-Corp) or a chat-handoff placeholder (everything else). */}
+        <EntityKindRouter
+          workspace={workspace}
+          entity={ctx.activeEntity}
+          entities={ctx.entities}
+          isConsolidated={ctx.isConsolidated}
+          canConsolidate={canConsolidate}
+          year={taxYear}
+        />
       </PageShell>
     </AppShell>
   );

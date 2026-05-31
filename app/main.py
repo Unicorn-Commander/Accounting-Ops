@@ -17,6 +17,7 @@ from app.api.irs_forms import router as irs_forms_router
 from app.api.open_items import router as open_items_router
 from app.api.specialist_runs import router as specialist_runs_router
 from app.api.specialist_pdf import router as specialist_pdf_router
+from app.api.specialty_rules import router as specialty_rules_router
 from app.api.tax_knowledge import router as tax_knowledge_router
 from app.api.tax_review import router as tax_review_router
 from app.api.tax_narrative import router as tax_narrative_router
@@ -116,6 +117,7 @@ app.include_router(approval_recommendations_router)
 app.include_router(chat_router)
 app.include_router(specialist_runs_router)
 app.include_router(specialist_pdf_router)
+app.include_router(specialty_rules_router)
 app.include_router(irs_forms_router)
 app.include_router(tax_narrative_router)
 app.include_router(tax_review_router)
