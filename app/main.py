@@ -29,6 +29,7 @@ from app.api.clients import router as clients_router
 from app.api.credentials import router as credentials_router
 from app.api.journal import router as journal_router
 from app.api.members import router as members_router
+from app.api.personal_access_tokens import router as personal_access_tokens_router
 from app.api.reports import router as reports_router
 from app.api.sentinel import router as sentinel_router
 from app.api.setup import router as setup_router
@@ -129,6 +130,7 @@ app.include_router(setup_router)
 app.include_router(cash_position_router)
 app.include_router(transactions_router)
 app.include_router(sentinel_router)
+app.include_router(personal_access_tokens_router)
 app.include_router(tools_router)
 app.include_router(consolidated_router)
 # chat router was already included earlier; do not double-register
@@ -173,14 +175,17 @@ async def well_known_mcp() -> dict:
 
 @app.get("/.well-known/mcps.json", tags=["discovery"])
 async def well_known_mcps() -> dict:
-    """Brigade-ingest manifest — lists ALL exposed MCP tools + their schemas.
+    """Brigade-ingest manifest + PAT mint advertising.
 
     Brigade polls this URL and re-publishes our tools as ``account.<name>``
-    in the aggregated catalog at brigade.unicorncommander.ai. The midboy1
-    deployment has a richer programmatic version of this in
-    ``app/api/discovery.py``; this worktree falls back to a hand-curated
-    list of the 17 registered MCP tools so federation is testable end-to-end
-    without that module.
+    in the aggregated catalog at brigade.unicorncommander.ai. The richer
+    programmatic version lives in ``app/api/discovery.py``; this fallback
+    publishes the curated tool list + the PAT mint flow so external AI
+    clients (Claude Desktop, Cursor, etc.) can mint a bearer without
+    leaving the user's app.
+
+    The ``pat.mint_url`` + ``pat.prefix`` ARE the contract the
+    /settings/pats UI delivers on.
     """
     tools_curated = [
         "analyze_pending_approvals",
@@ -215,6 +220,10 @@ async def well_known_mcps() -> dict:
                 "accounting:admin",
                 "brigade:cross_app",
             ],
+            "pat": {
+                "prefix": "aops_pat_",
+                "mint_url": f"{settings.public_base_url}/settings/pats",
+            },
             "federated_auth": {
                 "trusted_issuer": "https://brigade.unicorncommander.ai",
                 "expected_audience": "accounting-ops",

@@ -38,6 +38,10 @@ const NAV_SECTIONS = [
     ],
   },
   {
+    label: "Settings",
+    items: [["Access Tokens", "/settings/pats"]],
+  },
+  {
     label: null,
     items: [
       ["Connectors", "/connectors"],
