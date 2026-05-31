@@ -140,7 +140,16 @@ def test_pdf_contains_expected_content():
 
 
 def _extract_text(pdf_bytes: bytes) -> str | None:
-    """Best-effort text extraction: pdfplumber → PyPDF2 → None."""
+    """Best-effort text extraction: pdfplumber → pypdf → PyPDF2 → None.
+
+    Order matters: pdfplumber gives the richest text (handles columns,
+    spacing) when installed; ``pypdf`` is the modern maintained successor
+    to ``PyPDF2`` and is what ships in the app container today; ``PyPDF2``
+    is kept as a final fallback for old environments. None means "no
+    extractor available" — caller falls back to a raw byte scan, which is
+    only reliable for uncompressed PDFs (WeasyPrint emits FlateDecode
+    streams by default, so the raw scan WILL fail for the body text).
+    """
     try:
         import io
         import pdfplumber  # type: ignore[import-untyped]
@@ -149,6 +158,21 @@ def _extract_text(pdf_bytes: bytes) -> str | None:
             return "\n".join(
                 page.extract_text() or "" for page in pdf.pages
             )
+    except Exception:
+        pass
+
+    # pypdf (modern, maintained) — preferred over PyPDF2 in new environments.
+    # The accounting-ops container ships with pypdf already as a transitive
+    # dep, so this branch is what actually runs in CI / on midboy1.
+    try:
+        import io
+        import pypdf  # type: ignore[import-untyped]
+
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        return "\n".join(
+            (reader.pages[i].extract_text() or "")
+            for i in range(len(reader.pages))
+        )
     except Exception:
         pass
 

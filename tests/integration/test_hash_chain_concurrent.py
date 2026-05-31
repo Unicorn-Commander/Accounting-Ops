@@ -403,3 +403,151 @@ def _make_first_result(row):
     r.mappings.return_value.first.return_value = row
     r.mappings.return_value.all.return_value = [row]
     return r
+
+
+# ---------------------------------------------------------------------------
+# Issue 2 (audit 2026-05-31): defense-in-depth UNIQUE (entity_id, this_hash)
+# constraint must be recognized by _attempt_chain_insert as idempotent (the
+# data IS already in the DB) rather than as a chain race to retry.
+# ---------------------------------------------------------------------------
+
+
+def test_chain_insert_returns_idempotent_on_entity_this_hash_conflict():
+    """A constraint conflict on uq_je_entity_this_hash (migration 0018) is
+    treated as idempotent.
+
+    Rationale: that constraint can only fire when two writers hashed identical
+    inputs (same prev_hash, same content, same posted_at micro). The existing
+    row IS the same logical post; retrying with a fresh prev_hash would either
+    succeed cleanly (different chain position → different hash) OR hit the
+    source_external_id idempotency branch. Surfacing as _ChainInsertIdempotent
+    here closes the defense-in-depth loop the migration opens.
+    """
+    existing_id = uuid4()
+
+    async def _always_hash_collision(*args, **kwargs):
+        raise _make_integrity_error("uq_je_entity_this_hash")
+
+    session = _FakeChainSession(existing_entry_id=existing_id)
+    with patch("app.journal.posting._insert_journal_entry", _always_hash_collision), patch(
+        "app.journal.posting.get_last_chain_hash",
+        AsyncMock(return_value=b"\x00" * 32),
+    ):
+        outcome = asyncio.run(
+            _attempt_chain_insert(
+                session,
+                je_id=uuid4(),
+                workspace_id=str(uuid4()),
+                entity_id=str(uuid4()),
+                amount_cents=10_00,
+                effective_date=date(2026, 1, 1),
+                debit_account="6210::SaaS",
+                credit_account="1010::Cash",
+                category="SaaS · AI",
+                tier="L",
+                source="test",
+                source_external_id="ext-1",
+                description="x",
+                payee=None,
+                memo=None,
+                reasoning_trace="",
+                model_version="",
+                identity="alice",
+                approving_uid=None,
+                receipt_link_id=None,
+            )
+        )
+    assert isinstance(outcome, _ChainInsertIdempotent), (
+        f"expected idempotent on uq_je_entity_this_hash, got {type(outcome).__name__}"
+    )
+    assert outcome.existing_entry_id == existing_id
+
+
+def test_chain_insert_legitimate_posts_unaffected_by_new_constraint():
+    """The presence of the new constraint mapping must NOT change the
+    happy-path behavior: a post that doesn't conflict still returns None
+    (= clean insert) on the first attempt."""
+    insert_call_count = 0
+
+    async def _fake_insert(*args, **kwargs):
+        nonlocal insert_call_count
+        insert_call_count += 1
+
+    session = _FakeChainSession()
+    with patch("app.journal.posting._insert_journal_entry", _fake_insert), patch(
+        "app.journal.posting.get_last_chain_hash",
+        AsyncMock(return_value=b"\xab" * 32),
+    ):
+        outcome = asyncio.run(
+            _attempt_chain_insert(
+                session,
+                je_id=uuid4(),
+                workspace_id=str(uuid4()),
+                entity_id=str(uuid4()),
+                amount_cents=12_34,
+                effective_date=date(2026, 5, 31),
+                debit_account="6210::SaaS",
+                credit_account="1010::Cash",
+                category="SaaS · AI",
+                tier="L",
+                source="test",
+                source_external_id="legitimate-post-1",
+                description="legitimate",
+                payee=None,
+                memo=None,
+                reasoning_trace="",
+                model_version="",
+                identity="alice",
+                approving_uid=None,
+                receipt_link_id=None,
+            )
+        )
+    assert outcome is None
+    assert insert_call_count == 1
+
+
+def test_chain_insert_other_constraints_still_retry_not_idempotent():
+    """A constraint that is NEITHER uq_je_entity_source_external NOR
+    uq_je_entity_this_hash must still be treated as a chain race (retryable)
+    so the bug-9 fix doesn't regress. Only the two specifically-mapped names
+    short-circuit to idempotent.
+    """
+    attempts = {"n": 0}
+
+    async def _race_then_succeed(*args, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise _make_integrity_error("some_other_constraint")
+        # Second attempt succeeds.
+
+    session = _FakeChainSession()
+    with patch("app.journal.posting._insert_journal_entry", _race_then_succeed), patch(
+        "app.journal.posting.get_last_chain_hash",
+        AsyncMock(return_value=b"\x00" * 32),
+    ):
+        outcome = asyncio.run(
+            _attempt_chain_insert(
+                session,
+                je_id=uuid4(),
+                workspace_id=str(uuid4()),
+                entity_id=str(uuid4()),
+                amount_cents=10_00,
+                effective_date=date(2026, 1, 1),
+                debit_account="6210::SaaS",
+                credit_account="1010::Cash",
+                category="SaaS · AI",
+                tier="L",
+                source="test",
+                source_external_id="ext-1",
+                description="x",
+                payee=None,
+                memo=None,
+                reasoning_trace="",
+                model_version="",
+                identity="alice",
+                approving_uid=None,
+                receipt_link_id=None,
+            )
+        )
+    assert outcome is None  # retried + succeeded
+    assert attempts["n"] == 2
