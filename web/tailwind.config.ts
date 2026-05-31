@@ -62,7 +62,8 @@ export default {
       },
       animation: {
         "pulse-soft": "pulse-soft 1.6s ease-in-out infinite",
-        "fade-in": "fade-in 220ms ease-out"
+        "fade-in": "fade-in 220ms ease-out",
+        "slide-in-left": "slide-in-left 220ms ease-out"
       },
       keyframes: {
         "pulse-soft": {
@@ -72,6 +73,10 @@ export default {
         "fade-in": {
           from: { opacity: "0", transform: "translateY(4px)" },
           to: { opacity: "1", transform: "translateY(0)" }
+        },
+        "slide-in-left": {
+          from: { transform: "translateX(-100%)" },
+          to: { transform: "translateX(0)" }
         }
       }
     }

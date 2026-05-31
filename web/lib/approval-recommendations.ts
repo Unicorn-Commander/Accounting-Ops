@@ -34,7 +34,7 @@ export type ApprovalRecommendation = {
   created_at: string;
   // Target approval fields (joined)
   entity_id: string;
-  approval_status: "pending" | "approved" | "rejected" | "canceled";
+  approval_status: "pending" | "approved" | "rejected" | "canceled" | "skipped";
   amount: string | null;
   currency_code: string | null;
   payload: Record<string, unknown> | null;

@@ -67,6 +67,33 @@ export type ClientsDashboard = {
   total_open_items: number;
 };
 
+export type TriageRoute =
+  | "deadline_soon"
+  | "needs_cpa"
+  | "waiting_on_client"
+  | "stale"
+  | "ok";
+
+export type TriageWorkspace = Workspace & {
+  open_items_count: number;
+  needs_cpa_count: number;
+  waiting_on_client_count: number;
+  upcoming_deadline: string | null;
+  days_to_deadline: number | null;
+  last_client_activity_at: string | null;
+  suggested_route: TriageRoute;
+  entity_scope?: string[] | null;
+};
+
+export type ClientsTriage = {
+  persona: "platform_admin" | "cpa" | "client";
+  workspaces: TriageWorkspace[];
+  total_workspaces: number;
+  total_open_items: number;
+  total_needs_cpa: number;
+  total_waiting_on_client: number;
+};
+
 export type Entity = {
   id: string;
   slug: string;
@@ -132,6 +159,10 @@ export async function getClientsDashboard(): Promise<ClientsDashboard | null> {
   return await apiFetch<ClientsDashboard>("/api/me/clients");
 }
 
+export async function getClientsTriage(): Promise<ClientsTriage | null> {
+  return await apiFetch<ClientsTriage>("/api/me/clients/triage");
+}
+
 export type CpaRecentActivityItem = {
   id: string;
   workspace_id: string;
@@ -140,6 +171,9 @@ export type CpaRecentActivityItem = {
   outcome: string;
   model_version: string | null;
   created_at: string;
+  /** Deep-link path the UI should push to AFTER switching the workspace
+   *  cookie. Backend computes this from the tool name. */
+  deep_link_path?: string | null;
 };
 
 export async function getCpaRecentActivity(

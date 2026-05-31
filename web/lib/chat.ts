@@ -20,6 +20,9 @@ export type ChatPersona = {
   slug: string;
   display_name: string;
   one_line: string;
+  /** Optional tier — present when the backend includes it (current
+   *  /api/chat/personas does). Used by the grouped picker UI. */
+  tier?: "strategic" | "operational" | "specialist";
 };
 
 export type ChatPersonasResponse = {

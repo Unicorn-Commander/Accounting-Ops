@@ -527,6 +527,7 @@ async def list_entries(
     start_date: str | None = None,
     end_date: str | None = None,
     category: str | None = None,
+    account: str | None = None,
     status_filter: str | None = None,
     search: str | None = None,
     limit: int = 100,
@@ -539,6 +540,9 @@ async def list_entries(
       - entity_id: scope to one entity
       - start_date / end_date: ISO date strings (effective_date range)
       - category: exact match on category column
+      - account: exact match on EITHER debit_account or credit_account
+                 (used by Reports drill-down: a P&L line's canonical_form
+                 matches one side of every JE that contributes to it)
       - status_filter: 'posted' | 'reversed'
       - search: substring against (payee + description + memo + debit + credit)
     """
@@ -572,6 +576,11 @@ async def list_entries(
         if category:
             where.append("je.category = :category")
             params["category"] = category
+        if account:
+            where.append(
+                "(je.debit_account = :account OR je.credit_account = :account)"
+            )
+            params["account"] = account
         if status_filter:
             where.append("je.status = :status_filter")
             params["status_filter"] = status_filter

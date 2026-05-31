@@ -9,7 +9,8 @@ import {
   getBalanceSheet,
   getCashFlow,
   getProfitAndLoss,
-  get1099NEC
+  get1099NEC,
+  getYearsWithEntries
 } from "@/lib/journal";
 import { cn } from "@/lib/cn";
 
@@ -20,31 +21,46 @@ type SearchParams = {
   year?: string;
 };
 
-const PERIODS = [
+const CURRENT_YEAR = new Date().getFullYear();
+
+// Period chips: the year-bracketed ones are filled in data-driven below from
+// the actual posted entries' year range. MTD/QTD/YTD/Quarter chips stay static.
+const STATIC_PERIODS = [
   { v: "mtd", label: "MTD" },
   { v: "qtd", label: "QTD" },
   { v: "ytd", label: "YTD" },
-  { v: "2026-Q1", label: "Q1" },
-  { v: "2026-Q2", label: "Q2" },
-  { v: "2026", label: "2026" },
-  { v: "2025", label: "2025" }
+  { v: `${CURRENT_YEAR}-Q1`, label: "Q1" },
+  { v: `${CURRENT_YEAR}-Q2`, label: "Q2" }
 ];
-
-const YEARS = ["2026", "2025", "2024", "2023"];
 
 export default async function ReportsPage(props: {
   searchParams: Promise<SearchParams>;
 }) {
   const sp = await props.searchParams;
-  const period = sp.period ?? "ytd";
-  const view = sp.view ?? "pl";
-  const year = sp.year ?? "2026";
   const ctx = await getActiveContext();
   const workspace = ctx.activeWorkspace;
   const entityFilter = ctx.isConsolidated ? "consolidated" : ctx.activeEntity?.id;
   const canConsolidate = ctx.activeWorkspace
     ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
     : false;
+  const view = sp.view ?? "pl";
+
+  // Data-driven year set (fallback to current + prior if API isn't reachable).
+  const yearsData = workspace
+    ? await getYearsWithEntries(workspace.id, entityFilter)
+    : null;
+  const dataYears: number[] = (yearsData?.years && yearsData.years.length > 0)
+    ? yearsData.years
+    : [CURRENT_YEAR, CURRENT_YEAR - 1];
+  const YEARS = dataYears.map(String);
+
+  const PERIODS = [
+    ...STATIC_PERIODS,
+    ...dataYears.slice(0, 5).map((y) => ({ v: String(y), label: String(y) }))
+  ];
+
+  const period = sp.period ?? "ytd";
+  const year = sp.year ?? String(yearsData?.default_year ?? CURRENT_YEAR);
 
   const [pl, bs, cf, ten99] = workspace
     ? await Promise.all([
@@ -142,6 +158,7 @@ export default async function ReportsPage(props: {
         {view === "1099-nec" && ten99 && (
           <Ten99NECView data={ten99} />
         )}
+        {/* End of report views */}
 
         {(!pl && view === "pl") || (!bs && view === "bs") || (!cf && view === "cf") || (!ten99 && view === "1099-nec") ? (
           <Card>
@@ -168,6 +185,23 @@ export default async function ReportsPage(props: {
   );
 }
 
+/**
+ * Build the journal drill-down URL for a report row.
+ * The journal page accepts ?account=<canonical_form>&start=<iso>&end=<iso>
+ * and matches rows where the canonical_form sits on EITHER side of the entry.
+ */
+function journalDrillDownHref(args: {
+  account: string;
+  start?: string;
+  end?: string;
+}): string {
+  const p = new URLSearchParams();
+  p.set("account", args.account);
+  if (args.start) p.set("start", args.start);
+  if (args.end) p.set("end", args.end);
+  return `/journal?${p.toString()}`;
+}
+
 function PLView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getProfitAndLoss>>> }) {
   return (
     <div>
@@ -183,14 +217,31 @@ function PLView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getProfi
         ) : (
           <div className="overflow-x-auto"><table className="w-full min-w-[480px] text-sm">
             <tbody>
-              {data.revenue.lines.map((l) => (
-                <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0">
-                  <td className="px-5 py-2 font-mono text-xs">{l.canonical_form}</td>
-                  <td className="px-5 py-2 text-right font-mono tabular-nums text-credit">
-                    {formatAmount(l.amount)}
-                  </td>
-                </tr>
-              ))}
+              {data.revenue.lines.map((l) => {
+                const href = journalDrillDownHref({
+                  account: l.canonical_form,
+                  start: data.start_date,
+                  end: data.end_date
+                });
+                return (
+                  <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0 hover:bg-white/[0.02]">
+                    <td className="px-5 py-2 font-mono text-xs">
+                      <Link
+                        href={href}
+                        className="hover:text-brand-300 hover:underline focus:outline-none focus-visible:underline"
+                        title={`Show journal entries that hit ${l.canonical_form}`}
+                      >
+                        {l.canonical_form}
+                      </Link>
+                    </td>
+                    <td className="px-5 py-2 text-right font-mono tabular-nums text-credit">
+                      <Link href={href} className="hover:underline focus:outline-none focus-visible:underline">
+                        {formatAmount(l.amount)}
+                      </Link>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
             <tfoot>
               <tr className="border-t-2 border-credit/30 bg-credit/[0.04]">
@@ -211,14 +262,31 @@ function PLView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getProfi
         ) : (
           <div className="overflow-x-auto"><table className="w-full min-w-[480px] text-sm">
             <tbody>
-              {data.expenses.lines.map((l) => (
-                <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0">
-                  <td className="px-5 py-2 font-mono text-xs">{l.canonical_form}</td>
-                  <td className="px-5 py-2 text-right font-mono tabular-nums text-debit">
-                    -{formatAmount(l.amount)}
-                  </td>
-                </tr>
-              ))}
+              {data.expenses.lines.map((l) => {
+                const href = journalDrillDownHref({
+                  account: l.canonical_form,
+                  start: data.start_date,
+                  end: data.end_date
+                });
+                return (
+                  <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0 hover:bg-white/[0.02]">
+                    <td className="px-5 py-2 font-mono text-xs">
+                      <Link
+                        href={href}
+                        className="hover:text-brand-300 hover:underline focus:outline-none focus-visible:underline"
+                        title={`Show journal entries that hit ${l.canonical_form}`}
+                      >
+                        {l.canonical_form}
+                      </Link>
+                    </td>
+                    <td className="px-5 py-2 text-right font-mono tabular-nums text-debit">
+                      <Link href={href} className="hover:underline focus:outline-none focus-visible:underline">
+                        -{formatAmount(l.amount)}
+                      </Link>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
             <tfoot>
               <tr className="border-t-2 border-debit/30 bg-debit/[0.04]">
@@ -250,6 +318,8 @@ function PLView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getProfi
 }
 
 function BSView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getBalanceSheet>>> }) {
+  // Balance sheet is "as of" rather than "period", so drill-downs use end-date
+  // only (no start). Journal filter applies effective_date <= end.
   return (
     <div>
       <p className="mb-4 text-xs text-ink-tertiary">
@@ -265,12 +335,23 @@ function BSView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getBalan
           ) : (
             <div className="overflow-x-auto"><table className="w-full min-w-[480px] text-sm">
               <tbody>
-                {data.assets.lines.map((l) => (
-                  <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0">
-                    <td className="px-5 py-2 font-mono text-xs">{l.canonical_form}</td>
-                    <td className="px-5 py-2 text-right font-mono tabular-nums">{formatAmount(l.amount)}</td>
-                  </tr>
-                ))}
+                {data.assets.lines.map((l) => {
+                  const href = journalDrillDownHref({ account: l.canonical_form, end: data.as_of });
+                  return (
+                    <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0 hover:bg-white/[0.02]">
+                      <td className="px-5 py-2 font-mono text-xs">
+                        <Link href={href} className="hover:text-brand-300 hover:underline focus:outline-none focus-visible:underline">
+                          {l.canonical_form}
+                        </Link>
+                      </td>
+                      <td className="px-5 py-2 text-right font-mono tabular-nums">
+                        <Link href={href} className="hover:underline focus:outline-none focus-visible:underline">
+                          {formatAmount(l.amount)}
+                        </Link>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
               <tfoot>
                 <tr className="border-t-2 border-credit/30 bg-credit/[0.04]">
@@ -293,12 +374,23 @@ function BSView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getBalan
           ) : (
             <div className="overflow-x-auto"><table className="w-full min-w-[480px] text-sm">
               <tbody>
-                {data.liabilities.lines.map((l) => (
-                  <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0">
-                    <td className="px-5 py-2 font-mono text-xs">{l.canonical_form}</td>
-                    <td className="px-5 py-2 text-right font-mono tabular-nums">{formatAmount(l.amount)}</td>
-                  </tr>
-                ))}
+                {data.liabilities.lines.map((l) => {
+                  const href = journalDrillDownHref({ account: l.canonical_form, end: data.as_of });
+                  return (
+                    <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0 hover:bg-white/[0.02]">
+                      <td className="px-5 py-2 font-mono text-xs">
+                        <Link href={href} className="hover:text-brand-300 hover:underline focus:outline-none focus-visible:underline">
+                          {l.canonical_form}
+                        </Link>
+                      </td>
+                      <td className="px-5 py-2 text-right font-mono tabular-nums">
+                        <Link href={href} className="hover:underline focus:outline-none focus-visible:underline">
+                          {formatAmount(l.amount)}
+                        </Link>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
               <tfoot>
                 <tr className="border-t-2 border-debit/30 bg-debit/[0.04]">
@@ -316,12 +408,23 @@ function BSView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getBalan
           </div>
           <div className="overflow-x-auto"><table className="w-full min-w-[480px] text-sm">
             <tbody>
-              {data.equity.lines.map((l) => (
-                <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0">
-                  <td className="px-5 py-2 font-mono text-xs">{l.canonical_form}</td>
-                  <td className="px-5 py-2 text-right font-mono tabular-nums">{formatAmount(l.amount)}</td>
-                </tr>
-              ))}
+              {data.equity.lines.map((l) => {
+                const href = journalDrillDownHref({ account: l.canonical_form, end: data.as_of });
+                return (
+                  <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0 hover:bg-white/[0.02]">
+                    <td className="px-5 py-2 font-mono text-xs">
+                      <Link href={href} className="hover:text-brand-300 hover:underline focus:outline-none focus-visible:underline">
+                        {l.canonical_form}
+                      </Link>
+                    </td>
+                    <td className="px-5 py-2 text-right font-mono tabular-nums">
+                      <Link href={href} className="hover:underline focus:outline-none focus-visible:underline">
+                        {formatAmount(l.amount)}
+                      </Link>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
             <tfoot>
               <tr className="border-t-2 border-brand-500/30 bg-brand-500/[0.04]">

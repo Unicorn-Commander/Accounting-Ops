@@ -10,9 +10,19 @@ Endpoints:
   GET /api/me/clients   — aggregate every workspace the caller belongs to with
                           open-items + last-active counts in one round trip.
 
+  GET /api/me/clients/triage
+                        — same workspace list, enriched with CPA-triage signals
+                          (needs_cpa, waiting_on_client, upcoming_deadline,
+                          last_client_activity_at, suggested_route). Drives the
+                          /clients triage cards. Backward-compat: the original
+                          /api/me/clients is still served as-is.
+
   GET /api/me/cpa-recent-activity?days=30
                         — recent decision_audit rows where actor_role='cpa'
-                          across every workspace the caller belongs to.
+                          across every workspace the caller belongs to. Now
+                          also returns ``deep_link_path`` per item so the UI
+                          can deep-link into the SPECIFIC workspace + page
+                          after switching (not just /dashboard).
 
 The CPA view never lets the caller see workspaces they don't already have a
 membership row in — the same uc_uid -> workspace_membership lookup the rest of
@@ -227,11 +237,19 @@ async def cpa_recent_activity(
                     )
                 ).mappings().all()
                 for r in res:
-                    items.append({
+                    enriched = {
                         "workspace_id": ws["id"],
                         "workspace_name": ws["name"],
                         **dict(r),
-                    })
+                    }
+                    # Deep-link mapping: route the activity row to the most
+                    # specific page in the target workspace based on the
+                    # tool that produced it. The web layer cookie-swaps the
+                    # workspace, then router.push(deep_link_path).
+                    enriched["deep_link_path"] = _deep_link_for_tool(
+                        enriched.get("tool")
+                    )
+                    items.append(enriched)
         except Exception as exc:
             _log.info(
                 "[clients] decision_audit peek failed for %s: %s", ws["id"], exc
@@ -239,6 +257,288 @@ async def cpa_recent_activity(
             continue
     items.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     return {"items": items[:200], "days": days}
+
+
+# ---------------------------------------------------------------------------
+# Deep-link map: tool_name -> target page after workspace switch.
+# The audit row carries only the tool name; the UI knows where each tool
+# "belongs" so users land at the right surface rather than always /dashboard.
+# ---------------------------------------------------------------------------
+
+_TOOL_TO_PATH: dict[str, str] = {
+    # Approvals surface
+    "approval_decision": "/approvals",
+    "approve_approval": "/approvals",
+    "reject_approval": "/approvals",
+    "skip_approval": "/approvals",
+    "apply_held_recategorization": "/approvals",
+    # Tax surfaces
+    "draft_memo": "/taxes",
+    "flag_for_cpa_review": "/taxes",
+    "resolve_tax_review_item": "/taxes",
+    "get_form_1120_data": "/taxes",
+    # Journal / reports
+    "post_journal_entry": "/journal",
+    "post_correction": "/journal",
+    "verify_chain": "/journal",
+    "get_p_and_l": "/reports",
+    "get_balance_sheet": "/reports",
+    "get_trial_balance": "/reports/trial-balance",
+    # COA / entity
+    "create_entity_with_coa": "/coa",
+    "create_coa_account": "/coa",
+    # Setup / connectors
+    "suggest_connectors": "/connectors",
+    "mark_intake_complete": "/dashboard",
+}
+
+
+def _deep_link_for_tool(tool: str | None) -> str:
+    """Map an audit row tool name to a target page path. Default: /dashboard."""
+    if not tool:
+        return "/dashboard"
+    return _TOOL_TO_PATH.get(tool, "/dashboard")
+
+
+# ---------------------------------------------------------------------------
+# Triage endpoint — same workspace list, enriched with CPA-triage signals.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/me/clients/triage")
+async def list_my_clients_triage(
+    auth: AuthContext = Depends(validate_bearer_token),
+) -> dict[str, Any]:
+    """CPA command-center version of /api/me/clients.
+
+    Enriches each workspace row with:
+      * ``needs_cpa_count``         — tax_review_queue items in 'pending' status
+      * ``waiting_on_client_count`` — approval_queue rows in 'pending' that are
+                                      bank_transaction_import (the user has to
+                                      decide whether to post them) — proxy for
+                                      "we're waiting on the workspace owner"
+      * ``upcoming_deadline``       — earliest future tax_filing_submission
+                                      ``expected_response_by`` (None if none)
+      * ``days_to_deadline``        — int days from now to upcoming_deadline,
+                                      negative if already past
+      * ``last_client_activity_at`` — most recent journal_entry.created_at
+                                      not authored by an AI agent. Proxy for
+                                      "is the client still feeding us data?"
+      * ``suggested_route``         — one of "needs_cpa" | "waiting_on_client"
+                                      | "deadline_soon" | "stale" | "ok",
+                                      derived from the signals above
+
+    Plus the persona detection / role flags from the base endpoint. Returns
+    the workspaces sorted urgent-first (deadline soon > needs_cpa > waiting >
+    stale > ok). Best-effort: workspace-level failures degrade silently.
+    """
+    user_id = await _user_id_for(auth.uc_uid)
+    if user_id is None:
+        return {"persona": "client", "workspaces": []}
+
+    async with SessionLocal() as session:
+        async with session.begin():
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT
+                            w.id::text          AS id,
+                            w.slug              AS slug,
+                            w.display_name      AS display_name,
+                            m.role::text        AS role,
+                            w.isolation_tier::text AS isolation_tier,
+                            w.hipaa_protected   AS hipaa_protected,
+                            m.entity_scope      AS entity_scope,
+                            m.last_active_at    AS last_active_at
+                        FROM public.workspace_membership m
+                        JOIN public.workspace w ON w.id = m.workspace_id
+                        WHERE m.user_id = :user_id
+                          AND w.status = 'active'
+                        ORDER BY w.display_name
+                        """
+                    ),
+                    {"user_id": user_id},
+                )
+            ).mappings().all()
+
+    import datetime as dt
+    now = dt.datetime.now(dt.timezone.utc)
+
+    workspaces: list[dict[str, Any]] = []
+    cpa_count = 0
+    has_platform = False
+
+    for row in rows:
+        entry = dict(row)
+        role = entry["role"]
+        if role == "cpa":
+            cpa_count += 1
+        if role == "platform_admin":
+            has_platform = True
+
+        ent_count = 0
+        open_items = 0
+        needs_cpa = 0
+        waiting_client = 0
+        upcoming_deadline: dt.datetime | None = None
+        last_client_activity: dt.datetime | None = None
+
+        try:
+            async with workspace_session(SessionLocal, row["id"]) as ws:
+                # entity count
+                e_row = (
+                    await ws.execute(
+                        text(
+                            "SELECT count(*) AS c FROM entity WHERE status = 'active'"
+                        )
+                    )
+                ).first()
+                ent_count = e_row.c if e_row else 0
+
+                # CPA review queue (needs_cpa)
+                try:
+                    r = (
+                        await ws.execute(
+                            text(
+                                """
+                                SELECT count(*) AS c FROM tax_review_queue
+                                WHERE status IN ('pending','in_review')
+                                """
+                            )
+                        )
+                    ).first()
+                    needs_cpa = r.c if r else 0
+                    open_items += needs_cpa
+                except Exception:
+                    pass
+
+                # Pending bank-imports as a proxy for "waiting on workspace owner"
+                try:
+                    r = (
+                        await ws.execute(
+                            text(
+                                """
+                                SELECT count(*) AS c FROM approval_queue
+                                WHERE status = 'pending'
+                                  AND subject_type = 'bank_transaction_import'
+                                """
+                            )
+                        )
+                    ).first()
+                    waiting_client = r.c if r else 0
+                    open_items += waiting_client
+                except Exception:
+                    pass
+
+                # Upcoming filing deadline
+                try:
+                    r = (
+                        await ws.execute(
+                            text(
+                                """
+                                SELECT min(expected_response_by) AS d
+                                FROM tax_filing_submission
+                                WHERE expected_response_by IS NOT NULL
+                                  AND status NOT IN ('closed','acknowledged')
+                                  AND expected_response_by > now() - interval '60 days'
+                                """
+                            )
+                        )
+                    ).first()
+                    upcoming_deadline = r.d if r and r.d else None
+                except Exception:
+                    pass
+
+                # Last NON-agent journal entry == client activity heartbeat
+                try:
+                    r = (
+                        await ws.execute(
+                            text(
+                                """
+                                SELECT max(created_at) AS d
+                                FROM journal_entry
+                                WHERE posted_by_uc_uid IS NOT NULL
+                                """
+                            )
+                        )
+                    ).first()
+                    last_client_activity = r.d if r and r.d else None
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            _log.info(
+                "[clients/triage] workspace %s failed: %s", row["id"], exc
+            )
+
+        days_to_deadline: int | None = None
+        if upcoming_deadline:
+            days_to_deadline = (upcoming_deadline.date() - now.date()).days
+
+        # Suggested route — first applicable, in priority order.
+        suggested = "ok"
+        if days_to_deadline is not None and days_to_deadline <= 14:
+            suggested = "deadline_soon"
+        elif needs_cpa > 0:
+            suggested = "needs_cpa"
+        elif waiting_client > 0:
+            suggested = "waiting_on_client"
+        elif last_client_activity is None or (
+            (now - last_client_activity).days > 30
+        ):
+            suggested = "stale"
+
+        entry["entity_count"] = ent_count
+        entry["open_items_count"] = open_items
+        entry["needs_cpa_count"] = needs_cpa
+        entry["waiting_on_client_count"] = waiting_client
+        entry["upcoming_deadline"] = (
+            upcoming_deadline.isoformat() if upcoming_deadline else None
+        )
+        entry["days_to_deadline"] = days_to_deadline
+        entry["last_client_activity_at"] = (
+            last_client_activity.isoformat() if last_client_activity else None
+        )
+        entry["suggested_route"] = suggested
+        workspaces.append(entry)
+
+    if has_platform:
+        persona = "platform_admin"
+    elif cpa_count >= 1:
+        persona = "cpa"
+    else:
+        persona = "client"
+
+    # Sort: deadline_soon (by days asc) > needs_cpa (desc count) > waiting >
+    #       stale > ok. We do this in one sort key for stability.
+    _route_rank = {
+        "deadline_soon": 0,
+        "needs_cpa": 1,
+        "waiting_on_client": 2,
+        "stale": 3,
+        "ok": 4,
+    }
+
+    def _sort_key(w: dict[str, Any]) -> tuple:
+        r = _route_rank.get(w["suggested_route"], 5)
+        # Deadline: nearest first; missing -> large
+        d = w.get("days_to_deadline")
+        d_key = d if d is not None else 9999
+        return (r, d_key, -w.get("open_items_count", 0), w.get("display_name", ""))
+
+    workspaces.sort(key=_sort_key)
+
+    return {
+        "persona": persona,
+        "workspaces": workspaces,
+        "total_workspaces": len(workspaces),
+        "total_open_items": sum(w["open_items_count"] for w in workspaces),
+        "total_needs_cpa": sum(w["needs_cpa_count"] for w in workspaces),
+        "total_waiting_on_client": sum(
+            w["waiting_on_client_count"] for w in workspaces
+        ),
+    }
 
 
 __all__ = ("router",)

@@ -471,26 +471,18 @@ async def bulk_decide(
     Returns the per-item results from the underlying tool so the UI can
     show "47 of 50 approved; 3 had errors".
     """
-    require_role(workspace, "admin")
-
+    # Role floor: skip is accountant-tolerant (queue triage); approve/reject
+    # remain admin-only (financial attestation).
     decision = body.decision.strip().lower()
     if decision not in ("approve", "reject", "skip"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="decision must be 'approve', 'reject', or 'skip'",
         )
-
-    # 'skip' is a UX-level no-op (the UI tracks skipped state client-side).
     if decision == "skip":
-        return {
-            "ok": True,
-            "decision": "skip",
-            "total": 0,
-            "approved": 0,
-            "rejected": 0,
-            "failed": 0,
-            "results": [],
-        }
+        require_role(workspace, "accountant")
+    else:
+        require_role(workspace, "admin")
 
     # ---- Resolve target approval IDs ----
     if body.cluster_id and body.approval_ids:
@@ -557,6 +549,89 @@ async def bulk_decide(
                 f"got {len(approval_ids)}. Chunk client-side."
             ),
         )
+
+    # ---- Durable bulk-skip path ----
+    # 'skip' bypasses bulk_decide_approvals (which is approve/reject-only):
+    # flip status to 'skipped' in one UPDATE + write a single decision_audit
+    # row per item via the per-row skip endpoint helper. Idempotent for rows
+    # already in 'skipped'.
+    if decision == "skip":
+        from app.tools._audit import write_decision_audit  # local to avoid cycle
+
+        skipped = 0
+        already = 0
+        failed = 0
+        results: list[dict[str, Any]] = []
+
+        async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+            for aid in approval_ids:
+                row = (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT entity_id::text AS entity_id, status
+                            FROM approval_queue
+                            WHERE id = :id
+                            FOR UPDATE
+                            """
+                        ),
+                        {"id": aid},
+                    )
+                ).mappings().first()
+                if row is None:
+                    failed += 1
+                    results.append({
+                        "approval_id": aid, "ok": False, "error": "not_found"
+                    })
+                    continue
+                if row["status"] == "skipped":
+                    already += 1
+                    results.append({
+                        "approval_id": aid, "ok": True, "status": "skipped",
+                        "noop": True,
+                    })
+                    continue
+                if row["status"] != "pending":
+                    failed += 1
+                    results.append({
+                        "approval_id": aid, "ok": False,
+                        "error": f"status_{row['status']}",
+                    })
+                    continue
+                await session.execute(
+                    text(
+                        "UPDATE approval_queue SET status = "
+                        "CAST('skipped' AS approval_status) WHERE id = :id"
+                    ),
+                    {"id": aid},
+                )
+                response = {
+                    "approval_id": aid, "status": "skipped", "noop": False
+                }
+                await write_decision_audit(
+                    session,
+                    workspace_id=workspace_id,
+                    entity_id=UUID(row["entity_id"]),
+                    ctx=workspace,
+                    tool_name="approval_skip",
+                    request_payload={"approval_id": aid, "note": body.note,
+                                      "via": "bulk-decide"},
+                    response_payload=response,
+                    reasoning=body.note or "Bulk-skip via cluster review.",
+                    outcome="skipped",
+                )
+                skipped += 1
+                results.append({"approval_id": aid, "ok": True, **response})
+
+        return {
+            "ok": True,
+            "decision": "skip",
+            "total": len(approval_ids),
+            "skipped": skipped,
+            "noop_already_skipped": already,
+            "failed": failed,
+            "results": results,
+        }
 
     # ---- Build per-item decisions payload ----
     decisions_payload: list[dict[str, Any]] = []

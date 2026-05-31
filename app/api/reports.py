@@ -984,3 +984,69 @@ async def form_1099_nec(
                 "known payment processor — verify the payment rail and the "
                 "payee's tax status before filing.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Years discovery — data-driven period chips on /reports
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/workspaces/{workspace_id}/reports/years-with-entries")
+async def years_with_entries(
+    workspace_id: UUID,
+    entity_id: str | None = None,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict[str, Any]:
+    """Distinct calendar years that have at least one posted journal entry.
+
+    Drives the period/year chip set on /reports and /reports/trial-balance so
+    the UI stops hardcoding 2026/2025. Returns descending years.
+
+    Always includes the current year and the prior year (even if empty) so the
+    chip set never collapses to nothing for a freshly-provisioned workspace.
+    """
+    require_role(workspace, "viewer")
+    if entity_id and entity_id != "consolidated":
+        scope_restriction = assert_entity_in_scope(workspace, UUID(entity_id))
+    else:
+        scope_restriction = assert_entity_in_scope(workspace, None)
+
+    where = ["status = 'posted'"]
+    params: dict[str, Any] = {}
+    if entity_id and entity_id != "consolidated":
+        where.append("entity_id = :eid")
+        params["eid"] = entity_id
+    if scope_restriction is not None:
+        where.append("entity_id = ANY(:entity_scope)")
+        params["entity_scope"] = [str(e) for e in scope_restriction]
+    where_sql = " AND ".join(where)
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        rows = (
+            await session.execute(
+                text(
+                    f"""
+                    SELECT DISTINCT EXTRACT(year FROM effective_date)::int AS y
+                    FROM journal_entry
+                    WHERE {where_sql}
+                    ORDER BY y DESC
+                    """
+                ),
+                params,
+            )
+        ).all()
+
+    data_years = {int(r.y) for r in rows}
+    import datetime as dt
+    today = dt.date.today()
+    # Always include the current and prior year so the UI has chips even when
+    # the workspace has zero posted entries.
+    data_years.add(today.year)
+    data_years.add(today.year - 1)
+    years_sorted = sorted(data_years, reverse=True)
+
+    return {
+        "years": years_sorted,
+        "default_year": today.year,
+        "current_year": today.year,
+    }

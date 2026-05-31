@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Fragment, type FormEvent } from "react";
 import { Check, RefreshCw, X } from "lucide-react";
@@ -11,6 +12,13 @@ import {
   type TrialBalance,
   type TrialBalanceAccount,
 } from "@/lib/reports-trial-balance";
+
+function journalDrillDownHref(account: string, endDate: string): string {
+  const p = new URLSearchParams();
+  p.set("account", account);
+  p.set("end", endDate);
+  return `/journal?${p.toString()}`;
+}
 
 type AccountGroup = "asset" | "liability" | "equity" | "revenue" | "expense";
 
@@ -160,35 +168,50 @@ export function TrialBalanceView({
                         {GROUP_LABELS[group]}
                       </td>
                     </tr>
-                    {groupRows.map((row) => (
-                      <tr
-                        key={row.canonical_form}
-                        className="border-b border-subtle/40 last:border-b-0"
-                      >
-                        <td className="px-5 py-2.5 font-mono text-xs">
-                          {row.canonical_form}
-                        </td>
-                        <td className="px-5 py-2.5 text-xs text-ink-secondary">
-                          {row.account_type}
-                        </td>
-                        <td className="px-5 py-2.5 text-right font-mono tabular-nums">
-                          {centsToDollars(row.total_debit)}
-                        </td>
-                        <td className="px-5 py-2.5 text-right font-mono tabular-nums">
-                          {centsToDollars(row.total_credit)}
-                        </td>
-                        <td
-                          className={cn(
-                            "px-5 py-2.5 text-right font-mono tabular-nums",
-                            row.net_balance.startsWith("-")
-                              ? "text-debit"
-                              : "text-credit"
-                          )}
+                    {groupRows.map((row) => {
+                      const href = journalDrillDownHref(row.canonical_form, asOf);
+                      return (
+                        <tr
+                          key={row.canonical_form}
+                          className="border-b border-subtle/40 last:border-b-0 hover:bg-white/[0.02]"
                         >
-                          {centsToDollars(row.net_balance)}
-                        </td>
-                      </tr>
-                    ))}
+                          <td className="px-5 py-2.5 font-mono text-xs">
+                            <Link
+                              href={href}
+                              className="hover:text-brand-300 hover:underline focus:outline-none focus-visible:underline"
+                              title={`Show journal entries that hit ${row.canonical_form}`}
+                            >
+                              {row.canonical_form}
+                            </Link>
+                          </td>
+                          <td className="px-5 py-2.5 text-xs text-ink-secondary">
+                            {row.account_type}
+                          </td>
+                          <td className="px-5 py-2.5 text-right font-mono tabular-nums">
+                            <Link href={href} className="hover:underline focus:outline-none focus-visible:underline">
+                              {centsToDollars(row.total_debit)}
+                            </Link>
+                          </td>
+                          <td className="px-5 py-2.5 text-right font-mono tabular-nums">
+                            <Link href={href} className="hover:underline focus:outline-none focus-visible:underline">
+                              {centsToDollars(row.total_credit)}
+                            </Link>
+                          </td>
+                          <td
+                            className={cn(
+                              "px-5 py-2.5 text-right font-mono tabular-nums",
+                              row.net_balance.startsWith("-")
+                                ? "text-debit"
+                                : "text-credit"
+                            )}
+                          >
+                            <Link href={href} className="hover:underline focus:outline-none focus-visible:underline">
+                              {centsToDollars(row.net_balance)}
+                            </Link>
+                          </td>
+                        </tr>
+                      );
+                    })}
                     <tr className="bg-white/[0.025]">
                       <td className="px-5 py-2 text-xs font-semibold uppercase tracking-wider">
                         {GROUP_LABELS[group]} subtotal
