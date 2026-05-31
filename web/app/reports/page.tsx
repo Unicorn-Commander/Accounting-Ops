@@ -2,7 +2,7 @@ import Link from "next/link";
 import { AlertTriangle, Download } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
-import { Card, PageShell, SectionHeader } from "@/components/primitives";
+import { Card, EmptyState, PageShell, SectionHeader } from "@/components/primitives";
 import { getActiveContext } from "@/lib/active-context";
 import {
   formatAmount,
@@ -144,24 +144,30 @@ export default async function ReportsPage(props: {
         )}
 
         {(!pl && view === "pl") || (!bs && view === "bs") || (!cf && view === "cf") || (!ten99 && view === "1099-nec") ? (
-          <Card>
-            <div className="py-8 text-center">
-              <p className="text-sm font-medium text-ink-secondary">
-                No data to report yet for this period.
-              </p>
-              <p className="mx-auto mt-1 max-w-md text-xs text-ink-tertiary">
-                Reports pull live from the journal&apos;s hash-chained entries.
-                Once you post entries (manually or via the approval queue) for
-                the selected entity and date range, they&apos;ll appear here.
-              </p>
+          // H9: standardised "no posted entries yet" empty state. Primary CTA
+          // sends the user to /journal which is where posted entries live;
+          // secondary route to /approvals for the next-step queue.
+          <EmptyState
+            variant="no-data"
+            title="No posted entries for this period yet."
+            description="Reports pull live from the journal's hash-chained entries. Once you post entries (manually or via the approval queue) for the selected entity and date range, they'll appear here."
+            primaryAction={
+              <Link
+                href="/journal"
+                className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
+              >
+                Open journal
+              </Link>
+            }
+            secondaryAction={
               <Link
                 href="/approvals"
-                className="mt-4 inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
+                className="inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
               >
                 Review pending approvals
               </Link>
-            </div>
-          </Card>
+            }
+          />
         ) : null}
       </PageShell>
     </AppShell>

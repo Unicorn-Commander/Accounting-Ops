@@ -86,7 +86,7 @@ export function Composer({
               disabled={disabled || !value.trim()}
               aria-label="Send message"
               className={cn(
-                "inline-flex h-7 items-center gap-1 rounded-md bg-brand-500 px-2.5 text-[11px] font-medium text-white shadow-brand-glow hover:bg-brand-600",
+                "inline-flex h-7 items-center gap-1 rounded-md bg-brand-500 px-2.5 text-[11px] font-medium text-white hover:bg-brand-600",
                 "disabled:cursor-not-allowed disabled:opacity-40"
               )}
             >

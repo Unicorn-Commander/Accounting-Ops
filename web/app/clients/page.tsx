@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
-import { Card, PageShell, SectionHeader } from "@/components/primitives";
+import { Card, EmptyState, PageShell, SectionHeader } from "@/components/primitives";
+import { Users } from "lucide-react";
 import { ClientsTable } from "@/components/clients-table";
 import { getClientsDashboard, getCpaRecentActivity } from "@/lib/api";
 
@@ -25,11 +26,26 @@ export default async function ClientsPage() {
         />
 
         {!dashboard ? (
-          <Card>
-            <p className="text-sm text-ink-tertiary">
-              No workspaces found. Ask a workspace owner to invite you.
-            </p>
-          </Card>
+          // H9: empty state for CPAs with no assigned clients (also covers
+          // founders with zero workspaces). Uses the permission-denied tone
+          // since "ask the owner to invite you" is the actual recovery path.
+          <EmptyState
+            variant="permission-denied"
+            icon={<Users size={28} className="text-ink-disabled" aria-hidden="true" />}
+            title="No clients assigned yet."
+            description="A workspace owner needs to invite you with the CPA or accountant role before assigned clients show up here."
+          />
+        ) : dashboard.workspaces.length === 0 ? (
+          <EmptyState
+            variant="no-data"
+            icon={<Users size={28} className="text-ink-disabled" aria-hidden="true" />}
+            title="No clients in this view yet."
+            description={
+              dashboard.persona === "cpa"
+                ? "Once a workspace owner invites you to their books, the client will appear here with open items and review status."
+                : "You belong to no workspaces. Ask an owner to invite you, or create your own from /setup."
+            }
+          />
         ) : (
           <div className="flex flex-col gap-6">
             <ClientsTable

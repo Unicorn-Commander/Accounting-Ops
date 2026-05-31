@@ -117,7 +117,7 @@ export function PeriodCloseClient({
   return (
     <div className="space-y-5">
       {toast ? (
-        <div className="rounded-xl border border-credit/30 bg-credit/[0.06] px-4 py-3 text-sm text-credit">
+        <div className="rounded-lg border border-credit/30 bg-credit/[0.06] px-4 py-3 text-sm text-credit">
           <span className="inline-flex items-center gap-2">
             <Check size={16} />
             {toast}
@@ -125,7 +125,7 @@ export function PeriodCloseClient({
         </div>
       ) : null}
       {error ? (
-        <div className="rounded-xl border border-debit/30 bg-debit/[0.06] px-4 py-3 text-sm text-debit">
+        <div className="rounded-lg border border-debit/30 bg-debit/[0.06] px-4 py-3 text-sm text-debit">
           {error}
         </div>
       ) : null}
@@ -259,7 +259,7 @@ export function PeriodCloseClient({
 
       {confirmOpen && selectedEntity ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-canvas/85 px-4 backdrop-blur-sm">
-          <div className="w-full max-w-lg rounded-xl border border-default bg-surface p-5 shadow-card">
+          <div className="w-full max-w-lg rounded-lg border border-default bg-surface p-5 shadow-card">
             <div className="flex items-start gap-3">
               <div className="mt-0.5 rounded-full bg-debit/15 p-2 text-debit">
                 <AlertTriangle size={18} />

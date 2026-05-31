@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2, Pencil, Plus, Trash2, X, Check } from "lucide-react";
-import { Card } from "@/components/primitives";
+import { Card, EmptyState } from "@/components/primitives";
 import { cn } from "@/lib/cn";
 
 type Entity = { id: string; display_name: string };
@@ -234,7 +234,7 @@ export function CoaEditor({
             </div>
             <button
               onClick={() => setShowNewForm(!showNewForm)}
-              className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow hover:bg-brand-600 transition"
+              className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600 transition"
             >
               {showNewForm ? <X size={13} /> : <Plus size={13} />}
               {showNewForm ? "Cancel" : "Add account"}
@@ -305,32 +305,29 @@ export function CoaEditor({
           )}
 
           {accounts.length === 0 && !loading && (
-            // Audit quick-win #8: offer Setup Assistant + add-account as the
-            // next steps; the previous "Add the first account" link was an
-            // empty literal absence with no path to a default COA.
-            <div className="rounded-xl border border-default bg-surface p-8 text-center text-sm text-ink-tertiary">
-              <p className="text-ink-secondary">
-                No accounts yet for this entity.
-              </p>
-              <p className="mt-2 text-xs text-ink-tertiary">
-                Most users let the Setup Assistant seed a default Chart of
-                Accounts based on the entity type, then customise from there.
-              </p>
-              <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+            // H9: ported to shared EmptyState primitive. Setup Assistant +
+            // manual-add CTAs preserved from Tier-1 quick-win #8.
+            <EmptyState
+              variant="no-data"
+              title="No accounts yet for this entity."
+              description="Most users let the Setup Assistant seed a default Chart of Accounts based on the entity type, then customise from there."
+              primaryAction={
                 <a
                   href="/setup"
-                  className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow hover:bg-brand-600 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
                 >
                   Run Setup Assistant
                 </a>
+              }
+              secondaryAction={
                 <button
                   onClick={() => setShowNewForm(true)}
                   className="inline-flex items-center gap-1.5 rounded-md border border-default bg-surface px-3 py-1.5 text-xs font-medium text-ink-secondary hover:bg-elevated transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
                 >
                   <Plus size={12} /> Add account manually
                 </button>
-              </div>
-            </div>
+              }
+            />
           )}
 
           {ACCOUNT_TYPE_ORDER.filter((t) => grouped[t]?.length > 0).map((type) => (

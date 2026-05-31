@@ -30,6 +30,7 @@ import {
   AlertTriangle,
   SkipForward,
   Flag,
+  Info,
   X
 } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -276,7 +277,7 @@ export function ClusterCard({
           ? "Rejected"
           : "Skipped";
     return (
-      <div className={cn("rounded-xl border px-4 py-3", tone)}>
+      <div className={cn("rounded-lg border px-4 py-3", tone)}>
         <p className="flex items-center gap-2 text-sm">
           <Check size={14} />
           <span className="font-semibold">{cluster.vendor_signature}</span>
@@ -317,7 +318,7 @@ export function ClusterCard({
   return (
     <div
       className={cn(
-        "rounded-xl border bg-surface transition-colors",
+        "rounded-lg border bg-surface transition-colors",
         confidenceBorder(cluster.confidence)
       )}
     >
@@ -360,6 +361,44 @@ export function ClusterCard({
             <span className="text-ink-tertiary">Dates</span>{" "}
             <span className="font-mono">{dateLabel}</span>
           </span>
+        </div>
+
+        {/* H7: "Why grouped" rationale — explains the clustering criteria so
+            a user reviewing 310 decisions can trust the bundle. The rationale
+            is computed from row signal (vendor signature + suggested category
+            + flag count) rather than the opaque cluster_id. Raw cluster_id
+            moves to a debug-only tooltip on the Info icon below. */}
+        <div className="flex items-start gap-2 rounded-md border border-subtle bg-canvas/40 px-3 py-2 text-[11px] text-ink-secondary">
+          <span title={`Cluster ID: ${cluster.cluster_id}`} className="mt-0.5 shrink-0 text-ink-tertiary">
+            <Info size={12} aria-hidden="true" />
+          </span>
+          <p>
+            <span className="font-semibold text-ink-secondary">
+              Why grouped:
+            </span>{" "}
+            Same normalized vendor (
+            <span className="font-mono text-ink-primary">
+              {cluster.vendor_signature || "—"}
+            </span>
+            ) + same suggested category (
+            <span className="font-mono text-ink-primary">
+              {cluster.category_suggested || "—"}
+            </span>
+            ){cluster.flagged_count > 0 ? " + materiality filter" : " + no material flags"};{" "}
+            <span className="font-medium text-ink-primary">
+              {cluster.approvable_count} of {cluster.count}
+            </span>{" "}
+            eligible for bulk action
+            {cluster.flagged_count > 0 ? (
+              <>
+                ,{" "}
+                <span className="text-pending">
+                  {cluster.flagged_count} excluded for individual review
+                </span>
+              </>
+            ) : null}
+            .
+          </p>
         </div>
 
         {/* Category override dropdown */}

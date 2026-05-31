@@ -2,7 +2,18 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { Mail, Plus, RotateCw, Trash2, XCircle } from "lucide-react";
+import {
+  AlertTriangle,
+  Building2,
+  Check,
+  Layers,
+  Mail,
+  Plus,
+  RotateCw,
+  Trash2,
+  User,
+  XCircle,
+} from "lucide-react";
 import type {
   Entity,
   Invitation,
@@ -61,6 +72,102 @@ function fmtDate(s: string | null | undefined): string {
   }
 }
 
+// ---------------------------------------------------------------------------
+// H11: Confirmation dialog — used in place of native confirm() for member
+// removal + invitation cancellation. Same modal pattern as InviteModal: a
+// fixed overlay with a card, backdrop-click closes, focus trap is implicit
+// because the only interactive elements are the two buttons.
+// ---------------------------------------------------------------------------
+
+function ConfirmDialog({
+  open,
+  title,
+  description,
+  confirmLabel,
+  cancelLabel = "Cancel",
+  destructive = true,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  description: React.ReactNode;
+  confirmLabel: string;
+  cancelLabel?: string;
+  destructive?: boolean;
+  busy?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-canvas/80 backdrop-blur-sm px-4"
+      onClick={onCancel}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="confirm-dialog-title"
+    >
+      <div
+        className="w-full max-w-md rounded-lg border border-default bg-surface p-5 shadow-card"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start gap-3">
+          <AlertTriangle
+            size={18}
+            className={cn(
+              "mt-0.5 shrink-0",
+              destructive ? "text-debit" : "text-pending"
+            )}
+            aria-hidden="true"
+          />
+          <div className="min-w-0 flex-1">
+            <h3 id="confirm-dialog-title" className="text-base font-semibold">
+              {title}
+            </h3>
+            <div className="mt-1 text-xs text-ink-secondary">{description}</div>
+          </div>
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="rounded-md border border-subtle px-3 py-1.5 text-sm text-ink-secondary hover:bg-white/[0.04] disabled:opacity-50"
+            autoFocus
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50",
+              destructive ? "bg-debit hover:bg-debit/90" : "bg-brand-500 hover:bg-brand-600"
+            )}
+          >
+            {busy ? "Working…" : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type ConfirmPayload =
+  | {
+      kind: "remove-member";
+      label: string;
+      userId: string;
+    }
+  | {
+      kind: "cancel-invite";
+      label: string;
+      inviteId: string;
+    };
+
 export function MembersClient({
   workspaceId,
   workspaceName,
@@ -83,6 +190,7 @@ export function MembersClient({
   const [inviting, setInviting] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmPayload | null>(null);
 
   async function callApi(
     path: string,
@@ -116,7 +224,7 @@ export function MembersClient({
           <button
             type="button"
             onClick={() => setInviting(true)}
-            className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600"
+            className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-600"
           >
             <Plus size={14} /> Invite member
           </button>
@@ -170,24 +278,16 @@ export function MembersClient({
                       type="button"
                       disabled={busyId === m.user_id}
                       className="inline-flex items-center gap-1 rounded border border-debit/30 px-2 py-1 text-xs text-debit hover:bg-debit/10 disabled:opacity-50"
-                      onClick={async () => {
-                        if (!confirm(`Remove ${m.email || m.uc_uid}?`)) return;
-                        setBusyId(m.user_id);
-                        setErrMsg(null);
-                        const res = await callApi(
-                          `/api/workspaces/${workspaceId}/members/${m.user_id}`,
-                          "DELETE"
-                        );
-                        setBusyId(null);
-                        if (!res.ok) {
-                          setErrMsg(
-                            (res.data as { detail?: string })?.detail ||
-                              `Remove failed (${res.status})`
-                          );
-                          return;
-                        }
-                        startTransition(() => router.refresh());
-                      }}
+                      onClick={() =>
+                        // H11: native confirm() replaced with shared modal.
+                        // SAFETY: explicit confirm step is required before
+                        //         any DELETE — no path bypasses ConfirmDialog.
+                        setConfirm({
+                          kind: "remove-member",
+                          label: m.email || m.uc_uid,
+                          userId: m.user_id,
+                        })
+                      }
                     >
                       <Trash2 size={12} /> Remove
                     </button>
@@ -263,24 +363,14 @@ export function MembersClient({
                     type="button"
                     disabled={busyId === inv.id}
                     className="inline-flex items-center gap-1 rounded border border-debit/30 px-2 py-1 text-xs text-debit hover:bg-debit/10 disabled:opacity-50"
-                    onClick={async () => {
-                      if (!confirm(`Cancel invitation to ${inv.email}?`)) return;
-                      setBusyId(inv.id);
-                      setErrMsg(null);
-                      const res = await callApi(
-                        `/api/workspaces/${workspaceId}/invitations/${inv.id}/cancel`,
-                        "POST"
-                      );
-                      setBusyId(null);
-                      if (!res.ok) {
-                        setErrMsg(
-                          (res.data as { detail?: string })?.detail ||
-                            `Cancel failed (${res.status})`
-                        );
-                        return;
-                      }
-                      startTransition(() => router.refresh());
-                    }}
+                    onClick={() =>
+                      // H11: native confirm() replaced with shared modal.
+                      setConfirm({
+                        kind: "cancel-invite",
+                        label: inv.email,
+                        inviteId: inv.id,
+                      })
+                    }
                   >
                     <XCircle size={12} /> Cancel
                   </button>
@@ -302,6 +392,89 @@ export function MembersClient({
           }}
         />
       ) : null}
+
+      {/* H11: shared confirmation dialog for member-removal + invite-cancel.
+          Replaces the native confirm() that fired raw browser prompts. */}
+      <ConfirmDialog
+        open={confirm !== null}
+        title={
+          confirm?.kind === "remove-member"
+            ? "Remove member?"
+            : "Cancel invitation?"
+        }
+        description={
+          confirm?.kind === "remove-member" ? (
+            <>
+              <p>
+                <span className="text-ink-primary">{confirm?.label}</span> will
+                lose access to <span className="text-ink-primary">{workspaceName}</span>{" "}
+                immediately.
+              </p>
+              <p className="mt-2 text-ink-tertiary">
+                Their decision history and audit trail stay in place — only
+                the active membership is removed.
+              </p>
+            </>
+          ) : (
+            <>
+              <p>
+                The pending invitation to{" "}
+                <span className="text-ink-primary">{confirm?.label}</span> will
+                be revoked. The magic link in their email stops working
+                immediately.
+              </p>
+              <p className="mt-2 text-ink-tertiary">
+                You can issue a new invitation any time.
+              </p>
+            </>
+          )
+        }
+        confirmLabel={
+          confirm?.kind === "remove-member"
+            ? "Remove member"
+            : "Cancel invitation"
+        }
+        destructive
+        busy={busyId === (confirm?.kind === "remove-member" ? confirm.userId : confirm?.kind === "cancel-invite" ? confirm.inviteId : null)}
+        onCancel={() => setConfirm(null)}
+        onConfirm={async () => {
+          if (!confirm) return;
+          setErrMsg(null);
+          if (confirm.kind === "remove-member") {
+            setBusyId(confirm.userId);
+            const res = await callApi(
+              `/api/workspaces/${workspaceId}/members/${confirm.userId}`,
+              "DELETE"
+            );
+            setBusyId(null);
+            setConfirm(null);
+            if (!res.ok) {
+              setErrMsg(
+                (res.data as { detail?: string })?.detail ||
+                  `Remove failed (${res.status})`
+              );
+              return;
+            }
+            startTransition(() => router.refresh());
+          } else {
+            setBusyId(confirm.inviteId);
+            const res = await callApi(
+              `/api/workspaces/${workspaceId}/invitations/${confirm.inviteId}/cancel`,
+              "POST"
+            );
+            setBusyId(null);
+            setConfirm(null);
+            if (!res.ok) {
+              setErrMsg(
+                (res.data as { detail?: string })?.detail ||
+                  `Cancel failed (${res.status})`
+              );
+              return;
+            }
+            startTransition(() => router.refresh());
+          }
+        }}
+      />
     </div>
   );
 }
@@ -354,7 +527,7 @@ function InviteModal({
       onClick={() => onClose(false)}
     >
       <div
-        className="w-full max-w-md rounded-xl border border-default bg-surface p-5 shadow-card"
+        className="w-full max-w-md rounded-lg border border-default bg-surface p-5 shadow-card"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="text-base font-semibold">Invite member</h3>
@@ -400,28 +573,80 @@ function InviteModal({
             </select>
           </label>
 
-          <label className="block text-xs font-medium text-ink-secondary">
-            Restrict to entities (optional)
-            <select
-              multiple
-              value={scope}
-              onChange={(e) =>
-                setScope(
-                  Array.from(e.target.selectedOptions).map((o) => o.value)
-                )
-              }
-              className="mt-1 block h-28 w-full rounded-md border border-default bg-elevated px-3 py-2 text-sm"
-            >
-              {entities.map((ent) => (
-                <option key={ent.id} value={ent.id}>
-                  {ent.display_name}
-                </option>
-              ))}
-            </select>
-            <span className="mt-1 block text-[10px] text-ink-tertiary">
-              Leave empty for full workspace access (cmd/ctrl-click to multi-select).
-            </span>
-          </label>
+          {/*
+           * H11: <select multiple> replaced with mobile-friendly checkbox
+           * cards. iPhone users couldn't multi-select with cmd/ctrl; CPAs
+           * found the affordance confusing. Each entity shows its display
+           * name + a kind chip so users can confirm scope at a glance.
+           */}
+          <div>
+            <label className="block text-xs font-medium text-ink-secondary">
+              Restrict to entities (optional)
+            </label>
+            <p className="mt-1 text-[10px] text-ink-tertiary">
+              Leave all unchecked for full workspace access.
+            </p>
+            {entities.length === 0 ? (
+              <p className="mt-2 rounded-md border border-subtle bg-elevated px-3 py-2 text-xs text-ink-tertiary">
+                No entities to choose from yet.
+              </p>
+            ) : (
+              <div className="mt-2 max-h-56 space-y-1.5 overflow-y-auto rounded-md border border-default bg-elevated/40 p-2">
+                {entities.map((ent) => {
+                  const checked = scope.includes(ent.id);
+                  // Choose icon by entity kind for fast visual scan.
+                  const kind = (ent as Entity & { kind?: string }).kind ?? "";
+                  const KindIcon = kind === "individual"
+                    ? User
+                    : kind === "consolidated"
+                      ? Layers
+                      : Building2;
+                  return (
+                    <label
+                      key={ent.id}
+                      className={cn(
+                        "flex cursor-pointer items-center gap-3 rounded-md border px-3 py-2 transition",
+                        checked
+                          ? "border-brand-500/60 bg-brand-500/[0.08]"
+                          : "border-subtle bg-surface hover:bg-white/[0.04]"
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          setScope((prev) =>
+                            e.target.checked
+                              ? [...prev, ent.id]
+                              : prev.filter((x) => x !== ent.id)
+                          );
+                        }}
+                        className="h-4 w-4 shrink-0 accent-brand-500"
+                        aria-label={`Include ${ent.display_name}`}
+                      />
+                      <KindIcon size={14} className="shrink-0 text-ink-tertiary" />
+                      <span className="min-w-0 flex-1 truncate text-sm text-ink-primary">
+                        {ent.display_name}
+                      </span>
+                      {kind ? (
+                        <span className="shrink-0 rounded-full border border-subtle bg-white/[0.04] px-2 py-0.5 text-[10px] uppercase tracking-wider text-ink-tertiary">
+                          {kind.replace(/_/g, " ")}
+                        </span>
+                      ) : null}
+                      {checked ? (
+                        <Check size={12} className="shrink-0 text-brand-400" aria-hidden="true" />
+                      ) : null}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            {scope.length > 0 ? (
+              <p className="mt-1.5 text-[10px] text-brand-300">
+                {scope.length} entit{scope.length === 1 ? "y" : "ies"} selected
+              </p>
+            ) : null}
+          </div>
 
           <label className="block text-xs font-medium text-ink-secondary">
             Expires after (days)
@@ -447,7 +672,7 @@ function InviteModal({
           <button
             type="button"
             disabled={!email || busy}
-            className="rounded-md bg-brand-500 px-3 py-1.5 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600 disabled:opacity-50"
+            className="rounded-md bg-brand-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-600 disabled:opacity-50"
             onClick={async () => {
               setBusy(true);
               setErr(null);

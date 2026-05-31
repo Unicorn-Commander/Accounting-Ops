@@ -109,7 +109,7 @@ export function BankTxnImportRow({
 
   if (done) {
     return (
-      <div className="flex items-center justify-between rounded-xl border border-default bg-surface px-4 py-3 opacity-60">
+      <div className="flex items-center justify-between rounded-lg border border-default bg-surface px-4 py-3 opacity-60">
         <span className="font-mono text-xs text-ink-tertiary">
           {p.source_external_id}
         </span>
@@ -131,7 +131,7 @@ export function BankTxnImportRow({
   return (
     <div
       className={cn(
-        "rounded-xl border bg-surface transition",
+        "rounded-lg border bg-surface transition",
         selected ? "border-brand-500/60 bg-brand-500/[0.04]" : "border-default"
       )}
     >

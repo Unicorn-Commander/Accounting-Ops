@@ -11,7 +11,6 @@
 
 import { useEffect, useState } from "react";
 import {
-  AlertTriangle,
   Download,
   FileText,
   Loader2,
@@ -21,7 +20,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Card } from "@/components/primitives";
+import { Card, ErrorState } from "@/components/primitives";
 import { DraftMarkdownViewer } from "@/components/draft-markdown-viewer";
 import { cn } from "@/lib/cn";
 import type { SpecialistRun } from "@/lib/specialist-runs";
@@ -335,7 +334,10 @@ export function NarrativeView({
           </div>
         </div>
 
-        {/* Status pill row */}
+        {/* Status pill row — DRAFT pill removed in Tier-2 H8 (the
+            persistent full-width band above the tabs is now the source of
+            truth for draft/CPA-sign-off state). We keep the size/loading
+            chips for at-a-glance debugging. */}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {loading && !refreshing && (
             <span className="inline-flex items-center gap-1.5 rounded-full border border-default bg-elevated px-2.5 py-0.5 text-[10px] text-ink-tertiary">
@@ -343,17 +345,12 @@ export function NarrativeView({
               loading
             </span>
           )}
-          {stamp && (
+          {stamp && stamp.status === "missing" && (
             <span
               title={stamp.detail}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[10px] font-medium",
-                stamp.status === "present"
-                  ? "border-pending/40 bg-pending/[0.08] text-pending"
-                  : "border-debit/40 bg-debit/[0.08] text-debit"
-              )}
+              className="inline-flex items-center gap-1.5 rounded-full border border-debit/40 bg-debit/[0.08] px-2.5 py-0.5 text-[10px] font-medium text-debit"
             >
-              {stamp.status === "present" ? "DRAFT stamp present" : "DRAFT stamp missing"}
+              DRAFT stamp missing — narrative may need re-running
             </span>
           )}
           {markdown && (
@@ -373,29 +370,22 @@ export function NarrativeView({
       )}
 
       {error && !loading && (
-        <Card>
-          <div className="flex flex-col items-center gap-4 py-8 text-center">
-            <AlertTriangle size={32} className="text-pending" />
-            <div>
-              <p className="text-sm font-semibold text-ink-primary">
-                No coordinator narrative yet for {year}.
-              </p>
-              <p className="mx-auto mt-1.5 max-w-md text-xs text-ink-tertiary">
+        // H10: standardised ErrorState. Founder-safe copy on top; the make
+        // target sits inside the admin-only "Technical details" disclosure.
+        <ErrorState
+          variant="warning"
+          title={`No coordinator narrative yet for ${year}.`}
+          description={
+            <>
+              <p>
                 Run the Tax Operations Coordinator to consolidate the
-                specialist drafts into a single plain-English narrative.
-                Either:
+                specialist drafts into a single plain-English narrative, or
+                review each draft individually on the &quot;Specialist
+                draft&quot; tab.
               </p>
-              <div className="mx-auto mt-3 max-w-md rounded-md border border-default bg-elevated px-3 py-2 text-left">
-                <code className="block font-mono text-[11px] text-ink-secondary">
-                  make tax-coordinate \<br />
-                  &nbsp;&nbsp;ENTITY={entityId.slice(0, 8)}… YEAR={year}
-                </code>
-              </div>
-              <p className="mt-3 text-[11px] text-ink-tertiary">
-                Or use the &quot;Specialist draft&quot; tab to review each
-                specialist&apos;s draft individually.
-              </p>
-            </div>
+            </>
+          }
+          recoveryAction={
             <button
               type="button"
               onClick={handleRefresh}
@@ -404,8 +394,16 @@ export function NarrativeView({
               <RefreshCw size={12} />
               Check again
             </button>
-          </div>
-        </Card>
+          }
+          technicalDetails={
+            <>
+              <p className="text-ink-tertiary">Run from the host shell:</p>
+              <code className="mt-1 block">
+                make tax-coordinate ENTITY={entityId.slice(0, 8)}… YEAR={year}
+              </code>
+            </>
+          }
+        />
       )}
 
       {markdown && !loading && (

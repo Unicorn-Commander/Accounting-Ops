@@ -21,7 +21,7 @@ export default async function LoginPage({
       <div className="grid-bg absolute inset-0 pointer-events-none" />
       <div className="relative w-full max-w-md">
         <div className="absolute -inset-x-12 -inset-y-8 bg-gradient-to-tr from-brand-500/10 via-transparent to-agent-500/10 blur-2xl" />
-        <div className="relative rounded-xl border border-default bg-surface p-8 shadow-card">
+        <div className="relative rounded-lg border border-default bg-surface p-8 shadow-card">
           <div className="flex items-center gap-3">
             <Logo />
             <div>

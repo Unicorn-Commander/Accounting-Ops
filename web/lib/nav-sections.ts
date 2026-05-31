@@ -6,8 +6,18 @@
 //
 // Each item carries a lucide icon (used by the desktop collapsed-rail) and a
 // human-facing label. Sections labelled `Admin` are gated by `canAdmin`.
+//
+// I15 (Tier-2): groups reorganised from arbitrary buckets to job-based
+// sections: Work, Books, Taxes, Team, Admin. Settings/admin pages are
+// consolidated under one Admin area instead of being scattered across
+// Settings/Reports/etc. Renamed labels:
+//   Agent activity        -> Activity log    (already in Tier-1)
+//   Specialty Rules       -> Rules
+//   CPA Export            -> Handoff
+//   Personal Access Tokens-> MCP Access Tokens
 
 import {
+  Activity,
   BarChart3,
   BookOpen,
   Cog,
@@ -24,7 +34,6 @@ import {
   Plug,
   Receipt,
   ShieldCheck,
-  Sparkles,
   Target,
   TrendingUp,
   Users,
@@ -42,54 +51,75 @@ export type NavSection = {
   adminOnly?: boolean;
 };
 
-// Ordered top-to-bottom in the rendered sidebar. The first (unlabeled) section
-// is the "work surface": daily action loop. Subsequent labeled sections group
-// reporting, admin, and settings.
+// Ordered top-to-bottom in the rendered sidebar. Section groups follow the
+// daily user mental model: Work (daily action loop) → Books (the ledger) →
+// Taxes (CPA-facing) → Team (people + permissions) → Admin (system).
 export const NAV_SECTIONS: NavSection[] = [
   {
-    label: null,
+    // Daily action loop — Dashboard + Open items + Chat + the approvals queue.
+    label: "Work",
     items: [
       { label: "Dashboard", href: "/dashboard", icon: Home },
       { label: "Open items", href: "/open-items", icon: Target },
       { label: "Chat", href: "/chat", icon: MessageSquare },
+      { label: "Approvals", href: "/approvals", icon: Inbox },
+      { label: "Activity log", href: "/agent-activity", icon: Activity },
+    ],
+  },
+  {
+    // The bookkeeping surfaces — what you do TO the ledger.
+    label: "Books",
+    items: [
       { label: "Transactions", href: "/transactions", icon: Receipt },
       { label: "Reconciliation", href: "/reconciliation-queue", icon: ListChecks },
-      { label: "Approvals", href: "/approvals", icon: Inbox },
-      { label: "Activity log", href: "/agent-activity", icon: Sparkles },
       { label: "Journal", href: "/journal", icon: BookOpen },
       { label: "Chart of Accounts", href: "/coa", icon: Database },
-    ],
-  },
-  {
-    label: "Reports",
-    items: [
       { label: "Reports", href: "/reports", icon: TrendingUp },
       { label: "Trial Balance", href: "/reports/trial-balance", icon: BarChart3 },
-      { label: "Taxes", href: "/taxes", icon: FileText },
-      { label: "CPA Export", href: "/cpa-export", icon: FileSpreadsheet },
     ],
   },
   {
+    // Tax surfaces — CPA-facing.
+    label: "Taxes",
+    items: [
+      { label: "Taxes", href: "/taxes", icon: FileText },
+      // I15: "CPA Export" -> "Handoff" (the route stays /cpa-export so links
+      // keep working).
+      { label: "Handoff", href: "/cpa-export", icon: FileSpreadsheet },
+    ],
+  },
+  {
+    // People + permissions — managing who's in the workspace.
+    label: "Team",
+    items: [
+      { label: "Members", href: "/settings/members", icon: Users },
+      { label: "Clients", href: "/clients", icon: Users },
+    ],
+  },
+  {
+    // I15: One consolidated Admin area for all system/owner settings.
+    // Sentinel + Period Close (admin-only) sit alongside Rules + MCP Tokens
+    // so admins find configuration in one place.
     label: "Admin",
+    items: [
+      // I15: "Specialty Rules" -> "Rules"
+      { label: "Rules", href: "/specialty-rules", icon: Cog },
+      { label: "Sentinel", href: "/settings/sentinel", icon: ShieldCheck },
+      // I15: "Personal Access Tokens" -> "MCP Access Tokens"
+      { label: "MCP Access Tokens", href: "/settings/pats", icon: Key },
+      { label: "Connectors", href: "/connectors", icon: Plug },
+    ],
+  },
+  {
+    // adminOnly section — gated by canAdmin in the rendering components.
+    label: "Admin only",
     adminOnly: true,
     items: [
       { label: "Period Close", href: "/admin/period-close", icon: ShieldCheck },
     ],
   },
   {
-    label: "Settings",
-    items: [
-      { label: "Members", href: "/settings/members", icon: Users },
-      { label: "Sentinel", href: "/settings/sentinel", icon: ShieldCheck },
-      { label: "Access Tokens", href: "/settings/pats", icon: Key },
-      { label: "Specialty Rules", href: "/specialty-rules", icon: Cog },
-    ],
-  },
-  {
     label: null,
-    items: [
-      { label: "Connectors", href: "/connectors", icon: Plug },
-      { label: "Help", href: "/help", icon: HelpCircle },
-    ],
+    items: [{ label: "Help", href: "/help", icon: HelpCircle }],
   },
 ];

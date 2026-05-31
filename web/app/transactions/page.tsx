@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import { LiveTransactionsTable } from "@/components/transactions-table";
@@ -39,21 +38,18 @@ export default async function TransactionsPage() {
           }
         />
 
+        {/*
+         * H9: removed the "Map accounts to entities" secondary action that
+         * was previously passed as emptyAction. That CTA confused the
+         * not-connected case (where mapping doesn't yet apply) — the
+         * configured-but-empty case still surfaces it via the page-level
+         * unmapped-accounts banner on /reconciliation-queue.
+         */}
         <LiveTransactionsTable
           transactions={txnData?.transactions ?? []}
           daysWindow={txnData?.days_window ?? 90}
           totalCount={txnData?.total_count ?? 0}
           configured={txnData?.configured ?? false}
-          emptyAction={
-            <div className="mt-4">
-              <Link
-                href="/connectors"
-                className="text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
-              >
-                Map accounts to entities →
-              </Link>
-            </div>
-          }
         />
 
         {txnData?.errors && txnData.errors.length > 0 && (

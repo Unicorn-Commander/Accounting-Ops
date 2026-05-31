@@ -80,7 +80,7 @@ function CountTile({
   const inner = (
     <div
       className={cn(
-        "rounded-xl border bg-surface px-4 py-3 transition hover:bg-white/[0.02]",
+        "rounded-lg border bg-surface px-4 py-3 transition hover:bg-white/[0.02]",
         borderCls[tone]
       )}
     >
@@ -609,7 +609,7 @@ function DecisionsSection({
                         })
                       }
                       className={cn(
-                        "rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow transition hover:bg-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
+                        "rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
                         isBusy && "opacity-60"
                       )}
                     >

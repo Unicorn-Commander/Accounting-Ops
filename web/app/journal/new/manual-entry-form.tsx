@@ -5,6 +5,7 @@ import { useEffect, useState, useTransition } from "react";
 import { Loader2 } from "lucide-react";
 import { Card } from "@/components/primitives";
 import { cn } from "@/lib/cn";
+import { MoneyParseError, parseDollars } from "@/lib/money";
 
 type Entity = { id: string; display_name: string };
 type CoaAccount = {
@@ -87,8 +88,20 @@ export function ManualEntryForm({
   async function submit() {
     setError(null);
     setPosted(null);
-    const amountNum = parseFloat(amount);
-    if (Number.isNaN(amountNum) || amountNum === 0) {
+    // Audit 2026-05-31 Bug 14: parse via integer-cents helper instead of
+    // parseFloat + Math.round; rejects more-than-2-decimal-place inputs cleanly.
+    let parsedCents: number;
+    try {
+      parsedCents = parseDollars(amount);
+    } catch (e) {
+      setError(
+        e instanceof MoneyParseError
+          ? e.message
+          : "Amount must be a valid dollar amount"
+      );
+      return;
+    }
+    if (parsedCents === 0) {
       setError("Amount must be a non-zero number");
       return;
     }
@@ -105,7 +118,7 @@ export function ManualEntryForm({
       return;
     }
 
-    const amountCents = Math.round(Math.abs(amountNum) * 100);
+    const amountCents = Math.abs(parsedCents);
     // Determine sign convention: if debit is asset and credit is revenue, this
     // is an inflow (positive). If debit is expense and credit is asset, this
     // is an outflow (negative). We pass the signed amount_cents the backend

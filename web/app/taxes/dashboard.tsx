@@ -99,7 +99,7 @@ function SpecialistModal({ entity, targetYear, onClose }: SpecialistModalProps) 
       onClick={onClose}
     >
       <div
-        className="relative w-full max-w-xl rounded-xl border border-default bg-surface p-6 shadow-2xl"
+        className="relative w-full max-w-xl rounded-lg border border-default bg-surface p-6 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <button

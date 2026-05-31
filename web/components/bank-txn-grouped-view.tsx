@@ -225,7 +225,7 @@ function GroupCard({
   return (
     <div
       className={cn(
-        "rounded-xl border bg-surface",
+        "rounded-lg border bg-surface",
         group.cpaFlag
           ? "border-amber-500/40"
           : isUncategorized
@@ -522,7 +522,7 @@ export function BankTxnGroupedView({
 
   if (groups.length === 0) {
     return (
-      <div className="rounded-xl border border-default bg-surface px-5 py-8 text-center">
+      <div className="rounded-lg border border-default bg-surface px-5 py-8 text-center">
         <p className="text-sm text-ink-secondary">
           Nothing to review — books are caught up.
         </p>
@@ -539,7 +539,7 @@ export function BankTxnGroupedView({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="rounded-xl border border-default bg-elevated px-4 py-2.5 text-xs text-ink-secondary">
+      <div className="rounded-lg border border-default bg-elevated px-4 py-2.5 text-xs text-ink-secondary">
         <span className="font-medium text-ink-primary">{totalRows}</span> rows
         in <span className="font-medium text-ink-primary">{totalGroups}</span>{" "}
         categories

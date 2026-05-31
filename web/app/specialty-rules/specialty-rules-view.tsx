@@ -148,7 +148,7 @@ export function SpecialtyRulesView({
         {canEdit ? (
           <Link
             href="/chat?persona=compliance-rule-author"
-            className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-semibold text-white shadow-brand-glow transition hover:bg-brand-600"
+            className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-brand-600"
             title="New rules route through the Compliance agent so the proposal is audited end-to-end."
           >
             <Plus size={13} /> Propose new rule

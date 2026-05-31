@@ -169,7 +169,7 @@ function ClusterCard({
 
   if (approved) {
     return (
-      <div className="rounded-xl border border-credit/30 bg-credit/[0.04] px-5 py-4">
+      <div className="rounded-lg border border-credit/30 bg-credit/[0.04] px-5 py-4">
         <p className="flex items-center gap-2 text-sm text-credit">
           <Check size={14} />
           {cluster.count} rows approved — ledger updated.
@@ -181,7 +181,7 @@ function ClusterCard({
   return (
     <div
       className={cn(
-        "rounded-xl border bg-surface transition-colors",
+        "rounded-lg border bg-surface transition-colors",
         flagged ? "border-pending/50 bg-pending/[0.03]" : "border-default"
       )}
     >
@@ -362,7 +362,7 @@ function SummaryStrip({
   }
 
   return (
-    <div className="flex flex-wrap gap-3 rounded-xl border border-default bg-elevated px-5 py-3">
+    <div className="flex flex-wrap gap-3 rounded-lg border border-default bg-elevated px-5 py-3">
       <div className="flex items-center gap-2 text-xs">
         <span className="font-medium text-ink-primary">{totalCount}</span>
         <span className="text-ink-secondary">transactions analyzed</span>
@@ -420,7 +420,7 @@ export function RecommendationsView({
 
   if (recommendations.length === 0) {
     return (
-      <div className="rounded-xl border border-default bg-surface px-5 py-10 text-center">
+      <div className="rounded-lg border border-default bg-surface px-5 py-10 text-center">
         <Sparkles size={24} className="mx-auto mb-3 text-ink-tertiary" />
         <p className="text-sm font-medium text-ink-secondary">
           No recommendations yet
@@ -475,7 +475,7 @@ export function RecommendationsView({
       {/* Cluster cards */}
       <div className="flex flex-col gap-3">
         {filteredClusters.length === 0 ? (
-          <div className="rounded-xl border border-default bg-surface px-5 py-6 text-center text-sm text-ink-secondary">
+          <div className="rounded-lg border border-default bg-surface px-5 py-6 text-center text-sm text-ink-secondary">
             No clusters match this filter.
           </div>
         ) : (
@@ -492,7 +492,7 @@ export function RecommendationsView({
       </div>
 
       {!canDecide && (
-        <div className="rounded-xl border border-pending/40 bg-pending/[0.06] px-5 py-3 text-xs text-ink-secondary">
+        <div className="rounded-lg border border-pending/40 bg-pending/[0.06] px-5 py-3 text-xs text-ink-secondary">
           You can review these recommendations, but only an{" "}
           <strong>admin</strong> can approve clusters.
         </div>

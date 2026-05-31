@@ -51,8 +51,11 @@ export default {
         reasoning: ["var(--font-inter)", "system-ui", "sans-serif"]
       },
       fontSize: {
-        "numeric-lg": ["1.75rem", { lineHeight: "1", letterSpacing: "-0.025em", fontWeight: "500" }],
-        "numeric-xl": ["2.5rem", { lineHeight: "1", letterSpacing: "-0.025em", fontWeight: "500" }]
+        // I19: removed negative letter-spacing. Numeric type read too tight
+        // on dense finance tables; restored to natural (0em) so KPIs stay
+        // legible at small viewports.
+        "numeric-lg": ["1.75rem", { lineHeight: "1", fontWeight: "500" }],
+        "numeric-xl": ["2.5rem", { lineHeight: "1", fontWeight: "500" }]
       },
       boxShadow: {
         card: "0 4px 24px rgba(0,0,0,0.4)",

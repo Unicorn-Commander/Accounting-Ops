@@ -139,6 +139,76 @@ function AIGeneratedBadge({
   );
 }
 
+// I13: Outcome-framed badge. Replaces internal agent-name language like
+// "Sentinel surfaced this finding" with user-outcome copy:
+//
+//   AI-flagged · needs CPA review        (outcome=flagged/needs_review/pending)
+//   AI-posted · approved by you          (auto_applied=true, outcome=ok/posted)
+//   AI-posted · pending decision         (auto_applied=true, outcome=queued)
+//   AI-drafted · awaiting your decision  (auto_applied=false, outcome=ok/queued)
+//   AI-resolved · approved by you        (outcome=approved/applied)
+//   AI-blocked · needs your attention    (outcome=blocked/rejected/error)
+//
+// The raw model_version, submitter_id, audit_id, tool_name still appear,
+// but only inside the "Details" disclosure that's collapsed by default.
+function outcomeFramedLabel(opts: {
+  outcome: string;
+  auto_applied: boolean;
+}): string {
+  const o = opts.outcome.toLowerCase();
+  if (o === "blocked" || o === "rejected" || o === "error") {
+    return "AI-blocked · needs your attention";
+  }
+  if (o === "queued" || o === "needs_review" || o === "pending") {
+    return opts.auto_applied
+      ? "AI-posted · pending decision"
+      : "AI-flagged · needs CPA review";
+  }
+  if (o === "approved" || o === "applied") {
+    return "AI-resolved · approved by you";
+  }
+  if (o === "ok" || o === "posted") {
+    return opts.auto_applied
+      ? "AI-posted · approved by you"
+      : "AI-drafted · awaiting your decision";
+  }
+  return "AI activity · review";
+}
+
+function OutcomeFramedBadge({
+  outcome,
+  auto_applied
+}: {
+  outcome: string;
+  auto_applied: boolean;
+}) {
+  const label = outcomeFramedLabel({ outcome, auto_applied });
+  const lower = outcome.toLowerCase();
+  let tone = "bg-agent-500/10 text-agent-500 border-agent-500/30";
+  if (lower === "blocked" || lower === "rejected" || lower === "error") {
+    tone = "bg-debit/10 text-debit border-debit/30";
+  } else if (
+    lower === "approved" ||
+    lower === "applied" ||
+    lower === "ok" ||
+    lower === "posted"
+  ) {
+    tone = "bg-credit/10 text-credit border-credit/30";
+  } else if (lower === "queued" || lower === "needs_review" || lower === "pending") {
+    tone = "bg-pending/10 text-pending border-pending/30";
+  }
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium",
+        tone
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
 function OutcomeChip({ outcome }: { outcome: string }) {
   const s = outcomeStyle(outcome);
   return (
@@ -238,7 +308,7 @@ function ChallengeDialog({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg rounded-xl border border-strong bg-surface p-5 shadow-card"
+        className="w-full max-w-lg rounded-lg border border-strong bg-surface p-5 shadow-card"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="mb-3 flex items-start gap-3">
@@ -310,7 +380,7 @@ function ChallengeDialog({
             onClick={submit}
             disabled={submitting || !reason.trim()}
             className={cn(
-              "inline-flex items-center gap-1.5 rounded-md bg-pending px-3 py-1.5 text-xs font-medium text-canvas shadow-brand-glow transition hover:opacity-90",
+              "inline-flex items-center gap-1.5 rounded-md bg-pending px-3 py-1.5 text-xs font-medium text-canvas transition hover:opacity-90",
               (submitting || !reason.trim()) && "opacity-60"
             )}
           >
@@ -433,14 +503,14 @@ function TimelineRow({
             <span className="font-mono text-[11px] text-ink-tertiary">
               {timeOfDay(row.created_at)}
             </span>
-            <AIGeneratedBadge
-              agentId={row.agent_id}
-              hover={`${agentDisplayName(row.agent_id)} — ${relativeTime(row.created_at)}`}
+            {/* I13: outcome-framed badge replaces the prominent agent name +
+                tool-name combo. Internal identifiers (agent_id, tool_name,
+                model_version, audit_id) live inside the Details disclosure
+                below — collapsed by default. */}
+            <OutcomeFramedBadge
+              outcome={row.outcome}
+              auto_applied={row.auto_applied}
             />
-            <span className="text-xs font-semibold text-agent-500">
-              {agentDisplayName(row.agent_id)}
-            </span>
-            <span className="text-[10px] text-ink-tertiary">·</span>
             <span className="text-sm text-ink-primary">{row.action_label}</span>
             {row.target.tax_year ? (
               <span className="rounded-full bg-white/[0.05] px-1.5 py-0.5 font-mono text-[10px] text-ink-tertiary">
@@ -452,22 +522,6 @@ function TimelineRow({
                 · {row.entity_display_name}
               </span>
             ) : null}
-            <OutcomeChip outcome={row.outcome} />
-            {row.auto_applied ? (
-              <span
-                className="inline-flex items-center gap-1 rounded-md bg-credit/10 px-1.5 py-0.5 text-[10px] font-medium text-credit"
-                title="No human decision was needed for this action"
-              >
-                Auto-applied
-              </span>
-            ) : (
-              <span
-                className="inline-flex items-center gap-1 rounded-md bg-brand-500/10 px-1.5 py-0.5 text-[10px] font-medium text-brand-300"
-                title="A human reviewed before this action took effect"
-              >
-                Human-decided
-              </span>
-            )}
             {localStatus.undone ? (
               <span className="inline-flex items-center gap-1 rounded-md bg-white/[0.05] px-1.5 py-0.5 text-[10px] font-medium text-ink-tertiary">
                 <Undo2 size={10} /> Undone
@@ -513,16 +567,32 @@ function TimelineRow({
             </div>
           ) : null}
 
-          {/* expanded body */}
+          {/* expanded body — I13: agent_id + model + tool_name moved down
+              into this disclosure. Was previously rendered in the primary
+              row, which read like internal machinery to founders/CPAs. */}
           {open ? (
             <div className="mt-3 space-y-1 rounded-md border border-subtle bg-canvas/40 px-3 py-2.5">
               <div className="grid grid-cols-1 gap-x-4 gap-y-1 text-[11px] sm:grid-cols-2">
+                <div>
+                  <span className="text-ink-tertiary">Agent: </span>
+                  <span className="text-ink-secondary">
+                    {agentDisplayName(row.agent_id)}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-ink-tertiary">Decision mode: </span>
+                  <span className="text-ink-secondary">
+                    {row.auto_applied
+                      ? "Auto-applied (no human in loop)"
+                      : "Human-decided"}
+                  </span>
+                </div>
                 <div>
                   <span className="text-ink-tertiary">Tool: </span>
                   <code className="text-ink-secondary">{row.tool_name}</code>
                 </div>
                 <div>
-                  <span className="text-ink-tertiary">Outcome: </span>
+                  <span className="text-ink-tertiary">Raw outcome: </span>
                   <span className="text-ink-secondary">{row.outcome}</span>
                 </div>
                 {row.latency_ms !== null ? (
@@ -546,6 +616,10 @@ function TimelineRow({
                         ? "window expired"
                         : "no — challenge only"}
                   </span>
+                </div>
+                <div className="col-span-full">
+                  <span className="text-ink-tertiary">Audit ID: </span>
+                  <code className="font-mono text-ink-tertiary">{row.id}</code>
                 </div>
                 {row.undone_at ? (
                   <div className="col-span-full text-ink-tertiary">
@@ -884,8 +958,12 @@ export function AIActivityTimeline({
         <div className="divide-y divide-subtle/60">
           {grouped.map((g) => (
             <div key={g.agent}>
-              <div className="bg-canvas/30 px-4 py-2 text-[10px] font-medium uppercase tracking-wider text-ink-tertiary md:px-5">
-                <span className="text-agent-500">
+              {/* I13: keep the agent name as the group divider so users can
+                  still see which agent did what — but de-emphasise it visually
+                  with ink-secondary rather than the cyan agent accent. Cyan
+                  is now reserved for live agent-status indicators only. */}
+              <div className="bg-canvas/30 px-4 py-2 text-[10px] font-medium uppercase tracking-wider md:px-5">
+                <span className="text-ink-secondary">
                   {agentDisplayName(g.agent)}
                 </span>
                 <span className="ml-2 text-ink-tertiary">

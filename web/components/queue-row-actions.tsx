@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { Check, Loader2, X } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { tryParseDollars } from "@/lib/money";
 import type { LiveTransaction } from "@/lib/transactions";
 
 type Outcome =
@@ -81,7 +82,15 @@ export function QueueRowActions({
       setError("Need entity mapping + category before posting");
       return;
     }
-    const amountCents = Math.round(parseFloat(transaction.amount) * 100);
+    // Audit 2026-05-31 Bug 14: integer-cents parse with rejection of
+    // out-of-range / over-precision values. Live transactions arrive from the
+    // backend with a canonical 2-decimal string, but defensive parsing keeps
+    // a malformed value from posting a wrong amount.
+    const amountCents = tryParseDollars(transaction.amount);
+    if (amountCents === null) {
+      setError(`Cannot parse amount "${transaction.amount}" as dollars`);
+      return;
+    }
     const effective = transaction.posted_at?.slice(0, 10) ?? new Date().toISOString().slice(0, 10);
     startTransition(async () => {
       try {

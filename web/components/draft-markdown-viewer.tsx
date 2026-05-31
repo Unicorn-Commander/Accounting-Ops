@@ -229,7 +229,7 @@ export function DraftMarkdownViewer({
       {/* Modal panel */}
       <div
         className={cn(
-          "relative z-10 flex flex-col w-full max-w-3xl rounded-xl border border-default bg-surface shadow-card",
+          "relative z-10 flex flex-col w-full max-w-3xl rounded-lg border border-default bg-surface shadow-card",
           "max-h-[90vh]"
         )}
         role="dialog"

@@ -10,6 +10,7 @@ import {
 import { AppShell } from "@/components/app-shell";
 import {
   Card,
+  EmptyState,
   MaterialityBadge,
   PageShell,
   SectionHeader,
@@ -161,7 +162,7 @@ function TabBar({
   ];
 
   return (
-    <div className="flex items-center gap-1 overflow-x-auto rounded-xl border border-default bg-elevated p-1">
+    <div className="flex items-center gap-1 overflow-x-auto rounded-lg border border-default bg-elevated p-1">
       {tabs.map((t) => (
         <Link
           key={t.id}
@@ -289,20 +290,28 @@ export default async function ApprovalsPage({
             )}
 
             {!canDecide && (
-              <div className="rounded-xl border border-pending/40 bg-pending/[0.06] px-5 py-3 text-xs text-ink-secondary">
+              <div className="rounded-lg border border-pending/40 bg-pending/[0.06] px-5 py-3 text-xs text-ink-secondary">
                 You can review these, but only an <strong>admin</strong> can
                 attest (approve/apply) a material action.
               </div>
             )}
 
             {totalPending === 0 && reviewCount === 0 ? (
-              <Card>
-                <div className="flex flex-col items-center gap-3 py-10 text-center">
-                  <ShieldCheck size={28} className="text-credit" />
-                  <p className="text-base font-medium text-ink-secondary">
-                    Books are caught up. Nothing waiting on you.
-                  </p>
-                  <p className="max-w-md text-xs text-ink-tertiary">
+              // H9: ported to shared EmptyState primitive (celebratory "caught
+              // up" variant — preserves the existing tone but standardises the
+              // layout to match transactions/journal/reconciliation).
+              <EmptyState
+                variant="no-data"
+                icon={
+                  <ShieldCheck
+                    size={28}
+                    className="text-credit"
+                    aria-hidden="true"
+                  />
+                }
+                title="Books are caught up. Nothing waiting on you."
+                description={
+                  <>
                     Material recategorizations, proposed compliance rules, and
                     bank-import reviews land here. Lower-value items live in
                     the{" "}
@@ -313,9 +322,9 @@ export default async function ApprovalsPage({
                       Reconciliation queue
                     </Link>
                     .
-                  </p>
-                </div>
-              </Card>
+                  </>
+                }
+              />
             ) : activeTab === "review" && clusters ? (
               /* ---- Cluster cards + singleton swipe (default tab) ---- */
               <>

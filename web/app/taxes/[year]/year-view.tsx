@@ -11,7 +11,7 @@
 // Tabs use local state so navigating between them is instant (no server round-trip).
 // The active tab is NOT reflected in the URL — purely a UI concern within /taxes/[year].
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Download, Loader2, Sparkles } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { Form1120Package } from "@/lib/taxes-1120";
@@ -23,6 +23,7 @@ import { NarrativeView } from "./narrative-view";
 import { SpecialistDraftView } from "./specialist-draft-view";
 import { RunHistoryView } from "./run-history-view";
 import { Card } from "@/components/primitives";
+import { DraftStatusBand } from "./draft-status-band";
 
 type Tab = "narrative" | "manual" | "specialist" | "runs" | "irs-forms";
 
@@ -89,7 +90,7 @@ function HandoffDownloadButton({
         disabled={busy}
         className={cn(
           "inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-semibold",
-          "bg-brand-500 text-white shadow-sm shadow-brand-glow",
+          "bg-brand-500 text-white",
           "hover:bg-brand-600 active:bg-brand-700",
           "disabled:cursor-not-allowed disabled:bg-elevated disabled:text-ink-disabled disabled:shadow-none",
           "transition-colors"
@@ -120,9 +121,49 @@ export function YearView({
   specialistRuns
 }: YearViewProps) {
   const [activeTab, setActiveTab] = useState<Tab>("narrative");
+  const [exportBusy, setExportBusy] = useState(false);
 
   const pendingCount = taxReviewItems.filter((it) => it.status === "pending").length;
   const runningCount = specialistRuns.filter((r) => r.status === "running").length;
+
+  // H8: Unresolved review items count — used by the DRAFT status band.
+  // "pending" + "reviewed" both count as still-needing-attention; only
+  // "resolved" and "rejected" close out an item.
+  const unresolvedCount = taxReviewItems.filter(
+    (it) => it.status === "pending" || it.status === "reviewed"
+  ).length;
+
+  // Latest coordinator run for provenance display in the DRAFT band.
+  const coordinatorRun = specialistRuns
+    .filter(
+      (r) => r.specialist_id === "tax-coordinator" && r.status === "completed"
+    )
+    .sort((a, b) => b.started_at.localeCompare(a.started_at))[0];
+
+  // H8: shared handoff-package download — exposed both to the legacy
+  // top-right button AND the DRAFT band's "Export reviewed package" CTA.
+  const handleExportPackage = useCallback(async () => {
+    if (entityId === "all") return;
+    setExportBusy(true);
+    try {
+      const url = `/api/workspaces/${workspaceId}/entities/${entityId}/tax-drafts/${year}/handoff-package.zip`;
+      const resp = await fetch(url, { cache: "no-store" });
+      if (!resp.ok) return;
+      const blob = await resp.blob();
+      const disposition = resp.headers.get("content-disposition") ?? "";
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      const filename = match?.[1] ?? `handoff-${year}.zip`;
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch {
+      // best-effort; user can retry via the secondary button
+    } finally {
+      setExportBusy(false);
+    }
+  }, [workspaceId, entityId, year]);
 
   type TabDef = {
     id: Tab;
@@ -155,6 +196,25 @@ export function YearView({
 
   return (
     <div>
+      {/*
+       * H8: DRAFT status band — persistent, full-width, visible in print.
+       * Pulled above the tab bar so it precedes ALL tabs (narrative, manual,
+       * specialists, runs, IRS forms). When a CPA prints, the band survives
+       * via the print: utility classes in `draft-status-band.tsx` + the
+       * matching @media print rules in `globals.css`.
+       */}
+      <DraftStatusBand
+        year={year}
+        generatedAt={coordinatorRun?.started_at}
+        model={coordinatorRun?.model}
+        unresolvedCount={unresolvedCount}
+        onExportReviewedPackage={
+          entityId !== "all" ? handleExportPackage : undefined
+        }
+        exportBusy={exportBusy}
+        className="mb-5"
+      />
+
       {/* Tab bar + Download Handoff Package button */}
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-1.5">

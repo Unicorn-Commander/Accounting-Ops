@@ -279,7 +279,7 @@ export function QueueColumnClient({
       )}
 
       {items.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-default bg-surface p-6">
+        <div className="rounded-lg border border-dashed border-default bg-surface p-6">
           <p className="text-xs text-ink-tertiary">
             {kind === "review" && "Nothing needs your attention right now."}
             {kind === "unknown" && "Every transaction matched a vendor rule."}
@@ -301,7 +301,7 @@ export function QueueColumnClient({
                 key={t.id}
                 ref={(el) => { cardRefs.current[idx] = el!; }}
                 className={cn(
-                  "group relative rounded-xl border border-default bg-surface transition-all",
+                  "group relative rounded-lg border border-default bg-surface transition-all",
                   toneMap[tone],
                   isSelected && "border-brand-500/50 ring-1 ring-brand-500/20",
                   isFocused && "border-brand-400 shadow-sm",

@@ -399,7 +399,7 @@ function ExportCard({
             <button
               onClick={onDownload}
               disabled={disabled}
-              className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-elevated disabled:text-ink-disabled disabled:shadow-none"
+              className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-elevated disabled:text-ink-disabled"
             >
               {loading ? (
                 <Loader2 size={13} className="animate-spin" />
@@ -465,7 +465,7 @@ function PdfReportsCard({
               <Dialog.Trigger asChild>
                 <button
                   disabled={busy !== null && !anyPdfBusy}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-elevated disabled:text-ink-disabled disabled:shadow-none"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-elevated disabled:text-ink-disabled"
                 >
                   {anyPdfBusy ? (
                     <Loader2 size={13} className="animate-spin" />
@@ -477,7 +477,7 @@ function PdfReportsCard({
               </Dialog.Trigger>
               <Dialog.Portal>
                 <Dialog.Overlay className="fixed inset-0 z-50 bg-canvas/80 backdrop-blur-sm" />
-                <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(440px,90vw)] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-default bg-surface p-6 shadow-card">
+                <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(440px,90vw)] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-default bg-surface p-6 shadow-card">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <Dialog.Title className="text-base font-semibold">

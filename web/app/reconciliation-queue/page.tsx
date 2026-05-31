@@ -3,10 +3,12 @@ import { ExternalLink, HelpCircle } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import {
   Card,
+  EmptyState,
   PageShell,
   SectionHeader,
   StatusChip
 } from "@/components/primitives";
+import { CheckCircle2 } from "lucide-react";
 import { getActiveContext } from "@/lib/active-context";
 import { getAccountMappings } from "@/lib/account-mappings";
 import { formatUSD } from "@/lib/cash-position";
@@ -59,7 +61,7 @@ export default async function ReconciliationQueuePage() {
         />
 
         {unmappedAcctCount > 0 && (
-          <div className="mb-6 rounded-xl border border-pending/40 bg-pending/[0.06] px-5 py-4">
+          <div className="mb-6 rounded-lg border border-pending/40 bg-pending/[0.06] px-5 py-4">
             <div className="flex items-start gap-3">
               <HelpCircle size={18} className="mt-0.5 shrink-0 text-pending" />
               <div className="flex-1">
@@ -82,15 +84,48 @@ export default async function ReconciliationQueuePage() {
         )}
 
         {transactions.length === 0 ? (
-          <Card>
-            <p className="text-sm text-ink-tertiary">
-              No transactions in the last 90 days. Connect a bank or wait for the next sync from{" "}
-              <Link href="/connectors" className="text-brand-400 underline-offset-2 hover:underline">
-                Connectors
+          // H9: standardised empty state. "No items to reconcile" with a link
+          // back to /approvals (which is where the daily reconciliation work
+          // begins for users with active flows).
+          <EmptyState
+            variant="not-connected"
+            title="No items to reconcile."
+            description="The last 90 days are clean. Connect a bank or wait for the next sync; new imports land in the approvals queue first."
+            primaryAction={
+              <Link
+                href="/connectors"
+                className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
+              >
+                Connect a bank
               </Link>
-              .
-            </p>
-          </Card>
+            }
+            secondaryAction={
+              <Link
+                href="/approvals"
+                className="inline-flex items-center gap-1.5 rounded-md border border-default bg-surface px-3 py-1.5 text-xs text-ink-secondary hover:bg-elevated"
+              >
+                Open approvals
+              </Link>
+            }
+          />
+        ) : needsReview.length === 0 &&
+          unknown.length === 0 &&
+          agentSuggested.length === 0 ? (
+          // H9: caught-up state — everything reconciled or auto-handled.
+          <EmptyState
+            variant="no-data"
+            icon={<CheckCircle2 size={28} className="text-credit" aria-hidden="true" />}
+            title="All caught up."
+            description="No items need review. New imports show up here and split into the three columns automatically."
+            secondaryAction={
+              <Link
+                href="/approvals"
+                className="inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
+              >
+                Go to approvals
+              </Link>
+            }
+          />
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             <QueueColumnClient

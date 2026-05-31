@@ -280,7 +280,7 @@ export function PATsClient({
       >
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-50 bg-canvas/80 backdrop-blur-sm" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl border border-default bg-surface shadow-card focus:outline-none">
+          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-lg border border-default bg-surface shadow-card focus:outline-none">
             <div className="border-b border-subtle px-6 py-4">
               <Dialog.Title className="text-base font-semibold">
                 Revoke "{confirmRevoke?.name}"?
@@ -440,7 +440,7 @@ function CreateModal({
     >
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-canvas/80 backdrop-blur-sm" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-default bg-surface shadow-card focus:outline-none">
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-default bg-surface shadow-card focus:outline-none">
           <div className="flex items-center justify-between border-b border-subtle px-6 py-4">
             <Dialog.Title className="text-base font-semibold">
               {created ? "Token created" : "Generate personal access token"}

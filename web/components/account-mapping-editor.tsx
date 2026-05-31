@@ -88,7 +88,7 @@ export function AccountMappingEditor({
 
   if (liveAccounts.length === 0) {
     return (
-      <div className="rounded-xl border border-default bg-surface p-6 text-center text-sm text-ink-tertiary">
+      <div className="rounded-lg border border-default bg-surface p-6 text-center text-sm text-ink-tertiary">
         No accounts to map yet. Connect a banking aggregator first, then come back here to assign
         each account to one of your entities.
       </div>
@@ -96,7 +96,7 @@ export function AccountMappingEditor({
   }
 
   return (
-    <div className="rounded-xl border border-default bg-surface">
+    <div className="rounded-lg border border-default bg-surface">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-subtle px-5 py-4">
         <div>
           <h2 className="text-base font-semibold">Account → Entity mapping</h2>
@@ -218,7 +218,7 @@ export function AccountMappingEditor({
           onClick={save}
           disabled={!dirty || saving}
           className={cn(
-            "inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-4 py-1.5 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600 transition",
+            "inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-4 py-1.5 text-sm font-medium text-white hover:bg-brand-600 transition",
             (!dirty || saving) && "cursor-not-allowed opacity-60"
           )}
         >

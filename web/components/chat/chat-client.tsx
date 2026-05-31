@@ -419,7 +419,7 @@ export function ChatClient({
       {/* Main pane */}
       <section
         className={cn(
-          "flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-default bg-surface"
+          "flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-default bg-surface"
         )}
       >
         <header className="flex flex-wrap items-center gap-2 border-b border-subtle bg-elevated/40 px-3 py-2 md:px-4 md:py-2.5">

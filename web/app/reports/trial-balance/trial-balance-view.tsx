@@ -3,7 +3,8 @@
 import { useRouter } from "next/navigation";
 import { Fragment, type FormEvent } from "react";
 import { Check, RefreshCw, X } from "lucide-react";
-import { Card } from "@/components/primitives";
+import Link from "next/link";
+import { Card, EmptyState, ErrorState } from "@/components/primitives";
 import { cn } from "@/lib/cn";
 import {
   centsAbsDiff,
@@ -107,7 +108,7 @@ export function TrialBalanceView({
       {data ? (
         <div
           className={cn(
-            "rounded-xl border px-5 py-4",
+            "rounded-lg border px-5 py-4",
             data.balanced
               ? "border-credit/30 bg-credit/[0.06] text-credit"
               : "border-debit/30 bg-debit/[0.06] text-debit"
@@ -129,13 +130,27 @@ export function TrialBalanceView({
       ) : null}
 
       {!data ? (
-        <Card>
-          <p className="text-sm text-ink-tertiary">Unable to load trial balance.</p>
-        </Card>
+        // H10: surface user-safe ErrorState instead of a bare card.
+        <ErrorState
+          title="Unable to load trial balance."
+          description="The reporting service did not return data for this period. Try the Refresh button, or check connectivity."
+        />
       ) : rows.length === 0 ? (
-        <Card>
-          <p className="text-sm text-ink-tertiary">No activity as of {asOf}</p>
-        </Card>
+        // H9: "no posted entries yet" empty state, linking to /journal where
+        // entries actually live.
+        <EmptyState
+          variant="no-data"
+          title={`No posted entries as of ${asOf}.`}
+          description="The trial balance is calculated from posted journal entries. Once entries land, the running totals show here."
+          primaryAction={
+            <Link
+              href="/journal"
+              className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
+            >
+              Open journal
+            </Link>
+          }
+        />
       ) : (
         <Card padded={false}>
           <div className="overflow-x-auto">
