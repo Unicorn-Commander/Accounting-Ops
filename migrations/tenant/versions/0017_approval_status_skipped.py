@@ -1,7 +1,7 @@
 """per-workspace schema: approval_status += 'skipped'
 
-Revision ID: 0015_approval_status_skipped
-Revises: 0014_sentinel
+Revision ID: 0017_approval_status_skipped
+Revises: 0016_monthly_account_balance
 Create Date: 2026-05-31
 
 Adds the 'skipped' value to the ``approval_status`` PostgreSQL ENUM so the
@@ -24,8 +24,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import context, op
 
-revision: str = "0015_approval_status_skipped"
-down_revision: str | None = "0014_sentinel"
+revision: str = "0017_approval_status_skipped"
+down_revision: str | None = "0016_monthly_account_balance"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -42,7 +42,7 @@ def _set_search_path() -> str:
 def upgrade() -> None:
     schema = _set_search_path()
     if not schema:
-        raise RuntimeError("0015 requires -x tenant=<schema>")
+        raise RuntimeError("0017 requires -x tenant=<schema>")
 
     # Commit alembic's outer tx so we can run ADD VALUE (which requires its
     # own implicit transaction in older Postgres).

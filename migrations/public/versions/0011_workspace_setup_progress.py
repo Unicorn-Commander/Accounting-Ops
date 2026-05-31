@@ -79,7 +79,20 @@ def upgrade() -> None:
             schema="public",
         )
 
+    # Runtime role needs UPDATE only on the new column. The 'accounting_ops_app'
+    # role is otherwise SELECT-only on public.workspace (no INSERT/DELETE), and
+    # that's intentional: the rest of the row is owned by the
+    # provisioning/billing path, not the runtime app. A column-level grant
+    # keeps that boundary clean while letting setup-progress flow.
+    op.execute(
+        "GRANT UPDATE (setup_progress) ON public.workspace TO accounting_ops_app"
+    )
+
 
 def downgrade() -> None:
     if _column_exists("public", "workspace", "setup_progress"):
+        # Revoke before drop so the catalog stays clean.
+        op.execute(
+            "REVOKE UPDATE (setup_progress) ON public.workspace FROM accounting_ops_app"
+        )
         op.drop_column("workspace", "setup_progress", schema="public")
