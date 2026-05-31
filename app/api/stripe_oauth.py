@@ -298,7 +298,7 @@ async def stripe_set_webhook_secret(
 
     Aaron creates the webhook endpoint in Stripe dashboard
     (dashboard.stripe.com/webhooks → Add endpoint), points it at
-    https://accounting.magicunicorn.dev/api/connectors/stripe/webhook,
+    https://accounting-ops.magicunicorn.dev/api/connectors/stripe/webhook,
     selects the events we handle (charge.succeeded, charge.refunded,
     payout.created, payout.paid, payout.failed), and pastes the resulting
     signing secret here.

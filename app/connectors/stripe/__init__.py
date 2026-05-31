@@ -31,7 +31,12 @@ WHY NO STRIPE CONNECT:
   be revoked from the Stripe dashboard if compromised.
 
 Webhook URL (Aaron registers in Stripe dashboard):
-  https://accounting.magicunicorn.dev/api/connectors/stripe/webhook
+  https://accounting-ops.magicunicorn.dev/api/connectors/stripe/webhook
+
+  (Note: the hyphenated form is the only one with DNS today. eBay's RuName
+  was historically registered to accounting.magicunicorn.dev — non-hyphenated
+  — and would need Aaron to either add DNS for it or re-register. For Stripe
+  there's no prior registration, so use the resolving form.)
 """
 
 from app.connectors.stripe.client import (
