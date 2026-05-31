@@ -4,6 +4,7 @@ import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import {
   Card,
+  EmptyState,
   MaterialityBadge,
   PageShell,
   SectionHeader,
@@ -25,6 +26,7 @@ type SearchParams = {
   start?: string;
   end?: string;
   category?: string;
+  account?: string;
   status?: string;
   q?: string;
 };
@@ -47,6 +49,7 @@ export default async function JournalPage(props: {
         startDate: sp.start,
         endDate: sp.end,
         category: sp.category,
+        account: sp.account,
         statusFilter: sp.status,
         search: sp.q,
         limit: 200
@@ -185,13 +188,25 @@ export default async function JournalPage(props: {
               <option value="posted">Posted</option>
               <option value="reversed">Reversed</option>
             </select>
+            {sp.account ? (
+              <>
+                {/* Preserve the drill-down account filter across form submits */}
+                <input type="hidden" name="account" value={sp.account} />
+                <span
+                  className="inline-flex items-center gap-1.5 rounded-md border border-brand-500/40 bg-brand-500/10 px-2 py-1 text-[10px] font-medium text-brand-300"
+                  title={`Drill-down: showing entries that hit ${sp.account}`}
+                >
+                  account: <code className="font-mono">{sp.account}</code>
+                </span>
+              </>
+            ) : null}
             <button
               type="submit"
               className="rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
             >
               Apply
             </button>
-            {(sp.q || sp.start || sp.end || sp.category || sp.status) && (
+            {(sp.q || sp.start || sp.end || sp.category || sp.account || sp.status) && (
               <Link
                 href="/journal"
                 className="rounded-md border border-default bg-surface px-3 py-1.5 text-xs text-ink-tertiary hover:bg-elevated"
@@ -202,19 +217,65 @@ export default async function JournalPage(props: {
           </form>
 
           {entries.length === 0 ? (
-            <div className="px-6 py-12 text-center text-sm text-ink-tertiary">
-              No journal entries match these filters.{" "}
-              {total === 0 && (
-                <>
-                  <Link
-                    href="/reconciliation-queue"
-                    className="text-brand-400 hover:underline"
-                  >
-                    Post your first entry from the reconciliation queue →
-                  </Link>
-                </>
-              )}
-            </div>
+            // H9: differentiate "no filter match" vs "no entries posted yet".
+            // Filter detection mirrors the form fields above.
+            (() => {
+              const filtersApplied = Boolean(
+                sp.q || sp.start || sp.end || sp.category || sp.status
+              );
+              const noEntriesAtAll = total === 0 && !filtersApplied;
+              return (
+                <div className="px-6 py-10">
+                  <EmptyState
+                    variant={
+                      noEntriesAtAll
+                        ? "no-data"
+                        : filtersApplied
+                          ? "filtered-empty"
+                          : "no-data"
+                    }
+                    title={
+                      noEntriesAtAll
+                        ? "No journal entries posted yet."
+                        : "No journal entries match these filters."
+                    }
+                    description={
+                      noEntriesAtAll
+                        ? "Once you approve a transaction or post a manual entry, the hash-chained ledger lives here."
+                        : "Try clearing a filter or widening the date range above."
+                    }
+                    primaryAction={
+                      noEntriesAtAll ? (
+                        <Link
+                          href="/reconciliation-queue"
+                          className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
+                        >
+                          Open reconciliation queue
+                        </Link>
+                      ) : (
+                        <Link
+                          href="/journal"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
+                        >
+                          Clear filters
+                        </Link>
+                      )
+                    }
+                    secondaryAction={
+                      noEntriesAtAll ? (
+                        <Link
+                          href="/journal/new"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-default bg-surface px-3 py-1.5 text-xs font-medium text-ink-secondary hover:bg-elevated"
+                        >
+                          + Manual entry
+                        </Link>
+                      ) : undefined
+                    }
+                    className="border-0 bg-transparent"
+                  />
+                </div>
+              );
+            })()
           ) : (
             <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-sm">
               <thead className="text-[10px] uppercase tracking-wider text-ink-tertiary">

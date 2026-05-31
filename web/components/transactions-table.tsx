@@ -5,10 +5,12 @@ import Link from "next/link";
 import { Filter, Search, X } from "lucide-react";
 import {
   Card,
+  EmptyState,
   MaterialityBadge,
   StatusChip
 } from "@/components/primitives";
 import { formatUSD } from "@/lib/cash-position";
+import { tryParseDollars } from "@/lib/money";
 import { shortDate, type LiveTransaction } from "@/lib/transactions";
 import { cn } from "@/lib/cn";
 
@@ -91,14 +93,26 @@ export function LiveTransactionsTable({
     });
   }, [transactions, accountId, orgName, categoryFilter, includePending, search]);
 
-  const inflow = useMemo(
-    () => filtered.reduce((s, t) => s + Math.max(parseFloat(t.amount), 0), 0),
-    [filtered]
-  );
-  const outflow = useMemo(
-    () => filtered.reduce((s, t) => s + Math.min(parseFloat(t.amount), 0), 0),
-    [filtered]
-  );
+  // Audit 2026-05-31 Bug 14: aggregate via integer cents to avoid binary-float
+  // drift on long lists, then convert back to dollars at display time. Each
+  // row's amount is parsed once via the cents helper; unparseable values
+  // contribute 0 (they're surfaced elsewhere).
+  const inflow = useMemo(() => {
+    let totalCents = 0;
+    for (const t of filtered) {
+      const c = tryParseDollars(t.amount);
+      if (c !== null && c > 0) totalCents += c;
+    }
+    return totalCents / 100;
+  }, [filtered]);
+  const outflow = useMemo(() => {
+    let totalCents = 0;
+    for (const t of filtered) {
+      const c = tryParseDollars(t.amount);
+      if (c !== null && c < 0) totalCents += c;
+    }
+    return totalCents / 100;
+  }, [filtered]);
   const pendingCount = useMemo(
     () => filtered.filter((t) => t.is_pending).length,
     [filtered]
@@ -115,25 +129,23 @@ export function LiveTransactionsTable({
     accountId !== "all" || orgName !== "all" || !includePending || search.length > 0;
 
   if (!configured) {
+    // H9: standardised not-connected empty state — single primary CTA, no
+    // confusing "Map accounts to entities" secondary action when nothing is
+    // connected yet.
     return (
-      <Card padded={false}>
-        <div className="px-6 py-12 text-center">
-          <p className="text-base font-medium text-ink-secondary">
-            No bank accounts connected yet.
-          </p>
-          <p className="mx-auto mt-1 max-w-md text-xs text-ink-tertiary">
-            Once you connect a bank aggregator, this view will show every
-            transaction (posted + pending) across your accounts, with auto
-            categorization and per-entity filtering.
-          </p>
+      <EmptyState
+        variant="not-connected"
+        title="No bank accounts connected yet."
+        description="Once you connect a bank aggregator, this view will show every transaction (posted + pending) across your accounts, with auto categorization and per-entity filtering."
+        primaryAction={
           <Link
             href="/connectors"
-            className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
+            className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
           >
             Connect a bank
           </Link>
-        </div>
-      </Card>
+        }
+      />
     );
   }
 
@@ -235,29 +247,38 @@ export function LiveTransactionsTable({
       </div>
 
       {filtered.length === 0 ? (
-        <div className="px-6 py-12 text-center">
-          <p className="text-sm font-medium text-ink-secondary">
-            {filtersActive
-              ? "No transactions match these filters."
-              : transactions.length === 0
-                ? "No transactions in the selected window."
-                : "Nothing here."}
-          </p>
-          <p className="mt-1 text-xs text-ink-tertiary">
-            {filtersActive
-              ? "Try clearing a filter or widening the date window."
-              : "Activity across your connected accounts will show up here as it posts."}
-          </p>
-          {filtersActive && (
-            <button
-              type="button"
-              onClick={clearFilters}
-              className="mt-4 inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
-            >
-              <X size={11} /> Clear filters
-            </button>
-          )}
-          {emptyAction}
+        // H9: differentiated empty states for filtered vs no-data cases. The
+        // outer card already provides the wrapping border; this is rendered
+        // inline so we keep filter chips visible above it.
+        <div className="px-6 py-10">
+          <EmptyState
+            variant={filtersActive ? "filtered-empty" : "no-data"}
+            title={
+              filtersActive
+                ? "No transactions match these filters."
+                : transactions.length === 0
+                  ? "No transactions in the selected window."
+                  : "Nothing here."
+            }
+            description={
+              filtersActive
+                ? "Try clearing a filter or widening the date window."
+                : "Activity across your connected accounts will show up here as it posts."
+            }
+            primaryAction={
+              filtersActive ? (
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
+                >
+                  <X size={11} /> Clear filters
+                </button>
+              ) : undefined
+            }
+            secondaryAction={emptyAction}
+            className="border-0 bg-transparent"
+          />
         </div>
       ) : (
         <div className="overflow-x-auto"><table className="w-full min-w-[640px] text-sm">
@@ -279,11 +300,16 @@ export function LiveTransactionsTable({
           </thead>
           <tbody>
             {filtered.map((t) => {
-              const amt = parseFloat(t.amount);
-              const isCredit = amt >= 0;
-              const absAmt = Math.abs(amt);
+              // Audit 2026-05-31 Bug 14: integer-cents path for sign + tier
+              // bucketing too. tryParseDollars returns null on malformed input;
+              // treat as 0 so the row still renders rather than crashing.
+              const amtCents = tryParseDollars(t.amount) ?? 0;
+              const isCredit = amtCents >= 0;
+              const absCents = Math.abs(amtCents);
               const materiality: "L" | "M" | "H" =
-                absAmt < 100 ? "L" : absAmt < 1000 ? "M" : "H";
+                absCents < 100_00 ? "L" : absCents < 1000_00 ? "M" : "H";
+              const amt = amtCents / 100;
+              const absAmt = absCents / 100;
               return (
                 <tr
                   key={t.id}

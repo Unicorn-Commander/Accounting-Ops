@@ -41,7 +41,7 @@ export function CanvasPane({
   return (
     <aside
       className={cn(
-        "flex h-full flex-col overflow-hidden rounded-xl border border-default bg-surface",
+        "flex h-full flex-col overflow-hidden rounded-lg border border-default bg-surface",
         "shadow-card"
       )}
       aria-label="Tool-result canvas"

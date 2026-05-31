@@ -187,6 +187,147 @@ async def _last_specialist_run(
         return None
 
 
+# ---------------------------------------------------------------------------
+# Audit 2026-05-31 Bug 12 — grouped aggregation across (entity_ids × years)
+# ---------------------------------------------------------------------------
+# The original implementation ran THREE awaited queries (queue summary, approval
+# summary, latest specialist_run) per entity × per tax_year. At 50 entities × 5
+# years that's 750 round-trips. These helpers run ONE query per data source over
+# all visible entity_ids + the fixed TAX_YEARS set, returning a nested dict
+# keyed (entity_id, tax_year) → metric. Total round-trips per request: 3.
+
+
+async def _bulk_queue_summary(
+    session: Any, entity_ids: list[str], tax_years: list[int]
+) -> dict[tuple[str, int], dict[str, int]]:
+    """One SQL pass that counts tax_review_queue rows by status across every
+    (entity, year) the caller can see. Returns a dict keyed (entity, year)
+    that includes a zero-filled summary for every cell the caller asked about
+    (so the in-memory assemble step never has to check key existence)."""
+    summary_zero = {"pending": 0, "reviewed": 0, "resolved": 0, "rejected": 0}
+    out: dict[tuple[str, int], dict[str, int]] = {
+        (eid, yr): dict(summary_zero) for eid in entity_ids for yr in tax_years
+    }
+    if not entity_ids or not tax_years:
+        return out
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT entity_id::text AS entity_id,
+                       tax_year,
+                       status,
+                       count(*)::int AS cnt
+                FROM tax_review_queue
+                WHERE entity_id = ANY(CAST(:eids AS uuid[]))
+                  AND tax_year = ANY(CAST(:yrs AS int[]))
+                GROUP BY entity_id, tax_year, status
+                """
+            ),
+            {"eids": entity_ids, "yrs": tax_years},
+        )
+    ).mappings().all()
+    for r in rows:
+        key = (r["entity_id"], int(r["tax_year"]))
+        if key not in out:
+            continue
+        st = r["status"]
+        if st in out[key]:
+            out[key][st] = int(r["cnt"])
+    return out
+
+
+async def _bulk_approval_summary(
+    session: Any, entity_ids: list[str], tax_years: list[int]
+) -> dict[tuple[str, int], dict[str, int]]:
+    """One SQL pass that returns (pending, total) approval_queue counts for
+    every (entity, year). Year derivation matches the per-call version
+    (EXTRACT(YEAR FROM created_at))."""
+    out: dict[tuple[str, int], dict[str, int]] = {
+        (eid, yr): {"pending": 0, "total": 0}
+        for eid in entity_ids
+        for yr in tax_years
+    }
+    if not entity_ids or not tax_years:
+        return out
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT
+                    entity_id::text                                    AS entity_id,
+                    EXTRACT(YEAR FROM created_at)::int                 AS yr,
+                    count(*) FILTER (WHERE status = 'pending')::int    AS pending,
+                    count(*)::int                                      AS total
+                FROM approval_queue
+                WHERE entity_id = ANY(CAST(:eids AS uuid[]))
+                  AND EXTRACT(YEAR FROM created_at) = ANY(CAST(:yrs AS int[]))
+                GROUP BY entity_id, EXTRACT(YEAR FROM created_at)
+                """
+            ),
+            {"eids": entity_ids, "yrs": tax_years},
+        )
+    ).mappings().all()
+    for r in rows:
+        key = (r["entity_id"], int(r["yr"]))
+        if key not in out:
+            continue
+        out[key] = {"pending": int(r["pending"] or 0), "total": int(r["total"] or 0)}
+    return out
+
+
+async def _bulk_last_specialist_run(
+    session: Any, entity_ids: list[str], tax_years: list[int]
+) -> dict[tuple[str, int], dict | None]:
+    """One SQL pass that returns the LATEST specialist_run per (entity, year).
+
+    Uses DISTINCT ON to pick the freshest row in a single scan. Gracefully
+    falls back to ``None`` everywhere if the specialist_run table doesn't
+    exist (caught the same way the per-call helper does).
+    """
+    out: dict[tuple[str, int], dict | None] = {
+        (eid, yr): None for eid in entity_ids for yr in tax_years
+    }
+    if not entity_ids or not tax_years:
+        return out
+    try:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT DISTINCT ON (entity_id, tax_year)
+                        entity_id::text   AS entity_id,
+                        tax_year,
+                        specialist_id     AS specialist_name,
+                        started_at,
+                        status
+                    FROM specialist_run
+                    WHERE entity_id = ANY(CAST(:eids AS uuid[]))
+                      AND tax_year = ANY(CAST(:yrs AS int[]))
+                    ORDER BY entity_id, tax_year, started_at DESC
+                    """
+                ),
+                {"eids": entity_ids, "yrs": tax_years},
+            )
+        ).mappings().all()
+        for r in rows:
+            key = (r["entity_id"], int(r["tax_year"]))
+            if key not in out:
+                continue
+            started = r["started_at"]
+            out[key] = {
+                "specialist_id": r["specialist_name"],
+                "started_at": started.isoformat()
+                if hasattr(started, "isoformat")
+                else str(started),
+                "status": r["status"],
+            }
+    except (ProgrammingError, Exception):  # noqa: BLE001
+        # Table missing or any other failure: return the zero-filled defaults.
+        pass
+    return out
+
+
 def _filing_status(
     queue_summary: dict[str, int],
     deadline: dt.date,
@@ -286,7 +427,18 @@ async def get_tax_status(
             entity_rows = [r for r in entity_rows if r["id"] in scoped_ids]
 
         # ----------------------------------------------------------------
-        # 2. Build per-entity output
+        # 2. Bulk-fetch all (entity × year) aggregates in 3 queries total
+        #    (audit 2026-05-31 Bug 12). Was N*Y*3; now 3.
+        # ----------------------------------------------------------------
+        visible_entity_ids = [r["id"] for r in entity_rows]
+        bulk_queue = await _bulk_queue_summary(session, visible_entity_ids, TAX_YEARS)
+        bulk_approval = await _bulk_approval_summary(session, visible_entity_ids, TAX_YEARS)
+        bulk_specialist = await _bulk_last_specialist_run(
+            session, visible_entity_ids, TAX_YEARS
+        )
+
+        # ----------------------------------------------------------------
+        # 3. Build per-entity output from the bulk caches (no per-cell awaits)
         # ----------------------------------------------------------------
         entities_out: list[dict] = []
 
@@ -329,14 +481,13 @@ async def get_tax_status(
                 deadline = _filing_deadline(tax_year)
                 deadline_str = deadline.isoformat()
 
-                # Queue summary (tax_review_queue)
-                q_summary = await _queue_summary(session, entity_id, tax_year)
-
-                # Approval summary (books status)
-                appr = await _approval_summary(session, entity_id, tax_year)
-
-                # Last specialist run
-                last_run = await _last_specialist_run(session, entity_id, tax_year)
+                key = (entity_id, tax_year)
+                q_summary = bulk_queue.get(
+                    key,
+                    {"pending": 0, "reviewed": 0, "resolved": 0, "rejected": 0},
+                )
+                appr = bulk_approval.get(key, {"pending": 0, "total": 0})
+                last_run = bulk_specialist.get(key)
 
                 # Derived statuses
                 f_status = _filing_status(q_summary, deadline, today)

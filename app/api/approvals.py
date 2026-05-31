@@ -165,6 +165,17 @@ class DecideRequest(BaseModel):
     category_override: str | None = None
 
 
+class SkipRequest(BaseModel):
+    """Body for POST /api/.../approvals/{id}/skip and /unskip.
+
+    A skip is a durable "decide later" — the row stays out of the active
+    pending queue but is NOT applied to the ledger. The user can return to
+    /approvals?status=skipped and un-skip it (back to 'pending') any time.
+    """
+
+    note: str | None = None
+
+
 @router.post("/api/workspaces/{workspace_id}/approvals/{approval_id}/decide")
 async def decide_approval(
     workspace_id: UUID,
@@ -594,3 +605,189 @@ async def _approve_bank_transaction_import(
         "materiality_tier": result.materiality.tier,
         "source_external_id": source_external_id,
     }
+
+
+# ====================================================================
+# Skip / un-skip — durable "decide later" state (no ledger impact)
+# ====================================================================
+#
+# These flip the approval_queue.status between 'pending' and 'skipped' WITHOUT
+# applying the held action. Every flip writes a decision_audit row so the trail
+# is preserved. Role floor: accountant (can see + skip; only admin can decide).
+# This matches the principle that "skip" is not an attestation — it's a
+# triage state for a queue, accessible to anyone who can see the queue.
+
+
+@router.post("/api/workspaces/{workspace_id}/approvals/{approval_id}/skip")
+async def skip_approval(
+    workspace_id: UUID,
+    approval_id: UUID,
+    body: SkipRequest,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Mark a pending approval as 'skipped'. NEVER posts to the ledger.
+
+    Idempotent for already-skipped rows (no-op + 200). Errors:
+      * 404 if not found
+      * 409 if status is approved/rejected/canceled (you can only skip pending)
+    """
+    require_role(workspace, "accountant")
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id::text, entity_id::text AS entity_id,
+                           subject_type, status
+                    FROM approval_queue
+                    WHERE id = :id
+                    FOR UPDATE
+                    """
+                ),
+                {"id": str(approval_id)},
+            )
+        ).mappings().first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Approval not found")
+
+        entity_id = UUID(row["entity_id"])
+        assert_entity_in_scope(workspace, entity_id)
+
+        if row["status"] == "skipped":
+            # Idempotent: already skipped — write an audit anyway so the trail
+            # records that the user reasserted the skip (useful if a note is
+            # attached).
+            response = {
+                "ok": True,
+                "approval_id": str(approval_id),
+                "status": "skipped",
+                "noop": True,
+            }
+            await write_decision_audit(
+                session,
+                workspace_id=workspace_id,
+                entity_id=entity_id,
+                ctx=workspace,
+                tool_name="approval_skip",
+                request_payload={"approval_id": str(approval_id), "note": body.note},
+                response_payload=response,
+                reasoning=body.note or "Re-skipped (was already skipped).",
+                outcome="skipped",
+            )
+            return response
+
+        if row["status"] != "pending":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot skip an approval in status '{row['status']}'",
+            )
+
+        await session.execute(
+            text(
+                """
+                UPDATE approval_queue
+                SET status = CAST('skipped' AS approval_status)
+                WHERE id = :id
+                """
+            ),
+            {"id": str(approval_id)},
+        )
+        response = {
+            "ok": True,
+            "approval_id": str(approval_id),
+            "status": "skipped",
+            "noop": False,
+        }
+        await write_decision_audit(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            ctx=workspace,
+            tool_name="approval_skip",
+            request_payload={"approval_id": str(approval_id), "note": body.note},
+            response_payload=response,
+            reasoning=body.note or "Marked for later decision (skipped).",
+            outcome="skipped",
+        )
+        return response
+
+
+@router.post("/api/workspaces/{workspace_id}/approvals/{approval_id}/unskip")
+async def unskip_approval(
+    workspace_id: UUID,
+    approval_id: UUID,
+    body: SkipRequest,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Flip a 'skipped' approval back to 'pending'.
+
+    Idempotent if already 'pending'. Errors:
+      * 404 if not found
+      * 409 if status is approved/rejected/canceled
+    """
+    require_role(workspace, "accountant")
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id::text, entity_id::text AS entity_id, status
+                    FROM approval_queue
+                    WHERE id = :id
+                    FOR UPDATE
+                    """
+                ),
+                {"id": str(approval_id)},
+            )
+        ).mappings().first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Approval not found")
+
+        entity_id = UUID(row["entity_id"])
+        assert_entity_in_scope(workspace, entity_id)
+
+        if row["status"] == "pending":
+            response = {
+                "ok": True,
+                "approval_id": str(approval_id),
+                "status": "pending",
+                "noop": True,
+            }
+            return response
+
+        if row["status"] != "skipped":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot un-skip an approval in status '{row['status']}'",
+            )
+
+        await session.execute(
+            text(
+                """
+                UPDATE approval_queue
+                SET status = CAST('pending' AS approval_status)
+                WHERE id = :id
+                """
+            ),
+            {"id": str(approval_id)},
+        )
+        response = {
+            "ok": True,
+            "approval_id": str(approval_id),
+            "status": "pending",
+            "noop": False,
+        }
+        await write_decision_audit(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            ctx=workspace,
+            tool_name="approval_unskip",
+            request_payload={"approval_id": str(approval_id), "note": body.note},
+            response_payload=response,
+            reasoning=body.note or "Returned skipped item to pending queue.",
+            outcome="reopened",
+        )
+        return response

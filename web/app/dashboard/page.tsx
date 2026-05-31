@@ -79,7 +79,7 @@ export default async function DashboardPage() {
             {openItemsCounts && openItemsCounts.counts.action_required > 0 ? (
               <Link
                 href="/open-items"
-                className="group mb-5 block rounded-xl border border-debit/50 bg-gradient-to-r from-debit/[0.08] via-pending/[0.05] to-brand-500/[0.06] px-5 py-4 transition hover:border-debit/70 hover:shadow-brand-glow"
+                className="group mb-5 block rounded-lg border border-debit/50 bg-gradient-to-r from-debit/[0.08] via-pending/[0.05] to-brand-500/[0.06] px-5 py-4 transition hover:border-debit/70 hover:shadow-brand-glow"
               >
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-debit/15 text-debit">
@@ -119,7 +119,7 @@ export default async function DashboardPage() {
             ) : openItemsCounts && openItemsCounts.counts.action_required === 0 ? (
               <Link
                 href="/open-items"
-                className="mb-5 block rounded-xl border border-credit/30 bg-credit/[0.04] px-5 py-3 transition hover:border-credit/50"
+                className="mb-5 block rounded-lg border border-credit/30 bg-credit/[0.04] px-5 py-3 transition hover:border-credit/50"
               >
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-credit/15 text-credit">

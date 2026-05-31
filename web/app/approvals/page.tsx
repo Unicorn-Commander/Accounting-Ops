@@ -5,11 +5,13 @@ import {
   ShieldCheck,
   Banknote,
   Sparkles,
-  Layers
+  Layers,
+  SkipForward
 } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import {
   Card,
+  EmptyState,
   MaterialityBadge,
   PageShell,
   SectionHeader,
@@ -19,6 +21,7 @@ import { ApprovalActions } from "@/components/approval-actions";
 import { BankTxnBatchPanel } from "@/components/bank-txn-batch-panel";
 import { RecommendationsView } from "@/app/approvals/recommendations-view";
 import { ClusterReview } from "@/components/approvals/cluster-review";
+import { SkippedQueue } from "@/components/approvals/skipped-queue";
 import { getActiveContext } from "@/lib/active-context";
 import {
   getApprovals,
@@ -33,7 +36,7 @@ import { formatAmount } from "@/lib/journal";
 // Tab definitions
 // -----------------------------------------------------------------------
 
-type Tab = "review" | "rows" | "recommendations";
+type Tab = "review" | "rows" | "recommendations" | "skipped";
 
 // -----------------------------------------------------------------------
 // Helpers for journal_recategorization + compliance_rule rows
@@ -132,12 +135,14 @@ function TabBar({
   active,
   reviewCount,
   btiCount,
-  recCount
+  recCount,
+  skippedCount
 }: {
   active: Tab;
   reviewCount: number;
   btiCount: number;
   recCount: number;
+  skippedCount: number;
 }) {
   const tabs: { id: Tab; label: string; count?: number; icon: React.ReactNode }[] = [
     {
@@ -157,11 +162,17 @@ function TabBar({
       label: "AI scoring",
       count: recCount,
       icon: <Sparkles size={13} />
+    },
+    {
+      id: "skipped",
+      label: "Skipped",
+      count: skippedCount,
+      icon: <SkipForward size={13} />
     }
   ];
 
   return (
-    <div className="flex items-center gap-1 overflow-x-auto rounded-xl border border-default bg-elevated p-1">
+    <div className="flex items-center gap-1 overflow-x-auto rounded-lg border border-default bg-elevated p-1">
       {tabs.map((t) => (
         <Link
           key={t.id}
@@ -211,11 +222,16 @@ export default async function ApprovalsPage({
       ? "rows"
       : sp.tab === "recommendations"
         ? "recommendations"
-        : "review"; // default to the new cluster-card UX
+        : sp.tab === "skipped"
+          ? "skipped"
+          : "review"; // default to the new cluster-card UX
 
-  const [data, categories, recsData, clusters] = await Promise.all([
+  const [data, skippedData, categories, recsData, clusters] = await Promise.all([
     workspace
       ? getApprovals(workspace.id, { entityId, status: "pending" })
+      : null,
+    workspace
+      ? getApprovals(workspace.id, { entityId, status: "skipped" })
       : null,
     workspace ? getApprovalCategories(workspace.id) : [],
     workspace
@@ -229,6 +245,8 @@ export default async function ApprovalsPage({
   ]);
 
   const approvals = data?.approvals ?? [];
+  const skippedApprovals = skippedData?.approvals ?? [];
+  const skippedCount = skippedData?.total ?? skippedApprovals.length;
   const canDecide = workspace
     ? ["owner", "admin"].includes(workspace.role)
     : false;
@@ -279,30 +297,39 @@ export default async function ApprovalsPage({
         ) : (
           <div className="flex flex-col gap-6">
             {/* Tab bar (show only when there is something to switch to). */}
-            {(reviewCount > 0 || btiApprovals.length > 0) && (
+            {(reviewCount > 0 || btiApprovals.length > 0 || skippedCount > 0) && (
               <TabBar
                 active={activeTab}
                 reviewCount={reviewCount}
                 btiCount={btiApprovals.length}
                 recCount={recCount}
+                skippedCount={skippedCount}
               />
             )}
 
             {!canDecide && (
-              <div className="rounded-xl border border-pending/40 bg-pending/[0.06] px-5 py-3 text-xs text-ink-secondary">
+              <div className="rounded-lg border border-pending/40 bg-pending/[0.06] px-5 py-3 text-xs text-ink-secondary">
                 You can review these, but only an <strong>admin</strong> can
                 attest (approve/apply) a material action.
               </div>
             )}
 
             {totalPending === 0 && reviewCount === 0 ? (
-              <Card>
-                <div className="flex flex-col items-center gap-3 py-10 text-center">
-                  <ShieldCheck size={28} className="text-credit" />
-                  <p className="text-base font-medium text-ink-secondary">
-                    Books are caught up. Nothing waiting on you.
-                  </p>
-                  <p className="max-w-md text-xs text-ink-tertiary">
+              // H9: ported to shared EmptyState primitive (celebratory "caught
+              // up" variant — preserves the existing tone but standardises the
+              // layout to match transactions/journal/reconciliation).
+              <EmptyState
+                variant="no-data"
+                icon={
+                  <ShieldCheck
+                    size={28}
+                    className="text-credit"
+                    aria-hidden="true"
+                  />
+                }
+                title="Books are caught up. Nothing waiting on you."
+                description={
+                  <>
                     Material recategorizations, proposed compliance rules, and
                     bank-import reviews land here. Lower-value items live in
                     the{" "}
@@ -313,9 +340,9 @@ export default async function ApprovalsPage({
                       Reconciliation queue
                     </Link>
                     .
-                  </p>
-                </div>
-              </Card>
+                  </>
+                }
+              />
             ) : activeTab === "review" && clusters ? (
               /* ---- Cluster cards + singleton swipe (default tab) ---- */
               <>
@@ -353,6 +380,13 @@ export default async function ApprovalsPage({
               <RecommendationsView
                 recommendations={recRows}
                 clusters={recClusters}
+                workspaceId={workspace.id}
+                canDecide={canDecide}
+              />
+            ) : activeTab === "skipped" ? (
+              /* ---- Skipped queue (decide later) ---- */
+              <SkippedQueue
+                approvals={skippedApprovals}
                 workspaceId={workspace.id}
                 canDecide={canDecide}
               />

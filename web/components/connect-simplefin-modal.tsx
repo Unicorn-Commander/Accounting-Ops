@@ -76,7 +76,7 @@ export function ConnectSimplefinModal({
       <Dialog.Trigger asChild>{trigger}</Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-canvas/80 backdrop-blur-sm" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-xl border border-default bg-surface shadow-card focus:outline-none">
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-lg border border-default bg-surface shadow-card focus:outline-none">
           <div className="flex items-center justify-between border-b border-subtle px-6 py-4">
             <Dialog.Title className="text-base font-semibold">
               Connect SimpleFIN to {workspaceName}
@@ -108,7 +108,7 @@ export function ConnectSimplefinModal({
                   reset();
                   router.refresh();
                 }}
-                className="w-full rounded-md bg-brand-500 px-4 py-2 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600"
+                className="w-full rounded-md bg-brand-500 px-4 py-2 text-sm font-medium text-white hover:bg-brand-600"
               >
                 Done
               </button>
@@ -172,7 +172,7 @@ export function ConnectSimplefinModal({
                   onClick={submit}
                   disabled={loading || token.trim().length < 10}
                   className={cn(
-                    "inline-flex items-center gap-2 rounded-md bg-brand-500 px-4 py-2 text-sm font-medium text-white shadow-brand-glow transition hover:bg-brand-600",
+                    "inline-flex items-center gap-2 rounded-md bg-brand-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-brand-600",
                     (loading || token.trim().length < 10) &&
                       "cursor-not-allowed opacity-60"
                   )}

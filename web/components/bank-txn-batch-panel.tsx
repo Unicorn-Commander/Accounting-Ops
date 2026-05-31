@@ -333,7 +333,7 @@ export function BankTxnBatchPanel({
   return (
     <div className="flex flex-col gap-4">
       {/* ---- Filter bar ---- */}
-      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-default bg-elevated px-4 py-2.5">
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-default bg-elevated px-4 py-2.5">
         <span className="text-[11px] uppercase tracking-wider text-ink-tertiary">
           Filters
         </span>
@@ -449,7 +449,7 @@ export function BankTxnBatchPanel({
 
       {/* ---- Batch action bar (rows mode only — groups mode has its own per-card buttons) ---- */}
       {viewMode === "rows" && canDecide && selCount > 0 && (
-        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-brand-500/40 bg-brand-500/[0.06] px-4 py-2.5">
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-brand-500/40 bg-brand-500/[0.06] px-4 py-2.5">
           <span className="text-xs font-medium text-ink-primary">
             {selCount} selected
           </span>
@@ -518,7 +518,7 @@ export function BankTxnBatchPanel({
           }}
         />
       ) : filteredApprovals.length === 0 ? (
-        <div className="rounded-xl border border-default bg-surface px-5 py-8 text-center">
+        <div className="rounded-lg border border-default bg-surface px-5 py-8 text-center">
           <p className="text-sm text-ink-secondary">
             Nothing to review — books are caught up.
           </p>

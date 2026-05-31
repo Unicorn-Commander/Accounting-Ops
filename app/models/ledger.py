@@ -60,6 +60,10 @@ class ApprovalStatus(str, enum.Enum):
     approved = "approved"
     rejected = "rejected"
     canceled = "canceled"
+    # 'skipped' added 2026-05-31 (migration 0015) for the "decide later" queue.
+    # Skipped rows do NOT post to the ledger; they remain pending in spirit
+    # and can be flipped back to 'pending' via the un-skip endpoint.
+    skipped = "skipped"
 
 
 class ComplianceTrigger(str, enum.Enum):

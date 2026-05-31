@@ -12,7 +12,7 @@
 //     hint in the empty state so the user can click-to-send without typing.
 //   - Mobile-responsive: stacks vertically below `lg`.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, Loader2, Sparkles } from "lucide-react";
 import { ChatClient } from "@/components/chat/chat-client";
@@ -21,6 +21,7 @@ import type {
   ChatPersona,
   ChatSessionSummary
 } from "@/lib/chat";
+import { SetupChecklist, type SetupChecklistHandle } from "./setup-checklist";
 
 type Entity = { id: string; display_name: string; slug: string };
 
@@ -115,11 +116,18 @@ export function SetupClient({
     };
   }, [activeEntityId, workspaceId]);
 
+  // Ref to the checklist so we can forward EVERY assistant tool_call event,
+  // not just `mark_intake_complete`. The checklist filters internally to the
+  // ones that signify step completion.
+  const checklistRef = useRef<SetupChecklistHandle | null>(null);
+
   // Listen for mark_intake_complete tool calls. When seen, surface a small
   // success card on top of the chat and redirect to /dashboard after a short
   // delay so the user can read the recap.
   const handleAssistantToolCall = useCallback(
     (event: { name: string; args: Record<string, unknown>; result?: unknown }) => {
+      // Always notify the checklist; it filters internally.
+      checklistRef.current?.noteToolEvent(event);
       if (event.name !== "mark_intake_complete") return;
       let summary = "Setup complete.";
       let nextSteps: string[] = [];
@@ -163,7 +171,15 @@ export function SetupClient({
   }, [completion, router]);
 
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-3 md:grid md:grid-cols-[15rem_1fr] md:gap-4 lg:grid-cols-[17rem_1fr]">
+      {/* Persistent setup checklist — left rail on md+, top strip on mobile */}
+      <SetupChecklist
+        ref={checklistRef}
+        workspaceId={workspaceId}
+        className="md:sticky md:top-3 md:self-start"
+      />
+
+      <div className="space-y-3 min-w-0">
       {/* Onboarding hint — what to expect (only shown before the first turn) */}
       {initialActiveSessionId === null && (
         <Card>
@@ -262,6 +278,7 @@ export function SetupClient({
           onAssistantToolCall={handleAssistantToolCall}
         />
       ) : null}
+      </div>
     </div>
   );
 }

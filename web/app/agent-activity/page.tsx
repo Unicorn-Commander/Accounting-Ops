@@ -1,55 +1,91 @@
-import { Filter } from "lucide-react";
-import { AppShell } from "@/components/app-shell";
-import { Card, PageShell, SectionHeader } from "@/components/primitives";
-import { ActivityEventList, ActivitySummaryStrip } from "@/components/agent-activity-feed";
-import { ACTIVITY_EVENTS, summarizeActivity } from "@/lib/agent-activity";
+// /agent-activity — full-page AI activity timeline.
+//
+// Wired to live decision_audit + tax_review_queue (agent submissions) via
+// fetchAIActivity. Replaces the previous ACTIVITY_EVENTS mock + "Preview"
+// banner per UX audit issue I16.
+//
+// The richer in-page interactions (filter / live poll / undo / challenge)
+// live in the AIActivityTimeline component, shared with /open-items
+// section 7 + /entities/{eid}/activity.
 
-export default function AgentActivityPage() {
-  const summary = summarizeActivity(ACTIVITY_EVENTS);
+import Link from "next/link";
+import { AppShell } from "@/components/app-shell";
+import { AIActivityTimeline } from "@/components/ai-activity-timeline";
+import { Card, PageShell, SectionHeader } from "@/components/primitives";
+import { fetchAIActivity } from "@/lib/ai-activity";
+import { getActiveContext } from "@/lib/active-context";
+
+export const dynamic = "force-dynamic";
+
+export default async function AgentActivityPage() {
+  const ctx = await getActiveContext();
+  const workspace = ctx.activeWorkspace;
+
+  if (!workspace) {
+    return (
+      <AppShell>
+        <PageShell>
+          <SectionHeader
+            title="Activity log"
+            subtitle="Every decision your agents make, with reasoning. Append-only. Tamper-evident."
+          />
+          <Card>
+            <p className="text-sm text-ink-secondary">
+              No workspace selected. Visit{" "}
+              <Link
+                href="/dashboard"
+                className="text-brand-400 underline-offset-2 hover:underline"
+              >
+                Dashboard
+              </Link>{" "}
+              to pick one.
+            </p>
+          </Card>
+        </PageShell>
+      </AppShell>
+    );
+  }
+
+  // Resolve entity scope from cookie/default. The endpoint also accepts
+  // entity_id query parameter for further filtering — surfaced inside the
+  // timeline's filter bar.
+  const entityId = ctx.isConsolidated
+    ? undefined
+    : ctx.activeEntity?.id ?? undefined;
+
+  const aiActivity = await fetchAIActivity(workspace.id, {
+    entityId,
+    limit: 200
+  });
+
+  const scopeLabel = ctx.isConsolidated
+    ? "All entities (consolidated)"
+    : ctx.activeEntity?.display_name ?? "(no entity)";
 
   return (
     <AppShell>
       <PageShell>
         <SectionHeader
           title="Activity log"
-          subtitle="Every decision your agents make, with reasoning. Append-only. Tamper-evident."
-          action={
-            <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-1 rounded-full border border-pending/40 bg-pending/[0.08] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-pending">
-                Preview
-              </span>
-              <button className="inline-flex items-center gap-1.5 rounded-md border border-default bg-surface px-3 py-1.5 text-xs text-ink-secondary hover:bg-elevated focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas">
-                <Filter size={13} /> Filters
-              </button>
-            </div>
+          subtitle={`Every decision your agents make, with reasoning. Append-only. Tamper-evident. · ${scopeLabel}`}
+        />
+
+        <AIActivityTimeline
+          workspaceId={workspace.id}
+          initial={aiActivity}
+          entityId={entityId}
+          emptyMsg={
+            aiActivity === null
+              ? "Activity log unavailable — backend returned no data. Try refreshing in a moment."
+              : "No AI agent actions yet for the selected scope. Once an agent drafts a memo, posts a JE, or runs a specialist, you'll see it here."
           }
         />
 
-        {/* Preview banner — audit quick-win #6 + issue 16: the events below
-            are seeded sample data, not the real SSE stream. */}
-        <div className="mb-4 rounded-lg border border-pending/40 bg-pending/[0.04] px-4 py-3 text-xs text-pending">
-          <strong className="font-semibold">Preview:</strong> the events below
-          are sample data showing the planned shape of the activity log. Real
-          AI activity for your workspace is available on{" "}
-          <a href="/open-items#ai-activity" className="underline">
-            /open-items
-          </a>{" "}
-          in the &ldquo;Recent AI activity&rdquo; section.
-        </div>
-
-        <Card padded={false}>
-          <div className="flex flex-wrap items-center gap-3 border-b border-subtle px-5 py-3">
-            <ActivitySummaryStrip summary={summary} />
-            <span className="ml-auto text-[11px] text-ink-tertiary">Sample data · last 60 minutes</span>
-          </div>
-
-          <ActivityEventList events={ACTIVITY_EVENTS} />
-
-          <div className="flex items-center justify-between border-t border-subtle px-5 py-3 text-[11px] text-ink-tertiary">
-            <span>Showing {ACTIVITY_EVENTS.length} sample events</span>
-            <span>Phase 1 wires real SSE stream from FastAPI</span>
-          </div>
-        </Card>
+        <p className="mt-4 text-[11px] text-ink-tertiary">
+          Sourced from <code className="text-ink-secondary">decision_audit</code> +
+          agent-submitted <code className="text-ink-secondary">tax_review_queue</code>{" "}
+          rows. Append-only. Every undo / challenge writes its own audit row.
+        </p>
       </PageShell>
     </AppShell>
   );

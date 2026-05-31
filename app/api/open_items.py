@@ -962,3 +962,82 @@ async def record_decision(
         )
 
     return {"ok": True, "key": key, "verdict": verdict}
+
+
+# ---------------------------------------------------------------------------
+# GET /open-items/decision-history — per-decision audit trail
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/workspaces/{workspace_id}/open-items/decision-history")
+async def get_decision_history(
+    workspace_id: UUID,
+    key: str = Query(..., min_length=1, max_length=512),
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Return the full append-only history of a single decision key.
+
+    Each ``record_decision`` call inserts a new ``tax_review_queue`` row
+    with ``form_reference = 'DECISION_RESOLVED: <key>|<verdict>'``. The
+    aggregator's "latest INSERT wins" produces the current state; this
+    endpoint returns every row, oldest first, so the UI can show the
+    user a real audit trail (who decided, when, what changed, notes).
+
+    Read floor: viewer (every workspace member can see decision history).
+    """
+    require_role(workspace, "viewer")
+    key_clean = (key or "").strip()
+    if not key_clean:
+        return {"key": "", "history": []}
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT
+                        id::text                AS id,
+                        form_reference          AS form_reference,
+                        resolution_notes        AS notes,
+                        reviewer_uc_uid         AS decided_by,
+                        created_at              AS decided_at,
+                        content                 AS content
+                    FROM tax_review_queue
+                    WHERE form_reference = :exact_ref_accept
+                       OR form_reference = :exact_ref_other
+                    ORDER BY created_at ASC
+                    """
+                ),
+                {
+                    "exact_ref_accept": f"DECISION_RESOLVED: {key_clean}|accept",
+                    "exact_ref_other": f"DECISION_RESOLVED: {key_clean}|other",
+                },
+            )
+        ).mappings().all()
+
+    history: list[dict[str, Any]] = []
+    for r in rows:
+        ref = r["form_reference"] or ""
+        verdict = "accept"
+        if "|" in ref:
+            verdict = ref.split("|", 1)[1].strip() or "accept"
+        decided_at = r["decided_at"]
+        if isinstance(decided_at, dt.datetime):
+            decided_at_iso = decided_at.isoformat()
+        else:
+            decided_at_iso = str(decided_at)
+        history.append(
+            {
+                "id": r["id"],
+                "verdict": verdict,
+                "decided_by": r["decided_by"],
+                "decided_at": decided_at_iso,
+                "notes": r["notes"] or "",
+            }
+        )
+
+    return {
+        "key": key_clean,
+        "history": history,
+        "total": len(history),
+    }

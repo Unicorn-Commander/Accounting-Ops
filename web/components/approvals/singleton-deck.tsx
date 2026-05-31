@@ -150,30 +150,29 @@ export function SingletonDeck({
       const item = current;
       setError(null);
 
-      if (decision === "skip") {
-        // Local-only: record as skipped + move on.
-        setDecisions((prev) => ({ ...prev, [item.approval_id]: "skip" }));
-        onDecidedOne(item, "skip");
-        return;
-      }
-
       setPendingId(item.approval_id);
       try {
-        const body: Record<string, unknown> = { decision };
-        if (decision === "approve") {
-          const cat = overrides[item.approval_id];
-          if (cat && cat !== item.category_suggested) {
-            body.category_override = cat;
+        let endpoint: string;
+        let body: Record<string, unknown>;
+        if (decision === "skip") {
+          // Durable skip — server-side flip to status='skipped' + audit row.
+          endpoint = `/api/workspaces/${workspaceId}/approvals/${item.approval_id}/skip`;
+          body = {};
+        } else {
+          endpoint = `/api/workspaces/${workspaceId}/approvals/${item.approval_id}/decide`;
+          body = { decision };
+          if (decision === "approve") {
+            const cat = overrides[item.approval_id];
+            if (cat && cat !== item.category_suggested) {
+              body.category_override = cat;
+            }
           }
         }
-        const res = await fetch(
-          `/api/workspaces/${workspaceId}/approvals/${item.approval_id}/decide`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body)
-          }
-        );
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
         const j = (await res.json().catch(() => ({}))) as { detail?: string };
         if (!res.ok) throw new Error(j.detail ?? `HTTP ${res.status}`);
 

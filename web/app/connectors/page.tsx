@@ -174,7 +174,7 @@ function ConnectorCard({
                 workspaceId={workspaceId}
                 workspaceName={workspaceName ?? "this workspace"}
                 trigger={
-                  <button className="inline-flex items-center gap-1 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow hover:bg-brand-600 transition">
+                  <button className="inline-flex items-center gap-1 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600 transition">
                     <Plus size={12} />
                     Connect
                   </button>
@@ -186,7 +186,7 @@ function ConnectorCard({
               null
             ) : (
               <button
-                className="inline-flex items-center gap-1 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow hover:bg-brand-600 transition disabled:cursor-not-allowed disabled:opacity-60"
+                className="inline-flex items-center gap-1 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600 transition disabled:cursor-not-allowed disabled:opacity-60"
                 disabled
                 title="Connector-specific Connect flow lands soon"
               >

@@ -82,7 +82,7 @@ export function DecisionNoteDialog({
       {/* Dialog */}
       <div
         className={cn(
-          "relative w-full max-w-md rounded-xl border border-default bg-elevated p-5 shadow-card"
+          "relative w-full max-w-md rounded-lg border border-default bg-elevated p-5 shadow-card"
         )}
       >
         <div className="flex items-start justify-between gap-3">

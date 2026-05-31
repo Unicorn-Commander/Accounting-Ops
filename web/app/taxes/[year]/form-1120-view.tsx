@@ -223,7 +223,7 @@ function OverrideDialog({
         onClick={onClose}
         aria-label="Close"
       />
-      <div className="relative z-10 w-full max-w-md rounded-xl border border-default bg-surface p-6 shadow-card">
+      <div className="relative z-10 w-full max-w-md rounded-lg border border-default bg-surface p-6 shadow-card">
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <p className="text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
@@ -946,7 +946,7 @@ export function Form1120View({
             type="button"
             onClick={handleDownloadPdf}
             disabled={pdfBusy}
-            className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-elevated disabled:text-ink-disabled disabled:shadow-none"
+            className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600 disabled:cursor-not-allowed disabled:bg-elevated disabled:text-ink-disabled"
           >
             {pdfBusy ? (
               <span className="inline-block h-3 w-3 animate-spin rounded-full border border-white border-t-transparent" />

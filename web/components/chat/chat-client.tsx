@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AlertCircle, Bot } from "lucide-react";
+import { AlertCircle, Bot, History, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ChatSidebar } from "./sidebar";
 import { Composer } from "./composer";
@@ -100,6 +100,9 @@ export function ChatClient({
   const [draft, setDraft] = useState("");
   const [canvas, setCanvas] = useState<CanvasArtifact | null>(null);
   const [canvasPinned, setCanvasPinned] = useState(false);
+  // Mobile-only sessions drawer (slides in from the left). Hidden when
+  // hideSidebar is true (the /setup route).
+  const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false);
 
   const threadRef = useRef<HTMLDivElement>(null);
   const stream = useChatStream();
@@ -169,6 +172,22 @@ export function ChatClient({
     }
     window.history.replaceState({}, "", url.toString());
   }, [activeSessionId]);
+
+  // Mobile drawer: Escape closes it. Background scroll-lock so swipes don't
+  // accidentally interact with the chat thread underneath.
+  useEffect(() => {
+    if (!mobileSessionsOpen) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setMobileSessionsOpen(false);
+    }
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [mobileSessionsOpen]);
 
   // Auto-scroll to the bottom on new messages + streaming text.
   useEffect(() => {
@@ -416,13 +435,84 @@ export function ChatClient({
         />
       )}
 
+      {/* Mobile sessions drawer — slides in from the left, < lg only */}
+      {!hideSidebar && mobileSessionsOpen && (
+        <div
+          className="fixed inset-0 z-50 lg:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Chat sessions"
+          id="chat-mobile-sessions"
+        >
+          {/* Backdrop — tap to close. Distinct from the drawer panel so swipes
+              on the panel don't bubble to it. */}
+          <button
+            type="button"
+            aria-label="Close sessions"
+            onClick={() => setMobileSessionsOpen(false)}
+            className="absolute inset-0 cursor-default bg-black/55 backdrop-blur-sm transition-opacity"
+            tabIndex={-1}
+          />
+          <aside
+            className={cn(
+              "relative flex h-full w-[min(86vw,22rem)] flex-col bg-surface shadow-xl",
+              "animate-slide-in-left"
+            )}
+          >
+            <div className="flex items-center justify-between border-b border-subtle px-3 py-2">
+              <p className="text-xs font-semibold text-ink-primary">
+                Sessions
+              </p>
+              <button
+                type="button"
+                onClick={() => setMobileSessionsOpen(false)}
+                aria-label="Close"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-ink-secondary hover:bg-elevated focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <ChatSidebar
+              sessions={sessions}
+              activeId={activeSessionId}
+              onSelect={(id) => {
+                setActiveSessionId(id);
+                setMobileSessionsOpen(false);
+              }}
+              onNew={() => {
+                startNewChat();
+                setMobileSessionsOpen(false);
+              }}
+              className="flex flex-1 rounded-none border-0"
+            />
+          </aside>
+        </div>
+      )}
+
       {/* Main pane */}
       <section
         className={cn(
-          "flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-default bg-surface"
+          "flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-default bg-surface"
         )}
       >
         <header className="flex flex-wrap items-center gap-2 border-b border-subtle bg-elevated/40 px-3 py-2 md:px-4 md:py-2.5">
+          {/* Mobile-only "Sessions" hamburger — opens the slide-in drawer. */}
+          {!hideSidebar && (
+            <button
+              type="button"
+              onClick={() => setMobileSessionsOpen(true)}
+              aria-label="Open chat sessions"
+              aria-controls="chat-mobile-sessions"
+              aria-expanded={mobileSessionsOpen}
+              className={cn(
+                "inline-flex h-8 w-8 items-center justify-center rounded-md border border-subtle bg-elevated text-ink-secondary hover:bg-surface focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500",
+                "lg:hidden"
+              )}
+              title="Sessions (Esc to close)"
+            >
+              <History size={14} />
+            </button>
+          )}
           <Bot size={14} className="text-agent-500" />
           <PersonaPicker
             personas={personas}

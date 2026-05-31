@@ -46,6 +46,7 @@ export type JournalFilters = {
   startDate?: string;
   endDate?: string;
   category?: string;
+  account?: string;
   statusFilter?: string;
   search?: string;
   limit?: number;
@@ -63,6 +64,7 @@ export async function getJournalEntries(
   if (filters.startDate) params.set("start_date", filters.startDate);
   if (filters.endDate) params.set("end_date", filters.endDate);
   if (filters.category) params.set("category", filters.category);
+  if (filters.account) params.set("account", filters.account);
   if (filters.statusFilter) params.set("status_filter", filters.statusFilter);
   if (filters.search) params.set("search", filters.search);
   params.set("limit", String(filters.limit ?? 100));
@@ -135,6 +137,40 @@ export type CashFlow = {
   financing: { lines: CashFlowLine[]; total: string };
   net_change_in_cash: string;
 };
+
+export type YearsWithEntries = {
+  years: number[];
+  default_year: number;
+  current_year: number;
+};
+
+export async function getYearsWithEntries(
+  workspaceId: string,
+  entityId?: string
+): Promise<YearsWithEntries | null> {
+  const session = await auth();
+  if (!session?.accessToken) return null;
+  const params = new URLSearchParams();
+  if (entityId) params.set("entity_id", entityId);
+  try {
+    const res = await fetch(
+      `${INTERNAL_BASE}/api/workspaces/${workspaceId}/reports/years-with-entries${
+        params.toString() ? "?" + params : ""
+      }`,
+      {
+        headers: {
+          Authorization: `Bearer ${session.accessToken}`,
+          Accept: "application/json",
+        },
+        cache: "no-store",
+      }
+    );
+    if (!res.ok) return null;
+    return (await res.json()) as YearsWithEntries;
+  } catch {
+    return null;
+  }
+}
 
 async function fetchReport<T>(
   workspaceId: string,

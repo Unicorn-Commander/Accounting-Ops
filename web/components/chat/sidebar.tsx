@@ -24,7 +24,7 @@ export function ChatSidebar({
   return (
     <aside
       className={cn(
-        "flex h-full flex-col overflow-hidden rounded-xl border border-default bg-surface",
+        "flex h-full flex-col overflow-hidden rounded-lg border border-default bg-surface",
         className
       )}
       aria-label="Chat sessions"

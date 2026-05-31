@@ -247,7 +247,7 @@ function ResolveModal({
         onClick={onClose}
         aria-label="Close"
       />
-      <div className="relative z-10 w-full max-w-sm rounded-xl border border-default bg-surface p-6 shadow-card">
+      <div className="relative z-10 w-full max-w-sm rounded-lg border border-default bg-surface p-6 shadow-card">
         <div className="mb-4 flex items-start justify-between gap-3">
           <h2 className="text-base font-semibold">Resolve item</h2>
           <button

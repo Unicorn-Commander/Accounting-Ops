@@ -150,9 +150,13 @@ async def test_middleware_passes_valid_service_token(monkeypatch):
     import app.auth as auth_mod
 
     token = "x" * 40
+    # Audit 2026-05-31 Bug 7: declare role_floor so the loader admits this
+    # token in production mode. The actual authorization downstream uses
+    # workspace_membership; role_floor just satisfies the "at least one scope
+    # field set" requirement.
     monkeypatch.setenv(
         "ACCTOPS_SERVICE_TOKENS",
-        '{"%s": {"uc_uid": "svc-user", "agent_id": "tester"}}' % token,
+        '{"%s": {"uc_uid": "svc-user", "agent_id": "tester", "role_floor": "viewer"}}' % token,
     )
     monkeypatch.setattr(auth_mod, "_service_tokens_cache", None)
     try:

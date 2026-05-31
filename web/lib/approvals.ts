@@ -55,7 +55,7 @@ export type Approval = {
   subject_id: string;
   amount: string | null;
   currency_code: string | null;
-  status: "pending" | "approved" | "rejected" | "canceled";
+  status: "pending" | "approved" | "rejected" | "canceled" | "skipped";
   reasoning: string;
   requested_by_identity: string;
   decided_by_uc_uid: string | null;

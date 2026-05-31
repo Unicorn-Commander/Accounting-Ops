@@ -51,8 +51,11 @@ export default {
         reasoning: ["var(--font-inter)", "system-ui", "sans-serif"]
       },
       fontSize: {
-        "numeric-lg": ["1.75rem", { lineHeight: "1", letterSpacing: "-0.025em", fontWeight: "500" }],
-        "numeric-xl": ["2.5rem", { lineHeight: "1", letterSpacing: "-0.025em", fontWeight: "500" }]
+        // I19: removed negative letter-spacing. Numeric type read too tight
+        // on dense finance tables; restored to natural (0em) so KPIs stay
+        // legible at small viewports.
+        "numeric-lg": ["1.75rem", { lineHeight: "1", fontWeight: "500" }],
+        "numeric-xl": ["2.5rem", { lineHeight: "1", fontWeight: "500" }]
       },
       boxShadow: {
         card: "0 4px 24px rgba(0,0,0,0.4)",
@@ -62,7 +65,8 @@ export default {
       },
       animation: {
         "pulse-soft": "pulse-soft 1.6s ease-in-out infinite",
-        "fade-in": "fade-in 220ms ease-out"
+        "fade-in": "fade-in 220ms ease-out",
+        "slide-in-left": "slide-in-left 220ms ease-out"
       },
       keyframes: {
         "pulse-soft": {
@@ -72,6 +76,10 @@ export default {
         "fade-in": {
           from: { opacity: "0", transform: "translateY(4px)" },
           to: { opacity: "1", transform: "translateY(0)" }
+        },
+        "slide-in-left": {
+          from: { transform: "translateX(-100%)" },
+          to: { transform: "translateX(0)" }
         }
       }
     }

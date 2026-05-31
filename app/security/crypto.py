@@ -55,6 +55,18 @@ class CredCrypto:
         # Bytes-only; never log or repr this object.
         self._master_key = master_key
 
+    def master_key_bytes(self) -> bytes:
+        """Return the raw master key bytes for HKDF-derived subkeys.
+
+        Intended for in-process callers that need a per-purpose subkey (e.g.
+        ``app.security.internal_assertion`` which derives an
+        assertion-signing key via HKDF info='acctops:internal-assertion:v1').
+        NEVER log this value, NEVER ship it over the network, NEVER persist
+        it outside of the original secret file. Per-purpose HKDF derivation
+        means a leak of any derived key does NOT expose the master key.
+        """
+        return self._master_key
+
     @classmethod
     def from_file(cls, path: Path = MASTER_KEY_PATH) -> "CredCrypto":
         """Load the master key from a secret file. Refuses to auto-generate."""

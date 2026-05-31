@@ -150,10 +150,19 @@ def test_spoofed_actor_headers_do_not_reach_the_audit_span(monkeypatch):
     active_provider.add_span_processor(SimpleSpanProcessor(_Capture()))
 
     # Register an in-process service token so /api/me validates without a DB.
+    # Audit 2026-05-31 Bug 7: declare role_floor so the loader admits it in
+    # production mode (the unscoped legacy shape is now rejected at load time).
+    # role_floor=viewer matches /api/me's read-only nature.
     token = "x" * 40
     monkeypatch.setenv(
         "ACCTOPS_SERVICE_TOKENS",
-        json.dumps({token: {"uc_uid": "audit-real", "agent_id": "audit-agent"}}),
+        json.dumps({
+            token: {
+                "uc_uid": "audit-real",
+                "agent_id": "audit-agent",
+                "role_floor": "viewer",
+            }
+        }),
     )
     import app.auth as auth
 

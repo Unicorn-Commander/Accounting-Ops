@@ -158,6 +158,195 @@ class PostingRefusal:
     existing_entry_id: UUID | None = None
 
 
+# Audit 2026-05-31 Bug 9: chain-race retry bound.
+# A concurrent post advancing the per-entity hash chain MUST cause this writer
+# to re-fetch get_last_chain_hash and recompute this_hash, NOT mis-classify as
+# idempotent. Bounded at 3 to avoid livelock if write pressure is pathological;
+# in that case the call returns blocked_idempotent and the caller can retry.
+_MAX_CHAIN_RETRIES = 3
+
+
+@dataclass
+class _ChainInsertIdempotent:
+    """The (entity_id, source, source_external_id) uniqueness was hit during
+    insert — a TRUE duplicate raced our pre-check. Carries the existing entry
+    id so the caller can return it on the PostingRefusal."""
+
+    existing_entry_id: UUID | None
+
+
+@dataclass
+class _ChainInsertExhausted:
+    """All _MAX_CHAIN_RETRIES attempts hit a non-idempotency IntegrityError —
+    pathological chain contention. Treat as blocked_idempotent so the caller
+    can retry, mirroring pre-Bug-9 behavior for the unrecoverable case."""
+
+
+async def _attempt_chain_insert(
+    session: AsyncSession,
+    *,
+    je_id: UUID,
+    workspace_id: str,
+    entity_id: str,
+    amount_cents: int,  # absolute value
+    effective_date,
+    debit_account: str,
+    credit_account: str,
+    category: str,
+    tier: str,
+    source: str,
+    source_external_id: str | None,
+    description: str,
+    payee: str | None,
+    memo: str | None,
+    reasoning_trace: str,
+    model_version: str,
+    identity: str,
+    approving_uid: str | None,
+    receipt_link_id: UUID | None,
+) -> None | _ChainInsertIdempotent | _ChainInsertExhausted:
+    """Attempt to advance the per-entity chain + insert, with bounded retry.
+
+    Audit 2026-05-31 Bug 9. Returns ``None`` on a clean insert; an
+    ``_ChainInsertIdempotent`` when the OTHER writer won the idempotency race
+    (true duplicate); an ``_ChainInsertExhausted`` when all retries hit
+    non-idempotency IntegrityErrors.
+
+    On each attempt:
+      1. Re-fetch ``get_last_chain_hash`` so prev_hash reflects the LATEST
+         committed entry for this entity (a concurrent post may have advanced
+         it since the previous attempt).
+      2. Compute this_hash + a FRESH posted_at (so collisions on posted_at are
+         vanishingly unlikely between retries).
+      3. INSERT inside a savepoint so a duplicate-key error doesn't poison the
+         outer transaction.
+
+    IntegrityError disambiguation: PostgreSQL/asyncpg raises ``UniqueViolation``
+    with a ``constraint_name`` attribute set on the wrapped ``orig`` exception.
+    We treat conflicts on ``uq_je_entity_source_external`` as idempotency
+    (terminal) and anything else as a chain-advance race (retryable).
+    """
+    last_exc: IntegrityError | None = None
+    for attempt in range(_MAX_CHAIN_RETRIES):
+        prev_hash = await get_last_chain_hash(session, entity_id)
+        posted_at = datetime.now(tz=timezone.utc)
+        this_hash = compute_hash(
+            prev_hash,
+            effective_date=effective_date,
+            amount_cents=amount_cents,
+            debit_account=debit_account,
+            credit_account=credit_account,
+            source=source,
+            source_external_id=source_external_id,
+            payee=payee,
+            description=description,
+            posted_at=posted_at,
+        )
+        try:
+            async with session.begin_nested():
+                await _insert_journal_entry(
+                    session,
+                    je_id=je_id,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    amount_cents=amount_cents,
+                    effective_date=effective_date,
+                    posted_at=posted_at,
+                    debit_account=debit_account,
+                    credit_account=credit_account,
+                    category=category,
+                    tier=tier,
+                    source=source,
+                    source_external_id=source_external_id,
+                    description=description,
+                    payee=payee,
+                    memo=memo,
+                    prev_hash=prev_hash,
+                    this_hash=this_hash,
+                    reasoning_trace=reasoning_trace,
+                    model_version=model_version,
+                    identity=identity,
+                    approving_uid=approving_uid,
+                    receipt_link_id=receipt_link_id,
+                )
+            return None
+        except IntegrityError as exc:
+            last_exc = exc
+            constraint = _integrity_constraint_name(exc)
+            if constraint == "uq_je_entity_source_external":
+                # True idempotency: the other writer's row is already in.
+                existing_id = await _lookup_existing_entry_id(
+                    session,
+                    entity_id=entity_id,
+                    source=source,
+                    source_external_id=source_external_id,
+                )
+                return _ChainInsertIdempotent(existing_entry_id=existing_id)
+            # Anything else: assume chain-race / transient — retry with a
+            # fresh prev_hash + this_hash + posted_at on next loop iteration.
+            continue
+    # Exhausted retries on non-idempotency conflicts.
+    return _ChainInsertExhausted()
+
+
+def _integrity_constraint_name(exc: IntegrityError) -> str | None:
+    """Best-effort name extraction from an asyncpg/SQLAlchemy IntegrityError.
+
+    asyncpg wraps the underlying ``UniqueViolationError`` (which carries
+    ``constraint_name``) on the SQLAlchemy exception's ``orig`` attribute.
+    Returns the constraint name when available, else None.
+    """
+    orig = getattr(exc, "orig", None)
+    if orig is None:
+        return None
+    name = getattr(orig, "constraint_name", None)
+    if isinstance(name, str) and name:
+        return name
+    # Fallback: scrape the message. Postgres formats unique-violation messages
+    # as: 'duplicate key value violates unique constraint "<name>"'.
+    msg = str(orig)
+    if 'unique constraint "' in msg:
+        try:
+            return msg.split('unique constraint "', 1)[1].split('"', 1)[0]
+        except (IndexError, ValueError):
+            pass
+    return None
+
+
+async def _lookup_existing_entry_id(
+    session: AsyncSession,
+    *,
+    entity_id: str,
+    source: str,
+    source_external_id: str | None,
+) -> UUID | None:
+    """Read the id of the already-posted row for (entity, source, ext_id).
+
+    Used after a uq_je_entity_source_external violation to report the
+    existing_entry_id back on the PostingRefusal.
+    """
+    if not source_external_id:
+        return None
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text FROM journal_entry
+                WHERE entity_id = :eid AND source = :src AND source_external_id = :ext
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "src": source, "ext": source_external_id},
+        )
+    ).first()
+    if row is None:
+        return None
+    try:
+        return UUID(row.id)
+    except (ValueError, AttributeError):
+        return None
+
+
 async def post_journal_entry(
     session: AsyncSession,
     *,
@@ -317,67 +506,75 @@ async def post_journal_entry(
             reason=f"Period closed at {period_end}; cannot post {effective_date}.",
         )
 
-    # ---- 4. Hash chain advance ----
-    prev_hash = await get_last_chain_hash(session, entity_id)
-    posted_at = datetime.now(tz=timezone.utc)
+    # ---- 4 + 5. Hash chain advance + insert (with bounded chain-race retry) ----
+    # Audit 2026-05-31 Bug 9: a concurrent post advancing the chain past us
+    # MUST NOT manifest as a false ``blocked_idempotent``. The chain-race
+    # IntegrityError is distinct from the (entity_id, source, source_external_id)
+    # idempotency violation — only the latter is a "true" duplicate. For a
+    # chain-race conflict we re-read get_last_chain_hash and recompute this_hash
+    # up to ``_MAX_CHAIN_RETRIES`` times so legitimate concurrent imports both
+    # land instead of one being silently dropped.
     abs_amount_cents = abs(amount_cents)
-    this_hash = compute_hash(
-        prev_hash,
-        effective_date=effective_date,
+    je_id = uuid4()
+    insert_outcome = await _attempt_chain_insert(
+        session,
+        je_id=je_id,
+        workspace_id=workspace_id,
+        entity_id=entity_id,
         amount_cents=abs_amount_cents,
+        effective_date=effective_date,
         debit_account=pair.debit_account,
         credit_account=pair.credit_account,
+        category=category,
+        tier=verdict.tier,
         source=source,
         source_external_id=source_external_id,
-        payee=payee,
         description=description,
-        posted_at=posted_at,
+        payee=payee,
+        memo=memo,
+        reasoning_trace=reasoning_trace,
+        model_version=model_version,
+        identity=posted_by_uc_uid,
+        approving_uid=posted_by_uc_uid if user_confirmed else None,
+        receipt_link_id=receipt_link_id,
     )
-
-    # ---- 5. Insert into journal_entry ----
-    je_id = uuid4()
-    # Use a savepoint so a duplicate-key error on (entity_id, source_external_id)
-    # or (entity_id, this_hash) doesn't poison the outer transaction.
-    try:
-        async with session.begin_nested():
-            await _insert_journal_entry(
-                session,
-                je_id=je_id,
-                workspace_id=workspace_id,
-                entity_id=entity_id,
-                amount_cents=abs_amount_cents,
-                effective_date=effective_date,
-                posted_at=posted_at,
-                debit_account=pair.debit_account,
-                credit_account=pair.credit_account,
-                category=category,
-                tier=verdict.tier,
-                source=source,
-                source_external_id=source_external_id,
-                description=description,
-                payee=payee,
-                memo=memo,
-                prev_hash=prev_hash,
-                this_hash=this_hash,
-                reasoning_trace=reasoning_trace,
-                model_version=model_version,
-                identity=posted_by_uc_uid,
-                approving_uid=posted_by_uc_uid if user_confirmed else None,
-                receipt_link_id=receipt_link_id,
-            )
-    except IntegrityError as exc:
-        # Concurrent post advanced the chain past us, OR an idempotency
-        # race. Either way the caller should retry.
+    if isinstance(insert_outcome, _ChainInsertIdempotent):
+        # True (entity_id, source, source_external_id) duplicate — the OTHER
+        # writer won the idempotency race after our pre-check at step 3.
         await _log_post_attempt(
             session, workspace_id=workspace_id, entity_id=entity_id, source=source,
             source_external_id=source_external_id, outcome="blocked_idempotent",
-            journal_entry_id=None, reason=f"chain race: {exc.__class__.__name__}",
+            journal_entry_id=insert_outcome.existing_entry_id,
+            reason="Concurrent writer posted the same (source, source_external_id)",
             actor_uc_uid=posted_by_uc_uid, actor_agent_id=posted_by_agent_id,
             amount_cents=amount_cents, category=category,
         )
         return PostingRefusal(
             outcome="blocked_idempotent",
-            reason="Chain race detected (concurrent post) — retry",
+            reason="Already posted",
+            existing_entry_id=insert_outcome.existing_entry_id,
+        )
+    if isinstance(insert_outcome, _ChainInsertExhausted):
+        # _MAX_CHAIN_RETRIES rounds of chain-race conflicts. Surface as
+        # blocked_idempotent so the caller can retry the whole post, matching
+        # pre-Bug-9 behavior on the truly pathological case — but log loudly so
+        # operators can see the hot entity.
+        await _log_post_attempt(
+            session, workspace_id=workspace_id, entity_id=entity_id, source=source,
+            source_external_id=source_external_id, outcome="blocked_idempotent",
+            journal_entry_id=None,
+            reason=(
+                f"Chain advance retried {_MAX_CHAIN_RETRIES} times; "
+                "concurrent posts contesting this entity's chain"
+            ),
+            actor_uc_uid=posted_by_uc_uid, actor_agent_id=posted_by_agent_id,
+            amount_cents=amount_cents, category=category,
+        )
+        return PostingRefusal(
+            outcome="blocked_idempotent",
+            reason=(
+                f"Chain race exhausted {_MAX_CHAIN_RETRIES} retries — caller should retry"
+            ),
         )
 
     await _log_post_attempt(
@@ -717,103 +914,131 @@ async def _apply_recategorization(
     # The reversal carries its own description; verify_chain rehashes from the
     # STORED description, so we must hash the exact same string we store.
     reversal_description = f"Reversal of {orig_id} for recategorization"
-    try:
-        async with session.begin_nested():
-            # Two appended entries must verify in chain order. verify_chain walks
-            # by (posted_at ASC, id ASC); guarantee posted_at(reversal) <
-            # posted_at(restatement) by construction so the walk order always
-            # matches the link order (reversal -> restatement) regardless of the
-            # random ids — otherwise a same-microsecond tie could invert them and
-            # break the prev_hash check.
-            posted_at = datetime.now(tz=timezone.utc)
-            posted_at2 = posted_at + timedelta(microseconds=1)
-            # 1. Reversal: flip the original's debit/credit, point back at it.
-            prev_hash = await get_last_chain_hash(session, entity_id)
-            rev_src_ext = f"reversal:{orig_id}"
-            rev_hash = compute_hash(
-                prev_hash,
-                effective_date=effective_date,
-                amount_cents=abs_cents,
-                debit_account=credit_account,
-                credit_account=debit_account,
-                source="reversal",
-                source_external_id=rev_src_ext,
-                payee=payee,
-                description=reversal_description,
-                posted_at=posted_at,
-            )
-            await _insert_journal_entry(
-                session,
-                je_id=reversal_id,
-                workspace_id=workspace_id,
-                entity_id=entity_id,
-                amount_cents=abs_cents,
-                effective_date=effective_date,
-                posted_at=posted_at,
-                debit_account=credit_account,
-                credit_account=debit_account,
-                category=from_category,
-                tier=tier,
-                source="reversal",
-                source_external_id=rev_src_ext,
-                description=reversal_description,
-                payee=payee,
-                memo=memo,
-                prev_hash=prev_hash,
-                this_hash=rev_hash,
-                reasoning_trace=reasoning,
-                model_version="",
-                identity=actor_uc_uid,
-                approving_uid=approver,
-                receipt_link_id=receipt_link_id,
-                reverses_entry_id=orig_id,
-            )
-            # 2. Restatement: cash side unchanged, category side -> new account.
-            restated_src_ext = f"recat:{orig_id}"
-            restated_hash = compute_hash(
-                rev_hash,
-                effective_date=effective_date,
-                amount_cents=abs_cents,
-                debit_account=restated_debit,
-                credit_account=restated_credit,
-                source="recategorization",
-                source_external_id=restated_src_ext,
-                payee=payee,
-                description=description,
-                posted_at=posted_at2,
-            )
-            await _insert_journal_entry(
-                session,
-                je_id=restated_id,
-                workspace_id=workspace_id,
-                entity_id=entity_id,
-                amount_cents=abs_cents,
-                effective_date=effective_date,
-                posted_at=posted_at2,
-                debit_account=restated_debit,
-                credit_account=restated_credit,
-                category=new_category,
-                tier=tier,
-                source="recategorization",
-                source_external_id=restated_src_ext,
-                description=description,
-                payee=payee,
-                memo=memo,
-                prev_hash=rev_hash,
-                this_hash=restated_hash,
-                reasoning_trace=reasoning,
-                model_version="",
-                identity=actor_uc_uid,
-                approving_uid=approver,
-                receipt_link_id=receipt_link_id,
-                reverses_entry_id=None,
-            )
-    except IntegrityError:
+    rev_src_ext = f"reversal:{orig_id}"
+    restated_src_ext = f"recat:{orig_id}"
+
+    # Audit 2026-05-31 Bug 9: bounded chain-race retry. A concurrent post on
+    # the same entity advancing the chain between get_last_chain_hash and
+    # insert MUST cause this recat to recompute on the latest prev_hash, NOT
+    # be silently treated as idempotent. The reversal+restatement pair is
+    # appended atomically inside the savepoint; on a chain-race conflict the
+    # whole pair is recomputed against a fresh prev_hash.
+    last_recat_failure: IntegrityError | None = None
+    for attempt in range(_MAX_CHAIN_RETRIES):
+        try:
+            async with session.begin_nested():
+                # Two appended entries must verify in chain order. verify_chain walks
+                # by (posted_at ASC, id ASC); guarantee posted_at(reversal) <
+                # posted_at(restatement) by construction so the walk order always
+                # matches the link order (reversal -> restatement) regardless of the
+                # random ids — otherwise a same-microsecond tie could invert them and
+                # break the prev_hash check.
+                posted_at = datetime.now(tz=timezone.utc)
+                posted_at2 = posted_at + timedelta(microseconds=1)
+                # 1. Reversal: flip the original's debit/credit, point back at it.
+                prev_hash = await get_last_chain_hash(session, entity_id)
+                rev_hash = compute_hash(
+                    prev_hash,
+                    effective_date=effective_date,
+                    amount_cents=abs_cents,
+                    debit_account=credit_account,
+                    credit_account=debit_account,
+                    source="reversal",
+                    source_external_id=rev_src_ext,
+                    payee=payee,
+                    description=reversal_description,
+                    posted_at=posted_at,
+                )
+                await _insert_journal_entry(
+                    session,
+                    je_id=reversal_id,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    amount_cents=abs_cents,
+                    effective_date=effective_date,
+                    posted_at=posted_at,
+                    debit_account=credit_account,
+                    credit_account=debit_account,
+                    category=from_category,
+                    tier=tier,
+                    source="reversal",
+                    source_external_id=rev_src_ext,
+                    description=reversal_description,
+                    payee=payee,
+                    memo=memo,
+                    prev_hash=prev_hash,
+                    this_hash=rev_hash,
+                    reasoning_trace=reasoning,
+                    model_version="",
+                    identity=actor_uc_uid,
+                    approving_uid=approver,
+                    receipt_link_id=receipt_link_id,
+                    reverses_entry_id=orig_id,
+                )
+                # 2. Restatement: cash side unchanged, category side -> new account.
+                restated_hash = compute_hash(
+                    rev_hash,
+                    effective_date=effective_date,
+                    amount_cents=abs_cents,
+                    debit_account=restated_debit,
+                    credit_account=restated_credit,
+                    source="recategorization",
+                    source_external_id=restated_src_ext,
+                    payee=payee,
+                    description=description,
+                    posted_at=posted_at2,
+                )
+                await _insert_journal_entry(
+                    session,
+                    je_id=restated_id,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    amount_cents=abs_cents,
+                    effective_date=effective_date,
+                    posted_at=posted_at2,
+                    debit_account=restated_debit,
+                    credit_account=restated_credit,
+                    category=new_category,
+                    tier=tier,
+                    source="recategorization",
+                    source_external_id=restated_src_ext,
+                    description=description,
+                    payee=payee,
+                    memo=memo,
+                    prev_hash=rev_hash,
+                    this_hash=restated_hash,
+                    reasoning_trace=reasoning,
+                    model_version="",
+                    identity=actor_uc_uid,
+                    approving_uid=approver,
+                    receipt_link_id=receipt_link_id,
+                    reverses_entry_id=None,
+                )
+            # Success — break out of the retry loop.
+            break
+        except IntegrityError as exc:
+            last_recat_failure = exc
+            constraint = _integrity_constraint_name(exc)
+            if constraint == "uq_je_entity_source_external":
+                # The 'reversal:<orig_id>' or 'recat:<orig_id>' source_external_id
+                # already exists for this entity — TRUE duplicate. Not a chain
+                # race, not retryable.
+                return PostingRefusal(
+                    outcome="blocked_idempotent",
+                    reason=(
+                        f"Entry {orig_id} was already recategorized "
+                        f"(source_external_id '{rev_src_ext}' exists)."
+                    ),
+                )
+            # Otherwise assume a chain race; loop will recompute prev_hash.
+            continue
+    else:
+        # Exhausted retries on non-idempotency conflicts.
         return PostingRefusal(
             outcome="blocked_idempotent",
             reason=(
-                "Chain race or this entry was already recategorized "
-                f"(reversal source_external_id 'reversal:{orig_id}' exists)."
+                f"Recategorization chain race exhausted {_MAX_CHAIN_RETRIES} "
+                "retries — concurrent posts contesting this entity's chain"
             ),
         )
 

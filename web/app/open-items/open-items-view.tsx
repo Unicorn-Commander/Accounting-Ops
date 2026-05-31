@@ -38,6 +38,7 @@ import { AIActivityTimeline } from "@/components/ai-activity-timeline";
 import { Card, StatusChip } from "@/components/primitives";
 import { cn } from "@/lib/cn";
 import { DecisionNoteDialog } from "@/app/open-items/decision-note-dialog";
+import { DecisionAuditTrail } from "@/components/decision-audit-trail";
 import type { AIActivityResponse } from "@/lib/ai-activity";
 import type {
   DecisionItem,
@@ -79,7 +80,7 @@ function CountTile({
   const inner = (
     <div
       className={cn(
-        "rounded-xl border bg-surface px-4 py-3 transition hover:bg-white/[0.02]",
+        "rounded-lg border bg-surface px-4 py-3 transition hover:bg-white/[0.02]",
         borderCls[tone]
       )}
     >
@@ -254,8 +255,14 @@ function TimeSensitiveSection({ rows }: { rows: QueueRow[] }) {
                 </p>
               ) : null}
               <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-ink-tertiary">
-                <span className="inline-flex items-center gap-1">
-                  <Sparkles size={11} /> {r.submitter_id}
+                {/* I13: outcome-framed instead of raw submitter_id. Internal
+                    agent identifier hidden behind hover-tooltip. */}
+                <span
+                  className="inline-flex items-center gap-1 rounded-md border border-pending/30 bg-pending/10 px-1.5 py-0.5 text-[10px] font-medium text-pending"
+                  title={`Submitter: ${r.submitter_id}`}
+                >
+                  <Sparkles size={10} />
+                  AI-flagged · needs CPA review
                 </span>
                 <Link
                   href={`/taxes/${r.tax_year}?entity_id=${r.entity_id}`}
@@ -463,6 +470,19 @@ function DecisionsSection({
   } | null>(null);
   // Decision-note dialog state (replaces window.prompt() per audit issue 14).
   const [noteDialog, setNoteDialog] = useState<DecisionItem | null>(null);
+  // Track which decided decisions have their audit trail expanded inline.
+  // Default-collapsed so the page stays scannable; click "Show history" to
+  // reveal who decided / when / what changed.
+  const [auditOpen, setAuditOpen] = useState<Set<string>>(new Set());
+
+  const toggleAudit = (key: string) => {
+    setAuditOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   const record = async (
     decision: DecisionItem,
@@ -589,7 +609,7 @@ function DecisionsSection({
                         })
                       }
                       className={cn(
-                        "rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow transition hover:bg-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
+                        "rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-brand-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
                         isBusy && "opacity-60"
                       )}
                     >
@@ -625,6 +645,15 @@ function DecisionsSection({
                     ) : null}
                     <button
                       type="button"
+                      onClick={() => toggleAudit(dec.key)}
+                      className="text-[11px] text-ink-tertiary underline-offset-2 hover:text-ink-primary hover:underline"
+                    >
+                      {auditOpen.has(dec.key)
+                        ? "Hide history"
+                        : "Show history"}
+                    </button>
+                    <button
+                      type="button"
                       disabled={isBusy}
                       onClick={() => record(dec, "accept")}
                       className="ml-auto text-[11px] text-ink-tertiary underline-offset-2 hover:text-ink-primary hover:underline"
@@ -635,6 +664,16 @@ function DecisionsSection({
                 )}
               </div>
             </div>
+            {/* Inline audit trail (Missing feature #10). Default-collapsed
+                so the page stays scannable; click "Show history" to reveal
+                who decided / when / what changed. */}
+            {isDecided && auditOpen.has(dec.key) ? (
+              <DecisionAuditTrail
+                workspaceId={workspaceId}
+                decisionKey={dec.key}
+                onChange={() => record(dec, "accept")}
+              />
+            ) : null}
           </Card>
         );
       })}
@@ -729,8 +768,13 @@ function WaitingList({
                   {r.summary}
                 </p>
               ) : null}
-              <p className="mt-0.5 text-[10px] text-ink-tertiary">
-                {r.entity_display_name} · {r.submitter_id}
+              {/* I13: hide raw submitter_id behind hover tooltip; show
+                  entity name as the user-facing context. */}
+              <p
+                className="mt-0.5 text-[10px] text-ink-tertiary"
+                title={`Submitter: ${r.submitter_id}`}
+              >
+                {r.entity_display_name}
               </p>
             </div>
             <Link
