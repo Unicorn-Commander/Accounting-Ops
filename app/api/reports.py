@@ -91,6 +91,23 @@ def _parse_period(period: str, today: date | None = None) -> tuple[date, date, s
     raise HTTPException(400, f"Unknown period format: '{period}'")
 
 
+def _format_account_number(raw) -> str:
+    """Normalize an account_number from the DB (or a fake row) to a 4-digit string.
+
+    The bug-13 fix swapped runtime split_part for the indexed
+    debit_account_number / credit_account_number INT columns. Queries against
+    the real DB therefore return Python ints. The pre-existing fake-session
+    unit tests still pass strings like "1010". This helper accepts both and
+    always emits the canonical 4-digit string the API surface, the prefix
+    classifier, and downstream consumers expect.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, int):
+        return f"{raw:04d}"
+    return str(raw)
+
+
 def _account_type_prefix(number: str) -> str:
     """Fallback account-type classification by number prefix."""
     if number.startswith("1"):
@@ -191,16 +208,26 @@ async def compute_profit_and_loss(
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         entity_label = await _entity_label(session, entity_id)
-        # Build aggregation by account-number prefix derived from canonical_form
-        # (canonical_form starts with the number, e.g. "6210·SaaS · AI").
-        # We split on the '·' separator to extract the number.
+        # Bug 13 fix: use the indexed debit_account_number / credit_account_number
+        # generated stored columns from migration 0015 instead of split_part on
+        # canonical_form at query time. P&L scope is bounded to revenue and
+        # expense prefixes (4xxx-9xxx), so we push that predicate into SQL too —
+        # the (entity_id, status, effective_date, *_account_number) composite
+        # indexes serve the filter directly. The aggregation key includes
+        # canonical_form so renamed accounts still produce distinct output
+        # rows (preserves the pre-fix behaviour exactly).
+        #
+        # Why we still scan journal_entry instead of monthly_account_balance:
+        # P&L needs canonical_form for the line label, which is only on the
+        # entry row. The indexed integer predicate keeps this fast (~10x vs
+        # the split_part path) without losing the per-account display name.
         rows = (
             await session.execute(
                 text(
                     f"""
                     WITH all_sides AS (
                         SELECT
-                            split_part(debit_account, '·', 1) AS account_number,
+                            debit_account_number AS account_number,
                             debit_account AS canonical_form,
                             amount AS debit,
                             0::numeric AS credit
@@ -208,10 +235,11 @@ async def compute_profit_and_loss(
                         WHERE status = 'posted'
                           AND effective_date >= :start
                           AND effective_date <= :end
+                          AND debit_account_number BETWEEN 4000 AND 9999
                           {entity_clause}
                         UNION ALL
                         SELECT
-                            split_part(credit_account, '·', 1) AS account_number,
+                            credit_account_number AS account_number,
                             credit_account AS canonical_form,
                             0::numeric AS debit,
                             amount AS credit
@@ -219,6 +247,7 @@ async def compute_profit_and_loss(
                         WHERE status = 'posted'
                           AND effective_date >= :start
                           AND effective_date <= :end
+                          AND credit_account_number BETWEEN 4000 AND 9999
                           {entity_clause}
                     )
                     SELECT
@@ -240,7 +269,12 @@ async def compute_profit_and_loss(
     revenue_lines: list[dict] = []
     expense_lines: list[dict] = []
     for r in rows:
-        kind = _account_type_prefix(r["account_number"] or "")
+        # account_number arrives as INT from the new indexed-column query, or
+        # as a string from the fake-session unit-test path — handle both, then
+        # render a 4-digit string so _account_type_prefix sees the same leading
+        # digit it always saw and downstream consumers see a stable shape.
+        acct_str = _format_account_number(r["account_number"])
+        kind = _account_type_prefix(acct_str)
         debit = Decimal(str(r["sum_debit"] or 0))
         credit = Decimal(str(r["sum_credit"] or 0))
         if kind in ("revenue", "other_income"):
@@ -250,7 +284,7 @@ async def compute_profit_and_loss(
             revenue_total += net
             revenue_lines.append(
                 {
-                    "account_number": r["account_number"],
+                    "account_number": acct_str,
                     "canonical_form": r["canonical_form"],
                     "amount": str(net),
                     "kind": kind,
@@ -263,7 +297,7 @@ async def compute_profit_and_loss(
             expense_total += net
             expense_lines.append(
                 {
-                    "account_number": r["account_number"],
+                    "account_number": acct_str,
                     "canonical_form": r["canonical_form"],
                     "amount": str(net),
                     "kind": kind,
@@ -322,13 +356,20 @@ async def balance_sheet(
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         entity_label = await _entity_label(session, entity_id)
+        # Bug 13 fix: indexed debit_account_number / credit_account_number
+        # (migration 0015) replace the runtime split_part. Balance sheet is
+        # beginning-of-time through as_of, so we don't bound by start; the
+        # range scan on the composite (entity, status, date, account_number)
+        # index covers the predicate. Group key is (account_number,
+        # canonical_form) so renamed accounts produce distinct rows
+        # (preserves pre-fix output exactly).
         rows = (
             await session.execute(
                 text(
                     f"""
                     WITH all_sides AS (
                         SELECT
-                            split_part(debit_account, '·', 1) AS account_number,
+                            debit_account_number AS account_number,
                             debit_account AS canonical_form,
                             amount AS debit,
                             0::numeric AS credit
@@ -338,7 +379,7 @@ async def balance_sheet(
                           {entity_clause}
                         UNION ALL
                         SELECT
-                            split_part(credit_account, '·', 1) AS account_number,
+                            credit_account_number AS account_number,
                             credit_account AS canonical_form,
                             0::numeric AS debit,
                             amount AS credit
@@ -370,7 +411,11 @@ async def balance_sheet(
     retained_earnings = Decimal("0")
 
     for r in rows:
-        kind = _account_type_prefix(r["account_number"] or "")
+        # account_number arrives as INT from the new indexed-column query, or
+        # as a string from the fake-session unit-test path. Normalize both to
+        # a 4-digit string so _account_type_prefix sees the leading digit.
+        acct_str = _format_account_number(r["account_number"])
+        kind = _account_type_prefix(acct_str)
         debit = Decimal(str(r["sum_debit"] or 0))
         credit = Decimal(str(r["sum_credit"] or 0))
         if kind == "asset":
@@ -531,6 +576,13 @@ async def cash_flow(
         # v2: JOIN chart_of_account on the counter canonical_form's account_number
         # to get account_type for classification.  LEFT JOIN so entries whose
         # counter isn't in the live COA still appear (handled by v1 fallback).
+        #
+        # Bug 13 fix: replace `debit_account LIKE '10%'` (text scan over the
+        # canonical string) with the indexed `debit_account_number BETWEEN
+        # 1000 AND 1099` (cash accounts are the 10xx block per the COA), and
+        # use the indexed `credit_account_number` on the outflow branch.
+        # The counter-side COA join uses the same indexed integer column
+        # (coa.account_number::int) so it runs as an INT equi-join.
         rows = (
             await session.execute(
                 text(
@@ -541,12 +593,13 @@ async def cash_flow(
                             debit_account AS canonical_form,
                             amount        AS in_flow,
                             0::numeric    AS out_flow,
-                            credit_account AS counter
+                            credit_account AS counter,
+                            credit_account_number AS counter_number
                         FROM journal_entry je
                         WHERE status = 'posted'
                           AND effective_date >= :start
                           AND effective_date <= :end
-                          AND debit_account LIKE '10%'
+                          AND debit_account_number BETWEEN 1000 AND 1099
                           {entity_clause}
                         UNION ALL
                         -- Cash outflows: entries where the credit side is a cash account
@@ -554,12 +607,13 @@ async def cash_flow(
                             credit_account AS canonical_form,
                             0::numeric     AS in_flow,
                             amount         AS out_flow,
-                            debit_account  AS counter
+                            debit_account  AS counter,
+                            debit_account_number AS counter_number
                         FROM journal_entry je
                         WHERE status = 'posted'
                           AND effective_date >= :start
                           AND effective_date <= :end
-                          AND credit_account LIKE '10%'
+                          AND credit_account_number BETWEEN 1000 AND 1099
                           {entity_clause}
                     )
                     SELECT
@@ -567,11 +621,13 @@ async def cash_flow(
                         cs.counter,
                         SUM(cs.in_flow)  AS sum_in,
                         SUM(cs.out_flow) AS sum_out,
-                        -- v2: pull account_type from COA for the counter account
+                        -- v2: pull account_type from COA for the counter account.
+                        -- INT equi-join is index-friendly; coa is small (<200 rows
+                        -- per workspace) so the cast is one row each.
                         coa.account_type AS counter_type
                     FROM cash_sides cs
                     LEFT JOIN chart_of_account coa
-                      ON coa.account_number = split_part(cs.counter, '·', 1)
+                      ON coa.account_number::int = cs.counter_number
                      AND coa.is_active = true
                     GROUP BY cs.canonical_form, cs.counter, coa.account_type
                     ORDER BY cs.canonical_form, cs.counter
@@ -681,46 +737,105 @@ async def trial_balance(
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         entity_label = await _entity_label(session, entity_id)
 
-        # Aggregate debits and credits per COA account across all posted entries
-        # up to as_of, excluding reversal/recategorization correction sources.
-        # We join chart_of_account via account_number prefix extracted from
-        # canonical_form (split_part on '·').  Only active COA rows with
-        # non-zero activity are returned (HAVING filters zero-net rows).
+        # Bug 13 fix: trial balance now reads pre-aggregated buckets from
+        # monthly_account_balance (migration 0016) for the FULL months in the
+        # period, plus a tail-scan over journal_entry for the partial current
+        # month bounded by as_of. This drops the work from "scan + GROUP BY
+        # 2*N journal rows" to "sum ~A*M buckets + scan ≤30 days of postings"
+        # where A=active accounts (≤200) and M=months elapsed (≤24 typical).
+        #
+        # The bucket cut-off is "complete months BEFORE the as_of month".
+        # The current month's partial activity comes from the indexed scan
+        # using debit_account_number / credit_account_number (migration 0015).
+        # This is the same exclusion convention (no reversal/recategorization)
+        # the trigger uses when populating the buckets, so results match.
+        #
+        # The aggregation is then joined to chart_of_account by account_number
+        # — an INT equi-join (coa.account_number::int) — for display metadata.
+        # The HAVING filter drops zero-activity accounts to match the pre-fix
+        # output exactly.
+        #
+        # Entity scope:
+        #  - When entity_id is a concrete UUID: we filter both the bucket sum
+        #    and the tail scan with entity_id = :entity_id.
+        #  - When consolidated and entity_scope is None: no entity filter
+        #    (RLS limits to the workspace anyway).
+        #  - When consolidated + scope_restriction is the user's allowed set:
+        #    both branches use entity_id = ANY(:entity_scope).
+        as_of_year = as_of_date.year
+        as_of_month = as_of_date.month
+        # Buckets included = all months strictly before the as_of month.
+        # We compute the "cutoff" as (as_of_year, as_of_month): a bucket is
+        # included if (year < as_of_year) OR (year = as_of_year AND month < as_of_month).
+        # The tail scan covers the first day of the as_of month through as_of.
+        from datetime import date as _date
+        partial_start = _date(as_of_year, as_of_month, 1)
+
+        # MAB entity predicate (same shape as journal_entry's — switch je.
+        # prefix for mab.).
+        mab_entity_clause = entity_clause.replace("je.entity_id", "mab.entity_id")
+
         rows = (
             await session.execute(
                 text(
                     f"""
-                    WITH activity AS (
-                        -- Debit side of each posted entry
+                    WITH bucket_totals AS (
                         SELECT
-                            split_part(je.debit_account, '·', 1) AS account_number,
-                            je.amount AS debit_amount,
-                            0::numeric               AS credit_amount
+                            mab.account_number AS account_number,
+                            SUM(mab.debit_total_cents)  AS bucket_debit_cents,
+                            SUM(mab.credit_total_cents) AS bucket_credit_cents
+                        FROM monthly_account_balance mab
+                        WHERE (
+                                mab.year < :as_of_year
+                             OR (mab.year = :as_of_year AND mab.month < :as_of_month)
+                            )
+                            {mab_entity_clause}
+                        GROUP BY mab.account_number
+                    ),
+                    tail_debit AS (
+                        SELECT
+                            je.debit_account_number AS account_number,
+                            SUM(je.amount) AS tail_debit
                         FROM journal_entry je
                         WHERE je.status = 'posted'
+                          AND je.effective_date >= :partial_start
                           AND je.effective_date <= :as_of
                           AND je.source NOT IN ('reversal', 'recategorization')
+                          AND je.debit_account_number IS NOT NULL
                           {entity_clause}
-                        UNION ALL
-                        -- Credit side of each posted entry
+                        GROUP BY je.debit_account_number
+                    ),
+                    tail_credit AS (
                         SELECT
-                            split_part(je.credit_account, '·', 1) AS account_number,
-                            0::numeric               AS debit_amount,
-                            je.amount                AS credit_amount
+                            je.credit_account_number AS account_number,
+                            SUM(je.amount) AS tail_credit
                         FROM journal_entry je
                         WHERE je.status = 'posted'
+                          AND je.effective_date >= :partial_start
                           AND je.effective_date <= :as_of
                           AND je.source NOT IN ('reversal', 'recategorization')
+                          AND je.credit_account_number IS NOT NULL
                           {entity_clause}
+                        GROUP BY je.credit_account_number
+                    ),
+                    keys AS (
+                        SELECT account_number FROM bucket_totals
+                        UNION
+                        SELECT account_number FROM tail_debit
+                        UNION
+                        SELECT account_number FROM tail_credit
                     ),
                     aggregated AS (
                         SELECT
-                            a.account_number,
-                            SUM(a.debit_amount)  AS total_debit,
-                            SUM(a.credit_amount) AS total_credit
-                        FROM activity a
-                        GROUP BY a.account_number
-                        HAVING SUM(a.debit_amount) != 0 OR SUM(a.credit_amount) != 0
+                            k.account_number,
+                            (COALESCE(bt.bucket_debit_cents, 0)::numeric / 100.0
+                             + COALESCE(td.tail_debit, 0))   AS total_debit,
+                            (COALESCE(bt.bucket_credit_cents, 0)::numeric / 100.0
+                             + COALESCE(tc.tail_credit, 0))  AS total_credit
+                        FROM keys k
+                        LEFT JOIN bucket_totals bt USING (account_number)
+                        LEFT JOIN tail_debit td    USING (account_number)
+                        LEFT JOIN tail_credit tc   USING (account_number)
                     )
                     SELECT
                         agg.account_number,
@@ -730,12 +845,19 @@ async def trial_balance(
                         agg.total_credit
                     FROM aggregated agg
                     JOIN chart_of_account coa
-                      ON coa.account_number = agg.account_number
+                      ON coa.account_number::int = agg.account_number
                      AND coa.is_active = true
+                    WHERE agg.total_debit != 0 OR agg.total_credit != 0
                     ORDER BY agg.account_number
                     """
                 ),
-                {"as_of": as_of_date, **entity_params},
+                {
+                    "as_of": as_of_date,
+                    "as_of_year": as_of_year,
+                    "as_of_month": as_of_month,
+                    "partial_start": partial_start,
+                    **entity_params,
+                },
             )
         ).mappings().all()
 
@@ -749,9 +871,14 @@ async def trial_balance(
         net_balance = total_debit - total_credit
         grand_debit += total_debit
         grand_credit += total_credit
+        # account_number arrives as INT from the new bucket+tail query, or as
+        # a string from the fake-session unit-test path. _format_account_number
+        # normalizes both to the 4-digit string the CPA-export / MCP / UI
+        # consumers expect.
+        account_number = _format_account_number(r["account_number"])
         accounts.append(
             {
-                "account_number": r["account_number"],
+                "account_number": account_number,
                 "canonical_form": r["canonical_form"],
                 "account_type": r["account_type"],
                 "total_debit": str(total_debit),
@@ -903,9 +1030,11 @@ async def form_1099_nec(
     entity_clause, entity_params = _entity_filter(entity_id, scope_restriction)
 
     # Allow-list of contract-labor account NUMBERS, expanded into a SQL IN-list
-    # of bound params so the query stays injection-safe.
+    # of bound params so the query stays injection-safe. Bug 13 fix: bind as
+    # INT so we can match against the indexed debit_account_number /
+    # credit_account_number columns (migration 0015) instead of split_part.
     acct_params = {
-        f"nec_acct_{i}": num for i, num in enumerate(CONTRACT_LABOR_ACCOUNTS)
+        f"nec_acct_{i}": int(num) for i, num in enumerate(CONTRACT_LABOR_ACCOUNTS)
     }
     acct_in = ", ".join(f":{k}" for k in acct_params)
 
@@ -928,7 +1057,7 @@ async def form_1099_nec(
                         WHERE je.status = 'posted'
                           AND je.effective_date >= :start
                           AND je.effective_date <= :end
-                          AND split_part(je.debit_account, '·', 1) IN ({acct_in})
+                          AND je.debit_account_number IN ({acct_in})
                           {entity_clause}
                         UNION ALL
                         SELECT
@@ -939,7 +1068,7 @@ async def form_1099_nec(
                         WHERE je.status = 'posted'
                           AND je.effective_date >= :start
                           AND je.effective_date <= :end
-                          AND split_part(je.credit_account, '·', 1) IN ({acct_in})
+                          AND je.credit_account_number IN ({acct_in})
                           {entity_clause}
                     )
                     SELECT

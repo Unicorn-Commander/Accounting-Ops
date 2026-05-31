@@ -165,11 +165,17 @@ def test_sql_restricts_to_contract_labor_account_both_sides():
     # with NO account filter and referenced the wrong grouping. Ensure we don't.
     assert "GROUP BY je.payee" not in sql
 
-    # Must restrict on the contract-labor account number via split_part, on BOTH
-    # the debit and credit sides — this is what excludes revenue (4xxx) and other
+    # Must restrict on the contract-labor account number on BOTH the debit
+    # and credit sides — this is what excludes revenue (4xxx) and other
     # expense postings from the NEC total.
-    assert "split_part(je.debit_account" in sql
-    assert "split_part(je.credit_account" in sql
+    #
+    # Bug 13 fix (2026-05-31): the predicate now matches the indexed
+    # je.debit_account_number / je.credit_account_number generated stored
+    # columns from migration 0015 instead of split_part on the canonical
+    # string. The SEMANTIC check (filtering by the contract-labor account
+    # set, on both sides) is unchanged.
+    assert "je.debit_account_number IN" in sql
+    assert "je.credit_account_number IN" in sql
     # Netting: debit minus credit (so refunds/reversals reduce the total).
     assert "SUM(s.debit) - SUM(s.credit)" in sql
     # Aggregates by counterparty, joined for the display name.
