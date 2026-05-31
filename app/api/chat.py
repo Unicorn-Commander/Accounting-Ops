@@ -136,12 +136,45 @@ class SaveAsMemoRequest(BaseModel):
 
 @router.get("/api/chat/personas")
 async def get_chat_personas(
-    _auth: AuthContext = Depends(validate_bearer_token),
+    auth: AuthContext = Depends(validate_bearer_token),
 ) -> dict:
-    """List registered chat personas for the agent-picker UI."""
+    """List registered chat personas for the agent-picker UI.
+
+    Surfaces Brigade-federation status so the picker can show a
+    "+N cross-app tools available" badge on personas that consume Brigade
+    when the caller has the cross-app scope.
+    """
+    # Brigade catalog status — empty + offline when feature is OFF
+    # (the default until BRIGADE_BASE_URL is configured).
+    brigade_online = False
+    brigade_reason = "not_initialized"
+    cross_app_count_for_caller = 0
+    try:
+        from app.security.brigade_client import (
+            get_cross_app_catalog,
+            get_cross_app_tools_for,
+        )
+
+        snap = get_cross_app_catalog()
+        brigade_online = snap.online
+        brigade_reason = snap.reason
+        cross_app_count_for_caller = len(get_cross_app_tools_for(auth.scopes))
+    except Exception as exc:  # noqa: BLE001 - brigade client must never break /personas
+        _log.info("brigade catalog unavailable for /personas: %s", exc)
+
+    payload = list_personas(brigade_online=brigade_online)
+    # Add per-persona cross-app count (0 unless this persona consumes
+    # Brigade AND Brigade is online AND the caller has the scope).
+    for entry in payload:
+        entry["cross_app_tool_count"] = (
+            cross_app_count_for_caller if entry.get("consumes_brigade") and brigade_online else 0
+        )
+
     return {
         "default": DEFAULT_PERSONA_SLUG,
-        "personas": list_personas(),
+        "brigade_online": brigade_online,
+        "brigade_reason": brigade_reason,
+        "personas": payload,
     }
 
 

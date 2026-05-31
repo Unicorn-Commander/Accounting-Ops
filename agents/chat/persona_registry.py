@@ -11,9 +11,14 @@ persona gets only the tools it needs, never more.
 """
 from __future__ import annotations
 
+import os
 import pathlib
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Literal
+
+
+Tier = Literal["strategic", "specialist", "operational"]
 
 
 # Paths are resolved relative to the repo root (the agents/ package).
@@ -94,6 +99,19 @@ class Persona:
     # If True, the runner will pre-bind {workspace_id, entity_id, tax_year}
     # into the conversational preamble so the agent doesn't have to ask.
     needs_tax_year: bool = True
+    # UI grouping in the persona picker. Default is "specialist" for backward
+    # compatibility with all the existing tax-specialists; opt in to other
+    # tiers when registering newer personas (CFO Agent = strategic).
+    tier: Tier = "specialist"
+    # Per-persona model override. None = let the chat runner pick (Sonnet
+    # default). Set to "claude-opus-4-7" on personas that warrant the deeper
+    # reasoning (CFO Agent strategic synthesis).
+    default_model: str | None = None
+    # True when this persona is allowed to consume Brigade-federated
+    # cross-app tools (project.*, meeting.*, contact.*) when the caller has
+    # the brigade:cross_app scope AND brigade_client.get_cross_app_catalog()
+    # is online. Default False for all existing personas — opt in.
+    consumes_brigade: bool = False
 
     def system_prompt(
         self,
@@ -153,6 +171,9 @@ def _persona(
     *,
     tools: tuple[str, ...],
     needs_tax_year: bool = True,
+    tier: Tier = "specialist",
+    default_model: str | None = None,
+    consumes_brigade: bool = False,
 ) -> Persona:
     base = _AGENTS_ROOT / rel_dir
     return Persona(
@@ -163,7 +184,53 @@ def _persona(
         system_prompt_path=base / "system_prompt.md",
         allowed_mcp_tools=tools,
         needs_tax_year=needs_tax_year,
+        tier=tier,
+        default_model=default_model,
+        consumes_brigade=consumes_brigade,
     )
+
+
+# ---------------------------------------------------------------------------
+# CFO Agent — strategic synthesis layer (new 2026-05-30)
+# ---------------------------------------------------------------------------
+#
+# The CFO Agent is a tier-up synthesis persona: it answers board-room-level
+# questions (cash runway, dilution, year-end strategy, board narrative) by
+# READING the data the operational + specialist agents produce, and SYNTHE-
+# SIZING across them. It explicitly does not do tactical work — it surfaces
+# to CPA / attorney / 409A provider / board for anything outside its scope.
+#
+# Model: Claude Opus 4.7 by default for deeper reasoning. Override via the
+# CFO_AGENT_MODEL env var. The runner falls back to Sonnet 4.5 when Opus
+# returns "model not found" (e.g. account doesn't have Opus access yet).
+#
+# Brigade: consumes_brigade=True — when the caller's bearer carries
+# brigade:cross_app AND brigade_client.get_cross_app_catalog().online, the
+# runner injects project.* / meeting.* / contact.* tools alongside the
+# local 17. Degrades to local-only when Brigade is offline.
+#
+# Tools: read-only + draft set, PLUS a set of "synthesis aliases" the brief
+# enumerates (get_balance_sheet, get_cash_flow, get_trial_balance, etc.).
+# Those aliases are resolved to the underlying registered MCP tool names at
+# dispatch time (see app/api/chat.py).
+
+CFO_AGENT_SYNTHESIS_ALIASES: tuple[str, ...] = (
+    "get_balance_sheet",       # alias: /api/.../reports/balance-sheet
+    "get_cash_flow",           # alias: /api/.../reports/cash-flow
+    "get_trial_balance",       # alias: /api/.../reports/trial-balance
+    "get_tax_status",          # alias: /api/.../tax-status
+    "get_cash_position",       # alias: /api/.../cash-position
+    "get_runway",              # already in _READ_TOOLS
+    "list_specialist_runs",    # alias: /api/.../specialist-runs
+    "search_tax_knowledge",    # alias of get_current_rule (RAG)
+    "list_pending_approvals",  # alias of analyze_pending_approvals
+    "get_tax_narrative",       # alias of get_form_1120_data narrative
+)
+
+
+def _cfo_default_model() -> str:
+    """CFO Agent model: Opus 4.7 by default; CFO_AGENT_MODEL env overrides."""
+    return os.getenv("CFO_AGENT_MODEL", "claude-opus-4-7")
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +239,27 @@ def _persona(
 # ---------------------------------------------------------------------------
 
 PERSONAS: tuple[Persona, ...] = (
+    # ----- Strategic tier — synthesis across operational + specialist work --
+    _persona(
+        "cfo-agent",
+        "CFO Agent",
+        "Strategic financial view — cash runway, unit economics, board reporting, financing strategy.",
+        "cpa_team/cfo_agent",
+        tools=_READ_TOOLS + _QUEUE_DRAFT_TOOLS + CFO_AGENT_SYNTHESIS_ALIASES,
+        needs_tax_year=True,
+        tier="strategic",
+        default_model=_cfo_default_model(),
+        consumes_brigade=True,
+    ),
+    _persona(
+        "cpa-tax-resolver",
+        "CPA Tax Resolver",
+        "Resolves queue items + cites rules; default conversational entry point.",
+        "cpa_team/tax_resolver",
+        tools=_READ_TOOLS + _QUEUE_DRAFT_TOOLS,
+        tier="strategic",
+    ),
+    # ----- Operational tier — setup, intake, runtime ops --------------------
     _persona(
         "setup-assistant",
         "Setup Assistant",
@@ -190,13 +278,7 @@ PERSONAS: tuple[Persona, ...] = (
             "mark_intake_complete",
         ),
         needs_tax_year=False,
-    ),
-    _persona(
-        "cpa-tax-resolver",
-        "CPA Tax Resolver",
-        "Resolves queue items + cites rules; default conversational entry point.",
-        "cpa_team/tax_resolver",
-        tools=_READ_TOOLS + _QUEUE_DRAFT_TOOLS,
+        tier="operational",
     ),
     _persona(
         "form-1120-preparer",
@@ -300,13 +382,24 @@ def get_persona(slug: str) -> Persona | None:
     return _index().get(slug)
 
 
-def list_personas() -> list[dict[str, str]]:
-    """Lightweight list for the agent-picker UI (no file I/O)."""
+def list_personas(brigade_online: bool = False) -> list[dict]:
+    """Lightweight list for the agent-picker UI (no file I/O).
+
+    When ``brigade_online`` is True, the per-persona payload includes a
+    ``brigade_active`` flag the picker uses to show the "+N cross-app tools
+    available" badge on personas that consume Brigade.
+    """
     return [
         {
             "slug": p.slug,
             "display_name": p.display_name,
             "one_line": p.one_line,
+            "tier": p.tier,
+            "needs_tax_year": p.needs_tax_year,
+            "consumes_brigade": p.consumes_brigade,
+            "brigade_active": p.consumes_brigade and brigade_online,
+            "default_model": p.default_model,
+            "tool_count": len(p.allowed_mcp_tools),
         }
         for p in PERSONAS
     ]

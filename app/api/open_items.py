@@ -353,6 +353,10 @@ class OpenItemsResponse(BaseModel):
     # Tax submissions in flight (paper/MyDORWAY/efile records from
     # tax_filing_submission). Sourced from app/api/tax_filing_submissions.py.
     submissions_in_flight: list[dict[str, Any]] = []
+    # eBay payouts that don't yet have a matching BoA deposit (sourced from
+    # connector_state.state['reconciliation']['unmatched_payouts']). Surfaces
+    # on the dashboard so Aaron sees the gap.
+    ebay_unmatched_payouts: list[dict[str, Any]] = []
 
 
 @router.get("/api/workspaces/{workspace_id}/open-items")
@@ -708,6 +712,36 @@ async def get_open_items(
         1 for s in submissions_out if s.get("status") == "awaiting_followup"
     )
 
+    # eBay unmatched payouts — sourced from connector_state.state
+    # ['reconciliation']['unmatched_payouts']. Read-only; the worker writes it
+    # on each sync pass.
+    ebay_unmatched_payouts: list[dict[str, Any]] = []
+    try:
+        async with workspace_session(SessionLocal, workspace.workspace_id) as ws:
+            recon_where = ["connector_name = 'ebay_finances'"]
+            recon_params: dict[str, Any] = {}
+            if entity_id:
+                recon_where.append("entity_id = :eid")
+                recon_params["eid"] = str(entity_id)
+            recon_sql = " AND ".join(recon_where)
+            recon_rows = (
+                await ws.execute(
+                    text(f"SELECT state FROM connector_state WHERE {recon_sql}"),
+                    recon_params,
+                )
+            ).mappings().all()
+            for r in recon_rows:
+                state = r["state"] or {}
+                if not isinstance(state, dict):
+                    continue
+                recon = state.get("reconciliation") or {}
+                for u in recon.get("unmatched_payouts", []) or []:
+                    ebay_unmatched_payouts.append(u)
+    except Exception:
+        # Best-effort: a missing connector_state row simply means no eBay
+        # connection. Never let the dashboard 500 on this.
+        pass
+
     counts = {
         "time_sensitive": len(sections["time_sensitive"]),
         "documents_pending": len(documents_out) - received_count,
@@ -720,6 +754,7 @@ async def get_open_items(
         "resolved_this_week": len(resolved_out),
         "submissions_in_flight": len(submissions_out),
         "submissions_awaiting_followup": awaiting_followup_count,
+        "ebay_unmatched_payouts": len(ebay_unmatched_payouts),
         # The headline number that drives the dashboard widget — only items
         # that require AARON to act, not things waiting on someone else.
         # Submissions awaiting follow-up count as action-required (Aaron must
@@ -744,6 +779,7 @@ async def get_open_items(
         waiting_on_attorney=sections["attorney"],
         resolved_this_week=resolved_out,
         submissions_in_flight=submissions_out,
+        ebay_unmatched_payouts=ebay_unmatched_payouts,
     )
 
 

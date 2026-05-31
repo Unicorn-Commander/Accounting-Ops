@@ -11,9 +11,11 @@ import {
 } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { ConnectSimplefinModal } from "@/components/connect-simplefin-modal";
+import { EbayStatusCard } from "@/components/ebay-status-card";
 import { Card, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
 import { CONNECTORS, getConnectorStatuses, type Connector, type ConnectorStatus } from "@/lib/connectors";
 import { getActiveContext } from "@/lib/active-context";
+import { getEbayStatus, type EbayConnectorStatus } from "@/lib/ebay-connector";
 import { cn } from "@/lib/cn";
 
 const CATEGORY_ICON: Record<Connector["category"], React.ComponentType<{ size?: number; className?: string }>> = {
@@ -24,10 +26,23 @@ const CATEGORY_ICON: Record<Connector["category"], React.ComponentType<{ size?: 
   payroll: Wallet
 };
 
-export default async function ConnectorsPage() {
+export default async function ConnectorsPage({
+  searchParams
+}: {
+  searchParams: Promise<{ ebay?: string; ebay_error?: string; seller?: string }>;
+}) {
+  const sp = await searchParams;
   const statuses = await getConnectorStatuses();
   const ctx = await getActiveContext();
   const workspace = ctx.activeWorkspace;
+  const ebayStatus = workspace ? await getEbayStatus(workspace.id) : null;
+  const activeEntityId = ctx.activeEntity?.id ?? null;
+  // First non-personal entity used as a "default for new connect" hint when no
+  // entity is selected. Mirrors the EntitySelector default-pick logic.
+  const defaultEntityId =
+    ctx.entities.find((e) => e.kind !== "personal")?.id ??
+    ctx.entities[0]?.id ??
+    null;
   const available = CONNECTORS.filter((c) => c.available);
   const upcoming = CONNECTORS.filter((c) => !c.available);
 
@@ -43,6 +58,18 @@ export default async function ConnectorsPage() {
           }
         />
 
+        {sp.ebay === "connected" && (
+          <div className="mb-4 rounded-md border border-credit/40 bg-credit/10 p-3 text-[12px] text-credit">
+            eBay connected{sp.seller && sp.seller !== "connected" ? ` as ${sp.seller}` : ""}. The hourly sync worker
+            will pull the first batch on its next pass; the first 30 transactions go to the approval queue for review.
+          </div>
+        )}
+        {sp.ebay_error && (
+          <div className="mb-4 rounded-md border border-debit/40 bg-debit/10 p-3 text-[12px] text-debit">
+            eBay OAuth error: {sp.ebay_error}. Try Connect again, or check the Setup Assistant.
+          </div>
+        )}
+
         <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-ink-tertiary">
           Available now
         </h2>
@@ -54,6 +81,9 @@ export default async function ConnectorsPage() {
               status={statuses[connector.id]}
               workspaceId={workspace?.id}
               workspaceName={workspace?.display_name}
+              ebayStatus={connector.id === "ebay-finances" ? ebayStatus : null}
+              activeEntityId={connector.id === "ebay-finances" ? activeEntityId : null}
+              defaultEntityId={connector.id === "ebay-finances" ? defaultEntityId : null}
             />
           ))}
         </div>
@@ -75,12 +105,18 @@ function ConnectorCard({
   connector,
   status,
   workspaceId,
-  workspaceName
+  workspaceName,
+  ebayStatus,
+  activeEntityId,
+  defaultEntityId
 }: {
   connector: Connector;
   status?: ConnectorStatus;
   workspaceId?: string;
   workspaceName?: string;
+  ebayStatus?: EbayConnectorStatus | null;
+  activeEntityId?: string | null;
+  defaultEntityId?: string | null;
 }) {
   const Icon = CATEGORY_ICON[connector.category];
   return (
@@ -123,6 +159,15 @@ function ConnectorCard({
             </details>
           )}
 
+          {connector.id === "ebay-finances" && workspaceId && (
+            <EbayStatusCard
+              status={ebayStatus ?? null}
+              workspaceId={workspaceId}
+              entityId={activeEntityId ?? null}
+              defaultEntityId={defaultEntityId ?? null}
+            />
+          )}
+
           <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-subtle pt-4">
             {connector.id === "simplefin" && workspaceId ? (
               <ConnectSimplefinModal
@@ -135,15 +180,15 @@ function ConnectorCard({
                   </button>
                 }
               />
+            ) : connector.id === "ebay-finances" ? (
+              // eBay "Connect" button lives inside the EbayStatusCard above; this
+              // slot only carries the secondary Docs / Signup links.
+              null
             ) : (
               <button
                 className="inline-flex items-center gap-1 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow hover:bg-brand-600 transition disabled:cursor-not-allowed disabled:opacity-60"
                 disabled
-                title={
-                  connector.id === "simplefin"
-                    ? "Sign in + pick a workspace first"
-                    : "Connector-specific Connect flow lands soon"
-                }
+                title="Connector-specific Connect flow lands soon"
               >
                 <Plus size={12} />
                 Connect (soon)
