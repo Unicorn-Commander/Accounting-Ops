@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2, Pencil, Plus, Trash2, X, Check } from "lucide-react";
 import { Card } from "@/components/primitives";
 import { cn } from "@/lib/cn";
@@ -11,9 +12,11 @@ type CoaAccount = {
   id: string;
   account_number: string;
   account_name: string;
-  canonical_form: string;
+  canonical_form: string | null;
   account_type: string;
   normal_balance: string;
+  linked_external_source?: string | null;
+  linked_external_account_id?: string | null;
   is_active: boolean;
   is_system: boolean;
   notes: string | null;
@@ -53,14 +56,21 @@ export function CoaEditor({
   workspaceId,
   entities,
   activeEntityId,
+  initialAccounts = [],
 }: {
   workspaceId: string;
   entities: Entity[];
   activeEntityId: string;
+  initialAccounts?: CoaAccount[];
 }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [entityId, setEntityId] = useState(activeEntityId);
-  const [accounts, setAccounts] = useState<CoaAccount[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Hydrated from server-rendered prefetch; entity-switch triggers a
+  // router.refresh() rather than a client-side fetch because the proxy at
+  // /api/coa/[wid]/[eid] is shadowed by Traefik in production.
+  const [accounts, setAccounts] = useState<CoaAccount[]>(initialAccounts);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -74,18 +84,21 @@ export function CoaEditor({
   const [deactivating, setDeactivating] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
+  // Keep local accounts in sync whenever the server re-renders with a new
+  // initialAccounts (e.g. after entity switch via ?entity= query param).
   useEffect(() => {
-    if (!entityId) return;
-    setLoading(true);
-    setError(null);
-    fetch(`/api/coa/${workspaceId}/${entityId}`)
-      .then((r) => (r.ok ? r.json() : { accounts: [] }))
-      .then((body) => {
-        setAccounts(body.accounts ?? []);
-      })
-      .catch(() => setError("Failed to load chart of accounts"))
-      .finally(() => setLoading(false));
-  }, [entityId, workspaceId]);
+    setAccounts(initialAccounts);
+  }, [initialAccounts]);
+
+  // Switching entity → bump ?entity= query so server re-renders with the
+  // new entity's COA. The CoaPage server component re-runs and prefetches.
+  function switchEntity(newEntityId: string) {
+    setEntityId(newEntityId);
+    const params = new URLSearchParams(searchParams?.toString() ?? "");
+    params.set("entity", newEntityId);
+    router.push(`?${params.toString()}`);
+    router.refresh();
+  }
 
   async function handleCreate() {
     if (!newAccount.account_number || !newAccount.account_name) return;
@@ -205,7 +218,7 @@ export function CoaEditor({
             <div className="flex items-center gap-2">
               <select
                 value={entityId}
-                onChange={(e) => setEntityId(e.target.value)}
+                onChange={(e) => switchEntity(e.target.value)}
                 className="rounded-md border border-default bg-canvas py-1.5 px-3 text-sm"
               >
                 {entities.map((e) => (
