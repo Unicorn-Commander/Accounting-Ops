@@ -1,4 +1,10 @@
-"""Migration smoke test for 0008_regulatory_feed.py (public schema)."""
+"""Migration smoke test for 0009_regulatory_feed.py (public schema).
+
+Audit 2026-05-31 Bug 5: renumbered 0008 -> 0009 to resolve two-heads ambiguity
+on ``alembic -c alembic-public.ini heads`` (both rbac_expansion and
+regulatory_feed had landed as 0008). RBAC came first chronologically, so
+regulatory_feed becomes 0009 with down_revision = "0008_rbac_expansion".
+"""
 from __future__ import annotations
 
 import pathlib
@@ -8,7 +14,7 @@ _PATH = (
     / "migrations"
     / "public"
     / "versions"
-    / "0008_regulatory_feed.py"
+    / "0009_regulatory_feed.py"
 )
 
 
@@ -22,8 +28,8 @@ def test_migration_file_exists():
 
 def test_revision_chain():
     src = _src()
-    assert 'revision: str = "0008_regulatory_feed"' in src
-    assert 'down_revision: str | None = "0007_tax_chunking"' in src
+    assert 'revision: str = "0009_regulatory_feed"' in src
+    assert 'down_revision: str | None = "0008_rbac_expansion"' in src
 
 
 def test_table_and_columns():

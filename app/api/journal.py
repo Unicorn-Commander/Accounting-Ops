@@ -152,6 +152,12 @@ async def list_coa(
     entity_id: UUID,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
+    # Audit 2026-05-31 Bug 1: enforce role floor + entity_scope on read.
+    # Without these, a scoped CPA/bookkeeper could enumerate any entity's COA in
+    # the same workspace. require_role mirrors create/update/delete (viewer-and-up
+    # for read); assert_entity_in_scope returns 403 for an out-of-scope concrete id.
+    require_role(workspace, "viewer")
+    assert_entity_in_scope(workspace, entity_id)
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         rows = (
             await session.execute(
@@ -180,6 +186,9 @@ async def create_coa_account(
 ):
     """Create a new chart-of-accounts entry for an entity."""
     require_role(workspace, "accountant")
+    # Audit 2026-05-31 Bug 1: enforce entity_scope before any write so a scoped
+    # CPA can't create a COA row inside an entity outside their scope.
+    assert_entity_in_scope(workspace, body.entity_id)
 
     if body.account_type not in VALID_COA_TYPES:
         raise HTTPException(
@@ -257,12 +266,14 @@ async def update_coa_account(
         )
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
-        # Fetch existing account
+        # Fetch existing account (now also returning entity_id so we can enforce
+        # entity_scope BEFORE mutating — audit 2026-05-31 Bug 1).
         existing = (
             await session.execute(
                 text(
-                    "SELECT id::text, account_number, account_name, account_type, "
-                    "is_active, is_system FROM chart_of_account "
+                    "SELECT id::text, entity_id::text AS entity_id, account_number, "
+                    "account_name, account_type, is_active, is_system "
+                    "FROM chart_of_account "
                     "WHERE id = :aid AND entity_id IN ("
                     "  SELECT id FROM entity WHERE workspace_id = :wid"
                     ")"
@@ -275,6 +286,10 @@ async def update_coa_account(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="COA account not found",
             )
+        # Audit 2026-05-31 Bug 1: enforce entity_scope on the LOADED entity_id
+        # so a scoped CPA can't rename/reclassify a different entity's COA row
+        # by guessing the account UUID.
+        assert_entity_in_scope(workspace, UUID(existing["entity_id"]))
 
         updates: dict[str, Any] = {}
         if body.account_name is not None:
@@ -331,6 +346,28 @@ async def deactivate_coa_account(
     require_role(workspace, "accountant")
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        # Audit 2026-05-31 Bug 1: load the account's entity_id first, then assert
+        # entity_scope. A scoped CPA must not be able to deactivate another
+        # entity's COA row by guessing the account UUID. 404 (not 403) if the
+        # row doesn't exist in this workspace at all — keeps existence opaque.
+        owner = (
+            await session.execute(
+                text(
+                    "SELECT entity_id::text AS entity_id FROM chart_of_account "
+                    "WHERE id = :aid AND entity_id IN ("
+                    "  SELECT id FROM entity WHERE workspace_id = :wid"
+                    ")"
+                ),
+                {"aid": str(account_id), "wid": str(workspace_id)},
+            )
+        ).mappings().first()
+        if not owner:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="COA account not found",
+            )
+        assert_entity_in_scope(workspace, UUID(owner["entity_id"]))
+
         # Check if account has any journal entries
         postings = (
             await session.execute(

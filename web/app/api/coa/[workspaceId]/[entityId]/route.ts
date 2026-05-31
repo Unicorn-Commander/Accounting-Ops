@@ -1,3 +1,11 @@
+// Audit 2026-05-31 Bug 15: this Next.js proxy was historically described as
+// "dead-code because Traefik shadows /api/*". That was true BEFORE the
+// 2026-05-30 Traefik flip (commit f1a92be) which routes /api/* to web by
+// default. After the flip, web is the front door and Traefik's catch-all
+// covers /api/workspaces/*. This specific /api/coa/[workspaceId]/[entityId]
+// route stays as a compatibility proxy for any client that still hits it
+// directly (the SSR-rendered CoaEditor uses router.refresh() rather than
+// fetching this route on entity-switch, but the route itself is live).
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 

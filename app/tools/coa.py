@@ -14,8 +14,10 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+from fastapi import HTTPException
 from sqlalchemy import text
 
+from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace
 from app.workspace_session import workspace_session
@@ -201,8 +203,16 @@ async def update_coa_account(
     Returns the updated row projection.
 
     Role floor: accountant.
+
+    Audit 2026-05-31 Bug 2: previously this authorized the workspace with
+    entity_id=None and then updated any account in the workspace, letting a
+    scoped CPA mutate another entity's COA by guessing/learning an account UUID.
+    Now we load the account's entity_id FIRST, then enforce entity_scope before
+    the UPDATE — matching the HTTP PATCH route's post-fix behavior.
     """
-    await authorize_workspace(workspace_id, None, min_role="accountant")
+    # Authorize at the workspace level first; we'll re-check the entity once
+    # we know which one this account belongs to.
+    ctx = await authorize_workspace(workspace_id, None, min_role="accountant")
 
     if account_name is None and account_type is None:
         raise ValueError("at least one of account_name or account_type required")
@@ -218,8 +228,9 @@ async def update_coa_account(
         existing = (
             await session.execute(
                 text(
-                    "SELECT id::text, account_number, account_name, account_type, "
-                    "is_active, is_system FROM chart_of_account "
+                    "SELECT id::text, entity_id::text AS entity_id, account_number, "
+                    "account_name, account_type, is_active, is_system "
+                    "FROM chart_of_account "
                     "WHERE id = :aid AND entity_id IN ("
                     "  SELECT id FROM entity WHERE workspace_id = :wid"
                     ")"
@@ -229,6 +240,14 @@ async def update_coa_account(
         ).mappings().first()
         if not existing:
             raise LookupError(f"COA account {account_id} not found")
+        # Audit 2026-05-31 Bug 2: enforce entity_scope on the LOADED entity_id.
+        # ``assert_entity_in_scope`` raises HTTPException(403) on out-of-scope;
+        # translate to a transport-neutral PermissionError so the MCP channel
+        # returns a clean tool error (matches mcp_auth.authorize_workspace).
+        try:
+            assert_entity_in_scope(ctx, UUID(existing["entity_id"]))
+        except HTTPException as exc:
+            raise PermissionError(str(exc.detail)) from exc
 
         new_name = (
             account_name.strip()

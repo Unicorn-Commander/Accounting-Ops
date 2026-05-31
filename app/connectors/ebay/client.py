@@ -227,12 +227,13 @@ async def _persist_refreshed_blob(blob: EbayCredentialBlob) -> None:
 
 
 def _redact(token: str | None) -> str:
-    """Safe logging: first 4 + last 4 only, never the middle."""
-    if not token:
-        return "<none>"
-    if len(token) <= 12:
-        return "<short>"
-    return f"{token[:4]}..{token[-4:]}"
+    """Deprecated. Audit 2026-05-31 Bug 8: bearer prefix/suffix is still useful
+    for correlating stolen tokens and violates the "no raw credential material in
+    logs" rule. Kept only as a safe no-op for any straggler call sites — returns
+    a fixed placeholder rather than any byte of the token. Don't add new callers;
+    log workspace_id / credential_id / status / expires_in_seconds instead.
+    """
+    return "<redacted>" if token else "<none>"
 
 
 @dataclass
@@ -286,10 +287,13 @@ class EbayFinancesClient:
                 },
             )
         if resp.status_code != 200:
+            # Audit 2026-05-31 Bug 8: never log any byte of a bearer token, even
+            # prefix/suffix. Log credential id + workspace id + status only.
             _log.warning(
-                "ebay_access_token_refresh_failed status=%s old_token=%s",
+                "ebay_access_token_refresh_failed status=%s credential_id=%s workspace_id=%s",
                 resp.status_code,
-                _redact(token),
+                self.blob.credential_id,
+                self.blob.workspace_id,
             )
             raise EbayApiError(
                 f"eBay token refresh returned HTTP {resp.status_code}",
@@ -311,9 +315,13 @@ class EbayFinancesClient:
                 "ebay_token_persist_failed: %s (token still valid in memory)",
                 exc.__class__.__name__,
             )
+        # Audit 2026-05-31 Bug 8: log credential metadata + expiry seconds; the
+        # bearer never appears in stdout. The status string makes alert rules
+        # cheap to write ("count(status=refreshed) per hour").
         _log.info(
-            "ebay_access_token_refreshed new_token=%s expires_in=%ds",
-            _redact(new_token),
+            "ebay_access_token_refreshed credential_id=%s workspace_id=%s status=refreshed expires_in_seconds=%d",
+            self.blob.credential_id,
+            self.blob.workspace_id,
             new_exp - int(time.time()),
         )
         return new_token

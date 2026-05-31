@@ -36,6 +36,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 _log = logging.getLogger("acctops.mailer")
 
 
+def _recipient_domain(addr: str | None) -> str:
+    """Audit 2026-05-31 Bug 16: log only the recipient DOMAIN, never the
+    local-part. Full address + subject stay in the ``email_outbox`` row
+    (auditable, but not in stdout where CPA/customer PII could leak into log
+    aggregators). Returns "<none>" / "<malformed>" for missing or wrong-shape
+    inputs rather than raising — the mailer must never fail because of logging.
+    """
+    if not addr:
+        return "<none>"
+    s = str(addr).strip()
+    if "@" not in s:
+        return "<malformed>"
+    # rsplit so display-name email like 'Aaron <aaron@x.com>' stays robust.
+    return s.rsplit("@", 1)[-1].rstrip(">").lower() or "<malformed>"
+
+
 @dataclass(frozen=True)
 class SmtpConfig:
     host: str | None
@@ -152,9 +168,11 @@ async def send_email(
             ),
             {"id": str(outbox_id)},
         )
+        # Audit 2026-05-31 Bug 16: log outbox id + domain + status only; the
+        # full to_email + subject live in the email_outbox row for audit.
         _log.info(
-            "[mailer] queued (no SMTP relay) outbox=%s to=%s subject=%r",
-            outbox_id, to_email, subject,
+            "[mailer] queued (no SMTP relay) outbox=%s to_domain=%s status=queued",
+            outbox_id, _recipient_domain(to_email),
         )
         return {
             "status": "queued",
@@ -185,9 +203,11 @@ async def send_email(
             ),
             {"id": str(outbox_id), "err": err[:4000]},
         )
+        # Audit 2026-05-31 Bug 16: log outbox id + domain + status; never
+        # full email or subject in stdout.
         _log.warning(
-            "[mailer] SMTP send failed; queued outbox=%s to=%s err=%s",
-            outbox_id, to_email, err,
+            "[mailer] SMTP send failed; queued outbox=%s to_domain=%s status=queued err=%s",
+            outbox_id, _recipient_domain(to_email), err,
         )
         return {
             "status": "queued",
@@ -207,9 +227,11 @@ async def send_email(
         ),
         {"id": str(outbox_id)},
     )
+    # Audit 2026-05-31 Bug 16: log outbox id + domain + status; full email +
+    # subject stay in the email_outbox row only.
     _log.info(
-        "[mailer] SMTP send OK outbox=%s to=%s subject=%r",
-        outbox_id, to_email, subject,
+        "[mailer] SMTP send OK outbox=%s to_domain=%s status=sent",
+        outbox_id, _recipient_domain(to_email),
     )
     return {
         "status": "sent",

@@ -31,6 +31,14 @@ from app.workspace_session import workspace_session
 
 _VALID_STATUS_FILTERS = frozenset({"pending", "approved", "rejected", "all"})
 
+# Audit 2026-05-31 Bug 6: documented but-unenforced cap. Enforce at the TOP of
+# bulk_decide_approvals so a buggy UI/agent submitting thousands of items can't
+# tie up the per-item hash-chain advance or balloon a single audit window. The
+# HTTP layer (when this tool is invoked over HTTP) surfaces this as 413 Payload
+# Too Large via the route wrapper; the MCP layer surfaces it as a ValueError so
+# the tool returns a clean error to the agent.
+BULK_DECIDE_MAX_ITEMS = 200
+
 
 async def list_pending_approvals(
     workspace_id: UUID,
@@ -247,11 +255,22 @@ async def bulk_decide_approvals(
 
     Role floor: admin (per-item decide requires admin; we enforce up-front so
     a non-admin call fails before iterating).
-    """
-    await authorize_workspace(workspace_id, None, min_role="admin")
 
+    Audit 2026-05-31 Bug 6: a hard ``BULK_DECIDE_MAX_ITEMS`` cap is now
+    enforced. Reject BEFORE any auth work — even unauthenticated callers can
+    DOS the auth chain otherwise — so cap enforcement is cheap.
+    """
+    # Cap check first — cheaper than any auth round-trip + protects the auth
+    # path itself from being abused as a bulk-validation oracle.
     if not isinstance(decisions, list):
         raise ValueError("decisions must be a list of dicts")
+    if len(decisions) > BULK_DECIDE_MAX_ITEMS:
+        raise ValueError(
+            f"bulk_decide_approvals accepts at most {BULK_DECIDE_MAX_ITEMS} "
+            f"items per call; got {len(decisions)}. Split into smaller batches."
+        )
+
+    await authorize_workspace(workspace_id, None, min_role="admin")
 
     results: list[dict[str, Any]] = []
     approved = rejected = failed = 0
