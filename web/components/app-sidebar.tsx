@@ -3,80 +3,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import {
-  BarChart3,
-  BookOpen,
-  ChevronsLeft,
-  ChevronsRight,
-  Cog,
-  Database,
-  FileSpreadsheet,
-  FileText,
-  HelpCircle,
-  Home,
-  Inbox,
-  ListChecks,
-  type LucideIcon,
-  MessageSquare,
-  Plug,
-  Receipt,
-  ShieldCheck,
-  Sparkles,
-  TrendingUp,
-} from "lucide-react";
+import { ChevronsLeft, ChevronsRight } from "lucide-react";
 import { cn } from "@/lib/cn";
-
-type NavItem = {
-  label: string;
-  href: string;
-  icon: LucideIcon;
-};
-
-type NavSection = {
-  label: string | null;
-  items: NavItem[];
-  adminOnly?: boolean;
-};
-
-// Order + grouping matches site-header NAV_SECTIONS for parity, but each item
-// now has a dedicated lucide icon for the collapsed sidebar state.
-const NAV_SECTIONS: NavSection[] = [
-  {
-    label: null,
-    items: [
-      { label: "Dashboard", href: "/dashboard", icon: Home },
-      { label: "Chat", href: "/chat", icon: MessageSquare },
-      { label: "Transactions", href: "/transactions", icon: Receipt },
-      { label: "Reconciliation", href: "/reconciliation-queue", icon: ListChecks },
-      { label: "Approvals", href: "/approvals", icon: Inbox },
-      { label: "Agent activity", href: "/agent-activity", icon: Sparkles },
-      { label: "Journal", href: "/journal", icon: BookOpen },
-      { label: "Chart of Accounts", href: "/coa", icon: Database },
-    ],
-  },
-  {
-    label: "Reports",
-    items: [
-      { label: "Reports", href: "/reports", icon: TrendingUp },
-      { label: "Trial Balance", href: "/reports/trial-balance", icon: BarChart3 },
-      { label: "Taxes", href: "/taxes", icon: FileText },
-      { label: "CPA Export", href: "/cpa-export", icon: FileSpreadsheet },
-    ],
-  },
-  {
-    label: "Admin",
-    adminOnly: true,
-    items: [{ label: "Period Close", href: "/admin/period-close", icon: ShieldCheck }],
-  },
-  {
-    label: null,
-    items: [
-      { label: "Connectors", href: "/connectors", icon: Plug },
-      { label: "Specialty Rules", href: "/specialty-rules", icon: Cog },
-      { label: "Help", href: "/help", icon: HelpCircle },
-    ],
-  },
-];
+import { NAV_SECTIONS } from "@/lib/nav-sections";
 
 const COOKIE = "aops_sidebar_collapsed";
 
@@ -139,7 +68,7 @@ export function AppSidebar({
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           onClick={toggle}
-          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-tertiary transition hover:bg-white/[0.05] hover:text-ink-primary"
+          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-tertiary transition hover:bg-white/[0.05] hover:text-ink-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
         >
           {collapsed ? <ChevronsRight size={16} /> : <ChevronsLeft size={16} />}
         </button>
@@ -172,7 +101,7 @@ export function AppSidebar({
                       title={collapsed ? item.label : undefined}
                       aria-current={active ? "page" : undefined}
                       className={cn(
-                        "group relative flex items-center gap-2.5 rounded-md text-sm transition",
+                        "group relative flex items-center gap-2.5 rounded-md text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
                         collapsed ? "justify-center px-2 py-2" : "px-2.5 py-2",
                         active
                           ? "bg-brand-500/10 text-brand-300"
@@ -256,7 +185,7 @@ export function SidebarMobileNav({
                 href={item.href}
                 onClick={onNavigate}
                 className={cn(
-                  "flex items-center gap-2.5 rounded-md px-3 py-2.5 text-sm transition",
+                  "flex items-center gap-2.5 rounded-md px-3 py-2.5 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
                   active
                     ? "bg-brand-500/10 text-brand-300"
                     : "text-ink-secondary hover:bg-white/[0.04] hover:text-ink-primary"

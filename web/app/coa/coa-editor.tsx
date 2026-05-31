@@ -67,8 +67,12 @@ export function CoaEditor({
   const searchParams = useSearchParams();
   const [entityId, setEntityId] = useState(activeEntityId);
   // Hydrated from server-rendered prefetch; entity-switch triggers a
-  // router.refresh() rather than a client-side fetch because the proxy at
-  // /api/coa/[wid]/[eid] is shadowed by Traefik in production.
+  // router.refresh() because SSR-rendered tables stay snappy without an extra
+  // round-trip. The /api/coa/[wid]/[eid] route does work post-Traefik flip
+  // (the new catch-all forwards /api/workspaces/* to app; this specific COA
+  // proxy lives separately and is also reachable), but a Next router.refresh()
+  // is the canonical pattern for redo-on-server. Audit 2026-05-31 Bug 15
+  // updated this comment after the Traefik proxy flip landed.
   const [accounts, setAccounts] = useState<CoaAccount[]>(initialAccounts);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -301,14 +305,31 @@ export function CoaEditor({
           )}
 
           {accounts.length === 0 && !loading && (
+            // Audit quick-win #8: offer Setup Assistant + add-account as the
+            // next steps; the previous "Add the first account" link was an
+            // empty literal absence with no path to a default COA.
             <div className="rounded-xl border border-default bg-surface p-8 text-center text-sm text-ink-tertiary">
-              No accounts found.{" "}
-              <button
-                onClick={() => setShowNewForm(true)}
-                className="text-brand-400 hover:underline"
-              >
-                Add the first account
-              </button>
+              <p className="text-ink-secondary">
+                No accounts yet for this entity.
+              </p>
+              <p className="mt-2 text-xs text-ink-tertiary">
+                Most users let the Setup Assistant seed a default Chart of
+                Accounts based on the entity type, then customise from there.
+              </p>
+              <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+                <a
+                  href="/setup"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white shadow-brand-glow hover:bg-brand-600 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
+                >
+                  Run Setup Assistant
+                </a>
+                <button
+                  onClick={() => setShowNewForm(true)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-default bg-surface px-3 py-1.5 text-xs font-medium text-ink-secondary hover:bg-elevated transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
+                >
+                  <Plus size={12} /> Add account manually
+                </button>
+              </div>
             </div>
           )}
 

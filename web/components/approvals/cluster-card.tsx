@@ -330,9 +330,13 @@ export function ClusterCard({
             <h3 className="truncate text-lg font-semibold tracking-tight text-ink-primary">
               {cluster.vendor_signature || "—"}
             </h3>
-            <p className="mt-0.5 text-xs text-ink-tertiary">
-              {cluster.count} transaction{cluster.count !== 1 ? "s" : ""} ·{" "}
-              <span className="font-mono">{cluster.cluster_id}</span>
+            {/* Audit quick-win #2: hide raw cluster_id from the primary line
+                — surface via a debug-only title-tooltip instead. */}
+            <p
+              className="mt-0.5 text-xs text-ink-tertiary"
+              title={`Cluster ID: ${cluster.cluster_id}`}
+            >
+              {cluster.count} transaction{cluster.count !== 1 ? "s" : ""}
             </p>
           </div>
           <div className="shrink-0 text-right">

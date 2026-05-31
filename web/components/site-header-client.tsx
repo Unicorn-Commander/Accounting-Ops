@@ -5,50 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Menu, X } from "lucide-react";
 import { cn } from "@/lib/cn";
-
-const NAV_SECTIONS = [
-  {
-    label: null,
-    items: [
-      ["Dashboard", "/dashboard"],
-      ["Open items", "/open-items"],
-      ["Transactions", "/transactions"],
-      ["Reconciliation", "/reconciliation-queue"],
-      ["Approvals", "/approvals"],
-      ["Agent activity", "/agent-activity"],
-      ["Journal", "/journal"],
-      ["Chart of Accounts", "/coa"],
-    ],
-  },
-  {
-    label: "Reports",
-    items: [
-      ["Reports", "/reports"],
-      ["Trial Balance", "/reports/trial-balance"],
-      ["Taxes", "/taxes"],
-      ["CPA Export", "/cpa-export"],
-    ],
-  },
-  {
-    label: "Admin",
-    adminOnly: true,
-    items: [
-      ["Period Close", "/admin/period-close"],
-      ["Sentinel settings", "/settings/sentinel"],
-    ],
-  },
-  {
-    label: "Settings",
-    items: [["Access Tokens", "/settings/pats"]],
-  },
-  {
-    label: null,
-    items: [
-      ["Connectors", "/connectors"],
-      ["Help", "/help"],
-    ],
-  },
-];
+import { NAV_SECTIONS } from "@/lib/nav-sections";
 
 export function SiteHeaderClient({
   variant,
@@ -81,6 +38,8 @@ export function SiteHeaderClient({
     };
   }, [mobileOpen]);
 
+  const sections = NAV_SECTIONS.filter((s) => !s.adminOnly || canAdmin);
+
   return (
     <>
       <header
@@ -96,7 +55,7 @@ export function SiteHeaderClient({
               type="button"
               aria-label="Open menu"
               onClick={() => setMobileOpen(true)}
-              className="lg:hidden -ml-1 inline-flex h-9 w-9 items-center justify-center rounded-md text-ink-secondary hover:bg-white/[0.05] hover:text-ink-primary"
+              className="lg:hidden -ml-1 inline-flex h-9 w-9 items-center justify-center rounded-md text-ink-secondary hover:bg-white/[0.05] hover:text-ink-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
             >
               <Menu size={18} />
             </button>
@@ -104,7 +63,7 @@ export function SiteHeaderClient({
 
           <Link
             href={variant === "marketing" ? "/" : "/dashboard"}
-            className="flex items-center gap-2 text-[15px] font-semibold tracking-tight"
+            className="flex items-center gap-2 text-[15px] font-semibold tracking-tight focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas rounded-md"
           >
             <Logo />
             <span className="hidden sm:inline">Accounting-Ops</span>
@@ -113,52 +72,26 @@ export function SiteHeaderClient({
             </span>
           </Link>
 
-          {variant === "app" && (
-            <nav className="ml-6 hidden flex-1 items-center gap-1 lg:flex">
-              {NAV_SECTIONS.filter((section) => !section.adminOnly || canAdmin).map(
-                (section) => (
-                  <div key={section.label ?? section.items.map(([, href]) => href).join("|")} className="flex items-center gap-1">
-                    {section.label ? (
-                      <span className="px-1.5 text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
-                        {section.label}
-                      </span>
-                    ) : null}
-                    {section.items.map(([label, href]) => {
-                      const active =
-                        pathname === href || pathname?.startsWith(href + "/");
-                      return (
-                        <Link
-                          key={href}
-                          href={href}
-                          className={cn(
-                            "rounded-md px-2.5 py-1.5 text-sm transition",
-                            active
-                              ? "bg-white/5 text-ink-primary"
-                              : "text-ink-secondary hover:text-ink-primary hover:bg-white/[0.03]"
-                          )}
-                        >
-                          {label}
-                        </Link>
-                      );
-                    })}
-                  </div>
-                )
-              )}
-            </nav>
-          )}
+          {/*
+            Note: The previous desktop top-nav <nav> was removed (audit
+            issue C3 / Issue 3). The single source of nav is now
+            `AppSidebar` (240/60px collapsible) on the left.  Keep this
+            header strictly for logo + workspace/entity chips + agent
+            status + user menu + mobile hamburger.
+          */}
 
           <div className="ml-auto flex items-center gap-2 md:gap-3">
             {variant === "marketing" ? (
               <>
                 <Link
                   href="/login"
-                  className="hidden sm:inline-block text-sm text-ink-secondary hover:text-ink-primary"
+                  className="hidden sm:inline-block text-sm text-ink-secondary hover:text-ink-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas rounded-md px-1"
                 >
                   Sign in
                 </Link>
                 <a
                   href="mailto:aaron@magicunicorn.tech?subject=Accounting-Ops dev preview"
-                  className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600 transition"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
                 >
                   Request access
                 </a>
@@ -178,7 +111,8 @@ export function SiteHeaderClient({
         </div>
       </header>
 
-      {/* Mobile drawer */}
+      {/* Mobile drawer — uses the shared NAV_SECTIONS source so mobile and
+          desktop IA stay in sync. */}
       {variant === "app" && mobileOpen && (
         <div className="fixed inset-0 z-40 lg:hidden">
           {/* Backdrop */}
@@ -196,7 +130,7 @@ export function SiteHeaderClient({
                 type="button"
                 aria-label="Close menu"
                 onClick={() => setMobileOpen(false)}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-ink-secondary hover:bg-white/[0.05]"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-ink-secondary hover:bg-white/[0.05] focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
               >
                 <X size={18} />
               </button>
@@ -209,36 +143,43 @@ export function SiteHeaderClient({
               </div>
             )}
 
-            <nav className="flex flex-col gap-1">
-              {NAV_SECTIONS.filter((section) => !section.adminOnly || canAdmin).map(
-                (section) => (
-                  <div key={section.label ?? section.items.map(([, href]) => href).join("|")}>
-                    {section.label ? (
-                      <p className="px-3 pb-1 pt-3 text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
-                        {section.label}
-                      </p>
-                    ) : null}
-                    {section.items.map(([label, href]) => {
-                      const active =
-                        pathname === href || pathname?.startsWith(href + "/");
-                      return (
-                        <Link
-                          key={href}
-                          href={href}
+            <nav className="flex flex-col gap-1" aria-label="Primary navigation">
+              {sections.map((section, idx) => (
+                <div key={section.label ?? `g-${idx}`}>
+                  {section.label ? (
+                    <p className="px-3 pb-1 pt-3 text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
+                      {section.label}
+                    </p>
+                  ) : null}
+                  {section.items.map((item) => {
+                    const active =
+                      pathname === item.href ||
+                      pathname?.startsWith(item.href + "/");
+                    const Icon = item.icon;
+                    return (
+                      <Link
+                        key={item.href}
+                        href={item.href}
+                        className={cn(
+                          "flex items-center gap-2.5 rounded-md px-3 py-2.5 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
+                          active
+                            ? "bg-brand-500/10 text-brand-300"
+                            : "text-ink-secondary hover:bg-white/[0.04] hover:text-ink-primary"
+                        )}
+                      >
+                        <Icon
+                          size={16}
                           className={cn(
-                            "block rounded-md px-3 py-2.5 text-sm transition",
-                            active
-                              ? "bg-brand-500/10 text-brand-300"
-                              : "text-ink-secondary hover:bg-white/[0.04] hover:text-ink-primary"
+                            "shrink-0",
+                            active ? "text-brand-300" : "text-ink-tertiary"
                           )}
-                        >
-                          {label}
-                        </Link>
-                      );
-                    })}
-                  </div>
-                )
-              )}
+                        />
+                        <span className="flex-1">{item.label}</span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              ))}
             </nav>
           </div>
         </div>
