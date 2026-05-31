@@ -26,6 +26,13 @@ constrain the token's reach below the impersonated user's full membership:
 A service token WITHOUT these fields keeps full impersonation reach for
 backward compatibility — useful for trusted internal workers during the
 transition. New tokens SHOULD declare the minimum scope they need.
+
+PATs (2026-05-31): Personal Access Tokens are user-minted long-lived bearers
+formatted ``aops_pat_<43 chars>``. They sit BEFORE the Keycloak JWT branch in
+the chain: prefix-match → sha256 hash compare → resolve owner uc_uid. PATs
+are owner-scoped to a uc_uid; the optional ``workspace_scope`` field travels
+on the AuthContext via service_scope.workspace_ids so resolve_workspace
+applies the same gate that service tokens get.
 """
 from __future__ import annotations
 
@@ -219,6 +226,88 @@ def _match_service_token(presented: str) -> dict[str, Any] | None:
 _log = logging.getLogger("acctops.auth")
 
 
+# ---------------------------------------------------------------------------
+# PAT verification
+# ---------------------------------------------------------------------------
+# Imported lazily inside the helpers to avoid a hard import-time dependency on
+# the DB layer at module load (so the auth module stays usable in test bodies
+# that patch in mock sessions, mirroring the pattern used by _stamp_audit_actor
+# for OTel).
+
+
+def _looks_like_pat_token(token: str) -> bool:
+    """Cheap pre-check before hitting the DB."""
+    from app.security.pat import looks_like_pat
+
+    return looks_like_pat(token)
+
+
+async def _try_authenticate_pat(token: str) -> AuthContext | None:
+    """Resolve a presented bearer to an AuthContext if it's a valid live PAT.
+
+    Returns None on any kind of failure (no match, revoked, expired, DB
+    blip). Never raises — the caller decides whether None means 401 or
+    fall-through.
+    """
+    from app.db import SessionLocal
+    from app.security.pat import (
+        find_active_pat_by_token,
+        touch_last_used,
+    )
+
+    try:
+        async with SessionLocal() as session:
+            async with session.begin():
+                hit = await find_active_pat_by_token(session, token)
+    except Exception as exc:  # pragma: no cover - DB failure → fall through
+        _log.warning("PAT lookup failed: %s", exc.__class__.__name__)
+        return None
+    if hit is None:
+        return None
+    pat, _owner_id, owner_uc_uid = hit
+
+    # PAT scope: mirror workspace_scope into ServiceScope.workspace_ids so the
+    # tenancy layer applies its existing per-workspace gate. The owner's full
+    # entity_scope and role still come from workspace_membership — a PAT is
+    # owner-scoped, not below-owner-scoped.
+    svc_scope: ServiceScope | None = None
+    if pat.workspace_scope is not None:
+        svc_scope = ServiceScope(workspace_ids=frozenset(pat.workspace_scope))
+
+    ctx = AuthContext(
+        uc_uid=owner_uc_uid,
+        agent_id=None,  # PATs are NOT agent calls — no RFC 8693 `act`
+        scopes=tuple(pat.scopes),
+        claims={
+            "sub": owner_uc_uid,
+            "uc_uid": owner_uc_uid,
+            "pat_id": str(pat.id),
+            "pat_prefix": pat.secret_prefix,
+        },
+        service_scope=svc_scope,
+    )
+
+    # Fire-and-forget bump. We deliberately open a NEW session so any failure
+    # here can't poison the auth path's transaction. asyncio.create_task fires
+    # it without awaiting; if it crashes, the auth still succeeds.
+    import asyncio
+
+    asyncio.create_task(_touch_pat_last_used(pat.id))
+    return ctx
+
+
+async def _touch_pat_last_used(pat_id) -> None:  # pragma: no cover - background
+    from app.db import SessionLocal
+    from app.security.pat import touch_last_used
+
+    try:
+        async with SessionLocal() as session:
+            async with session.begin():
+                await touch_last_used(session, pat_id)
+    except Exception as exc:
+        _log.debug("PAT last_used_at bump failed: %s", exc.__class__.__name__)
+
+
 async def authenticate_token(token: str) -> AuthContext:
     """Validate a raw bearer token string and return its AuthContext.
 
@@ -254,6 +343,27 @@ async def authenticate_token(token: str) -> AuthContext:
         )
         _stamp_audit_actor(ctx)
         return ctx
+
+    # PAT fast-path: user-minted personal access tokens (aops_pat_*). Look up
+    # by indexed prefix → constant-time hash compare. The owner's uc_uid
+    # populates AuthContext so downstream membership resolution treats the
+    # request as a regular user call. If a PAT carries a workspace_scope, we
+    # mirror it into ServiceScope.workspace_ids so resolve_workspace applies
+    # the same gate it already enforces for scoped service tokens (no new
+    # plumbing in tenancy.py). A successful match is fire-and-forget about
+    # last_used_at — never block the request on that bookkeeping.
+    if _looks_like_pat_token(token):
+        pat_ctx = await _try_authenticate_pat(token)
+        if pat_ctx is not None:
+            _stamp_audit_actor(pat_ctx)
+            return pat_ctx
+        # Looked like a PAT but didn't validate → 401 immediately. Falling
+        # through to JWT would be wasted work and confusing logs (JWT decode
+        # would reject an obviously-non-JWT body).
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or revoked personal access token",
+        )
 
     if jwt is None:
         raise HTTPException(

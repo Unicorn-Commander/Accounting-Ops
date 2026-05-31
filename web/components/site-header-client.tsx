@@ -34,6 +34,10 @@ const NAV_SECTIONS = [
     items: [["Period Close", "/admin/period-close"]],
   },
   {
+    label: "Settings",
+    items: [["Access Tokens", "/settings/pats"]],
+  },
+  {
     label: null,
     items: [
       ["Connectors", "/connectors"],

@@ -17,6 +17,7 @@ from app.api.cash_position import router as cash_position_router
 from app.api.category_overrides import router as category_overrides_router
 from app.api.credentials import router as credentials_router
 from app.api.journal import router as journal_router
+from app.api.personal_access_tokens import router as personal_access_tokens_router
 from app.api.reports import router as reports_router
 from app.api.tools import consolidated_router, router as tools_router
 from app.api.transactions import router as transactions_router
@@ -80,6 +81,7 @@ app.include_router(tax_status_router)
 app.include_router(reports_router)
 app.include_router(cash_position_router)
 app.include_router(transactions_router)
+app.include_router(personal_access_tokens_router)
 app.include_router(tools_router)
 app.include_router(consolidated_router)
 
@@ -111,6 +113,46 @@ async def well_known_mcp() -> dict:
             "resource_pattern": "/api/workspaces/{workspace_id}/entities/{entity_id}/...",
             "consolidated_pattern": "/api/workspaces/{workspace_id}/consolidated/...",
         },
+    }
+
+
+@app.get("/.well-known/mcps.json", tags=["discovery"])
+async def well_known_mcps() -> dict:
+    """Multi-MCP discovery manifest (plural). Lists this server's MCP surface
+    AND the Personal Access Token mint flow so external AI clients can mint a
+    bearer without leaving the user's app.
+
+    The ``mint_url`` + ``prefix`` here ARE the contract the
+    /settings/pats UI delivers on — clients show these values to the user as
+    "open this URL, mint a token, paste it back".
+    """
+    return {
+        "name": "Accounting-Ops",
+        "version": "0.1.0",
+        "servers": [
+            {
+                "id": "accounting-ops",
+                "name": "Accounting-Ops",
+                "url": f"{settings.public_base_url}/mcp",
+                "transport": "streamable_http",
+                "auth": {
+                    "type": "bearer",
+                    "schemes": ["pat", "oauth2"],
+                    "pat": {
+                        "prefix": "aops_pat_",
+                        "mint_url": f"{settings.public_base_url}/settings/pats",
+                    },
+                    "oauth2": {
+                        "issuer": str(settings.keycloak_realm_url),
+                        "scopes": [
+                            "accounting:read",
+                            "accounting:write",
+                            "accounting:admin",
+                        ],
+                    },
+                },
+            }
+        ],
     }
 
 
