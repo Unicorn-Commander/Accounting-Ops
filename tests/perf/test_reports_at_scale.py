@@ -484,6 +484,8 @@ async def _pl_query_ms(conn, period_start: date, period_end: date) -> float:
 
 
 async def _cf_query_ms(conn, period_start: date, period_end: date) -> float:
+    # Mirrors the cash-flow query in app/api/reports.py after the bug-13
+    # optimization: GROUP BY first, then JOIN against a pre-collapsed COA.
     sql = """
         WITH cash_sides AS (
             SELECT debit_account AS canonical_form,
@@ -503,16 +505,25 @@ async def _cf_query_ms(conn, period_start: date, period_end: date) -> float:
             WHERE status = 'posted'
               AND effective_date BETWEEN $1 AND $2
               AND credit_account_number BETWEEN 1000 AND 1099
+        ),
+        aggregated AS (
+            SELECT cs.canonical_form, cs.counter, cs.counter_number,
+                   SUM(cs.in_flow) AS sum_in, SUM(cs.out_flow) AS sum_out
+            FROM cash_sides cs
+            GROUP BY cs.canonical_form, cs.counter, cs.counter_number
+        ),
+        coa_types AS (
+            SELECT DISTINCT ON (account_number::int)
+                account_number::int AS account_number, account_type
+            FROM chart_of_account
+            WHERE is_active = true
+            ORDER BY account_number::int, entity_id
         )
-        SELECT cs.canonical_form, cs.counter,
-               SUM(cs.in_flow) AS sum_in, SUM(cs.out_flow) AS sum_out,
-               coa.account_type
-        FROM cash_sides cs
-        LEFT JOIN chart_of_account coa
-          ON coa.account_number::int = cs.counter_number
-         AND coa.is_active = true
-        GROUP BY cs.canonical_form, cs.counter, coa.account_type
-        ORDER BY cs.canonical_form, cs.counter
+        SELECT agg.canonical_form, agg.counter,
+               agg.sum_in, agg.sum_out, ct.account_type
+        FROM aggregated agg
+        LEFT JOIN coa_types ct ON ct.account_number = agg.counter_number
+        ORDER BY agg.canonical_form, agg.counter
     """
     return await _run_query(conn, sql, [period_start, period_end])
 

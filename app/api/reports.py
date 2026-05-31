@@ -581,8 +581,19 @@ async def cash_flow(
         # canonical string) with the indexed `debit_account_number BETWEEN
         # 1000 AND 1099` (cash accounts are the 10xx block per the COA), and
         # use the indexed `credit_account_number` on the outflow branch.
-        # The counter-side COA join uses the same indexed integer column
-        # (coa.account_number::int) so it runs as an INT equi-join.
+        #
+        # Key perf optimization: GROUP BY FIRST, then JOIN. The cash entries
+        # collapse to ~tens of (canonical_form, counter) groups after
+        # aggregation, vs ~30K raw rows pre-aggregation. Joining the small
+        # aggregated set against chart_of_account costs O(groups), not
+        # O(entries). The previous shape (JOIN then GROUP BY) materialized
+        # the cartesian of (30K cash entries × N×K COA rows) when the
+        # account_number::int cast disabled index use on the equi-join.
+        #
+        # coa_types pre-collapses COA to one row per account_number (multiple
+        # entities can each carry their own COA row for the same number;
+        # for cash-flow type classification they all agree, so DISTINCT ON
+        # picks any one — deterministic by entity_id ordering).
         rows = (
             await session.execute(
                 text(
@@ -615,22 +626,35 @@ async def cash_flow(
                           AND effective_date <= :end
                           AND credit_account_number BETWEEN 1000 AND 1099
                           {entity_clause}
+                    ),
+                    aggregated AS (
+                        SELECT
+                            cs.canonical_form,
+                            cs.counter,
+                            cs.counter_number,
+                            SUM(cs.in_flow)  AS sum_in,
+                            SUM(cs.out_flow) AS sum_out
+                        FROM cash_sides cs
+                        GROUP BY cs.canonical_form, cs.counter, cs.counter_number
+                    ),
+                    coa_types AS (
+                        SELECT DISTINCT ON (account_number::int)
+                            account_number::int AS account_number,
+                            account_type
+                        FROM chart_of_account
+                        WHERE is_active = true
+                        ORDER BY account_number::int, entity_id
                     )
                     SELECT
-                        cs.canonical_form,
-                        cs.counter,
-                        SUM(cs.in_flow)  AS sum_in,
-                        SUM(cs.out_flow) AS sum_out,
-                        -- v2: pull account_type from COA for the counter account.
-                        -- INT equi-join is index-friendly; coa is small (<200 rows
-                        -- per workspace) so the cast is one row each.
-                        coa.account_type AS counter_type
-                    FROM cash_sides cs
-                    LEFT JOIN chart_of_account coa
-                      ON coa.account_number::int = cs.counter_number
-                     AND coa.is_active = true
-                    GROUP BY cs.canonical_form, cs.counter, coa.account_type
-                    ORDER BY cs.canonical_form, cs.counter
+                        agg.canonical_form,
+                        agg.counter,
+                        agg.sum_in,
+                        agg.sum_out,
+                        ct.account_type AS counter_type
+                    FROM aggregated agg
+                    LEFT JOIN coa_types ct
+                      ON ct.account_number = agg.counter_number
+                    ORDER BY agg.canonical_form, agg.counter
                     """
                 ),
                 {"start": start, "end": end, **entity_params},
