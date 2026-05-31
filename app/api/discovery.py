@@ -58,41 +58,123 @@ _DEFAULT_META = {
 }
 
 _TOOL_METADATA: dict[str, dict[str, Any]] = {
-    # Read-only / viewer floor
-    "list_transactions":        {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
-    "get_transaction":          {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
-    "query_specialty_rules":    {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
-    "get_p_and_l":              {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
-    "get_runway":               {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
-    "get_current_rule":         {"min_role": "viewer",     "read_only": True,  "latency_ms": 350},
-    "get_form_1120_data":       {"min_role": "viewer",     "read_only": True,  "latency_ms": 500},
-    "get_period_journal":       {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
-    "get_1099_payees":          {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
-    # Write — accountant floor
-    "categorize_transaction":   {"min_role": "accountant", "read_only": False, "latency_ms": 800},
-    "link_receipt_to_transaction": {"min_role": "accountant", "read_only": False, "latency_ms": 600},
-    "analyze_pending_approvals": {"min_role": "accountant", "read_only": False, "latency_ms": 1200},
-    "draft_memo":               {"min_role": "accountant", "read_only": False, "latency_ms": 600},
-    "flag_for_cpa_review":      {"min_role": "accountant", "read_only": False, "latency_ms": 600},
+    # ----- Discovery / workspace enumeration (viewer floor, read-only) ------
+    "list_my_workspaces":            {"min_role": "viewer",     "read_only": True,  "latency_ms": 200},
+    "list_workspace_entities":       {"min_role": "viewer",     "read_only": True,  "latency_ms": 200},
+
+    # ----- Approval queue ---------------------------------------------------
+    # analyze_pending_approvals writes recommendations rows so it is NOT read-only.
+    "analyze_pending_approvals":     {"min_role": "accountant", "read_only": False, "latency_ms": 1200},
+    "list_pending_approvals":        {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
+    "list_approval_recommendations": {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
+    "decide_approval":               {"min_role": "admin",      "read_only": False, "latency_ms": 800},
+    "bulk_decide_approvals":         {"min_role": "admin",      "read_only": False, "latency_ms": 2000},
+
+    # ----- Entity-scoped reads ---------------------------------------------
+    "list_transactions":             {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+    "get_transaction":               {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+    "list_recent_transactions":      {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
+    "get_cash_position":             {"min_role": "viewer",     "read_only": True,  "latency_ms": 350},
+    "query_specialty_rules":         {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+
+    # ----- Entity-scoped writes --------------------------------------------
+    "categorize_transaction":        {"min_role": "accountant", "read_only": False, "latency_ms": 800},
+    "link_receipt_to_transaction":   {"min_role": "accountant", "read_only": False, "latency_ms": 600},
+    # add_specialty_rule writes a specialty_rule row → admin floor.
+    "add_specialty_rule":            {"min_role": "admin",      "read_only": False, "latency_ms": 800},
+
+    # ----- Reports (entity or consolidated) --------------------------------
+    "get_p_and_l":                   {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
+    "get_runway":                    {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
+    # Consolidated cross-entity views require unrestricted entity_scope ⇒ admin.
+    "get_consolidated_p_and_l":      {"min_role": "admin",      "read_only": True,  "latency_ms": 600},
+    "get_balance_sheet":             {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
+    "get_cash_flow":                 {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
+    "get_trial_balance":             {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
+    "get_1099_nec_report":           {"min_role": "viewer",     "read_only": True,  "latency_ms": 500},
+
+    # ----- Chart of accounts (entity-scoped) -------------------------------
+    "list_chart_of_accounts":        {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+    "create_coa_account":            {"min_role": "accountant", "read_only": False, "latency_ms": 600},
+    "update_coa_account":            {"min_role": "accountant", "read_only": False, "latency_ms": 600},
+
+    # ----- Setup Assistant — provisioning ----------------------------------
+    "create_entity_with_coa":        {"min_role": "accountant", "read_only": False, "latency_ms": 1500},
+    # create_workspace runs alembic upgrade + DDL — owner+ enforced inline.
+    "create_workspace":              {"min_role": "owner",      "read_only": False, "latency_ms": 5000},
+    "suggest_connectors":            {"min_role": "viewer",     "read_only": True,  "latency_ms": 200},
+    "mark_intake_complete":          {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+
+    # ----- Journal + period close ------------------------------------------
+    "list_journal_entries":          {"min_role": "viewer",     "read_only": True,  "latency_ms": 350},
+    "get_journal_entry":             {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+    "verify_journal_chain":          {"min_role": "viewer",     "read_only": True,  "latency_ms": 600},
+    "list_posting_log":              {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
+    "post_journal_entry":            {"min_role": "accountant", "read_only": False, "latency_ms": 800},
+    "list_closed_periods":           {"min_role": "viewer",     "read_only": True,  "latency_ms": 200},
+    "close_period":                  {"min_role": "admin",      "read_only": False, "latency_ms": 800},
+
+    # ----- Connectors / mappings / overrides / credentials -----------------
+    "list_credentials":              {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+    "list_account_mappings":         {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+    "upsert_account_mappings":       {"min_role": "accountant", "read_only": False, "latency_ms": 600},
+    "list_category_overrides":       {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+    "create_category_override":      {"min_role": "accountant", "read_only": False, "latency_ms": 600},
+
+    # ----- Tax Knowledge RAG (global, no workspace scoping) ----------------
+    # Read-only, public-data tools. min_role left at viewer for the manifest.
+    "get_current_rule":              {"min_role": "viewer",     "read_only": True,  "latency_ms": 350},
+    "list_tax_knowledge_topics":     {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
+    "search_tax_knowledge":          {"min_role": "viewer",     "read_only": True,  "latency_ms": 500},
+    "get_tax_knowledge_doc":         {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+
+    # ----- 1120 Preparer + tax review queue --------------------------------
+    "get_tax_review_queue":          {"min_role": "viewer",     "read_only": True,  "latency_ms": 350},
+    "resolve_tax_review_item":       {"min_role": "accountant", "read_only": False, "latency_ms": 600},
+    "get_form_1120_data":            {"min_role": "viewer",     "read_only": True,  "latency_ms": 800},
+    "get_period_journal":            {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
+    "get_1099_payees":               {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
+    # draft_memo and flag_for_cpa_review write tax_review_queue / memo rows.
+    "draft_memo":                    {"min_role": "accountant", "read_only": False, "latency_ms": 800},
+    "flag_for_cpa_review":           {"min_role": "accountant", "read_only": False, "latency_ms": 600},
+
+    # ----- CPA Narrative + tax status dashboard ----------------------------
+    "get_tax_narrative":             {"min_role": "viewer",     "read_only": True,  "latency_ms": 350},
+    "trigger_tax_narrative":         {"min_role": "accountant", "read_only": False, "latency_ms": 2000},
+    "get_tax_status":                {"min_role": "viewer",     "read_only": True,  "latency_ms": 500},
+
+    # ----- Specialist run observability ------------------------------------
+    "list_specialist_runs":          {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
+    "get_specialist_run":            {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+    "start_specialist_run":          {"min_role": "accountant", "read_only": False, "latency_ms": 800},
+    "finish_specialist_run":         {"min_role": "accountant", "read_only": False, "latency_ms": 600},
+
+    # ----- propose_payment (Phase-1 stub; admin floor for safety) ----------
     # The MCP server wraps propose_payment so its registered name is
     # propose_payment_tool. We track BOTH so any rename is forgiving.
-    "propose_payment":          {"min_role": "accountant", "read_only": False, "latency_ms": 800},
-    "propose_payment_tool":     {"min_role": "accountant", "read_only": False, "latency_ms": 800},
-    # Write — admin floor
-    "add_specialty_rule":       {"min_role": "admin",      "read_only": False, "latency_ms": 800},
-    # Consolidated cross-entity view — admin + unrestricted entity_scope
-    "get_consolidated_p_and_l": {"min_role": "admin",      "read_only": True,  "latency_ms": 600},
+    "propose_payment":               {"min_role": "admin",      "read_only": False, "latency_ms": 800},
+    "propose_payment_tool":          {"min_role": "admin",      "read_only": False, "latency_ms": 800},
 }
 
 
 # min_role -> required scope mapping. Mirrored across the manifest and the
 # runtime — these names are what Brigade carries in the JWT's ``scope`` claim
 # when it federates a UC user into the call.
+#
+# Multi-persona expansion (2026-05-30) added several roles between viewer and
+# owner; see app/tenancy.py ROLE_ORDER. For Brigade-facing scope mapping we
+# collapse them to the same three buckets (read / write / admin) since Brigade
+# only knows about those three scope strings today.
 _SCOPE_FOR_ROLE = {
-    "viewer":     ["read:accounting"],
-    "accountant": ["write:accounting"],
-    "admin":      ["admin:accounting"],
-    "owner":      ["admin:accounting"],
+    "viewer":         ["read:accounting"],
+    "client_user":    ["read:accounting"],
+    "bookkeeper":     ["write:accounting"],
+    "accountant":     ["write:accounting"],
+    "cpa":            ["write:accounting"],
+    "admin":          ["admin:accounting"],
+    "owner":          ["admin:accounting"],
+    "client_owner":   ["admin:accounting"],
+    "platform_admin": ["admin:accounting"],
 }
 
 

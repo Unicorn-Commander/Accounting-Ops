@@ -43,7 +43,15 @@ def _reset_cache(monkeypatch):
 
 
 def test_legacy_token_format_keeps_no_scope(monkeypatch):
-    """A token without scope fields parses with None scope (backward compat)."""
+    """A token without scope fields parses with None scope (backward compat).
+
+    Audit 2026-05-31 Bug 7: the loader now REJECTS the unscoped legacy shape
+    in production. This test still validates the back-compat parsing path
+    by setting ACCTOPS_ALLOW_UNSCOPED_SERVICE_TOKEN=true (dev escape hatch).
+    The production behavior is covered by
+    tests/integration/test_service_token_scoping.py.
+    """
+    monkeypatch.setenv("ACCTOPS_ALLOW_UNSCOPED_SERVICE_TOKEN", "true")
     token = "a" * 40
     monkeypatch.setenv(
         "ACCTOPS_SERVICE_TOKENS",
@@ -97,7 +105,15 @@ def test_token_with_role_floor_normalizes_and_validates(monkeypatch):
 
 
 def test_token_with_invalid_role_floor_drops_field(monkeypatch):
-    """An unknown role_floor parses as None (safer than crashing the token)."""
+    """An unknown role_floor parses as None (safer than crashing the token).
+
+    Audit 2026-05-31 Bug 7: an unknown role_floor falls back to None — which
+    leaves the token with NO scope fields and triggers the rejection branch.
+    To test the parser logic in isolation we set the dev escape hatch (which
+    DOES still rejected? No, dev allows unscoped) — so the token is admitted
+    with role_floor=None. Without the flag it would be DROPPED entirely.
+    """
+    monkeypatch.setenv("ACCTOPS_ALLOW_UNSCOPED_SERVICE_TOKEN", "true")
     token = "e" * 40
     payload = (
         '{"%s": {"uc_uid":"u1","agent_id":"w","role_floor":"god-mode"}}'
@@ -137,6 +153,9 @@ def test_token_with_empty_workspace_ids_means_deny_all(monkeypatch):
 
 
 async def test_authenticate_legacy_service_token_yields_no_service_scope(monkeypatch):
+    """Audit 2026-05-31 Bug 7: dev escape hatch needed to admit the legacy
+    unscoped shape; production rejects it (separate test)."""
+    monkeypatch.setenv("ACCTOPS_ALLOW_UNSCOPED_SERVICE_TOKEN", "true")
     token = "h" * 40
     monkeypatch.setenv(
         "ACCTOPS_SERVICE_TOKENS",

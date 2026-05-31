@@ -176,6 +176,21 @@ def _parse_role_floor(value: Any) -> str | None:
     return None
 
 
+def _allow_unscoped_service_token() -> bool:
+    """Dev-only escape hatch for unscoped service tokens (audit 2026-05-31 Bug 7).
+
+    Honors ``ACCTOPS_ALLOW_UNSCOPED_SERVICE_TOKEN`` env (any truthy value: ``1``,
+    ``true``, ``yes``). Default OFF — production REQUIRES every service token to
+    declare at least one of ``workspace_ids`` / ``entity_ids`` / ``role_floor``.
+    """
+    return os.getenv("ACCTOPS_ALLOW_UNSCOPED_SERVICE_TOKEN", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _load_service_tokens() -> dict[str, dict[str, Any]]:
     """Parse ACCTOPS_SERVICE_TOKENS env var.
 
@@ -185,7 +200,7 @@ def _load_service_tokens() -> dict[str, dict[str, Any]]:
           "<token>": {
             "uc_uid": "aaron",
             "agent_id": "receipt-reconciler",
-            # H2 optional scope fields (least-privilege; backward compatible):
+            # H2 scope fields (REQUIRED in production — at least one must be set):
             "workspace_ids": ["<wid>", "<wid>"],   // None = all workspaces the user is in
             "entity_ids":    ["<eid>"],            // None = all entities in membership
             "role_floor":    "accountant"          // None = inherit membership role
@@ -194,6 +209,14 @@ def _load_service_tokens() -> dict[str, dict[str, Any]]:
 
     Token strings must be at least 32 chars (entropy) and are compared with
     ``secrets.compare_digest``. Returns {} if unset or malformed.
+
+    Audit 2026-05-31 Bug 7: in production a token must declare at least one of
+    (workspace_ids, entity_ids, role_floor) — an entry omitting all three is
+    REJECTED at load time (dropped from the cache + WARN). The dev escape hatch
+    ``ACCTOPS_ALLOW_UNSCOPED_SERVICE_TOKEN=true`` re-permits unscoped tokens
+    (still logs a warning). This closes the "leaked worker token becomes
+    owner/admin everywhere the user can reach" footgun; tokens that need the
+    receipt-reconciler-style broad reach must spell it out explicitly.
     """
     global _service_tokens_cache
     if _service_tokens_cache is not None:
@@ -202,6 +225,7 @@ def _load_service_tokens() -> dict[str, dict[str, Any]]:
     if not raw:
         _service_tokens_cache = {}
         return _service_tokens_cache
+    allow_unscoped = _allow_unscoped_service_token()
     try:
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
@@ -213,12 +237,43 @@ def _load_service_tokens() -> dict[str, dict[str, Any]]:
             uc_uid = ident.get("uc_uid")
             if not uc_uid or len(token) < 32:
                 continue
+            wsids = _parse_uuid_list(ident.get("workspace_ids"))
+            eids = _parse_uuid_list(ident.get("entity_ids"))
+            floor = _parse_role_floor(ident.get("role_floor"))
+            agent_id = ident.get("agent_id") or "service"
+            has_any_scope = (
+                wsids is not None or eids is not None or floor is not None
+            )
+            if not has_any_scope:
+                if not allow_unscoped:
+                    # Production: refuse to load — log a stable, grep-able warn
+                    # naming the agent_id so operators can see which token to fix.
+                    _log.warning(
+                        "[acctops.auth] REJECTING unscoped service token for "
+                        "agent_id=%r (uc_uid=%r) — at least one of "
+                        "workspace_ids, entity_ids, role_floor must be set "
+                        "(audit 2026-05-31 Bug 7). Set "
+                        "ACCTOPS_ALLOW_UNSCOPED_SERVICE_TOKEN=true to override "
+                        "in dev only.",
+                        agent_id,
+                        uc_uid,
+                    )
+                    continue
+                # Dev (flag set): allow + warn so dev operators see the smell.
+                _log.warning(
+                    "[acctops.auth] ALLOWING unscoped service token for "
+                    "agent_id=%r (uc_uid=%r) — "
+                    "ACCTOPS_ALLOW_UNSCOPED_SERVICE_TOKEN is set. "
+                    "Do NOT use this in production.",
+                    agent_id,
+                    uc_uid,
+                )
             tokens[token] = {
                 "uc_uid": uc_uid,
-                "agent_id": ident.get("agent_id") or "service",
-                "workspace_ids": _parse_uuid_list(ident.get("workspace_ids")),
-                "entity_ids": _parse_uuid_list(ident.get("entity_ids")),
-                "role_floor": _parse_role_floor(ident.get("role_floor")),
+                "agent_id": agent_id,
+                "workspace_ids": wsids,
+                "entity_ids": eids,
+                "role_floor": floor,
             }
         _service_tokens_cache = tokens
         return tokens

@@ -23,9 +23,18 @@ SERVICE_TOKEN = "cfo-agent-smoke-" + "z" * 32  # >= 32 chars, env-only
 
 @pytest.fixture(autouse=True)
 def _service_token_env(monkeypatch):
+    # Audit 2026-05-31 Bug 7: declare role_floor so the loader accepts the
+    # token in production mode. /api/chat/personas is workspace-agnostic so
+    # role_floor doesn't materially gate anything here — viewer is sufficient.
     monkeypatch.setenv(
         "ACCTOPS_SERVICE_TOKENS",
-        json.dumps({SERVICE_TOKEN: {"uc_uid": "test-aaron", "agent_id": "smoke"}}),
+        json.dumps({
+            SERVICE_TOKEN: {
+                "uc_uid": "test-aaron",
+                "agent_id": "smoke",
+                "role_floor": "viewer",
+            }
+        }),
     )
     # Clear the cache so the new env takes effect.
     from app import auth as auth_mod

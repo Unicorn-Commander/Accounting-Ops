@@ -167,3 +167,48 @@ async def test_input_schema_has_jsonschema_shape():
         schema = tool["input_schema"]
         assert schema.get("type") == "object"
         assert "properties" in schema or schema == {"type": "object", "properties": {}}
+
+
+# ---------------------------------------------------------------------------
+# Audit 2026-05-31 Bug 11 — every registered MCP tool MUST have an explicit
+# entry in _TOOL_METADATA (no silent fall-through to the conservative
+# admin/write/800ms default that hides real warnings + over-gates read tools).
+# ---------------------------------------------------------------------------
+
+
+async def test_every_registered_tool_has_explicit_metadata():
+    """Bug 11: an MCP tool added to mcp_server.py MUST have a matching entry
+    in app.api.discovery._TOOL_METADATA. The previous default-fallback
+    behavior emitted a per-request WARN and stamped admin/write/800ms which
+    (a) misclassifies read-only tools and (b) drowns out real warnings in
+    the log stream.
+
+    This test FAILS if a new tool is registered without metadata, so the
+    discovery layer keeps coverage as the surface grows.
+    """
+    from mcp_server import build_server
+    from app.api.discovery import _TOOL_METADATA
+
+    server = build_server()
+    live_tools = await server.list_tools()
+    live_names = {t.name for t in live_tools}
+    metadata_names = set(_TOOL_METADATA.keys())
+    missing = live_names - metadata_names
+    assert not missing, (
+        f"{len(missing)} MCP tool(s) lack a _TOOL_METADATA entry "
+        "(audit 2026-05-31 Bug 11). Add a row in app/api/discovery.py for: "
+        f"{sorted(missing)}"
+    )
+
+
+async def test_metadata_min_roles_are_known_values():
+    """Per-tool min_role must be one of the documented values so the
+    scope/tier mapping (_SCOPE_FOR_ROLE / _tier_for) routes correctly."""
+    from app.api.discovery import _SCOPE_FOR_ROLE, _TOOL_METADATA
+
+    known_roles = set(_SCOPE_FOR_ROLE.keys())
+    for tool_name, meta in _TOOL_METADATA.items():
+        assert meta["min_role"] in known_roles, (
+            f"{tool_name}: min_role={meta['min_role']!r} is not in "
+            f"_SCOPE_FOR_ROLE ({sorted(known_roles)})"
+        )

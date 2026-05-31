@@ -300,11 +300,16 @@ export function LiveTransactionsTable({
           </thead>
           <tbody>
             {filtered.map((t) => {
-              const amt = parseFloat(t.amount);
-              const isCredit = amt >= 0;
-              const absAmt = Math.abs(amt);
+              // Audit 2026-05-31 Bug 14: integer-cents path for sign + tier
+              // bucketing too. tryParseDollars returns null on malformed input;
+              // treat as 0 so the row still renders rather than crashing.
+              const amtCents = tryParseDollars(t.amount) ?? 0;
+              const isCredit = amtCents >= 0;
+              const absCents = Math.abs(amtCents);
               const materiality: "L" | "M" | "H" =
-                absAmt < 100 ? "L" : absAmt < 1000 ? "M" : "H";
+                absCents < 100_00 ? "L" : absCents < 1000_00 ? "M" : "H";
+              const amt = amtCents / 100;
+              const absAmt = absCents / 100;
               return (
                 <tr
                   key={t.id}

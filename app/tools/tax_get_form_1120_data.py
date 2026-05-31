@@ -3,15 +3,27 @@
 Calls the accounting-ops-cpa-export sidecar:
     GET /exports/1120/{year}?workspace_id=…&entity_id=…
 
-The caller's bearer token is forwarded so the sidecar can apply its own RBAC.
-The workspace/entity authorization for this service (viewer floor) is done first
-via authorize_workspace so a workspace non-member can never reach the sidecar.
+Audit 2026-05-31 Bug 10: the previous design forwarded a static
+``ACCTOPS_SERVICE_TOKEN`` to the sidecar, so the sidecar could not validate the
+ACTUAL caller's identity / workspace / entity / role. If the service token's
+own permissions ever drifted broader than the caller's the sidecar could
+return data outside the caller's scope. The fix: after this tool's local
+``authorize_workspace`` succeeds, mint a short-lived (≤5 min) HMAC-signed
+internal assertion bound to the caller (uc_uid, workspace_id, entity_id, role,
+scopes) and send it via the ``X-Internal-Assertion`` header. The sidecar
+verifies the signature with the same master key and uses the assertion's
+identity for its own authorization. The ``ACCTOPS_SERVICE_TOKEN`` bearer is
+still attached as a transport handshake so a random caller can't even reach
+the sidecar — but identity now flows through the assertion, not the token.
 
 DRAFT LABEL: Every returned payload carries a top-level ``_draft_notice`` field
 so any consumer knows this is for CPA review only.
+
+Role floor: viewer (read-only access to tax data).
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 from uuid import UUID
 
@@ -19,6 +31,8 @@ import httpx
 
 from app.config import get_settings
 from app.mcp_auth import authorize_workspace, current_auth
+from app.security.crypto import get_crypto
+from app.security.internal_assertion import sign_assertion
 
 
 async def get_form_1120_data(
@@ -36,30 +50,42 @@ async def get_form_1120_data(
 
     Role floor: viewer (read-only access to tax data).
     """
-    await authorize_workspace(workspace_id, entity_id, min_role="viewer")
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="viewer")
 
     settings = get_settings()
     auth = current_auth()
 
-    # Forward the caller's bearer so the cpa-export sidecar can validate it.
+    # Audit 2026-05-31 Bug 10: mint a per-call signed internal assertion bound
+    # to the validated caller's identity + the workspace/entity this call is
+    # scoped to. The sidecar verifies the signature and uses these claims to
+    # make its OWN authorization decision — it no longer has to trust an
+    # overbroad service token.
     headers: dict[str, str] = {}
     if auth is not None:
-        # Reconstruct the raw token. The AuthContext carries the uc_uid, not the
-        # raw token — the sidecar validates via JWKS, not by trusting a user id.
-        # We pull the raw token from the request's Authorization header via the
-        # context; since MCPAuthMiddleware already validated it, we need the
-        # original header value. For sidecar calls we pass the workspace/entity
-        # as query params; if the sidecar also wants a bearer it's the same one
-        # that got us here.
-        #
-        # The pattern: use the ACCTOPS_SERVICE_TOKEN env for sidecar auth if
-        # a service token is configured (cpa-export is internal); fall back to
-        # a no-auth call (the sidecar may run without bearer in dev). A future
-        # enhancement can plumb the forwarded bearer through a dedicated header.
-        import os
-        service_token = os.getenv("ACCTOPS_SERVICE_TOKEN") or os.getenv("CPA_EXPORT_TOKEN")
-        if service_token:
-            headers["Authorization"] = f"Bearer {service_token}"
+        try:
+            master_key = get_crypto().master_key_bytes()
+            assertion = sign_assertion(
+                master_key,
+                uc_uid=auth.uc_uid,
+                workspace_id=str(workspace_id),
+                entity_id=str(entity_id),
+                role=ctx.role,
+                scopes=auth.scopes,
+                agent_id=auth.agent_id,
+            )
+            headers["X-Internal-Assertion"] = assertion
+        except Exception:  # pragma: no cover - master key not bootstrapped in some test envs
+            # If the master key isn't available the assertion is impossible;
+            # fall through to bearer-only auth. The sidecar's own validate path
+            # will still gate access via the service token.
+            pass
+
+    # Bearer transport handshake: required so a random caller can't reach the
+    # sidecar at all. Identity authorization is in the X-Internal-Assertion
+    # header above (when present); this just opens the door.
+    service_token = os.getenv("ACCTOPS_SERVICE_TOKEN") or os.getenv("CPA_EXPORT_TOKEN")
+    if service_token:
+        headers["Authorization"] = f"Bearer {service_token}"
 
     url = (
         f"{settings.cpa_export_url.rstrip('/')}/exports/1120/{tax_year}"
