@@ -282,6 +282,27 @@ async def _attempt_chain_insert(
                     source_external_id=source_external_id,
                 )
                 return _ChainInsertIdempotent(existing_entry_id=existing_id)
+            if constraint == "uq_je_entity_this_hash":
+                # Defense-in-depth (migration 0018, audit 2026-05-31 Issue 2):
+                # the (entity_id, this_hash) DB unique constraint fired. This
+                # can only happen if two writers hashed IDENTICAL inputs
+                # (same prev_hash + same effective_date + same accounts + same
+                # source + same source_external_id + same payee + same
+                # description + same posted_at micro). That's effectively
+                # idempotent — the existing row IS the same logical post — so
+                # we treat it as such. In normal operation Bug 9's prev_hash
+                # retry would have caught the race upstream of THIS constraint;
+                # if this branch fires the writers contested the chain AND
+                # raced into the same micro-timestamp. Surface the existing id
+                # when we can resolve it via (source, source_external_id);
+                # otherwise None (callers handle None as best-effort).
+                existing_id = await _lookup_existing_entry_id(
+                    session,
+                    entity_id=entity_id,
+                    source=source,
+                    source_external_id=source_external_id,
+                )
+                return _ChainInsertIdempotent(existing_entry_id=existing_id)
             # Anything else: assume chain-race / transient — retry with a
             # fresh prev_hash + this_hash + posted_at on next loop iteration.
             continue
@@ -1028,6 +1049,23 @@ async def _apply_recategorization(
                     reason=(
                         f"Entry {orig_id} was already recategorized "
                         f"(source_external_id '{rev_src_ext}' exists)."
+                    ),
+                )
+            if constraint == "uq_je_entity_this_hash":
+                # Defense-in-depth (migration 0018, audit 2026-05-31 Issue 2):
+                # the (entity_id, this_hash) constraint fired on the recat
+                # pair. Same logic as the single-post path — if two writers
+                # produced identical hashes the row IS already in. Surface as
+                # idempotent rather than retrying because a retry against an
+                # advanced chain would either succeed cleanly (different
+                # prev_hash → different this_hash) or hit the source_external_id
+                # branch above (a duplicate of THIS specific recat).
+                return PostingRefusal(
+                    outcome="blocked_idempotent",
+                    reason=(
+                        f"Recategorization of {orig_id} would duplicate an "
+                        "existing chain entry (entity_id, this_hash). "
+                        "Likely a concurrent recat won the race."
                     ),
                 )
             # Otherwise assume a chain race; loop will recompute prev_hash.

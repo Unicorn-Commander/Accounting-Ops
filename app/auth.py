@@ -293,6 +293,48 @@ def _match_service_token(presented: str) -> dict[str, Any] | None:
 _log = logging.getLogger("acctops.auth")
 
 
+def _extract_brigade_scopes(claims: dict[str, Any]) -> tuple[str, ...]:
+    """Pull Brigade-style scopes from a verified-claims dict, tolerantly.
+
+    Brigade's contract (see ``agents/_shared/brigade_federation.md``) accepts
+    EITHER:
+
+      * ``scopes`` (preferred): a JSON ARRAY of strings — order preserved.
+      * ``scope`` (OIDC default): a SPACE-DELIMITED STRING — split on whitespace.
+
+    Precedence: when BOTH are present, the plural ``scopes`` wins (Brigade's
+    preferred form). When only ``scope`` is present, fall through to the OIDC
+    parse. When neither is present (or both are None/empty), the result is an
+    empty tuple — downstream scope checks in ``app/authz`` treat that as "no
+    scope granted" and refuse anything that requires a scope.
+
+    Safety:
+      * A malformed ``scopes`` (not a list, contains non-string elements) is
+        tolerated by ``str()``-coercing each element and dropping plain ``None``
+        entries; never raises. A wholly-wrong shape (e.g. ``scopes: 42``) falls
+        back to the ``scope`` branch, which itself never raises.
+      * Returning an empty tuple is the SAFE default — narrower than the
+        caller's intent, never wider. Subset-validation downstream catches
+        anything that needs an explicit grant.
+    """
+    plural = claims.get("scopes")
+    if isinstance(plural, list):
+        out: list[str] = []
+        for item in plural:
+            if item is None:
+                continue
+            out.append(str(item))
+        return tuple(out)
+    # No usable plural; try the singular space-delimited form.
+    singular = claims.get("scope")
+    if isinstance(singular, str) and singular:
+        return tuple(singular.split())
+    if isinstance(singular, list):
+        # Some callers may put a list under the singular key too — be tolerant.
+        return tuple(str(s) for s in singular if s is not None)
+    return ()
+
+
 # ---------------------------------------------------------------------------
 # PAT verification
 # ---------------------------------------------------------------------------
@@ -463,11 +505,16 @@ async def authenticate_token(token: str) -> AuthContext:
                 b_agent_id: str | None = None
                 if isinstance(b_act, dict):
                     b_agent_id = b_act.get("sub") or b_act.get("client_id")
-                raw_scope = brigade_claims.get("scope") or ""
-                if isinstance(raw_scope, list):
-                    b_scopes = tuple(str(s) for s in raw_scope)
-                else:
-                    b_scopes = tuple(str(raw_scope).split())
+                # Brigade may carry scopes as a SPACE-DELIMITED STRING under
+                # ``scope`` (OIDC default) OR as a JSON ARRAY under ``scopes``
+                # (Brigade's preferred plural form). Tolerate either — both are
+                # parsed into the same ordered tuple. The plural ``scopes`` wins
+                # when both are present (Brigade-preferred semantics). Malformed
+                # claims (non-string elements, non-list/string values) degrade to
+                # an empty tuple rather than raising — downstream subset checks
+                # in app/authz treat empty as "no scope granted". See
+                # ``agents/_shared/brigade_federation.md`` for the contract.
+                b_scopes = _extract_brigade_scopes(brigade_claims)
                 ctx = AuthContext(
                     uc_uid=b_uc_uid,
                     agent_id=b_agent_id,
@@ -629,12 +676,11 @@ async def _try_brigade(token: str) -> AuthContext | None:
     agent_id: str | None = None
     if isinstance(act, dict):
         agent_id = act.get("sub") or act.get("client_id")
-    # Brigade may carry scopes as a space-delimited string or an array.
-    scope_raw = claims.get("scope") or claims.get("scopes") or ""
-    if isinstance(scope_raw, list):
-        scopes = tuple(str(s) for s in scope_raw)
-    else:
-        scopes = tuple(str(scope_raw).split())
+    # Brigade may carry scopes as a space-delimited string under ``scope``
+    # (OIDC default) OR as a JSON list under ``scopes`` (Brigade preferred).
+    # Both routed through one helper so the plural-vs-singular precedence and
+    # the malformed-claim → empty-tuple safety contract live in one place.
+    scopes = _extract_brigade_scopes(claims)
     ctx = AuthContext(uc_uid=uc_uid, agent_id=agent_id, scopes=scopes, claims=claims)
     _stamp_audit_actor(ctx)
     return ctx

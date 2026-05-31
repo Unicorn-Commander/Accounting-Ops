@@ -78,18 +78,22 @@ export const CONNECTORS: Connector[] = [
   },
   {
     id: "stripe",
-    name: "Stripe Agent Toolkit",
+    name: "Stripe",
     category: "marketplace",
     description:
-      "Official Stripe MCP server. Customers, products, prices, invoices, payments, subscriptions, refunds, disputes, payouts.",
+      "Read-only access to Stripe via a restricted API key. Pulls balance_transactions (charge/refund/fee/payout) and maps each to a double-entry journal entry. Closes the loop with SimpleFIN by matching each payout to its BoA deposit (±$1, ±2 days).",
     what_it_enables: [
-      "Full Stripe account read/write",
-      "AP2-shape payment proposals (Phase 2)",
-      "Subscription + invoice reconciliation"
+      "Per-charge revenue with processor fee broken out (1210 → 4200; 5520 fee sidecar)",
+      "Payouts auto-reconciled to BoA deposits via SimpleFIN",
+      "Webhook-driven real-time event log (signature-verified)",
+      "30-day backfill on first connect; first 30 rows queue for approval"
     ],
     internal_url: "",
-    monthly_cost: "Free (read-only via Stripe API)",
-    available: false
+    monthly_cost: "Free (uses your existing Stripe account)",
+    signup_url: "https://dashboard.stripe.com/apikeys",
+    signup_label: "Create a restricted API key (read-only)",
+    doc_url: "https://stripe.com/docs/keys#limit-access-with-restricted-api-keys",
+    available: true
   },
   {
     id: "quickbooks-online",

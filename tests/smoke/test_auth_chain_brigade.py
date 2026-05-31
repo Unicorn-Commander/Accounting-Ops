@@ -103,6 +103,62 @@ async def test_brigade_jwt_extracts_scope_list():
     assert "write:accounting" in ctx.scopes
 
 
+async def test_brigade_jwt_scope_string_and_list_both_parse():
+    """Both the OIDC ``scope`` (space-delimited string) and Brigade-preferred
+    ``scopes`` (list) forms must populate AuthContext.scopes identically.
+
+    Per the federation contract (``agents/_shared/brigade_federation.md``):
+      * ``scopes`` (list) — preferred, order preserved.
+      * ``scope`` (str)   — OIDC default, whitespace-split.
+      * Both present     — plural ``scopes`` wins.
+    """
+    # 1. String form (OIDC default).
+    claims_str = _base_claims(scope="read:accounting write:accounting admin:journal")
+    claims_str.pop("scopes", None)
+    token_str = _mint_ed25519(_ED_PRIV, claims_str)
+    ctx_str = await auth.authenticate_token(token_str)
+    assert ctx_str.scopes == ("read:accounting", "write:accounting", "admin:journal"), (
+        f"OIDC scope string did not parse to ordered tuple: {ctx_str.scopes!r}"
+    )
+
+    # 2. List form (Brigade-preferred).
+    claims_list = _base_claims(scope=None)
+    claims_list["scopes"] = ["read:accounting", "write:accounting", "admin:journal"]
+    token_list = _mint_ed25519(_ED_PRIV, claims_list)
+    ctx_list = await auth.authenticate_token(token_list)
+    assert ctx_list.scopes == (
+        "read:accounting",
+        "write:accounting",
+        "admin:journal",
+    ), f"List scopes did not parse to ordered tuple: {ctx_list.scopes!r}"
+
+    # 3. Both present — the plural form wins (Brigade's preferred semantics).
+    claims_both = _base_claims(scope="only:from:singular")
+    claims_both["scopes"] = ["from:plural:1", "from:plural:2"]
+    token_both = _mint_ed25519(_ED_PRIV, claims_both)
+    ctx_both = await auth.authenticate_token(token_both)
+    assert ctx_both.scopes == ("from:plural:1", "from:plural:2"), (
+        f"Plural ``scopes`` should win when both present, got {ctx_both.scopes!r}"
+    )
+    assert "only:from:singular" not in ctx_both.scopes
+
+
+async def test_brigade_jwt_malformed_scopes_returns_empty_tuple():
+    """A malformed scopes claim (wrong type / non-list garbage) must NOT crash
+    the auth chain. Authentication still succeeds (the rest of the token is
+    valid); the AuthContext just carries an empty scope tuple. Downstream
+    subset-validation in app/authz treats empty as "no grant", which is the
+    SAFE default (narrower than intent, never wider).
+    """
+    # ``scopes`` set to an obviously-wrong type (int) — must NOT raise.
+    claims = _base_claims(scope=None)
+    claims["scopes"] = 42  # not a list, not a string
+    token = _mint_ed25519(_ED_PRIV, claims)
+    ctx = await auth.authenticate_token(token)
+    assert ctx.scopes == (), f"Malformed scopes should degrade to (), got {ctx.scopes!r}"
+    assert ctx.uc_uid == "aaron"  # auth still succeeded
+
+
 async def test_brigade_jwt_extracts_act_claim():
     """RFC 8693 act handling works on the Brigade path too."""
     claims = _base_claims(act={"sub": "tax-1120-preparer"})
