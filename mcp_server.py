@@ -12,6 +12,8 @@ from app.tools import (
     close_period,
     create_category_override,
     create_coa_account,
+    create_entity_with_coa,
+    create_workspace,
     decide_approval,
     draft_memo,
     finish_specialist_run,
@@ -51,8 +53,10 @@ from app.tools import (
     list_tax_knowledge_topics,
     list_transactions,
     list_workspace_entities,
+    mark_intake_complete,
     post_journal_entry,
     propose_payment,
+    suggest_connectors,
     query_specialty_rules,
     resolve_tax_review_item,
     search_tax_knowledge,
@@ -137,6 +141,14 @@ def build_server():
     server.tool()(list_chart_of_accounts)
     server.tool()(create_coa_account)
     server.tool()(update_coa_account)
+
+    # =====================================================================
+    # Setup Assistant — conversational entity + workspace provisioning
+    # =====================================================================
+    server.tool()(create_entity_with_coa)
+    server.tool()(create_workspace)
+    server.tool()(suggest_connectors)
+    server.tool()(mark_intake_complete)
 
     # =====================================================================
     # Journal + period close

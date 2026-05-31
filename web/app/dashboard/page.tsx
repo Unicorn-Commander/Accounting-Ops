@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { ArrowRight, ArrowUpRight, Sparkles, Wifi } from "lucide-react";
+import { redirect } from "next/navigation";
+import { ArrowRight, ArrowUpRight, Plus, Sparkles, Wifi } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { AgentActivitySection } from "@/components/agent-activity-section";
 import { EntitySelector } from "@/components/entity-selector";
@@ -13,6 +14,13 @@ import { cn } from "@/lib/cn";
 
 export default async function DashboardPage() {
   const ctx = await getActiveContext();
+  // If the active workspace has zero entities, the dashboard is meaningless —
+  // send the user to /setup so the Setup Assistant can provision their first
+  // entity. We only redirect when a workspace EXISTS but is empty; the
+  // "no workspace at all" case is handled by EmptyWorkspaceState below.
+  if (ctx.activeWorkspace && ctx.entities.length === 0) {
+    redirect("/setup");
+  }
   const canConsolidate = ctx.activeWorkspace
     ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
     : false;
@@ -44,11 +52,21 @@ export default async function DashboardPage() {
           subtitle={subtitle}
           action={
             ctx.activeWorkspace ? (
-              <EntitySelector
-                entities={ctx.entities}
-                activeEntityId={ctx.isConsolidated ? "consolidated" : ctx.activeEntity?.id}
-                canConsolidate={canConsolidate}
-              />
+              <div className="flex flex-wrap items-center gap-2">
+                <EntitySelector
+                  entities={ctx.entities}
+                  activeEntityId={ctx.isConsolidated ? "consolidated" : ctx.activeEntity?.id}
+                  canConsolidate={canConsolidate}
+                />
+                <Link
+                  href="/setup?mode=add"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-2.5 py-1 text-xs text-ink-secondary hover:border-brand-500/60 hover:text-ink-primary"
+                  title="Add another entity to this workspace"
+                >
+                  <Plus size={12} />
+                  Add entity
+                </Link>
+              </div>
             ) : null
           }
         />

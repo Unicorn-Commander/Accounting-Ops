@@ -45,6 +45,17 @@ export type ChatClientProps = {
   personas: ChatPersona[];
   initialSessions: ChatSessionSummary[];
   initialActiveSessionId: string | null;
+  // Optional: hide the sidebar (used by /setup which is a focused single-pane flow).
+  hideSidebar?: boolean;
+  // Optional: lock persona picker (used by /setup which forces setup-assistant).
+  lockPersona?: boolean;
+  // Optional: callback fired when the assistant streams ANY tool call.
+  // Used by /setup to listen for `mark_intake_complete` and redirect.
+  onAssistantToolCall?: (event: {
+    name: string;
+    args: Record<string, unknown>;
+    result?: unknown;
+  }) => void;
 };
 
 const DEFAULT_TAX_YEAR = new Date().getFullYear() - 1;
@@ -56,7 +67,10 @@ export function ChatClient({
   defaultPersonaSlug,
   personas,
   initialSessions,
-  initialActiveSessionId
+  initialActiveSessionId,
+  hideSidebar = false,
+  lockPersona = false,
+  onAssistantToolCall
 }: ChatClientProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -248,10 +262,29 @@ export function ChatClient({
     setDraft("");
 
     // 3. Start the SSE stream.
+    // Buffer in-flight tool calls so we can fire `onAssistantToolCall` once
+    // the corresponding tool_result frame arrives (with the response payload).
+    const pendingToolCalls = new Map<string, { name: string; args: Record<string, unknown> }>();
     await stream.start({
       workspaceId,
       sessionId: targetSessionId,
       text,
+      onEvent: (evt) => {
+        if (!onAssistantToolCall) return;
+        if (evt.type === "tool_call") {
+          pendingToolCalls.set(evt.id, { name: evt.name, args: evt.args });
+        } else if (evt.type === "tool_result") {
+          const pending = pendingToolCalls.get(evt.id);
+          if (pending) {
+            onAssistantToolCall({
+              name: pending.name,
+              args: pending.args,
+              result: evt.result
+            });
+            pendingToolCalls.delete(evt.id);
+          }
+        }
+      },
       onStreamEnd: (final) => {
         // Move the in-flight bubble into the history.
         if (final && final.kind === "assistant") {
@@ -269,7 +302,8 @@ export function ChatClient({
     stagedPersona,
     stagedTaxYear,
     stream,
-    refreshSessions
+    refreshSessions,
+    onAssistantToolCall
   ]);
 
   const startNewChat = useCallback(() => {
@@ -371,14 +405,16 @@ export function ChatClient({
   // -------------------------------------------------------------------------
   return (
     <div className="flex h-[calc(100vh-6.5rem)] min-h-[34rem] flex-col gap-4 md:h-[calc(100vh-7rem)] lg:flex-row">
-      {/* Left sidebar */}
-      <ChatSidebar
-        sessions={sessions}
-        activeId={activeSessionId}
-        onSelect={(id) => setActiveSessionId(id)}
-        onNew={startNewChat}
-        className="hidden w-64 shrink-0 lg:flex"
-      />
+      {/* Left sidebar — hidden when caller wants a focused single-pane view (e.g. /setup) */}
+      {!hideSidebar && (
+        <ChatSidebar
+          sessions={sessions}
+          activeId={activeSessionId}
+          onSelect={(id) => setActiveSessionId(id)}
+          onNew={startNewChat}
+          className="hidden w-64 shrink-0 lg:flex"
+        />
+      )}
 
       {/* Main pane */}
       <section
@@ -392,7 +428,7 @@ export function ChatClient({
             personas={personas}
             value={personaInUse}
             onChange={(slug) => setStagedPersona(slug)}
-            disabled={isExistingSession}
+            disabled={isExistingSession || lockPersona}
           />
           <span className="text-[10px] text-ink-tertiary">·</span>
           <span className="text-xs text-ink-secondary">{headerEntityName}</span>
