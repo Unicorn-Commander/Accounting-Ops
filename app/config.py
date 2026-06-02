@@ -36,6 +36,18 @@ class Settings(BaseModel):
     falkordb_password: str = ""  # set via FALKORDB_PASSWORD; "" = connect without AUTH
     garage_s3_endpoint: str = "http://garage:3900"
     garage_bucket_prefix: str = "accounting-ops"
+    # S3 (Garage) access credentials for the document-upload path. These are the
+    # ONLY S3 secrets the app holds; they are env-only (never in code) and used
+    # solely to PUT uploaded documents into the workspace's Garage bucket. Blank
+    # = uploads are disabled (the endpoint returns a clear 503 rather than
+    # silently dropping the file). region matches garage.toml's s3_region.
+    garage_s3_access_key: str = ""
+    garage_s3_secret_key: str = ""
+    garage_s3_region: str = "garage"
+    # Hard ceiling on a single uploaded document (bytes). Defends the app + the
+    # object store from a giant-file DoS. 25 MB comfortably covers a multi-page
+    # PDF receipt or a high-res phone photo; CSV statements are far smaller.
+    document_upload_max_bytes: int = 25 * 1024 * 1024
 
     otel_exporter_otlp_endpoint: str | None = None
     otel_service_name: str = "accounting-ops"
@@ -101,6 +113,12 @@ def get_settings() -> Settings:
         falkordb_password=os.getenv("FALKORDB_PASSWORD", defaults.falkordb_password),
         garage_s3_endpoint=os.getenv("GARAGE_S3_ENDPOINT", defaults.garage_s3_endpoint),
         garage_bucket_prefix=os.getenv("GARAGE_BUCKET_PREFIX", defaults.garage_bucket_prefix),
+        garage_s3_access_key=os.getenv("GARAGE_S3_ACCESS_KEY", defaults.garage_s3_access_key),
+        garage_s3_secret_key=os.getenv("GARAGE_S3_SECRET_KEY", defaults.garage_s3_secret_key),
+        garage_s3_region=os.getenv("GARAGE_S3_REGION", defaults.garage_s3_region),
+        document_upload_max_bytes=int(
+            os.getenv("DOCUMENT_UPLOAD_MAX_BYTES", str(defaults.document_upload_max_bytes))
+        ),
         otel_exporter_otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
         otel_service_name=os.getenv("OTEL_SERVICE_NAME", defaults.otel_service_name),
         qwen_local_url=os.getenv("QWEN_LOCAL_URL", defaults.qwen_local_url),

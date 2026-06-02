@@ -354,13 +354,21 @@ export default async function DashboardPage() {
                       ? "Activity across your connected accounts will show up here as it posts."
                       : "Connect a bank aggregator to start populating your transaction history."}
                   </p>
-                  <Link
-                    href="/connectors"
-                    className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
-                  >
-                    {txnData?.configured ? "Manage connectors" : "Connect a bank"}
-                    <ArrowRight size={11} />
-                  </Link>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <Link
+                      href="/connectors"
+                      className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
+                    >
+                      {txnData?.configured ? "Manage connectors" : "Connect a bank"}
+                      <ArrowRight size={11} />
+                    </Link>
+                    <Link
+                      href="/documents"
+                      className="inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
+                    >
+                      Or drag in documents
+                    </Link>
+                  </div>
                 </div>
               )}
             </Card>
