@@ -10,6 +10,9 @@ export const metadata: Metadata = {
   title: "Accounting-Ops — Your books. Your machine. Your rules.",
   description:
     "Agent-first financial operations platform for operators who refuse to send their books to a frontier AI provider. Self-hostable. Multi-entity. Audit-defensible by construction.",
+  // Icons are wired via the App Router file convention (app/favicon.ico,
+  // app/icon.svg, app/apple-icon.png) — Next auto-injects the <link> tags and
+  // serves /favicon.ico, which kills the bare GET /favicon.ico 404.
   openGraph: {
     title: "Accounting-Ops",
     description: "Your books. Your machine. Your rules.",

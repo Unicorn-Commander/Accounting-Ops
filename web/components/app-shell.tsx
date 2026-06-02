@@ -1,10 +1,11 @@
 import { cookies } from "next/headers";
 import { SiteHeader } from "@/components/site-header";
 import { AppSidebar } from "@/components/app-sidebar";
-import { AgentChatPopout } from "@/components/agent-chat-popout";
+import { ChatLauncher } from "@/components/chat/chat-launcher";
 import { ContextBreadcrumb } from "@/components/context-breadcrumb";
 import { GlobalToast } from "@/components/global-toast";
 import { getActiveContext } from "@/lib/active-context";
+import { fetchChatPersonas } from "@/lib/chat";
 import { auth } from "@/lib/auth";
 
 export async function AppShell({
@@ -24,6 +25,18 @@ export async function AppShell({
   const cookieStore = await cookies();
   const collapsed = cookieStore.get("aops_sidebar_collapsed")?.value === "1";
 
+  // Resolve the single entity + personas for the global chat launcher. The
+  // chat tools require ONE entity_id, so we pin the active (or first) entity.
+  // Personas fetch is best-effort — the launcher simply hides if it 401s/500s.
+  const chatEntity = ctx?.activeWorkspace
+    ? ctx.activeEntity ?? ctx.entities[0] ?? null
+    : null;
+  const personasRes =
+    ctx?.activeWorkspace && chatEntity ? await fetchChatPersonas() : null;
+  const chatPersonas = personasRes?.personas ?? [];
+  const chatDefaultPersona =
+    personasRes?.default ?? chatPersonas[0]?.slug ?? "cfo-agent";
+
   return (
     <>
       <SiteHeader variant="app" />
@@ -40,7 +53,15 @@ export async function AppShell({
           {children}
         </main>
       </div>
-      <AgentChatPopout />
+      {ctx?.activeWorkspace && chatEntity && chatPersonas.length > 0 && (
+        <ChatLauncher
+          workspaceId={ctx.activeWorkspace.id}
+          entityId={chatEntity.id}
+          entityName={chatEntity.display_name}
+          personas={chatPersonas}
+          defaultPersonaSlug={chatDefaultPersona}
+        />
+      )}
       <GlobalToast />
     </>
   );
