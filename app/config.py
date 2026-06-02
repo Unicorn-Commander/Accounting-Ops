@@ -33,6 +33,7 @@ class Settings(BaseModel):
 
     falkordb_host: str = "192.168.10.10"
     falkordb_port: int = 6379
+    falkordb_password: str = ""  # set via FALKORDB_PASSWORD; "" = connect without AUTH
     garage_s3_endpoint: str = "http://garage:3900"
     garage_bucket_prefix: str = "accounting-ops"
 
@@ -97,6 +98,7 @@ def get_settings() -> Settings:
         accepted_audience=os.getenv("ACCEPTED_AUDIENCE", keycloak_client_id),
         falkordb_host=os.getenv("FALKORDB_HOST", defaults.falkordb_host),
         falkordb_port=int(os.getenv("FALKORDB_PORT", str(defaults.falkordb_port))),
+        falkordb_password=os.getenv("FALKORDB_PASSWORD", defaults.falkordb_password),
         garage_s3_endpoint=os.getenv("GARAGE_S3_ENDPOINT", defaults.garage_s3_endpoint),
         garage_bucket_prefix=os.getenv("GARAGE_BUCKET_PREFIX", defaults.garage_bucket_prefix),
         otel_exporter_otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),

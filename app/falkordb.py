@@ -159,7 +159,11 @@ async def falkordb_session(
             "falkordb-py is not installed. Run `pip install falkordb` or check pyproject.toml"
         )
     settings = get_settings()
-    db = FalkorDB(host=settings.falkordb_host, port=settings.falkordb_port)
+    db = FalkorDB(
+        host=settings.falkordb_host,
+        port=settings.falkordb_port,
+        password=settings.falkordb_password or None,
+    )
     graph_name = subgraph_for_workspace(workspace_id)
     graph = db.select_graph(graph_name)
     try:
