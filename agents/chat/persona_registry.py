@@ -433,7 +433,7 @@ def list_personas(brigade_online: bool = False) -> list[dict]:
 
 
 # Default persona selected when /chat is opened fresh (no session id).
-# Explicitly set to the CPA Tax Resolver so the prepended Setup Assistant
-# does not become the implicit default for an established workspace's chat.
-# Setup Assistant has its own entry point: /setup (and is opened explicitly).
-DEFAULT_PERSONA_SLUG = "cpa-tax-resolver"
+# The CFO Agent is the primary interface — it grounds in agent-memory + Sentinel
+# and silently delegates to specialists — so it is the default. The Setup
+# Assistant has its own entry point: /setup (and is opened explicitly).
+DEFAULT_PERSONA_SLUG = "cfo-agent"

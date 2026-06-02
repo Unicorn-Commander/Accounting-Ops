@@ -27,7 +27,7 @@ export interface PersonasResult {
 export async function fetchPersonas(): Promise<PersonasResult> {
   const fallback: PersonasResult = {
     personas: FALLBACK_PERSONAS,
-    default: "cpa-tax-resolver",
+    default: "cfo-agent",
     brigade_online: false,
     brigade_reason: "no-session",
     is_fallback: true
@@ -59,7 +59,7 @@ export async function fetchPersonas(): Promise<PersonasResult> {
     const body = (await res.json()) as PersonasResponse;
     return {
       personas: body.personas ?? FALLBACK_PERSONAS,
-      default: body.default ?? "cpa-tax-resolver",
+      default: body.default ?? "cfo-agent",
       brigade_online: !!body.brigade_online,
       brigade_reason: body.brigade_reason ?? "unknown",
       is_fallback: false
