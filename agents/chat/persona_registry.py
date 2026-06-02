@@ -161,6 +161,18 @@ _QUEUE_DRAFT_TOOLS: tuple[str, ...] = (
     "flag_for_cpa_review",
 )
 
+# Read-only RAG tools over the curated, public ``tax_knowledge_document`` index
+# (the same retrieval path the specialists' get_current_rule uses). Non-tenant
+# data — IRS / Treasury / state-DOR authoritative text — so safe to expose, but
+# still gated by the MCP auth middleware. The conversational Tax-Research
+# persona is built on exactly these; no write/queue tools.
+_KNOWLEDGE_TOOLS: tuple[str, ...] = (
+    "search_tax_knowledge",
+    "list_tax_knowledge_topics",
+    "get_tax_knowledge_doc",
+    "get_current_rule",
+)
+
 
 # Builder helper — keeps the per-persona definitions readable.
 def _persona(
@@ -258,6 +270,21 @@ PERSONAS: tuple[Persona, ...] = (
         "cpa_team/tax_resolver",
         tools=_READ_TOOLS + _QUEUE_DRAFT_TOOLS,
         tier="strategic",
+    ),
+    # ----- Specialist tier — focused expertise ------------------------------
+    # Tax Research: conversational, read-only RAG over the curated
+    # tax_knowledge_document index. Explains "what does the latest tax law say
+    # about X" with citations; takes NO tax position and has NO write tools
+    # (knowledge-lookup tools only). needs_tax_year=False — the user names the
+    # year in their question; this persona isn't bound to one entity's filing.
+    _persona(
+        "tax-research",
+        "Tax Research",
+        "Looks up the latest federal + state tax rules with citations. Explains the law; takes no position.",
+        "tax_research/conversational_researcher",
+        tools=_KNOWLEDGE_TOOLS,
+        needs_tax_year=False,
+        tier="specialist",
     ),
     # ----- Operational tier — setup, intake, runtime ops --------------------
     _persona(
