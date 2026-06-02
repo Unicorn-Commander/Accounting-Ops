@@ -20,7 +20,7 @@ from sqlalchemy import text
 
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace
-from app.tools._audit import write_decision_audit
+from app.tools._audit import project_decision_audit, write_decision_audit
 from app.workspace_session import entity_session
 
 
@@ -138,7 +138,7 @@ async def link_receipt_to_transaction(
             "content_hash": receipt["content_hash"],
             "created": created,
         }
-        await write_decision_audit(
+        audit_id = await write_decision_audit(
             session,
             workspace_id=workspace_id,
             entity_id=eid,
@@ -149,6 +149,32 @@ async def link_receipt_to_transaction(
             reasoning=f"Linked receipt {receipt_id} to transaction {tx_id}.",
             outcome="linked" if created else "already_linked",
             source_document_id=receipt_id,
+        )
+        content_hash = receipt["content_hash"]
+
+    # ---- FalkorDB projection (best-effort, AFTER the entity_session commit) ----
+    # Mirror the authoritative writes: the agent Decision, and the
+    # (JournalEntry)-[:SUPPORTED_BY]->(SourceDocument) edge that closes the IRS
+    # purchase/payment/purpose triangle (the receipt's content_hash is the
+    # SourceDocument identity). Best-effort: failures are swallowed in project().
+    project_decision_audit(
+        workspace_id=workspace_id,
+        entity_id=eid,
+        audit_id=audit_id,
+        ctx=ctx,
+        tool_name="link_receipt",
+        outcome="linked" if created else "already_linked",
+        reasoning=f"Linked receipt {receipt_id} to transaction {tx_id}.",
+        subject_id=tx_id,
+    )
+    if content_hash:
+        from app import falkordb
+
+        falkordb.project(
+            falkordb.link_journal_entry_to_source(
+                workspace_id, eid, str(tx_id), content_hash
+            ),
+            label=f"je_supported_by:{tx_id}",
         )
 
     return payload

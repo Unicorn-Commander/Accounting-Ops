@@ -50,7 +50,7 @@ from app.journal import (
     post_journal_entry,
 )
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
-from app.tools._audit import write_decision_audit
+from app.tools._audit import project_decision_audit, write_decision_audit
 from app.tools.specialty_rules import activate_proposed_rule
 from app.workspace_session import workspace_session
 
@@ -238,7 +238,11 @@ async def decide_approval(
             )
 
         subject_type = row["subject_type"]
+        subject_id = UUID(row["subject_id"])
         payload = row["payload"] or {}
+        # Collected inside the transaction; the graph projection runs AFTER the
+        # workspace_session below commits (best-effort, never blocks the request).
+        applied: dict = {}
 
         # ---------------- REJECT ----------------
         if decision == "reject":
@@ -253,7 +257,7 @@ async def decide_approval(
                 "subject_type": subject_type,
                 "applied": False,
             }
-            await write_decision_audit(
+            audit_id = await write_decision_audit(
                 session,
                 workspace_id=workspace_id,
                 entity_id=entity_id,
@@ -267,78 +271,214 @@ async def decide_approval(
                 reasoning=body.note or "Rejected by human reviewer.",
                 outcome="rejected",
             )
-            return response
+            decision_outcome = "rejected"
 
-        # ---------------- APPROVE ----------------
-        if subject_type == "journal_recategorization":
-            applied = await _approve_recategorization(
-                session,
-                workspace_id=workspace_id,
-                entity_id=entity_id,
-                subject_id=UUID(row["subject_id"]),
-                payload=payload,
-                queued_reasoning=row["reasoning"],
-                approving_human=workspace.user_uc_uid,
-                note=body.note,
-            )
-        elif subject_type == "compliance_rule":
-            applied = await _approve_compliance_rule(
-                session,
-                workspace_id=workspace_id,
-                entity_id=entity_id,
-                subject_id=UUID(row["subject_id"]),
-                payload=payload,
-            )
-        elif subject_type == "bank_transaction_import":
-            applied = await _approve_bank_transaction_import(
-                session,
-                workspace_id=workspace_id,
-                entity_id=entity_id,
-                payload=payload,
-                approving_human=workspace.user_uc_uid,
-                note=body.note,
-                category_override=body.category_override,
-            )
         else:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Cannot apply unknown subject_type '{subject_type}'",
-            )
+            # ---------------- APPROVE ----------------
+            if subject_type == "journal_recategorization":
+                applied = await _approve_recategorization(
+                    session,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    subject_id=subject_id,
+                    payload=payload,
+                    queued_reasoning=row["reasoning"],
+                    approving_human=workspace.user_uc_uid,
+                    note=body.note,
+                )
+            elif subject_type == "compliance_rule":
+                applied = await _approve_compliance_rule(
+                    session,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    subject_id=subject_id,
+                    payload=payload,
+                )
+            elif subject_type == "bank_transaction_import":
+                applied = await _approve_bank_transaction_import(
+                    session,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    payload=payload,
+                    approving_human=workspace.user_uc_uid,
+                    note=body.note,
+                    category_override=body.category_override,
+                )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Cannot apply unknown subject_type '{subject_type}'",
+                )
 
-        # Apply succeeded (the helpers raise HTTPException on a refusal, which
-        # rolls the transaction back). Mark decided + audit in the SAME tx.
-        await _mark_decided(
-            session, approval_id=approval_id, new_status="approved",
-            decided_by=workspace.user_uc_uid,
-        )
-        response = {
-            "ok": True,
-            "approval_id": str(approval_id),
-            "decision": "approved",
-            "subject_type": subject_type,
-            "applied": True,
-            **applied,
-        }
-        await write_decision_audit(
-            session,
-            workspace_id=workspace_id,
-            entity_id=entity_id,
-            ctx=workspace,
-            tool_name="approval_decision",
-            request_payload={
-                "approval_id": str(approval_id), "decision": "approve",
-                "note": body.note,
-            },
-            response_payload=response,
-            reasoning=body.note or "Approved by human reviewer.",
-            outcome="approved",
-        )
-        return response
+            # Apply succeeded (the helpers raise HTTPException on a refusal, which
+            # rolls the transaction back). Mark decided + audit in the SAME tx.
+            await _mark_decided(
+                session, approval_id=approval_id, new_status="approved",
+                decided_by=workspace.user_uc_uid,
+            )
+            response = {
+                "ok": True,
+                "approval_id": str(approval_id),
+                "decision": "approved",
+                "subject_type": subject_type,
+                "applied": True,
+                **applied,
+            }
+            audit_id = await write_decision_audit(
+                session,
+                workspace_id=workspace_id,
+                entity_id=entity_id,
+                ctx=workspace,
+                tool_name="approval_decision",
+                request_payload={
+                    "approval_id": str(approval_id), "decision": "approve",
+                    "note": body.note,
+                },
+                response_payload=response,
+                reasoning=body.note or "Approved by human reviewer.",
+                outcome="approved",
+            )
+            decision_outcome = "approved"
+
+    # ---- FalkorDB projection (best-effort, AFTER the workspace_session commit) ----
+    # Everything above is authoritative + already committed. Mirror it into the
+    # graph fire-and-forget; any failure is swallowed in project()/record_*.
+    _project_approval_decision(
+        workspace_id=workspace_id,
+        entity_id=entity_id,
+        audit_id=audit_id,
+        ctx=workspace,
+        decision_outcome=decision_outcome,
+        subject_type=subject_type,
+        subject_id=subject_id,
+        applied=applied,
+        payload=payload,
+        note=body.note,
+    )
+    return response
 
 
 # --------------------------------------------------------------------
 # Apply helpers (run on the decide endpoint's session/transaction)
 # --------------------------------------------------------------------
+
+
+def _project_approval_decision(
+    *,
+    workspace_id: UUID,
+    entity_id: UUID,
+    audit_id: UUID,
+    ctx: WorkspaceContext,
+    decision_outcome: str,
+    subject_type: str,
+    subject_id: UUID,
+    applied: dict,
+    payload: dict,
+    note: str | None,
+) -> None:
+    """Best-effort FalkorDB projection of an approval decision (post-commit).
+
+    Mirrors the authoritative writes the decide endpoint just committed:
+      * the approval Decision node (approved/rejected), which OVERRIDES the prior
+        decision about the same subject;
+      * on an APPROVED ``compliance_rule`` → the now-ACTIVE ComplianceRule node
+        (active=True), so get_active_compliance_rules surfaces it from the graph;
+      * on an APPROVED ``journal_recategorization`` → the appended reversal +
+        restatement JournalEntry nodes (with REVERSES lineage);
+      * on an APPROVED ``bank_transaction_import`` → the posted JournalEntry node.
+
+    Fire-and-forget via project(); every failure is swallowed there. Call ONLY
+    after the workspace_session transaction has committed.
+    """
+    from app import falkordb
+
+    # 1. The decision itself (always — approve or reject).
+    project_decision_audit(
+        workspace_id=workspace_id,
+        entity_id=entity_id,
+        audit_id=audit_id,
+        ctx=ctx,
+        tool_name="approval_decision",
+        outcome=decision_outcome,
+        reasoning=note or f"Approval {decision_outcome} by human reviewer.",
+        subject_id=subject_id,
+        overrides_subject_id=subject_id,
+    )
+    if decision_outcome != "approved":
+        return
+
+    # 2. Subject-specific ledger/rule projections.
+    if subject_type == "compliance_rule":
+        # The rule moved into an ACTIVE profile; re-project active=True so the
+        # temporal read sees it. effective_from = now (activation time) is a safe
+        # mirror; the authoritative effective_from lives in Postgres.
+        falkordb.project(
+            falkordb.upsert_compliance_rule(
+                workspace_id,
+                entity_id,
+                str(applied.get("rule_id") or subject_id),
+                kind=str(payload.get("kind") or "rule"),
+                effective_from=dt.datetime.now(tz=dt.timezone.utc).isoformat(),
+                effective_to=None,
+                trigger=payload.get("trigger"),
+                action=payload.get("action_enum"),
+                source="ai_inferred",
+                active=True,
+            ),
+            label=f"compliance_rule_active:{applied.get('rule_id') or subject_id}",
+        )
+    elif subject_type == "journal_recategorization":
+        from app.journal.posting import CorrectionOutcome
+        from app.journal.projection import project_recategorization
+
+        rev_id = applied.get("reversal_entry_id")
+        restated_id = applied.get("restated_entry_id")
+        if rev_id and restated_id:
+            outcome = CorrectionOutcome(
+                reversal_entry_id=UUID(str(rev_id)),
+                restated_entry_id=UUID(str(restated_id)),
+                materiality_tier=str(applied.get("materiality_tier") or ""),
+                from_category=str(applied.get("from_category") or ""),
+                to_category=str(applied.get("to_category") or ""),
+            )
+            amt = payload.get("amount_cents")
+            project_recategorization(
+                workspace_id=workspace_id,
+                entity_id=entity_id,
+                outcome=outcome,
+                orig_entry_id=subject_id,
+                amount_cents=int(amt) if amt is not None else 0,
+                effective_date=payload.get("effective_date"),
+                payee=payload.get("payee"),
+            )
+    elif subject_type == "bank_transaction_import":
+        from app.journal.posting import PostingOutcome
+        from app.journal.materiality import MaterialityVerdict
+        from app.journal.projection import project_journal_entry_posted
+
+        je_id = applied.get("journal_entry_id")
+        amt = payload.get("amount_cents")
+        if je_id and amt is not None:
+            outcome = PostingOutcome(
+                journal_entry_id=UUID(str(je_id)),
+                materiality=MaterialityVerdict(
+                    outcome="auto_post",
+                    tier=str(applied.get("materiality_tier") or "L"),
+                    reason="human_approved",
+                ),
+            )
+            project_journal_entry_posted(
+                workspace_id=workspace_id,
+                entity_id=entity_id,
+                outcome=outcome,
+                category=str(payload.get("category") or ""),
+                amount_cents=int(amt),
+                effective_date=payload.get("effective_date"),
+                source="bofa-statement",
+                source_external_id=applied.get("source_external_id")
+                or payload.get("source_external_id"),
+                payee=payload.get("payee"),
+            )
 
 
 async def _mark_decided(

@@ -104,6 +104,29 @@ async def create_override(
             },
         )
         row = result.first()
+
+    # ---- FalkorDB LEARN (best-effort, AFTER the workspace_session commit) ----
+    # A human just confirmed pattern -> category. Teach the agent-memory graph so
+    # get_learned_category_for_vendor can suggest it next time. The graph's
+    # learned pattern is ENTITY-scoped, so we only project when the override is
+    # bound to a specific entity (an unscoped/workspace-wide override has no
+    # entity to attach the Vendor node to). Authoritative store is Postgres'
+    # category_override row; this is its non-authoritative mirror.
+    if body.entity_id is not None:
+        from app import falkordb
+
+        falkordb.project(
+            falkordb.record_learned_pattern(
+                workspace.workspace_id,
+                body.entity_id,
+                pattern_lower,
+                body.category,
+                rule_id=str(row.id),
+                confirmed_by=workspace.user_uc_uid,
+            ),
+            label=f"learned_pattern:{row.id}",
+        )
+
     return {"id": row.id, "pattern": row.pattern, "category": row.category}
 
 

@@ -16,6 +16,7 @@ logging / audit purposes only.
 """
 
 from app.categorization.engine import (
+    apply_learned_pattern,
     categorize_transaction,
     categorize_transaction_async,
     CategorySuggestion,
@@ -23,6 +24,7 @@ from app.categorization.engine import (
 from app.categorization.llm import LLMCategorizer, LLMCategorySuggestion
 
 __all__ = [
+    "apply_learned_pattern",
     "categorize_transaction",
     "categorize_transaction_async",
     "CategorySuggestion",

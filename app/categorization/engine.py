@@ -217,6 +217,63 @@ def _categorize_sync_tiers(
     )
 
 
+async def apply_learned_pattern(
+    suggestion: CategorySuggestion,
+    *,
+    workspace_id,
+    entity_id,
+    vendor_name: str | None,
+) -> CategorySuggestion:
+    """Augment a deterministic suggestion with a FalkorDB learned pattern.
+
+    READ-SIDE PROOF that the agent-memory graph is consulted at runtime. The
+    graph holds (Vendor)-[:LEARNED_PATTERN]->(CategorizationRule) edges that the
+    platform LEARNS whenever a human approves/overrides a categorization. When a
+    vendor has such a learned pattern and the deterministic engine did NOT
+    already confidently classify the txn (status != "auto"), we surface the
+    learned category as a ``suggest`` so it shows up as a review-grade hint —
+    NEVER as an auto-post (a human still confirms it through the existing gate).
+
+    MUST degrade gracefully: if there is no entity context, no learned pattern,
+    or FalkorDB is unreachable/raises, the ORIGINAL ``suggestion`` is returned
+    unchanged — behavior is exactly as it was before this hook existed. The
+    FalkorDB call is read-only and never blocks an authoritative write.
+
+    We intentionally do NOT override an existing ``auto`` suggestion: a
+    deterministic vendor-rule/override match is already high-trust, and the
+    graph is a non-authoritative projection — it informs the UNCERTAIN cases,
+    it doesn't override the certain ones.
+    """
+    if entity_id is None or workspace_id is None or not (vendor_name or "").strip():
+        return suggestion
+    if suggestion.status == "auto":
+        # Already high-trust deterministically; the graph only helps the
+        # uncertain cases. Leave it.
+        return suggestion
+    try:
+        from app import falkordb
+
+        learned = await falkordb.get_learned_category_for_vendor(
+            workspace_id, entity_id, vendor_name
+        )
+    except Exception:  # noqa: BLE001 - graph is non-authoritative; degrade silently
+        return suggestion
+    if not learned or not learned.get("category"):
+        return suggestion
+    return CategorySuggestion(
+        category=learned["category"],
+        status="suggest",
+        source=learned.get("source", "falkordb:learned_pattern"),
+        kind="unknown",
+        reason=(
+            f"FalkorDB learned pattern: a human previously categorized "
+            f"'{vendor_name}' as '{learned['category']}' "
+            f"({learned.get('confirmations', 1)}x). Suggested for review."
+        ),
+        sign_matched=False,
+    )
+
+
 async def _llm_tier(
     *,
     llm_fallback: "LLMCategorizer",

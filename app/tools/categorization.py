@@ -21,10 +21,12 @@ from uuid import UUID
 
 from sqlalchemy import text
 
+from decimal import Decimal
+
 from app.db import SessionLocal
 from app.journal import CorrectionOutcome, CorrectionQueued, PostingRefusal, post_correction
 from app.mcp_auth import authorize_workspace
-from app.tools._audit import write_decision_audit
+from app.tools._audit import project_decision_audit, write_decision_audit
 from app.workspace_session import entity_session
 
 
@@ -86,6 +88,9 @@ async def categorize_transaction(
                 reasoning=reasoning,
                 outcome="noop",
             )
+            # A no-op writes a decision_audit row but changes nothing else, so we
+            # don't project a graph Decision for it (keeps the graph free of
+            # no-signal nodes). The Postgres audit row remains authoritative.
             return {
                 "ok": True,
                 "outcome": "noop",
@@ -139,7 +144,7 @@ async def categorize_transaction(
             }
             audit_outcome = result.outcome
 
-        await write_decision_audit(
+        audit_id = await write_decision_audit(
             session,
             workspace_id=workspace_id,
             entity_id=eid,
@@ -151,6 +156,44 @@ async def categorize_transaction(
             response_payload=payload,
             reasoning=reasoning,
             outcome=audit_outcome,
+        )
+        # Capture original fields needed for the recat-entry projection while the
+        # row is still in scope (amount is NUMERIC; convert to cents).
+        orig_amount_cents = int(
+            (Decimal(str(original["amount"])) * 100).to_integral_value()
+        )
+        orig_effective_date = original["effective_date"]
+        orig_payee = original["payee"]
+
+    # ---- FalkorDB projection (best-effort, AFTER the entity_session commit) ----
+    # The graph mirrors the authoritative Postgres writes that just committed:
+    #   1. the agent Decision (this categorize call), which OVERRIDES the prior
+    #      decision about the same entry (recategorization supersession);
+    #   2. on an applied correction, the reversal + restatement JournalEntry
+    #      nodes (with the REVERSES lineage edge).
+    # Any failure is swallowed inside project()/record_* — never affects the call.
+    project_decision_audit(
+        workspace_id=workspace_id,
+        entity_id=eid,
+        audit_id=audit_id,
+        ctx=ctx,
+        tool_name="categorize",
+        outcome=audit_outcome,
+        reasoning=reasoning,
+        subject_id=id,
+        overrides_subject_id=id,
+    )
+    if isinstance(result, CorrectionOutcome):
+        from app.journal.projection import project_recategorization
+
+        project_recategorization(
+            workspace_id=workspace_id,
+            entity_id=eid,
+            outcome=result,
+            orig_entry_id=id,
+            amount_cents=orig_amount_cents,
+            effective_date=orig_effective_date,
+            payee=orig_payee,
         )
 
     if not payload["ok"]:
