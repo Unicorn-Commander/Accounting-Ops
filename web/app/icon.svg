@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-label="Accounting-Ops">
+  <defs>
+    <linearGradient id="aops-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9253ea"/>
+      <stop offset="1" stop-color="#762fda"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7" fill="url(#aops-bg)"/>
+  <!-- Ledger mark: a stylized "A" with a cyan baseline rule -->
+  <path d="M10 22 L16 9 L22 22" fill="none" stroke="#f3f3f7" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="12.4" y1="17.2" x2="19.6" y2="17.2" stroke="#f3f3f7" stroke-width="2.4" stroke-linecap="round"/>
+  <line x1="9" y1="25" x2="23" y2="25" stroke="#24ddf9" stroke-width="2.2" stroke-linecap="round"/>
+</svg>
