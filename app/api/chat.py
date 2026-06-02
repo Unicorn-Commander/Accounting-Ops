@@ -657,6 +657,31 @@ async def send_chat_message(
         except Exception:  # noqa: BLE001 - grounding is best-effort, never blocks chat
             _log.debug("CFO memory context unavailable; proceeding without it", exc_info=True)
 
+    # CFO Agent: enable silent specialist delegation (agents-as-tools).
+    # The CFO's LLM gets a local consult_specialist tool; when it consults a
+    # specialist, the run is bounded + depth-1 + scope-safe (same workspace /
+    # entity / tax_year / bearer) and each delegation is audited into
+    # decision_audit (surfaces in AI-activity). Built per turn so the consult
+    # budget is fresh. Non-CFO personas pass delegation=None (no tool).
+    # Best-effort: any failure here just disables delegation; chat still runs.
+    delegation_ctx = None
+    if persona_slug == "cfo-agent":
+        try:
+            from agents.chat.delegation import build_cfo_delegation
+
+            delegation_ctx = build_cfo_delegation(
+                sessionmaker=SessionLocal,
+                workspace_id=str(workspace.workspace_id),
+                entity_id=entity_id,
+                user_uc_uid=workspace.user_uc_uid,
+                user_bearer_token=user_bearer,
+                tax_year=tax_year,
+                cfo_agent_id=persona_slug,
+                agent_session_id=str(session_id),
+            )
+        except Exception:  # noqa: BLE001 - delegation is best-effort
+            _log.debug("CFO delegation unavailable; proceeding without it", exc_info=True)
+
     _clear_cancel(str(session_id))
 
     user_message_id = user_msg["id"]
@@ -680,6 +705,7 @@ async def send_chat_message(
         text_chunks: list[str] = []
         tool_calls_seen: list[dict[str, Any]] = []
         tool_results_seen: list[dict[str, Any]] = []
+        delegations_seen: list[dict[str, Any]] = []
         stop_payload: dict[str, Any] = {}
 
         try:
@@ -691,6 +717,7 @@ async def send_chat_message(
                 user_bearer_token=user_bearer,
                 model=selected_model,
                 cancel_check=lambda: _is_cancelled(str(session_id)),
+                delegation=delegation_ctx,
             ):
                 etype = event.get("type", "text_delta")
                 if etype == "text_delta":
@@ -713,6 +740,19 @@ async def send_chat_message(
                         # can replay it in the canvas pane.
                         "result": event.get("result"),
                     })
+                elif etype == "delegation":
+                    # UX-silent CFO→specialist consult. The durable audit row
+                    # is written by the delegation audit_sink; here we keep a
+                    # compact trace on the chat message so a reload reflects
+                    # that a consult happened (without showing an inline card).
+                    summary = event.get("summary") or ""
+                    delegations_seen.append({
+                        "id": event.get("id"),
+                        "specialist": event.get("specialist"),
+                        "ok": event.get("ok"),
+                        "question": event.get("question"),
+                        "summary": summary[:600],
+                    })
                 elif etype == "stop":
                     stop_payload = event
                 elif etype == "error":
@@ -727,10 +767,15 @@ async def send_chat_message(
             cancelled = stop_payload.get("stop_reason") == "cancelled" if stop_payload else False
             final_text = "".join(text_chunks)
             persisted = {
-                "type": "mixed" if (tool_calls_seen or tool_results_seen) else "text",
+                "type": (
+                    "mixed"
+                    if (tool_calls_seen or tool_results_seen or delegations_seen)
+                    else "text"
+                ),
                 "text": final_text,
                 "tool_calls": tool_calls_seen,
                 "tool_results": tool_results_seen,
+                "delegations": delegations_seen,
                 "stop_reason": stop_payload.get("stop_reason") if stop_payload else None,
                 "cancelled": cancelled,
             }

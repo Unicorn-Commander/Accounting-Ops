@@ -80,6 +80,10 @@ MAX_TOKENS_PER_TURN = int(os.environ.get("CHAT_MAX_TOKENS_PER_TURN", "4096"))
 #   {"type": "tool_result","id": "...", "name": "...", "result": <json>,
 #                          "artifact_kind": "markdown" | "json" | "text" | null,
 #                          "artifact_size": <int>}
+#   {"type": "delegation","id": "...", "specialist": "...", "ok": bool,
+#                          "summary": "..."}   <-- UX-silent CFO→specialist
+#                          consult; the chat layer persists it for the audit
+#                          trail but does NOT render an inline tool card.
 #   {"type": "stop", "stop_reason": "end_turn"|"max_tokens"|"tool_iteration_cap",
 #                    "input_tokens": <int>, "output_tokens": <int>,
 #                    "duration_ms": <int>, "model": "...", "backend": "..."}
@@ -200,6 +204,7 @@ async def stream_assistant_turn(
     max_iterations: int = MAX_TOOL_ITERATIONS,
     max_tokens: int = MAX_TOKENS_PER_TURN,
     cancel_check: Any = None,  # callable[[], bool] | None — polled between deltas
+    delegation: Any = None,  # DelegationContext | None — enables consult_specialist
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream chat events for one assistant turn.
 
@@ -226,6 +231,15 @@ async def stream_assistant_turn(
         cancel_check:       Optional callable; when it returns True, the loop
                             stops cleanly and emits a {"type": "stop",
                             "stop_reason": "cancelled"} event.
+        delegation:         Optional ``agents.chat.delegation.DelegationContext``.
+                            When supplied, the CFO persona is given a LOCAL
+                            ``consult_specialist`` tool (NOT an MCP tool) that
+                            silently consults a specialist's chat persona and
+                            folds the analysis back in. Depth-1 only: the
+                            consult is run WITHOUT a delegation context, so a
+                            consulted specialist can never delegate further.
+                            Pass None (the default) for every persona except the
+                            CFO and for every inner consult turn.
 
     Yields:
         Chat events (dicts). Always ends with one ``{"type": "stop"|"error"}``.
@@ -301,6 +315,33 @@ async def stream_assistant_turn(
                 allowed = set(allowed_mcp_tools)
                 tools = [t for t in tools_response.tools if t.name in allowed]
                 openai_tools = [_mcp_tool_to_openai_function(t) for t in tools]
+
+                # ---- Delegation (agents-as-tools) ----
+                # When a DelegationContext is supplied (CFO turn only), expose
+                # the LOCAL consult_specialist tool alongside the MCP tools.
+                # It is dispatched in-process (see the tool loop below), NOT to
+                # the MCP server. Guard: only enable it when there's budget AND
+                # the context isn't itself a depth-1 inner consult (callers pass
+                # delegation=None for inner turns, so this is belt-and-suspenders).
+                delegation_enabled = False
+                _CONSULT_TOOL_NAME = None
+                _dispatch_consult = None
+                if delegation is not None:
+                    try:
+                        from agents.chat.delegation import (
+                            CONSULT_TOOL_NAME as _CONSULT_TOOL_NAME,
+                            consult_specialist_tool_schema,
+                            dispatch_consult as _dispatch_consult,
+                        )
+
+                        if delegation.budget_remaining() > 0:
+                            openai_tools.append(consult_specialist_tool_schema())
+                            allowed.add(_CONSULT_TOOL_NAME)
+                            delegation_enabled = True
+                    except Exception as exc:  # noqa: BLE001 - never break chat
+                        _log.warning(
+                            "delegation tool unavailable (ignored): %s", exc
+                        )
 
                 client = openai.AsyncOpenAI(
                     base_url=openrouter_base_url,
@@ -443,6 +484,50 @@ async def stream_assistant_turn(
                             args = json.loads(tc["function"]["arguments"] or "{}")
                         except json.JSONDecodeError:
                             args = {}
+
+                        # ---- Local delegation tool (UX-silent) ----
+                        # consult_specialist is handled in-process, never sent
+                        # to the MCP server. It does NOT emit a visible
+                        # tool_call/tool_result card; instead a single
+                        # `delegation` event is yielded so the chat layer can
+                        # persist it for the audit trail without showing the
+                        # user an inline "routing to X".
+                        if delegation_enabled and name == _CONSULT_TOOL_NAME:
+                            state.tool_call_count += 1
+                            try:
+                                consult_result = await _dispatch_consult(
+                                    args=args, ctx=delegation
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                # dispatch_consult should never raise, but guard
+                                # so the chat stream is never broken.
+                                _log.warning("consult dispatch failed: %s", exc)
+                                consult_result = {
+                                    "ok": False,
+                                    "specialist": args.get("specialist"),
+                                    "error": f"consult failed: {exc}",
+                                }
+                            # Feed the specialist analysis back to the CFO as a
+                            # normal tool result so it can synthesize from it.
+                            state.messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "content": json.dumps(consult_result, default=str),
+                            })
+                            # Quiet, audit-only event (no inline card).
+                            yield {
+                                "type": "delegation",
+                                "id": tc["id"],
+                                "specialist": consult_result.get("specialist"),
+                                "ok": bool(consult_result.get("ok")),
+                                "question": args.get("question"),
+                                "summary": (
+                                    consult_result.get("analysis")
+                                    or consult_result.get("error")
+                                    or ""
+                                ),
+                            }
+                            continue
 
                         # Surface the call to the UI (collapsible card).
                         yield {
