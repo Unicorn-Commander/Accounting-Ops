@@ -30,6 +30,7 @@ import {
   Key,
   ListChecks,
   type LucideIcon,
+  FileCheck2,
   MessageSquare,
   Plug,
   Receipt,
@@ -73,6 +74,7 @@ export const NAV_SECTIONS: NavSection[] = [
     label: "Books",
     items: [
       { label: "Transactions", href: "/transactions", icon: Receipt },
+      { label: "Invoices", href: "/invoices", icon: FileCheck2 },
       { label: "Reconciliation", href: "/reconciliation-queue", icon: ListChecks },
       { label: "Journal", href: "/journal", icon: BookOpen },
       { label: "Chart of Accounts", href: "/coa", icon: Database },

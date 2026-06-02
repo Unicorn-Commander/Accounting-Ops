@@ -1,4 +1,11 @@
 from app.tools.analyze_pending_approvals import analyze_pending_approvals
+from app.tools.ar_invoicing import (
+    create_invoice_from_draft,
+    get_invoice,
+    record_payment,
+    upsert_ar_customer,
+    void_invoice,
+)
 from app.tools.approvals import (
     bulk_decide_approvals,
     decide_approval,
@@ -83,6 +90,7 @@ __all__ = [
     "create_category_override",
     "create_coa_account",
     "create_entity_with_coa",
+    "create_invoice_from_draft",
     "create_workspace",
     "decide_approval",
     "draft_memo",
@@ -96,6 +104,7 @@ __all__ = [
     "get_consolidated_p_and_l",
     "get_current_rule",
     "get_form_1120_data",
+    "get_invoice",
     "get_journal_entry",
     "get_p_and_l",
     "get_period_journal",
@@ -128,11 +137,14 @@ __all__ = [
     "propose_payment",
     "suggest_connectors",
     "query_specialty_rules",
+    "record_payment",
     "resolve_tax_review_item",
     "search_tax_knowledge",
     "start_specialist_run",
     "trigger_tax_narrative",
     "update_coa_account",
     "upsert_account_mappings",
+    "upsert_ar_customer",
     "verify_journal_chain",
+    "void_invoice",
 ]
