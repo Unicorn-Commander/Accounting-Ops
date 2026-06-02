@@ -391,7 +391,19 @@ def _rank_priorities(
 
     # Stable descending sort: score desc, then kind, then headline.
     out.sort(key=lambda p: (-p.score, p.kind, p.headline))
-    return out
+    # Dedupe identical headlines so one finding surfaced as several queue rows
+    # (e.g. the §174 flag appearing 3×) can't flood the top of the brief — and
+    # so the summary counts don't double-count. Keeps the highest-scored
+    # instance, since the list is already sorted by score descending.
+    seen_headlines: set[str] = set()
+    deduped: list[CfoBriefPriority] = []
+    for p in out:
+        key = p.headline.strip().lower()
+        if key in seen_headlines:
+            continue
+        seen_headlines.add(key)
+        deduped.append(p)
+    return deduped
 
 
 def _summary_line(
