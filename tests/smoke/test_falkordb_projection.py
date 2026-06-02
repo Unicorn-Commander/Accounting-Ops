@@ -239,7 +239,10 @@ async def test_upsert_compliance_rule_temporal_fields(monkeypatch):
     )
     q, params = graph.queries[0]
     assert "MERGE (r:ComplianceRule {id: $id})" in q
-    assert "datetime($effective_from)" in q
+    assert "$effective_from_ms" in q
+    assert "datetime(" not in q  # this FalkorDB build has no datetime(); stored as epoch-ms
+    assert params["effective_from_ms"] == 1735689600000  # 2025-01-01T00:00:00+00:00
+    assert params["effective_to_ms"] is None
     assert params["active"] is False
     assert params["kind"] == "fers"
 

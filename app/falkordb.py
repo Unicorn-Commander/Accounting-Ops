@@ -58,6 +58,22 @@ from app.config import get_settings
 _log = logging.getLogger("acctops.falkordb")
 
 
+def _iso_to_ms(value: str | None) -> int | None:
+    """ISO-8601 (anything ``datetime.fromisoformat`` accepts) -> epoch milliseconds, else None.
+
+    FalkorDB build 41801 has no ``datetime()`` Cypher function, so temporal values
+    are stored as integer epoch milliseconds and compared against ``timestamp()``.
+    """
+    if not value:
+        return None
+    try:
+        from datetime import datetime as _dt
+
+        return int(_dt.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() * 1000)
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Projection guard: graph is a PROJECTION of Postgres, never authoritative.
 #
@@ -241,12 +257,12 @@ async def get_active_compliance_rules(
             """
             MATCH (r:ComplianceRule)
             WHERE r.entity_id = $entity_id
-              AND r.effective_from <= COALESCE($at, datetime())
-              AND (r.effective_to IS NULL OR r.effective_to > COALESCE($at, datetime()))
+              AND r.effective_from <= COALESCE($at, timestamp())
+              AND (r.effective_to IS NULL OR r.effective_to > COALESCE($at, timestamp()))
             RETURN r
             ORDER BY r.kind
             """,
-            params={"entity_id": str(entity_id), "at": at_time},
+            params={"entity_id": str(entity_id), "at": _iso_to_ms(at_time)},
         )
         return [dict(row[0]) for row in result.result_set or []]
 
@@ -309,7 +325,7 @@ async def record_decision(
                 d.model_version = $model_version,
                 d.parent_run_id = $parent_run_id,
                 d.subject_id = $subject_id,
-                d.created_at = datetime()
+                d.created_at = timestamp()
             """,
             params={
                 "id": decision_id,
@@ -475,9 +491,10 @@ async def upsert_compliance_rule(
     same effective_from/effective_to interval the Postgres row holds.
 
     ``effective_from`` / ``effective_to`` are ISO-8601 strings (or None for an
-    open-ended ``effective_to``); they are stored via FalkorDB's ``datetime()``
-    constructor so the temporal comparison in ``get_active_compliance_rules``
-    (``r.effective_from <= datetime()``) typechecks. ``active`` mirrors whether
+    open-ended ``effective_to``); they are stored as integer epoch milliseconds
+    (this FalkorDB build has no ``datetime()`` function) so the temporal comparison
+    in ``get_active_compliance_rules`` (``r.effective_from <= timestamp()``) typechecks.
+    ``active`` mirrors whether
     the rule's compliance_profile is active in Postgres — a proposed-but-not-yet-
     approved rule projects with active=false so a read can honor the same gate.
     """
@@ -487,9 +504,8 @@ async def upsert_compliance_rule(
             MERGE (r:ComplianceRule {id: $id})
             SET r.entity_id = $entity_id,
                 r.kind = $kind,
-                r.effective_from = datetime($effective_from),
-                r.effective_to = CASE WHEN $effective_to IS NULL
-                                      THEN NULL ELSE datetime($effective_to) END,
+                r.effective_from = $effective_from_ms,
+                r.effective_to = $effective_to_ms,
                 r.trigger = $trigger,
                 r.action = $action,
                 r.source = $source,
@@ -499,8 +515,8 @@ async def upsert_compliance_rule(
                 "id": rule_id,
                 "entity_id": str(entity_id),
                 "kind": kind,
-                "effective_from": effective_from,
-                "effective_to": effective_to,
+                "effective_from_ms": _iso_to_ms(effective_from),
+                "effective_to_ms": _iso_to_ms(effective_to),
                 "trigger": trigger,
                 "action": action,
                 "source": source,
@@ -608,10 +624,10 @@ async def record_learned_pattern(
             ON CREATE SET r.entity_id = $entity_id,
                           r.category = $category,
                           r.confirmations = 1,
-                          r.created_at = datetime()
+                          r.created_at = timestamp()
             ON MATCH SET r.confirmations = COALESCE(r.confirmations, 1) + 1
             SET r.category = $category,
-                r.last_confirmed_at = datetime(),
+                r.last_confirmed_at = timestamp(),
                 r.last_confirmed_by = $confirmed_by
             MERGE (v)-[:LEARNED_PATTERN]->(r)
             """,
