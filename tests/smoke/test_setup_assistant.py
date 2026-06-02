@@ -169,11 +169,12 @@ def test_setup_assistant_tools_allow_list():
     assert not leaked, f"setup-assistant should not have: {leaked}"
 
 
-def test_default_persona_is_cpa_tax_resolver():
-    """Adding the Setup Assistant must not flip the /chat default persona."""
+def test_default_persona_is_cfo_agent():
+    """The CFO Agent is the primary interface, so it is the /chat default.
+    (Adding the Setup Assistant must not flip this — Setup has its own /setup entry.)"""
     from agents.chat.persona_registry import DEFAULT_PERSONA_SLUG
 
-    assert DEFAULT_PERSONA_SLUG == "cpa-tax-resolver"
+    assert DEFAULT_PERSONA_SLUG == "cfo-agent"
 
 
 def test_setup_assistant_opening_message_is_present():
