@@ -3,10 +3,12 @@ import { redirect } from "next/navigation";
 import { ArrowRight, ArrowUpRight, Plus, Sparkles, Wifi } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { AgentActivitySection } from "@/components/agent-activity-section";
+import { CfoBriefCard } from "@/components/cfo-brief-card";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
 import { getActiveContext } from "@/lib/active-context";
 import { getCashPosition, formatUSD } from "@/lib/cash-position";
+import { fetchCfoBrief } from "@/lib/cfo-brief";
 import { getProfitAndLoss } from "@/lib/journal";
 import { fetchOpenItems } from "@/lib/open-items";
 import { getRecentTransactions, shortDate, type LiveTransaction } from "@/lib/transactions";
@@ -39,6 +41,12 @@ export default async function DashboardPage() {
     : [null, null];
   const openItemsCounts = ctx.activeWorkspace
     ? await fetchOpenItems(ctx.activeWorkspace.id, { entityId: entityFilter })
+    : null;
+  // CFO brief — the plain-language concierge header. Best-effort: returns null
+  // on any backend failure, in which case we render the dashboard exactly as
+  // before (the card simply doesn't appear).
+  const cfoBrief = ctx.activeWorkspace
+    ? await fetchCfoBrief(ctx.activeWorkspace.id, { entityId: entityFilter })
     : null;
   const liveTxns: LiveTransaction[] = txnData?.transactions ?? [];
   const subtitle = ctx.activeWorkspace
@@ -75,6 +83,13 @@ export default async function DashboardPage() {
           <EmptyWorkspaceState />
         ) : (
           <>
+            {/* CFO brief — concierge header. Plain-language "what needs you now"
+                + cash status + one-tap deep-links. Renders only when the
+                deterministic brief endpoint succeeded; otherwise the dashboard
+                degrades to exactly its prior content. The denser open-items
+                banner + KPIs below act as the drill-downs. */}
+            {cfoBrief ? <CfoBriefCard brief={cfoBrief} /> : null}
+
             {/* Open-items highlight banner — surfaces "what needs Aaron right now" */}
             {openItemsCounts && openItemsCounts.counts.action_required > 0 ? (
               <Link
