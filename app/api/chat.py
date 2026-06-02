@@ -634,6 +634,29 @@ async def send_chat_message(
         user_uc_uid=workspace.user_uc_uid,
     )
 
+    # CFO Agent: ground the persona in the platform's accumulated memory —
+    # recent agent decisions (+ OVERRIDES lineage), active compliance rules,
+    # learned vendor patterns (FalkorDB), and open Sentinel findings (Postgres).
+    # This is BEST-EFFORT: any failure (graph down, no findings) yields an empty
+    # block and the chat behaves exactly as it does today. Workspace + entity
+    # scoped; the Sentinel read reuses an RLS-pinned workspace_session.
+    if persona_slug == "cfo-agent":
+        try:
+            from agents.chat.cfo_context import build_cfo_memory_context
+
+            async with workspace_session(
+                SessionLocal, workspace.workspace_id
+            ) as ctx_session:
+                memory_block = await build_cfo_memory_context(
+                    session=ctx_session,
+                    workspace_id=str(workspace.workspace_id),
+                    entity_id=entity_id,
+                )
+            if memory_block:
+                system_prompt = system_prompt + memory_block
+        except Exception:  # noqa: BLE001 - grounding is best-effort, never blocks chat
+            _log.debug("CFO memory context unavailable; proceeding without it", exc_info=True)
+
     _clear_cancel(str(session_id))
 
     user_message_id = user_msg["id"]

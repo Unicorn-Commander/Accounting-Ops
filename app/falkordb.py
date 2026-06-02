@@ -267,6 +267,157 @@ async def get_active_compliance_rules(
         return [dict(row[0]) for row in result.result_set or []]
 
 
+async def recent_decisions(
+    workspace_id: str | uuid.UUID,
+    entity_id: str | uuid.UUID,
+    limit: int = 10,
+) -> list[dict]:
+    """Return the most recent Decision nodes for an entity, newest first.
+
+    Read-side companion to ``record_decision``. The CFO chat persona reads this
+    so it can speak to "what we decided and why" — and, via the OVERRIDES edges,
+    "what changed" (a recategorization or correction supersedes the prior call).
+
+    Each returned dict carries the decision's own fields plus its OVERRIDES
+    lineage in BOTH directions:
+
+      * ``overrides`` — the verdict/reasoning of the prior Decision THIS one
+        supersedes (``(d)-[:OVERRIDES]->(prev)``), or ``None``. Lets the agent
+        narrate the change ("we moved X from category A to B because …").
+      * ``superseded_by_id`` — the id of a LATER Decision that overrides THIS
+        one (``(newer)-[:OVERRIDES]->(d)``), or ``None``. Lets the agent avoid
+        speaking to a stale call as if it were current.
+
+    Entity-scoped within the workspace subgraph: only Decisions carrying this
+    ``entity_id`` are returned, so a decision never crosses entities (and never
+    crosses workspaces — the subgraph is workspace-scoped).
+
+    Best-effort + non-authoritative: Postgres ``decision_audit`` is the source
+    of truth. The caller MUST treat an empty list (and any raised exception,
+    which it should catch) as "no signal" and behave exactly as it would without
+    this read.
+    """
+    limit = max(1, min(int(limit), 50))
+    async with falkordb_session(workspace_id) as graph:
+        result = await graph.query(
+            """
+            MATCH (d:Decision)
+            WHERE d.entity_id = $entity_id
+            OPTIONAL MATCH (d)-[:OVERRIDES]->(prev:Decision)
+            OPTIONAL MATCH (newer:Decision)-[:OVERRIDES]->(d)
+            RETURN d.id AS id,
+                   d.agent_id AS agent_id,
+                   d.verdict AS verdict,
+                   d.reasoning AS reasoning,
+                   d.subject_id AS subject_id,
+                   d.rule_version AS rule_version,
+                   d.created_at AS created_at,
+                   prev.id AS overrides_id,
+                   prev.verdict AS overrides_verdict,
+                   prev.reasoning AS overrides_reasoning,
+                   newer.id AS superseded_by_id
+            ORDER BY d.created_at DESC
+            LIMIT $limit
+            """,
+            params={"entity_id": str(entity_id), "limit": limit},
+        )
+        rows = result.result_set or []
+        out: list[dict] = []
+        seen: set = set()
+        for row in rows:
+            (
+                d_id,
+                agent_id,
+                verdict,
+                reasoning,
+                subject_id,
+                rule_version,
+                created_at,
+                overrides_id,
+                overrides_verdict,
+                overrides_reasoning,
+                superseded_by_id,
+            ) = row
+            # The two OPTIONAL MATCH clauses can fan a single Decision out into
+            # multiple rows if it overrides / is overridden by more than one
+            # (rare — OVERRIDES is 1:1 in practice). Keep the first row per
+            # decision id so LIMIT counts distinct decisions and lineage is
+            # deterministic (newest-first thanks to the ORDER BY).
+            if d_id in seen:
+                continue
+            seen.add(d_id)
+            overrides = (
+                {
+                    "id": overrides_id,
+                    "verdict": overrides_verdict,
+                    "reasoning": overrides_reasoning,
+                }
+                if overrides_id is not None
+                else None
+            )
+            out.append(
+                {
+                    "id": d_id,
+                    "agent_id": agent_id,
+                    "verdict": verdict,
+                    "reasoning": reasoning,
+                    "subject_id": subject_id,
+                    "rule_version": rule_version,
+                    "created_at": created_at,
+                    "overrides": overrides,
+                    "superseded_by_id": superseded_by_id,
+                }
+            )
+        return out
+
+
+async def notable_learned_patterns(
+    workspace_id: str | uuid.UUID,
+    entity_id: str | uuid.UUID,
+    limit: int = 10,
+) -> list[dict]:
+    """Return the highest-evidence learned vendor→category patterns for an entity.
+
+    Read-side companion to ``record_learned_pattern``. Ranks by the
+    ``confirmations`` counter (how many times a human re-affirmed the mapping)
+    so the CFO chat persona can speak to the entity's established categorization
+    habits ("Anthropic is consistently booked to SaaS · AI — 4 confirmations").
+
+    Entity-scoped within the workspace subgraph. Returns
+    ``[{"vendor", "category", "confirmations"}, ...]`` newest-evidence first;
+    an empty list when there are no learned patterns. Best-effort — the caller
+    catches + degrades on any exception.
+    """
+    limit = max(1, min(int(limit), 50))
+    async with falkordb_session(workspace_id) as graph:
+        result = await graph.query(
+            """
+            MATCH (v:Vendor)-[:LEARNED_PATTERN]->(r:CategorizationRule)
+            WHERE v.entity_id = $entity_id
+              AND r.entity_id = $entity_id
+            RETURN v.name AS vendor,
+                   r.category AS category,
+                   COALESCE(r.confirmations, 1) AS confirmations
+            ORDER BY confirmations DESC, v.name ASC
+            LIMIT $limit
+            """,
+            params={"entity_id": str(entity_id), "limit": limit},
+        )
+        out: list[dict] = []
+        for row in result.result_set or []:
+            vendor, category, confirmations = row
+            if not vendor or not category:
+                continue
+            out.append(
+                {
+                    "vendor": vendor,
+                    "category": category,
+                    "confirmations": int(confirmations) if confirmations is not None else 1,
+                }
+            )
+        return out
+
+
 async def record_decision(
     workspace_id: str | uuid.UUID,
     entity_id: str | uuid.UUID,
