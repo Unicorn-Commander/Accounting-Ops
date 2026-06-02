@@ -17,6 +17,7 @@ import { useRouter } from "next/navigation";
 import { CheckCircle2, Loader2, Sparkles } from "lucide-react";
 import { ChatClient } from "@/components/chat/chat-client";
 import { Card } from "@/components/primitives";
+import { OnboardingHero } from "@/components/onboarding-hero";
 import type {
   ChatPersona,
   ChatSessionSummary
@@ -27,6 +28,7 @@ type Entity = { id: string; display_name: string; slug: string };
 
 type Props = {
   workspaceId: string;
+  workspaceName: string;
   entities: Entity[];
   // null when the workspace has 0 entities; SetupClient calls the bootstrap
   // endpoint on mount to provision a placeholder.
@@ -41,6 +43,7 @@ type Props = {
 
 export function SetupClient({
   workspaceId,
+  workspaceName,
   entities,
   activeEntityId,
   personas,
@@ -171,6 +174,21 @@ export function SetupClient({
   }, [completion, router]);
 
   return (
+    <>
+    {/* PRIMARY first-run path — dump documents + connect bank. The Setup
+        Assistant chat below is the guided alternative. Shown once an entity is
+        bound (the bootstrap resolves boundEntityId on mount for true first-run);
+        the hero degrades to a "pick/await an entity" state if not yet bound. */}
+    {!completion && (
+      <OnboardingHero
+        workspaceId={workspaceId}
+        workspaceName={workspaceName}
+        entityId={boundEntityId}
+        entityName={
+          boundEntities.find((e) => e.id === boundEntityId)?.display_name
+        }
+      />
+    )}
     <div className="flex flex-col gap-3 md:grid md:grid-cols-[15rem_1fr] md:gap-4 lg:grid-cols-[17rem_1fr]">
       {/* Persistent setup checklist — left rail on md+, top strip on mobile */}
       <SetupChecklist
@@ -280,5 +298,6 @@ export function SetupClient({
       ) : null}
       </div>
     </div>
+    </>
   );
 }

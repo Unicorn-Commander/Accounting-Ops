@@ -17,6 +17,10 @@ dependencies = [
   "fastapi>=0.115.0",
   "httpx>=0.27.2",
   "mcp>=1.2.0",
+  # Required for FastAPI multipart/form-data uploads (document-upload endpoint).
+  # Already pulled in transitively, but pinned explicitly so the production
+  # image (pip install from pyproject) is guaranteed to have it.
+  "python-multipart>=0.0.9",
   "opentelemetry-api>=1.27.0",
   "opentelemetry-exporter-otlp>=1.27.0",
   "opentelemetry-instrumentation-fastapi>=0.48b0",

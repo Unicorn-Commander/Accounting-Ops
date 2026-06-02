@@ -36,6 +36,7 @@ import {
   ShieldCheck,
   Target,
   TrendingUp,
+  Upload,
   Users,
 } from "lucide-react";
 
@@ -60,6 +61,7 @@ export const NAV_SECTIONS: NavSection[] = [
     label: "Work",
     items: [
       { label: "Dashboard", href: "/dashboard", icon: Home },
+      { label: "Documents", href: "/documents", icon: Upload },
       { label: "Open items", href: "/open-items", icon: Target },
       { label: "Chat", href: "/chat", icon: MessageSquare },
       { label: "Approvals", href: "/approvals", icon: Inbox },

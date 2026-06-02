@@ -1,9 +1,12 @@
+import Link from "next/link";
 import {
+  ArrowRight,
   Banknote,
   CheckCircle2,
   ExternalLink,
   Mail,
   ShoppingBag,
+  Upload,
   Wallet,
   XCircle,
   Clock,
@@ -60,6 +63,29 @@ export default async function ConnectorsPage({
               : "Read-only data sources the agents pull from."
           }
         />
+
+        {/* Primary path reminder — drag-in documents is the fastest start. */}
+        <Link
+          href="/documents"
+          className="group mb-6 flex flex-wrap items-center gap-3 rounded-lg border border-brand-500/30 bg-brand-500/[0.05] px-5 py-4 transition hover:border-brand-500/60"
+        >
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-500/15 text-brand-300">
+            <Upload size={18} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold text-ink-primary">
+              Just want to dump your paperwork?
+            </p>
+            <p className="mt-0.5 text-xs text-ink-secondary">
+              Drag receipts, invoices, and statements into Documents — we read
+              what we can and queue everything for your review. No connector setup
+              required.
+            </p>
+          </div>
+          <span className="shrink-0 text-xs font-medium text-brand-300 group-hover:text-brand-400">
+            Go to Documents <ArrowRight size={12} className="inline" />
+          </span>
+        </Link>
 
         {sp.ebay === "connected" && (
           <div className="mb-4 rounded-md border border-credit/40 bg-credit/10 p-3 text-[12px] text-credit">

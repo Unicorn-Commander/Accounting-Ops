@@ -29,6 +29,7 @@ from app.api.cash_position import router as cash_position_router
 from app.api.category_overrides import router as category_overrides_router
 from app.api.clients import router as clients_router
 from app.api.credentials import router as credentials_router
+from app.api.documents import router as documents_router
 from app.api.journal import router as journal_router
 from app.api.members import router as members_router
 from app.api.personal_access_tokens import router as personal_access_tokens_router
@@ -109,6 +110,7 @@ app.include_router(workspaces_router)
 app.include_router(members_router)
 app.include_router(clients_router)
 app.include_router(credentials_router)
+app.include_router(documents_router)
 app.include_router(account_mappings_router)
 app.include_router(category_overrides_router)
 app.include_router(journal_router)

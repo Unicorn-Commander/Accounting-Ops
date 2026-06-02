@@ -137,6 +137,7 @@ export default async function SetupPage({
 
         <SetupClient
           workspaceId={ctx.activeWorkspace.id}
+          workspaceName={ctx.activeWorkspace.display_name}
           entities={ctx.entities.map((e) => ({
             id: e.id,
             display_name: e.display_name,
