@@ -135,6 +135,10 @@ _REVERSIBILITY: dict[str, tuple[str | None, int]] = {
     "add_specialty_rule": (None, 0),
     # Specialist runs — they may have written dozens of rows
     "run_specialist": (None, 0),
+    # CFO→specialist consultation (silent delegation). Read/draft-only and
+    # produces no ledger mutation, but it's an analysis event, not something to
+    # mechanically "undo" — challenge-only.
+    "consult_specialist": (None, 0),
 }
 
 
@@ -174,6 +178,7 @@ _ACTION_LABELS: dict[str, str] = {
     "approval_decision": "Decided approval",
     "add_specialty_rule": "Added compliance rule",
     "run_specialist": "Ran specialist agent",
+    "consult_specialist": "CFO consulted specialist",
     "link_receipt": "Linked receipt",
     "post_journal_entry": "Posted journal entry",
     "undo": "Undid prior AI action",
