@@ -114,6 +114,15 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     "list_closed_periods":           {"min_role": "viewer",     "read_only": True,  "latency_ms": 200},
     "close_period":                  {"min_role": "admin",      "read_only": False, "latency_ms": 800},
 
+    # ----- AR / Invoicing --------------------------------------------------
+    # create/void/record-payment post to the hash-chained ledger; upsert writes
+    # a counterparty row. get_invoice is a pure read (viewer floor).
+    "upsert_ar_customer":            {"min_role": "accountant", "read_only": False, "latency_ms": 400},
+    "create_invoice_from_draft":     {"min_role": "accountant", "read_only": False, "latency_ms": 900},
+    "get_invoice":                   {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
+    "void_invoice":                  {"min_role": "accountant", "read_only": False, "latency_ms": 700},
+    "record_payment":                {"min_role": "accountant", "read_only": False, "latency_ms": 700},
+
     # ----- Connectors / mappings / overrides / credentials -----------------
     "list_credentials":              {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
     "list_account_mappings":         {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},

@@ -13,6 +13,7 @@ from app.tools import (
     create_category_override,
     create_coa_account,
     create_entity_with_coa,
+    create_invoice_from_draft,
     create_workspace,
     decide_approval,
     draft_memo,
@@ -26,6 +27,7 @@ from app.tools import (
     get_consolidated_p_and_l,
     get_current_rule,
     get_form_1120_data,
+    get_invoice,
     get_journal_entry,
     get_p_and_l,
     get_period_journal,
@@ -58,13 +60,16 @@ from app.tools import (
     propose_payment,
     suggest_connectors,
     query_specialty_rules,
+    record_payment,
     resolve_tax_review_item,
     search_tax_knowledge,
     start_specialist_run,
     trigger_tax_narrative,
     update_coa_account,
     upsert_account_mappings,
+    upsert_ar_customer,
     verify_journal_chain,
+    void_invoice,
 )
 
 
@@ -160,6 +165,15 @@ def build_server():
     server.tool()(post_journal_entry)
     server.tool()(list_closed_periods)
     server.tool()(close_period)
+
+    # =====================================================================
+    # AR / Invoicing (native + cross-app-gated)
+    # =====================================================================
+    server.tool()(upsert_ar_customer)
+    server.tool()(create_invoice_from_draft)
+    server.tool()(get_invoice)
+    server.tool()(void_invoice)
+    server.tool()(record_payment)
 
     # =====================================================================
     # Connectors / mappings / overrides / credentials
