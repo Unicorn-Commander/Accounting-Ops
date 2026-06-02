@@ -13,6 +13,7 @@ Both tools authorize via ``authorize_workspace`` (token-bound) and run inside
 ``entity_session`` (workspace search_path + RLS GUC). The write requires admin —
 the same floor the HTTP add-rule route enforces. A decision_audit row is appended.
 """
+import datetime as _dt
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -21,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace
-from app.tools._audit import write_decision_audit
+from app.tools._audit import project_decision_audit, write_decision_audit
 from app.workspace_session import entity_session
 
 # Enum domains from migrations/tenant/0001 — validated before insert so a bad
@@ -334,7 +335,7 @@ async def add_specialty_rule(
             "trigger": trigger,
             "action": action,
         }
-        await write_decision_audit(
+        audit_id = await write_decision_audit(
             session,
             workspace_id=workspace_id,
             entity_id=eid,
@@ -345,5 +346,38 @@ async def add_specialty_rule(
             reasoning=reasoning,
             outcome="queued_for_approval",
         )
+
+    # ---- FalkorDB projection (best-effort, AFTER the entity_session commit) ----
+    # Mirror the proposed compliance_rule + the agent Decision. The rule is
+    # created under an INACTIVE profile (pending human approval), so it projects
+    # with active=False — get_active_compliance_rules can honor the same gate.
+    # effective_from = "now" (the INSERT used now()); effective_to is open.
+    from app import falkordb
+
+    project_decision_audit(
+        workspace_id=workspace_id,
+        entity_id=eid,
+        audit_id=audit_id,
+        ctx=ctx,
+        tool_name="add_rule",
+        outcome="queued_for_approval",
+        reasoning=reasoning,
+        subject_id=rule_id,
+    )
+    falkordb.project(
+        falkordb.upsert_compliance_rule(
+            workspace_id,
+            eid,
+            str(rule_id),
+            kind=kind.strip(),
+            effective_from=_dt.datetime.now(tz=_dt.timezone.utc).isoformat(),
+            effective_to=None,
+            trigger=trigger,
+            action=action,
+            source="ai_inferred",
+            active=False,
+        ),
+        label=f"compliance_rule:{rule_id}",
+    )
 
     return payload

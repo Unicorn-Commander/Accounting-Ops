@@ -71,3 +71,56 @@ async def write_decision_audit(
         },
     )
     return audit_id
+
+
+def project_decision_audit(
+    *,
+    workspace_id: UUID,
+    entity_id: UUID,
+    audit_id: UUID,
+    ctx: WorkspaceContext,
+    tool_name: str,
+    outcome: str,
+    reasoning: str,
+    subject_id: UUID | str | None = None,
+    overrides_subject_id: UUID | str | None = None,
+) -> None:
+    """Mirror a committed ``decision_audit`` row into the FalkorDB graph (best-effort).
+
+    THE single place the canonical agent-decision write is projected to the
+    graph as a ``Decision`` node — call it AFTER the caller's transaction has
+    committed (the ``decision_audit`` row is authoritative; this is its
+    non-authoritative mirror). It is fire-and-forget via ``falkordb.project`` so
+    a graph failure is logged + swallowed and never affects the request.
+
+    ``Decision`` node fields are mapped from the audit row: ``decision_id`` =
+    the audit id, ``agent_id`` = the acting agent (or the human uc_uid when no
+    agent), ``verdict`` = the audit ``outcome``, ``reasoning`` = the supplied
+    reasoning, ``model_version`` = the agent id (mirrors what the Postgres writer
+    stores in decision_audit.model_version).
+
+    ``subject_id`` / ``overrides_subject_id``: see ``falkordb.record_decision``.
+    When this decision corrects a prior one about the same subject (e.g. a
+    recategorization), pass ``overrides_subject_id`` so the
+    ``(Decision)-[:OVERRIDES]->(Decision)`` edge is derived in-graph.
+    """
+    # Local import keeps app.falkordb optional + avoids any import cycle.
+    from app import falkordb
+
+    agent_or_human = ctx.agent_id or ctx.user_uc_uid or "unknown"
+    falkordb.project(
+        falkordb.record_decision(
+            workspace_id,
+            entity_id,
+            decision_id=str(audit_id),
+            agent_id=agent_or_human,
+            verdict=outcome,
+            reasoning=reasoning or "",
+            model_version=ctx.agent_id or None,
+            subject_id=str(subject_id) if subject_id is not None else None,
+            overrides_subject_id=(
+                str(overrides_subject_id) if overrides_subject_id is not None else None
+            ),
+        ),
+        label=f"decision:{tool_name}:{audit_id}",
+    )

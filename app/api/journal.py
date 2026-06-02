@@ -503,7 +503,23 @@ async def post_entry(
             model_version=body.model_version,
         )
 
+    # FalkorDB projection (best-effort, AFTER the workspace_session commit above).
+    # The graph is a non-authoritative mirror of the journal_entry row Postgres
+    # just durably wrote; a failure here is swallowed + never affects the post.
     if isinstance(result, PostingOutcome):
+        from app.journal.projection import project_journal_entry_posted
+
+        project_journal_entry_posted(
+            workspace_id=workspace.workspace_id,
+            entity_id=body.entity_id,
+            outcome=result,
+            category=body.category,
+            amount_cents=body.amount_cents,
+            effective_date=body.effective_date,
+            source=body.source,
+            source_external_id=body.source_external_id,
+            payee=body.payee,
+        )
         return {
             "ok": True,
             "outcome": "posted",

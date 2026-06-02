@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.category_overrides import load_overrides_for_workspace
 from app.authz import assert_entity_in_scope
-from app.categorization import categorize_transaction
+from app.categorization import apply_learned_pattern, categorize_transaction
 from app.clients import ebay_finances
 from app.db import SessionLocal
 from app.security.credentials import get_credential_plaintext
@@ -160,6 +160,16 @@ async def workspace_recent_transactions(
                 amount=amount_f,
                 overrides=overrides,
             )
+            # Read-side proof: consult the FalkorDB agent-memory graph for a
+            # learned vendor->category pattern when the account maps to an entity.
+            # Degrades to the deterministic suggestion if the graph is empty/down.
+            if mapping:
+                suggestion = await apply_learned_pattern(
+                    suggestion,
+                    workspace_id=workspace.workspace_id,
+                    entity_id=mapping["entity_id"],
+                    vendor_name=txn.get("payee") or txn.get("description"),
+                )
             transactions.append(
                 {
                     "id": txn.get("id"),
@@ -240,6 +250,13 @@ async def workspace_recent_transactions(
                 amount=amount_f,
                 overrides=overrides,
             )
+            if mapping:
+                suggestion = await apply_learned_pattern(
+                    suggestion,
+                    workspace_id=workspace.workspace_id,
+                    entity_id=mapping["entity_id"],
+                    vendor_name=txn.get("payee") or txn.get("description"),
+                )
             transactions.append(
                 {
                     "id": txn.get("id"),
