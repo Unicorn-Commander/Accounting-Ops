@@ -51,6 +51,35 @@ export default async function DocumentsPage() {
     : null;
   const documents = docList?.documents ?? [];
 
+  // Brand-new workspace with no entities yet: there's nothing to file documents
+  // under. Send the user through the Setup Assistant to create their first
+  // entity instead of stranding them on a disabled drop zone.
+  if (ctx.entities.length === 0) {
+    return (
+      <AppShell>
+        <PageShell>
+          <SectionHeader
+            title="Documents"
+            subtitle="Drag in receipts, invoices, and statements — we read them and queue them for review."
+          />
+          <EmptyState
+            variant="not-connected"
+            title="Let's set up your business first"
+            description="Documents are filed under a specific business's books, so you'll create your first one in a quick guided setup. After that, drop in receipts here (the on-prem AI reads them — nothing leaves the server) or connect your bank to pull transactions automatically."
+            primaryAction={
+              <Link
+                href="/setup"
+                className="inline-flex items-center gap-1 rounded-lg bg-brand-500/15 px-3 py-1.5 text-xs font-medium text-brand-400 transition hover:bg-brand-500/25"
+              >
+                Start setup <ArrowRight size={12} />
+              </Link>
+            }
+          />
+        </PageShell>
+      </AppShell>
+    );
+  }
+
   return (
     <AppShell>
       <PageShell>
@@ -83,7 +112,7 @@ export default async function DocumentsPage() {
 
         {/* Uploaded documents list */}
         {entity && (
-          <div className="mt-8">
+          <div id="uploaded-documents" className="mt-8 scroll-mt-6">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-semibold uppercase tracking-wider text-ink-tertiary">
                 Uploaded documents
@@ -101,7 +130,15 @@ export default async function DocumentsPage() {
                 variant="no-data"
                 icon={<Inbox size={28} className="text-ink-disabled" />}
                 title="No documents uploaded yet"
-                description="Drag a receipt or invoice into the box above to get started. Uploaded files appear here with their review status."
+                description="Drag a receipt, invoice, or statement into the box above — the on-prem AI reads the vendor, date, and amount (nothing leaves the server), then queues it here for your approval. Prefer the fast path? Connecting your bank pulls transactions in automatically."
+                primaryAction={
+                  <Link
+                    href="/connectors"
+                    className="inline-flex items-center gap-1 rounded-lg bg-brand-500/15 px-3 py-1.5 text-xs font-medium text-brand-400 transition hover:bg-brand-500/25"
+                  >
+                    Connect your bank <ArrowRight size={12} />
+                  </Link>
+                }
               />
             ) : (
               <Card padded={false}>

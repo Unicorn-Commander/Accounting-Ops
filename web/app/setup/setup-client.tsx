@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, Loader2, Sparkles } from "lucide-react";
+import { AlertCircle, CheckCircle2, Loader2, Sparkles } from "lucide-react";
 import { ChatClient } from "@/components/chat/chat-client";
 import { Card } from "@/components/primitives";
 import { OnboardingHero } from "@/components/onboarding-hero";
@@ -67,6 +67,8 @@ export function SetupClient({
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [bootstrapping, setBootstrapping] = useState<boolean>(!activeEntityId);
   const [boundEntities, setBoundEntities] = useState<Entity[]>(entities);
+  // Bumped to retry the bootstrap after a failure without a full page reload.
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
 
   useEffect(() => {
     if (activeEntityId) return;
@@ -117,7 +119,7 @@ export function SetupClient({
     return () => {
       cancelled = true;
     };
-  }, [activeEntityId, workspaceId]);
+  }, [activeEntityId, workspaceId, bootstrapAttempt]);
 
   // Ref to the checklist so we can forward EVERY assistant tool_call event,
   // not just `mark_intake_complete`. The checklist filters internally to the
@@ -265,21 +267,56 @@ export function SetupClient({
         </Card>
       )}
 
-      {/* Bootstrap error surface */}
-      {bootstrapError && (
+      {/* Bootstrap error surface — clear copy + a one-click retry so a brand-new
+          user isn't stranded on a failed first step. */}
+      {bootstrapError && !bootstrapping && (
         <Card>
-          <p className="text-sm text-debit">
-            Couldn&apos;t bootstrap the setup chat: {bootstrapError}
-          </p>
+          <div className="flex items-start gap-3">
+            <AlertCircle size={20} className="mt-0.5 shrink-0 text-debit" />
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold text-debit">
+                We couldn&apos;t create your first entity
+              </h3>
+              <p className="mt-1 text-sm text-ink-secondary">
+                Something went wrong while setting up your workspace. This is
+                usually temporary — try again, and if it keeps happening reach
+                out from{" "}
+                <a href="/help" className="text-brand-400 hover:underline">
+                  /help
+                </a>
+                .
+              </p>
+              <p className="mt-2 break-words font-mono text-[11px] text-ink-tertiary">
+                {bootstrapError}
+              </p>
+              <button
+                type="button"
+                onClick={() => setBootstrapAttempt((n) => n + 1)}
+                className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-subtle bg-elevated px-3 py-1.5 text-xs font-medium text-ink-secondary hover:bg-surface"
+              >
+                Try again
+              </button>
+            </div>
+          </div>
         </Card>
       )}
 
-      {/* While bootstrapping a placeholder entity, show a small spinner */}
+      {/* While bootstrapping a placeholder entity, explain what's happening so a
+          brand-new user isn't staring at a context-free spinner. */}
       {bootstrapping ? (
         <Card>
-          <div className="flex items-center gap-2 py-6 text-sm text-ink-secondary">
-            <Loader2 size={14} className="animate-spin text-brand-400" />
-            Preparing setup workspace…
+          <div className="flex items-start gap-3 py-4">
+            <Loader2 size={18} className="mt-0.5 shrink-0 animate-spin text-brand-400" />
+            <div>
+              <p className="text-sm font-medium text-ink-primary">
+                Creating your first entity…
+              </p>
+              <p className="mt-1 text-sm text-ink-secondary">
+                Setting up a private workspace for your books. The Setup
+                Assistant will walk you through the next few minutes — no
+                accounting experience needed.
+              </p>
+            </div>
           </div>
         </Card>
       ) : boundEntityId ? (

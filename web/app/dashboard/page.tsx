@@ -493,12 +493,12 @@ function EmptyWorkspaceState() {
       <div className="flex flex-col items-center gap-3 py-10 text-center">
         <Sparkles size={32} className="text-ink-disabled" />
         <p className="text-base font-medium text-ink-secondary">
-          No workspaces yet.
+          Let&apos;s get you into a workspace.
         </p>
         <p className="max-w-md text-xs text-ink-tertiary">
-          Workspaces are how Accounting-Ops scopes your entities, journal,
-          and approvals. Sign in with the workspace owner&apos;s account, or
-          have them provision a membership for you.
+          A workspace is the home for your entities, books, and approvals.
+          Sign in with the workspace owner&apos;s account, or have them
+          provision a membership for you.
         </p>
         <Link
           href="/login"
@@ -506,6 +506,11 @@ function EmptyWorkspaceState() {
         >
           Sign in to your workspace
         </Link>
+        <p className="mt-2 max-w-md text-[11px] text-ink-tertiary">
+          New here? Once you&apos;re in, you&apos;ll start by connecting your
+          bank or dropping in a few documents — your transactions, reports, and
+          taxes fill in from there. Nothing posts to your books without you.
+        </p>
       </div>
     </Card>
   );

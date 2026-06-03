@@ -13,9 +13,11 @@
 // component never throws into the page.
 
 import { useCallback, useId, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
+  ArrowRight,
   CheckCircle2,
   CloudUpload,
   Copy,
@@ -150,12 +152,14 @@ export function DocumentUploader({
       // Upload sequentially so the local VLM isn't hammered with N concurrent
       // image jobs (it's a single shared GPU box) and so the queue order is
       // predictable.
+      const outcomes: UploadStatus[] = [];
       for (let i = 0; i < files.length; i++) {
         const row = seeded[i];
         setRows((prev) =>
           prev.map((r) => (r.key === row.key ? { ...r, status: "uploading" } : r))
         );
         const outcome = await uploadOne(files[i]);
+        outcomes.push(outcome.status);
         setRows((prev) =>
           prev.map((r) =>
             r.key === row.key
@@ -171,8 +175,17 @@ export function DocumentUploader({
       setBusy(false);
       // Refresh server components (e.g. the documents list + approvals badge).
       router.refresh();
+      // Scroll the freshly-updated "Uploaded documents" list into view so a
+      // first-time user can see their file actually landed in the system.
+      if (!compact && outcomes.some((s) => s === "done")) {
+        requestAnimationFrame(() => {
+          document
+            .getElementById("uploaded-documents")
+            ?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      }
     },
-    [uploadOne, onUploaded, router]
+    [uploadOne, onUploaded, router, compact]
   );
 
   const onDrop = useCallback(
@@ -190,6 +203,20 @@ export function DocumentUploader({
   const completedCount = rows.filter(
     (r) => r.status === "done" || r.status === "duplicate"
   ).length;
+
+  // Once a run finishes, surface a clear "it landed" confirmation that names the
+  // files and reassures a brand-new user the documents are now queued for review.
+  const doneRows = rows.filter((r) => r.status === "done");
+  const dupeRows = rows.filter((r) => r.status === "duplicate");
+  const errorRows = rows.filter((r) => r.status === "error");
+  const showSuccess = !busy && !compact && doneRows.length > 0;
+  const successNames = doneRows.map((r) => r.name);
+  const successLabel =
+    successNames.length === 1
+      ? successNames[0]
+      : successNames.length === 2
+        ? `${successNames[0]} and ${successNames[1]}`
+        : `${successNames[0]} and ${successNames.length - 1} more`;
 
   return (
     <div className="space-y-4">
@@ -271,6 +298,44 @@ export function DocumentUploader({
           Pick an entity first — uploaded documents are filed under a specific
           entity&apos;s books.
         </p>
+      )}
+
+      {/* Success confirmation — makes it obvious the files landed and are queued. */}
+      {showSuccess && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-credit/40 bg-credit/[0.07] px-4 py-3">
+          <div className="flex items-start gap-2.5">
+            <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-credit" />
+            <p className="text-sm text-credit">
+              <span className="font-semibold">
+                {doneRows.length === 1
+                  ? "1 document added"
+                  : `${doneRows.length} documents added`}
+              </span>{" "}
+              <span className="text-credit/90">
+                — {successLabel} {doneRows.length === 1 ? "is" : "are"} queued for
+                review.
+              </span>
+              {dupeRows.length > 0 && (
+                <span className="text-credit/70">
+                  {" "}
+                  {dupeRows.length} already uploaded earlier.
+                </span>
+              )}
+              {errorRows.length > 0 && (
+                <span className="text-pending">
+                  {" "}
+                  {errorRows.length} couldn&apos;t be read — see below.
+                </span>
+              )}
+            </p>
+          </div>
+          <Link
+            href="/approvals"
+            className="inline-flex shrink-0 items-center gap-1 rounded-md bg-credit/10 px-2.5 py-1 text-xs font-medium text-credit hover:bg-credit/20"
+          >
+            Review now <ArrowRight size={12} />
+          </Link>
+        </div>
       )}
 
       {/* Result log (hidden in compact mode) */}

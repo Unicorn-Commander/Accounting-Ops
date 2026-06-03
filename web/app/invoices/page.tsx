@@ -158,9 +158,33 @@ export default async function InvoicesPage(props: {
                     : "No invoices yet."
                 }
                 description={
-                  sp.status
-                    ? "Try a different status filter."
-                    : "Create your first invoice — it posts to the hash-chained ledger as DR Accounts Receivable / CR Revenue."
+                  sp.status ? (
+                    "Try a different status filter."
+                  ) : (
+                    <>
+                      <p>
+                        Bill a customer here and it records the money owed to you
+                        on the books automatically.
+                      </p>
+                      <p className="mt-2">
+                        Just getting set up? You can also{" "}
+                        <Link
+                          href="/connectors"
+                          className="text-brand-300 underline hover:text-brand-200"
+                        >
+                          connect your bank
+                        </Link>{" "}
+                        or{" "}
+                        <Link
+                          href="/documents"
+                          className="text-brand-300 underline hover:text-brand-200"
+                        >
+                          drop in a few documents
+                        </Link>{" "}
+                        to fill in the rest of your ledger, reports, and taxes.
+                      </p>
+                    </>
+                  )
                 }
                 primaryAction={
                   <Link

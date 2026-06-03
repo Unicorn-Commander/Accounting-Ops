@@ -34,7 +34,7 @@ export function OnboardingHero({
   const [showGuided, setShowGuided] = useState(false);
 
   return (
-    <div className="mb-5 space-y-3">
+    <div className="mb-4 space-y-3 md:mb-5">
       <Card>
         <div className="flex items-start gap-3">
           <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-500/15 text-brand-300">
@@ -42,19 +42,20 @@ export function OnboardingHero({
           </span>
           <div className="min-w-0">
             <h2 className="text-base font-semibold text-ink-primary">
-              The fastest way to start: just dump everything
+              Two ways to start — pick either (or both)
             </h2>
             <p className="mt-1 text-sm text-ink-secondary">
-              Drag in your receipts, invoices, and statements, and connect your
-              bank. We read what we can, propose entries, and queue everything for
-              your review. Nothing posts to your books without you.
+              Connect your bank and/or drop in your receipts, invoices, and
+              statements. We read what we can, propose entries, and queue
+              everything for your review — your transactions, reports, and taxes
+              fill in from there. Nothing posts to your books without you.
             </p>
           </div>
         </div>
 
-        <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
+        <div className="mt-4 grid grid-cols-1 gap-3 md:mt-5 md:grid-cols-2 md:gap-4">
           {/* Action 1 — drop documents */}
-          <div className="rounded-lg border border-default bg-canvas/40 p-4">
+          <div className="rounded-lg border border-default bg-canvas/40 p-3 md:p-4">
             <div className="mb-3 flex items-center gap-2">
               <FileUp size={15} className="text-brand-400" />
               <h3 className="text-sm font-semibold text-ink-primary">
@@ -70,7 +71,7 @@ export function OnboardingHero({
           </div>
 
           {/* Action 2 — connect bank */}
-          <div className="flex flex-col rounded-lg border border-default bg-canvas/40 p-4">
+          <div className="flex flex-col rounded-lg border border-default bg-canvas/40 p-3 md:p-4">
             <div className="mb-3 flex items-center gap-2">
               <Banknote size={15} className="text-brand-400" />
               <h3 className="text-sm font-semibold text-ink-primary">
@@ -78,9 +79,10 @@ export function OnboardingHero({
               </h3>
             </div>
             <p className="flex-1 text-xs text-ink-tertiary">
-              Link your bank + cards via SimpleFIN. We pull balances and
-              transactions read-only; the first batch goes to your approval queue,
-              never straight to the ledger.
+              The fastest path. Link your bank + cards via SimpleFIN — we pull
+              balances and transactions read-only and auto-categorize them. The
+              first batch goes to your approval queue, never straight to the
+              ledger.
             </p>
             <div className="mt-4">
               <ConnectSimplefinModal
@@ -101,7 +103,7 @@ export function OnboardingHero({
         <button
           type="button"
           onClick={() => setShowGuided((s) => !s)}
-          className="mt-4 inline-flex items-center gap-1.5 text-xs text-ink-tertiary hover:text-ink-primary"
+          className="mt-3 inline-flex items-center gap-1.5 text-xs text-ink-tertiary hover:text-ink-primary md:mt-4"
         >
           <MessageSquare size={12} />
           Prefer to be guided step by step?

@@ -433,9 +433,23 @@ export function TaxDashboard({
       <div className="space-y-4">
         {entities.length === 0 && (
           <Card>
-            <p className="text-sm text-ink-tertiary">
-              No entities found for this workspace. Add entities in Settings to
-              begin tracking tax status.
+            <p className="text-sm text-ink-secondary">
+              No entities to track yet. New here?{" "}
+              <Link
+                href="/connectors"
+                className="text-brand-400 underline-offset-2 hover:underline"
+              >
+                Connect your bank
+              </Link>{" "}
+              or{" "}
+              <Link
+                href="/documents"
+                className="text-brand-400 underline-offset-2 hover:underline"
+              >
+                drop in a few documents
+              </Link>{" "}
+              to get started — your transactions, reports, and taxes fill in from
+              there.
             </p>
           </Card>
         )}

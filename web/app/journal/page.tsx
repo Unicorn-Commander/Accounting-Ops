@@ -240,9 +240,35 @@ export default async function JournalPage(props: {
                         : "No journal entries match these filters."
                     }
                     description={
-                      noEntriesAtAll
-                        ? "Once you approve a transaction or post a manual entry, the hash-chained ledger lives here."
-                        : "Try clearing a filter or widening the date range above."
+                      noEntriesAtAll ? (
+                        <>
+                          <p>
+                            Once you approve a transaction or post a manual
+                            entry, the hash-chained ledger lives here.
+                          </p>
+                          <p className="mt-2">
+                            New here? The quickest start is to{" "}
+                            <Link
+                              href="/connectors"
+                              className="text-brand-300 underline hover:text-brand-200"
+                            >
+                              connect your bank
+                            </Link>{" "}
+                            or{" "}
+                            <Link
+                              href="/documents"
+                              className="text-brand-300 underline hover:text-brand-200"
+                            >
+                              drop in a few documents
+                            </Link>{" "}
+                            — your transactions flow in, get categorized, and land
+                            here once approved. A manual entry is for one-off
+                            adjustments.
+                          </p>
+                        </>
+                      ) : (
+                        "Try clearing a filter or widening the date range above."
+                      )
                     }
                     primaryAction={
                       noEntriesAtAll ? (

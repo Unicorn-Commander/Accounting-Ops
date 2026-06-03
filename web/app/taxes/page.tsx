@@ -5,6 +5,7 @@
 // new endpoint is unavailable (e.g. during a rolling deploy).
 
 import Link from "next/link";
+import { ArrowRight, FileText, Landmark } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, PageShell, SectionHeader } from "@/components/primitives";
@@ -48,6 +49,11 @@ export default async function TaxesPage() {
 
   const taxStatus = await fetchTaxStatus(workspace.id);
 
+  // First-run: no tax data to show yet means the books are still empty (no
+  // posted entries, so nothing to draft a return or estimate from). Show a warm
+  // starting-point hint instead of a bare, seemingly-broken dashboard.
+  const hasTaxData = !!taxStatus?.entities.some((e) => e.years.length > 0);
+
   return (
     <AppShell>
       <PageShell>
@@ -72,6 +78,34 @@ export default async function TaxesPage() {
           and files. No submission to the IRS or SCDOR happens from this
           platform.
         </div>
+
+        {/* First-run hint — filing deadlines + estimates need books first. */}
+        {!hasTaxData && (
+          <div className="mb-6 rounded-lg border border-default bg-surface px-5 py-4">
+            <p className="text-sm font-medium text-ink-primary">
+              Your filing deadlines and tax estimates will appear here once your
+              books have entries.
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-ink-tertiary">
+              New here? Connect your bank or drop in a few documents to get
+              started — your transactions, reports, and taxes fill in from there.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Link
+                href="/connectors"
+                className="inline-flex items-center gap-1 rounded-lg bg-brand-500/15 px-3 py-1.5 text-xs font-medium text-brand-400 transition hover:bg-brand-500/25"
+              >
+                <Landmark size={12} /> Connect your bank <ArrowRight size={12} />
+              </Link>
+              <Link
+                href="/documents"
+                className="inline-flex items-center gap-1 rounded-lg border border-default px-3 py-1.5 text-xs font-medium text-ink-secondary transition hover:bg-white/[0.03] hover:text-ink-primary"
+              >
+                <FileText size={12} /> Upload documents
+              </Link>
+            </div>
+          </div>
+        )}
 
         {taxStatus ? (
           <TaxDashboard taxStatus={taxStatus} />

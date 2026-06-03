@@ -281,6 +281,11 @@ export const SetupChecklist = forwardRef<
   const completedCount = STEP_ORDER.filter(
     (k) => progress.steps[k]?.status === "complete"
   ).length;
+  // 1-based number of the step the user is on right now (for "Step N of 6").
+  const currentStepNumber = allComplete ? STEP_ORDER.length : derivedCurrentIdx + 1;
+  const currentStepLabel = allComplete
+    ? null
+    : STEP_META[STEP_ORDER[derivedCurrentIdx]].label;
 
   return (
     <aside
@@ -308,6 +313,17 @@ export const SetupChecklist = forwardRef<
           style={{ width: `${(completedCount / STEP_ORDER.length) * 100}%` }}
         />
       </div>
+
+      {/* "You are here" — makes the live position obvious so a confused user
+          always knows which step they're on, not just how many are done. */}
+      {!allComplete && currentStepLabel && (
+        <div className="flex items-baseline gap-1.5 text-xs">
+          <span className="font-semibold text-brand-300">
+            Step {currentStepNumber} of {STEP_ORDER.length}
+          </span>
+          <span className="truncate text-ink-secondary">— {currentStepLabel}</span>
+        </div>
+      )}
 
       {/* Compact horizontal indicator (mobile only) */}
       <ol className="flex items-center gap-1.5 overflow-x-auto md:hidden" aria-hidden="false">
@@ -345,9 +361,11 @@ export const SetupChecklist = forwardRef<
               key={step}
               className={cn(
                 "flex items-start gap-2 rounded-md px-2 py-1.5 text-xs transition",
-                s === "complete" && "text-credit",
-                s === "blocked" && "text-pending",
-                isCurrent && "bg-brand-500/[0.06] text-brand-300",
+                // The current step gets a left accent + tint so "you are here"
+                // is unmistakable, even before any step has completed.
+                isCurrent && "border-l-2 border-brand-400 bg-brand-500/[0.08] pl-1.5 text-brand-300",
+                !isCurrent && s === "complete" && "text-credit",
+                !isCurrent && s === "blocked" && "text-pending",
                 !isCurrent && s !== "complete" && s !== "blocked" && "text-ink-secondary"
               )}
               aria-current={isCurrent ? "step" : undefined}
@@ -358,25 +376,27 @@ export const SetupChecklist = forwardRef<
                 )}
                 aria-hidden="true"
               >
-                {s === "complete" ? (
+                {isCurrent ? (
+                  <Icon size={14} className="text-brand-300" />
+                ) : s === "complete" ? (
                   <CheckCircle2 size={14} />
                 ) : s === "blocked" ? (
                   <PauseCircle size={14} />
-                ) : isCurrent ? (
-                  <Icon size={14} className="text-brand-300" />
                 ) : (
                   <Circle size={14} className="text-ink-tertiary" />
                 )}
               </span>
               <div className="min-w-0 flex-1">
-                <p className="truncate font-medium">{meta.label}</p>
+                <p className={cn("truncate", isCurrent ? "font-semibold" : "font-medium")}>
+                  {meta.label}
+                </p>
                 <p className="truncate text-[10px] text-ink-tertiary">
                   {meta.one_line}
                 </p>
               </div>
               {isCurrent && (
-                <span className="rounded-sm bg-brand-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-brand-300">
-                  Now
+                <span className="shrink-0 rounded-sm bg-brand-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-brand-300">
+                  You are here
                 </span>
               )}
             </li>
