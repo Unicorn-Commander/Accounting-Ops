@@ -92,6 +92,8 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
                     "Approve, reject, or request more information from the submitter."
                 ),
             },
+            # One open finding per pending approval (multiple per entity).
+            dedupe_key=topic,
             reasoning=f"Approval aging: pending {age} days (threshold {AGING_THRESHOLD_DAYS}).",
         )
         findings += 1

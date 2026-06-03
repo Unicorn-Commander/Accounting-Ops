@@ -98,6 +98,8 @@ async def _flag_deadline(
             "topic": topic,
             "confidence": "high",
         },
+        # One open finding per (form, due date) — multiple deadlines per entity.
+        dedupe_key=topic,
         reasoning=(
             f"Filing deadline scanner: {form} for {entity.slug} is due {due.isoformat()} "
             f"({days} days away)."

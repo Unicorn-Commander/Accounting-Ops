@@ -58,23 +58,25 @@ def _finding_dedupe_key(
     *,
     check_type: str,
     entity_id: UUID | None,
-    payload: dict[str, Any] | None = None,
     explicit: str | None = None,
 ) -> str:
     """Stable identity of a finding/incident, used to de-duplicate.
 
-    Priority: an explicit key (looping checks that emit one finding per subject
-    and don't carry a topic) -> ``payload['topic']`` (the documented convention;
-    filing_deadlines / regulatory_updates / tax_credit_scan set it) ->
-    ``{check_type}:{entity_id}`` (one open finding per check per entity, the safe
-    default — a volatile-title finding like "Cash runway 2.3 months" updates that
-    one row in place instead of spawning a new row every cycle).
+    Default is ``{check_type}:{entity_id}`` — ONE open finding per check per
+    entity, refreshed in place. A drifting value like "Cash runway 2.3 months"
+    or "12 uncategorized" updates that single row each cycle instead of spawning
+    a new one, and a period-stamped topic does NOT mint a fresh finding every
+    month/quarter. Checks that legitimately emit one finding PER SUBJECT
+    (filing per form, regulatory per item, tax_credit per program, approval per
+    item, connector per connector) pass an ``explicit`` per-subject key.
+
+    NOTE: payload['topic'] is intentionally NOT the finding key. Topics are
+    period-stamped (``...-{month}``/``-{quarter}``/``-{today}``) and exist for
+    the tax_review_queue memo-dedup — a separate concern. Keying findings on the
+    topic would resurrect the per-period duplication this whole change removes.
     """
     if explicit:
         return explicit[:200]
-    topic = (payload or {}).get("topic")
-    if topic:
-        return str(topic)[:200]
     return f"{check_type}:{entity_id or '-'}"[:200]
 
 
@@ -484,7 +486,6 @@ async def execute_action(
     resolved_key = _finding_dedupe_key(
         check_type=ctx.check_type,
         entity_id=entity_id,
-        payload=payload,
         explicit=dedupe_key,
     )
     existing_id = await _existing_open_finding(ctx.session, ctx.workspace_id, resolved_key)

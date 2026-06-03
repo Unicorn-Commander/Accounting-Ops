@@ -41,44 +41,32 @@ def _cfg(level: AutonomyLevel = AutonomyLevel.DRAFT_AND_FLAG) -> SentinelConfig:
 # --------------------------------------------------------------------------
 
 
-def test_dedupe_key_priority_explicit_then_topic_then_default():
+def test_dedupe_key_explicit_else_check_type_entity():
     eid = uuid4()
-    # explicit beats everything (per-subject loopers without a topic)
+    # An explicit per-subject key wins (the genuine loopers: filing per form,
+    # regulatory per item, tax_credit per program, approval per item, connector
+    # per connector).
     assert (
         _finding_dedupe_key(
             check_type="connector_health", entity_id=eid,
-            payload={"topic": "T"}, explicit="sentinel-connector-stripe-abcd1234",
+            explicit="sentinel-connector-stripe-abcd1234",
         )
         == "sentinel-connector-stripe-abcd1234"
     )
-    # then payload['topic'] (filing_deadlines / regulatory_updates / tax_credit_scan)
+    # Default: ONE open finding per check per entity. A period-stamped topic is
+    # intentionally NOT used (that would resurrect per-month/quarter dups).
     assert (
-        _finding_dedupe_key(
-            check_type="filing_deadlines", entity_id=eid,
-            payload={"topic": "sentinel-deadline-1120-2026-04-15"}, explicit=None,
-        )
-        == "sentinel-deadline-1120-2026-04-15"
-    )
-    # then the safe default: one open finding per check per entity
-    assert (
-        _finding_dedupe_key(
-            check_type="cash_runway", entity_id=eid, payload={}, explicit=None
-        )
+        _finding_dedupe_key(check_type="cash_runway", entity_id=eid)
         == f"cash_runway:{eid}"
     )
 
 
 def test_dedupe_key_handles_null_entity_and_caps_length():
     assert (
-        _finding_dedupe_key(
-            check_type="pending_invitations", entity_id=None, payload=None, explicit=None
-        )
+        _finding_dedupe_key(check_type="pending_invitations", entity_id=None)
         == "pending_invitations:-"
     )
-    long_topic = "x" * 500
-    key = _finding_dedupe_key(
-        check_type="x", entity_id=uuid4(), payload={"topic": long_topic}, explicit=None
-    )
+    key = _finding_dedupe_key(check_type="x", entity_id=uuid4(), explicit="y" * 500)
     assert len(key) == 200
 
 

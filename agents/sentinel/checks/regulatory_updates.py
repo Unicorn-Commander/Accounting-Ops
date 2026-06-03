@@ -9,9 +9,7 @@ memo in the workspace's tax_review_queue.
 from __future__ import annotations
 
 import datetime as dt
-import re
 from typing import Any
-from uuid import UUID
 
 from sqlalchemy import text
 
@@ -163,6 +161,8 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
                     "confidence": "medium",
                     "citations": [{"type": "url", "value": entry.get("url")}] if entry.get("url") else [],
                 },
+                # One open finding per regulatory item — multiple per entity.
+                dedupe_key=topic,
                 reasoning=(
                     f"Regulatory update from {entry['source']} matched signals "
                     f"{sorted(relevant)} for {ent.slug}."

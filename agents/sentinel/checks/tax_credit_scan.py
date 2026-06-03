@@ -130,6 +130,9 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
                     "confidence": "low",  # always low — needs CPA judgment
                     "citations": [{"type": "url", "value": program["url"]}],
                 },
+                # One open finding per program (title carries the program name),
+                # merged across quarters — not a fresh nudge every quarter.
+                dedupe_key=f"tax_credit_scan:{ent.id}:{title[:160]}",
                 reasoning=(
                     f"Tax credit scanner: {program['name']} potentially applies to "
                     f"{ent.slug} ({ent.kind})."
