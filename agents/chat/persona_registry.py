@@ -21,6 +21,14 @@ from typing import Literal
 Tier = Literal["strategic", "specialist", "operational"]
 
 
+# Gateway model aliases (defined on the UC LiteLLM gateway, Anthropic-direct on
+# the platform's key — see docs/INFERENCE-AND-BILLING.md). Used ONLY when the
+# chat path routes through the gateway (route_chat_through_gateway). They never
+# affect the OpenRouter-direct default path.
+GATEWAY_MODEL_OPUS = "accounting-ops-opus"      # CFO + hard reasoning (Opus 4.8)
+GATEWAY_MODEL_SONNET = "accounting-ops-sonnet"  # default / operational (Sonnet 4.6)
+
+
 # Paths are resolved relative to the repo root (the agents/ package).
 _AGENTS_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -105,8 +113,14 @@ class Persona:
     tier: Tier = "specialist"
     # Per-persona model override. None = let the chat runner pick (Sonnet
     # default). Set to "claude-opus-4-7" on personas that warrant the deeper
-    # reasoning (CFO Agent strategic synthesis).
+    # reasoning (CFO Agent strategic synthesis). Used by the OpenRouter-direct
+    # path + the delegation inner-consult.
     default_model: str | None = None
+    # GATEWAY alias used ONLY when the chat path routes through the UC LiteLLM
+    # gateway (route_chat_through_gateway). Distinct from default_model so the
+    # gateway tier (accounting-ops-opus/-sonnet) doesn't collide with the
+    # OpenRouter-style id. Defaults to the Sonnet tier; CFO overrides to Opus.
+    chat_model: str | None = None
     # True when this persona is allowed to consume Brigade-federated
     # cross-app tools (project.*, meeting.*, contact.*) when the caller has
     # the brigade:cross_app scope AND brigade_client.get_cross_app_catalog()
@@ -185,6 +199,7 @@ def _persona(
     needs_tax_year: bool = True,
     tier: Tier = "specialist",
     default_model: str | None = None,
+    chat_model: str | None = GATEWAY_MODEL_SONNET,
     consumes_brigade: bool = False,
 ) -> Persona:
     base = _AGENTS_ROOT / rel_dir
@@ -198,6 +213,7 @@ def _persona(
         needs_tax_year=needs_tax_year,
         tier=tier,
         default_model=default_model,
+        chat_model=chat_model,
         consumes_brigade=consumes_brigade,
     )
 
@@ -261,6 +277,7 @@ PERSONAS: tuple[Persona, ...] = (
         needs_tax_year=True,
         tier="strategic",
         default_model=_cfo_default_model(),
+        chat_model=GATEWAY_MODEL_OPUS,  # CFO gets Opus 4.8 through the gateway
         consumes_brigade=True,
     ),
     _persona(
@@ -426,6 +443,7 @@ def list_personas(brigade_online: bool = False) -> list[dict]:
             "consumes_brigade": p.consumes_brigade,
             "brigade_active": p.consumes_brigade and brigade_online,
             "default_model": p.default_model,
+            "chat_model": p.chat_model,
             "tool_count": len(p.allowed_mcp_tools),
         }
         for p in PERSONAS

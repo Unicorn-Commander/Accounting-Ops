@@ -82,6 +82,26 @@ class Settings(BaseModel):
     # endpoints that ignore the thinking-suppression param.
     llm_max_tokens: int = 512
 
+    # ---- Chat/agent inference gateway (UC LiteLLM) ----
+    # SEPARATE from the categorizer block above. The chat/CFO/specialist path
+    # routes frontier inference through the UC LiteLLM gateway (per-tenant virtual
+    # keys + Lago metering) ONLY when route_chat_through_gateway is enabled.
+    # DEFAULT OFF ⇒ the chat path behaves exactly as today (OpenRouter-direct).
+    # See docs/INFERENCE-AND-BILLING.md + agents/chat/inference_config.py.
+    llm_gateway_base_url: str = "https://llm.unicorncommander.ai"
+    # SCOPED admin key (NOT the gateway master) used only to mint per-workspace
+    # virtual keys. Blank ⇒ minting disabled (the platform key / OpenRouter
+    # fallback still work).
+    llm_gateway_admin_key: str = ""
+    # The deployment's own gateway virtual key (e.g. the internal magicunicorn.dev
+    # ring). Used when a workspace has no BYOK + no per-workspace virtual key.
+    # Blank ⇒ no platform key (fall through to OpenRouter).
+    llm_platform_virtual_key: str = ""
+    # MASTER feature flag. False ⇒ chat path is OpenRouter-direct (today's
+    # behavior, byte-identical). True ⇒ route frontier inference through the
+    # gateway per the resolver precedence (BYOK > platform/UC-credit > OpenRouter).
+    route_chat_through_gateway: bool = False
+
 
 def get_admin_database_url() -> str:
     """DB URL for DDL/owner operations (migrations + provisioning).
@@ -131,4 +151,12 @@ def get_settings() -> Settings:
         llm_timeout_s=int(os.getenv("LLM_TIMEOUT_S", str(defaults.llm_timeout_s))),
         llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", str(defaults.llm_max_tokens))),
         cpa_export_url=os.getenv("CPA_EXPORT_URL", defaults.cpa_export_url),
+        llm_gateway_base_url=os.getenv(
+            "LLM_GATEWAY_BASE_URL", defaults.llm_gateway_base_url
+        ),
+        llm_gateway_admin_key=os.getenv("LLM_GATEWAY_ADMIN_KEY", ""),
+        llm_platform_virtual_key=os.getenv("LLM_PLATFORM_VIRTUAL_KEY", ""),
+        route_chat_through_gateway=os.getenv(
+            "AO_ROUTE_CHAT_THROUGH_GATEWAY", ""
+        ).strip().lower() in ("1", "true", "yes", "on"),
     )
