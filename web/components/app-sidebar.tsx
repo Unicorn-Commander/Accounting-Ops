@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { ChevronsLeft, ChevronsRight } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { NAV_SECTIONS } from "@/lib/nav-sections";
+import { APP_VERSION_LABEL } from "@/lib/version";
 
 const COOKIE = "aops_sidebar_collapsed";
 
@@ -145,7 +146,7 @@ export function AppSidebar({
       {!collapsed && (
         <div className="border-t border-subtle px-3 py-2">
           <p className="font-mono text-[10px] text-ink-tertiary">
-            v0.1 dev preview
+            {APP_VERSION_LABEL}
           </p>
         </div>
       )}

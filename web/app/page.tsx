@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { APP_VERSION_LABEL } from "@/lib/version";
 import {
   ArrowUpRight,
   CircleDashed,
@@ -41,7 +42,7 @@ function Hero() {
         <div className="mx-auto max-w-3xl text-center">
           <span className="inline-flex items-center gap-2 rounded-full border border-subtle bg-surface/60 px-3 py-1 text-[11px] font-medium uppercase tracking-wider text-ink-tertiary">
             <span className="h-1.5 w-1.5 rounded-full bg-credit shadow-[0_0_6px_hsl(157_64%_52%_/_0.8)]" />
-            v0.1 dev preview // early access, opinionated, not for everyone
+            {APP_VERSION_LABEL} // early access, opinionated, not for everyone
           </span>
           <h1 className="mt-7 text-balance text-5xl font-semibold tracking-tight md:text-6xl lg:text-7xl">
             Your books. Your machine. Your rules.
@@ -334,7 +335,7 @@ function Footer() {
         <div className="flex flex-wrap items-center justify-between gap-6">
           <div className="flex items-center gap-3 text-sm">
             <span className="h-1.5 w-1.5 rounded-full bg-credit shadow-[0_0_6px_hsl(157_64%_52%_/_0.8)]" />
-            <span className="text-ink-secondary">v0.1 dev preview // commits land daily</span>
+            <span className="text-ink-secondary">{APP_VERSION_LABEL} // commits land daily</span>
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] uppercase tracking-wider text-ink-tertiary">
             <span>SDVOSB-aspirant</span>

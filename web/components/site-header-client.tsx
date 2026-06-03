@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { Menu, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { NAV_SECTIONS } from "@/lib/nav-sections";
+import { APP_VERSION_LABEL } from "@/lib/version";
 
 export function SiteHeaderClient({
   variant,
@@ -68,7 +69,7 @@ export function SiteHeaderClient({
             <Logo />
             <span className="hidden sm:inline">Accounting-Ops</span>
             <span className="hidden lg:inline-block text-[10px] font-medium uppercase tracking-wider text-ink-tertiary border border-subtle rounded-full px-2 py-0.5">
-              v0.1 dev preview
+              {APP_VERSION_LABEL}
             </span>
           </Link>
 

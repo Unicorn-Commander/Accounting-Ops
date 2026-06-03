@@ -1,5 +1,6 @@
 import { ArrowRight, Lock } from "lucide-react";
 import { signIn } from "@/lib/auth";
+import { APP_VERSION_LABEL } from "@/lib/version";
 
 export const metadata = {
   title: "Sign in · Accounting-Ops",
@@ -27,7 +28,7 @@ export default async function LoginPage({
             <div>
               <p className="text-base font-semibold">Accounting-Ops</p>
               <p className="text-[11px] uppercase tracking-wider text-ink-tertiary">
-                v0.1 dev preview
+                {APP_VERSION_LABEL}
               </p>
             </div>
           </div>
@@ -88,7 +89,7 @@ export default async function LoginPage({
         </div>
 
         <p className="mt-6 text-center text-[11px] text-ink-tertiary">
-          By signing in you accept that this is a v0.1 dev preview and may
+          By signing in you accept that this is a {APP_VERSION_LABEL} and may
           change without notice.
         </p>
       </div>
