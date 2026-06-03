@@ -6,7 +6,6 @@ SimpleFIN / eBay / Stripe connections quickly.
 """
 from __future__ import annotations
 
-import datetime as dt
 from typing import Any
 
 from sqlalchemy import text
@@ -34,13 +33,11 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
 
     findings = 0
     actions = 0
-    today = dt.date.today()
 
     for r in rows:
         hours = float(r["hours_since"] or 999)
         if hours < CONNECTOR_STALE_HOURS:
             continue
-        topic = f"sentinel-connector-{r['connector_name']}-{r['id'][:8]}-{today.isoformat()}"
         title = f"Connector stale: {r['connector_name']} ({r['connector_instance_name']})"
         summary = (
             f"Connector '{r['connector_instance_name']}' ({r['connector_name']}) "
@@ -61,6 +58,10 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
                 "hours_since_sync": round(hours, 1),
                 "last_sync_at": r["last_sync_at"].isoformat() if r["last_sync_at"] else None,
             },
+            # One open finding per connector (drop the date from the legacy
+            # topic so a still-stale connector refreshes in place across days
+            # instead of spawning a new finding daily).
+            dedupe_key=f"sentinel-connector-{r['connector_name']}-{r['id'][:8]}",
             reasoning=f"Connector health: {r['connector_name']} stale {hours:.0f}h.",
         )
         findings += 1

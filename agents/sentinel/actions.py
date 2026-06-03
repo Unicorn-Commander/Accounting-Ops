@@ -29,6 +29,7 @@ Closed-period guard:
 """
 from __future__ import annotations
 
+import contextvars
 import datetime as dt
 import json
 import logging
@@ -43,6 +44,98 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agents.sentinel.config import AutonomyLevel, SentinelConfig, at_least
 
 _log = logging.getLogger("acctops.sentinel.actions")
+
+# The dedupe key resolved by execute_action for the action currently running.
+# Threaded implicitly (rather than through every handler signature) so EVERY
+# _write_finding call — including handlers added later — stores the same key the
+# guard checked. Task-local, so concurrent workspace cycles never cross keys.
+_RESOLVED_DEDUPE_KEY: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "sentinel_resolved_dedupe_key", default=None
+)
+
+
+def _finding_dedupe_key(
+    *,
+    check_type: str,
+    entity_id: UUID | None,
+    payload: dict[str, Any] | None = None,
+    explicit: str | None = None,
+) -> str:
+    """Stable identity of a finding/incident, used to de-duplicate.
+
+    Priority: an explicit key (looping checks that emit one finding per subject
+    and don't carry a topic) -> ``payload['topic']`` (the documented convention;
+    filing_deadlines / regulatory_updates / tax_credit_scan set it) ->
+    ``{check_type}:{entity_id}`` (one open finding per check per entity, the safe
+    default — a volatile-title finding like "Cash runway 2.3 months" updates that
+    one row in place instead of spawning a new row every cycle).
+    """
+    if explicit:
+        return explicit[:200]
+    topic = (payload or {}).get("topic")
+    if topic:
+        return str(topic)[:200]
+    return f"{check_type}:{entity_id or '-'}"[:200]
+
+
+async def _existing_open_finding(
+    session: AsyncSession, workspace_id: UUID, dedupe_key: str
+) -> UUID | None:
+    """Return the id of an OPEN finding with this dedupe_key, if one exists."""
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT id FROM sentinel_finding
+                WHERE workspace_id = :wid AND dedupe_key = :key AND status = 'open'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ),
+            {"wid": str(workspace_id), "key": dedupe_key},
+        )
+    ).first()
+    return row[0] if row else None
+
+
+async def _touch_finding(
+    session: AsyncSession,
+    *,
+    finding_id: UUID,
+    severity: str,
+    title: str,
+    summary: str,
+    details: dict[str, Any] | None,
+    check_run_id: UUID | None,
+) -> None:
+    """Refresh an already-open finding instead of inserting a duplicate.
+
+    Updates the live fields (so e.g. a count or a severity escalation stays
+    current), stamps last_seen_at, and bumps seen_count.
+    """
+    await session.execute(
+        text(
+            """
+            UPDATE sentinel_finding
+            SET severity     = :sev,
+                title        = :title,
+                summary      = :summary,
+                details      = COALESCE(CAST(:details AS jsonb), details),
+                check_run_id = :crid,
+                last_seen_at = now(),
+                seen_count   = seen_count + 1
+            WHERE id = :id
+            """
+        ),
+        {
+            "sev": severity,
+            "title": title[:200],
+            "summary": summary,
+            "details": json.dumps(details) if details is not None else None,
+            "crid": str(check_run_id) if check_run_id else None,
+            "id": str(finding_id),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -243,39 +336,68 @@ async def _write_finding(
     action_ref_id: UUID | None,
     check_run_id: UUID | None,
     decision_audit_id: UUID | None,
+    dedupe_key: str | None = None,
 ) -> UUID:
+    # Identity for de-duplication. execute_action resolves it once and threads
+    # it via the contextvar; the explicit arg overrides (e.g. the failure-path
+    # finding). Default keeps one open finding per check per entity.
+    key = dedupe_key or _RESOLVED_DEDUPE_KEY.get() or f"{check_type}:{entity_id or '-'}"
+    key = key[:200]
     finding_id = uuid4()
-    await session.execute(
-        text(
-            """
-            INSERT INTO sentinel_finding (
-                id, workspace_id, entity_id, check_type, severity,
-                title, summary, details, action_type, action_ref_id,
-                check_run_id, decision_audit_id, status
-            ) VALUES (
-                :id, :wid, :eid, :check_type, :severity,
-                :title, :summary, CAST(:details AS jsonb),
-                :action_type, :action_ref_id,
-                :check_run_id, :decision_audit_id, 'open'
-            )
-            """
-        ),
-        {
-            "id": str(finding_id),
-            "wid": str(workspace_id),
-            "eid": str(entity_id) if entity_id else None,
-            "check_type": check_type,
-            "severity": severity,
-            "title": title[:200],
-            "summary": summary,
-            "details": json.dumps(details) if details is not None else None,
-            "action_type": action_type,
-            "action_ref_id": str(action_ref_id) if action_ref_id else None,
-            "check_run_id": str(check_run_id) if check_run_id else None,
-            "decision_audit_id": str(decision_audit_id) if decision_audit_id else None,
-        },
-    )
-    return finding_id
+    # ON CONFLICT against the partial unique index (workspace_id, dedupe_key)
+    # WHERE status='open' (migration 0020) makes a re-detected condition refresh
+    # the existing open row instead of inserting a duplicate — the race-safe
+    # backstop behind execute_action's pre-dispatch guard. RETURNING id yields
+    # the EXISTING row's id on conflict, the new id on insert.
+    row = (
+        await session.execute(
+            text(
+                """
+                INSERT INTO sentinel_finding (
+                    id, workspace_id, entity_id, check_type, severity,
+                    title, summary, details, action_type, action_ref_id,
+                    check_run_id, decision_audit_id, status,
+                    dedupe_key, last_seen_at, seen_count
+                ) VALUES (
+                    :id, :wid, :eid, :check_type, :severity,
+                    :title, :summary, CAST(:details AS jsonb),
+                    :action_type, :action_ref_id,
+                    :check_run_id, :decision_audit_id, 'open',
+                    :dedupe_key, now(), 1
+                )
+                ON CONFLICT (workspace_id, dedupe_key) WHERE status = 'open'
+                DO UPDATE SET
+                    severity          = EXCLUDED.severity,
+                    title             = EXCLUDED.title,
+                    summary           = EXCLUDED.summary,
+                    details           = COALESCE(EXCLUDED.details, sentinel_finding.details),
+                    action_type       = EXCLUDED.action_type,
+                    action_ref_id     = COALESCE(EXCLUDED.action_ref_id, sentinel_finding.action_ref_id),
+                    check_run_id      = EXCLUDED.check_run_id,
+                    decision_audit_id = COALESCE(EXCLUDED.decision_audit_id, sentinel_finding.decision_audit_id),
+                    last_seen_at      = now(),
+                    seen_count        = sentinel_finding.seen_count + 1
+                RETURNING id
+                """
+            ),
+            {
+                "id": str(finding_id),
+                "wid": str(workspace_id),
+                "eid": str(entity_id) if entity_id else None,
+                "check_type": check_type,
+                "severity": severity,
+                "title": title[:200],
+                "summary": summary,
+                "details": json.dumps(details) if details is not None else None,
+                "action_type": action_type,
+                "action_ref_id": str(action_ref_id) if action_ref_id else None,
+                "check_run_id": str(check_run_id) if check_run_id else None,
+                "decision_audit_id": str(decision_audit_id) if decision_audit_id else None,
+                "dedupe_key": key,
+            },
+        )
+    ).first()
+    return row[0] if row else finding_id
 
 
 # ---------------------------------------------------------------------------
@@ -309,11 +431,16 @@ async def execute_action(
     payload: dict[str, Any] | None = None,
     reasoning: str = "",
     target_date: dt.date | None = None,
+    dedupe_key: str | None = None,
 ) -> dict[str, Any]:
     """Run one Sentinel action through the safety gates.
 
     Returns {ok, action_type, finding_id, audit_id?, ref_id?, skipped_reason?}.
     Never raises (logs + returns ok=False on failure).
+
+    ``dedupe_key`` lets a check that emits one finding PER SUBJECT (e.g.
+    approval_aging, connector_health) supply a stable per-subject identity.
+    Otherwise the key is ``payload['topic']`` or ``{check_type}:{entity_id}``.
     """
     if kill_switch_active():
         return {"ok": False, "skipped_reason": "kill_switch"}
@@ -348,56 +475,92 @@ async def execute_action(
     except ClosedPeriodError as e:
         return {"ok": False, "skipped_reason": f"closed_period:{e}"}
 
-    # Dispatch to the action handler.
-    handler = _ACTION_DISPATCH.get(action_type)
-    if handler is None:
-        # log_finding only — pure finding row with no side effect.
-        return await _do_log_finding(
-            ctx,
-            entity_id=entity_id,
+    # Idempotency (restores the documented "de-dupe on topic key" behavior).
+    # If an OPEN finding for this incident already exists, refresh it and SKIP
+    # the side effect — so a re-detected condition doesn't spawn a duplicate
+    # finding AND doesn't draft a duplicate memo/flag/scheduled action. The key
+    # is threaded to _write_finding via the contextvar; the partial unique index
+    # (migration 0020) is the race-safe DB backstop.
+    resolved_key = _finding_dedupe_key(
+        check_type=ctx.check_type,
+        entity_id=entity_id,
+        payload=payload,
+        explicit=dedupe_key,
+    )
+    existing_id = await _existing_open_finding(ctx.session, ctx.workspace_id, resolved_key)
+    if existing_id is not None:
+        await _touch_finding(
+            ctx.session,
+            finding_id=existing_id,
+            severity=severity,
             title=title,
             summary=summary,
-            severity=severity,
             details=details,
-            reasoning=reasoning,
-        )
-
-    try:
-        return await handler(
-            ctx,
-            entity_id=entity_id,
-            title=title,
-            summary=summary,
-            severity=severity,
-            details=details,
-            payload=payload or {},
-            reasoning=reasoning,
-            target_date=target_date,
-        )
-    except Exception as e:  # noqa: BLE001 — never let an action crash a cycle
-        _log.exception("Sentinel action %s failed: %s", action_type, e)
-        # Still write a finding so the failure is visible.
-        finding_id = await _write_finding(
-            session=ctx.session,
-            workspace_id=ctx.workspace_id,
-            entity_id=entity_id,
-            check_type=ctx.check_type,
-            severity="medium",
-            title=f"Sentinel action failed: {action_type}",
-            summary=f"{type(e).__name__}: {e}"[:1000],
-            details={"action_type": action_type, "error": str(e)[:1000]},
-            action_type=action_type,
-            action_ref_id=None,
             check_run_id=ctx.check_run_id,
-            decision_audit_id=None,
         )
         return {
-            "ok": False,
-            "skipped_reason": "exception",
-            "finding_id": str(finding_id),
+            "ok": True,
             "action_type": action_type,
-            "error": str(e)[:500],
+            "finding_id": str(existing_id),
+            "deduped": True,
         }
+
+    token = _RESOLVED_DEDUPE_KEY.set(resolved_key)
+    try:
+        # Dispatch to the action handler.
+        handler = _ACTION_DISPATCH.get(action_type)
+        if handler is None:
+            # log_finding only — pure finding row with no side effect.
+            return await _do_log_finding(
+                ctx,
+                entity_id=entity_id,
+                title=title,
+                summary=summary,
+                severity=severity,
+                details=details,
+                reasoning=reasoning,
+            )
+
+        try:
+            return await handler(
+                ctx,
+                entity_id=entity_id,
+                title=title,
+                summary=summary,
+                severity=severity,
+                details=details,
+                payload=payload or {},
+                reasoning=reasoning,
+                target_date=target_date,
+            )
+        except Exception as e:  # noqa: BLE001 — never let an action crash a cycle
+            _log.exception("Sentinel action %s failed: %s", action_type, e)
+            # Still write a finding so the failure is visible — keyed separately
+            # so a failure never collides with the check's normal finding.
+            finding_id = await _write_finding(
+                session=ctx.session,
+                workspace_id=ctx.workspace_id,
+                entity_id=entity_id,
+                check_type=ctx.check_type,
+                severity="medium",
+                title=f"Sentinel action failed: {action_type}",
+                summary=f"{type(e).__name__}: {e}"[:1000],
+                details={"action_type": action_type, "error": str(e)[:1000]},
+                action_type=action_type,
+                action_ref_id=None,
+                check_run_id=ctx.check_run_id,
+                decision_audit_id=None,
+                dedupe_key=f"{resolved_key}::failed:{action_type}",
+            )
+            return {
+                "ok": False,
+                "skipped_reason": "exception",
+                "finding_id": str(finding_id),
+                "action_type": action_type,
+                "error": str(e)[:500],
+            }
+    finally:
+        _RESOLVED_DEDUPE_KEY.reset(token)
 
 
 # ---------------------------------------------------------------------------

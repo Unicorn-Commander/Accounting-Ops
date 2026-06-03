@@ -26,8 +26,14 @@ Kill switch:
   SENTINEL_DISABLED=true → log + sleep without running.
 
 Determinism + idempotency:
-  Each check writes via execute_action(), which de-dupes within a UTC day on
-  topic key. Re-running the same cycle within 24h is safe (zero new rows).
+  Each check writes via execute_action(), which de-dupes on the finding's
+  dedupe_key (payload['topic'] or "{check_type}:{entity_id}"): if an OPEN
+  finding for the same key already exists, it is refreshed (severity / summary /
+  title / last_seen_at / seen_count++) and the side effect is SKIPPED — so a
+  re-detected condition never spawns a duplicate finding, memo, or flag. A
+  partial unique index on (workspace_id, dedupe_key) WHERE status='open'
+  (tenant migration 0020) is the DB-enforced backstop. Re-running a cycle —
+  same day or weeks later while the finding is still open — adds zero rows.
 """
 from __future__ import annotations
 
@@ -46,7 +52,6 @@ from sqlalchemy import text
 
 from agents.sentinel.actions import (
     ActionContext,
-    SENTINEL_AGENT_ID,
     kill_switch_active,
 )
 from agents.sentinel.checks import CHECK_REGISTRY
