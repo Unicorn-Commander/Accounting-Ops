@@ -50,6 +50,9 @@ export type CfoBriefResponse = {
   action_required_total: number;
   cash: CfoBriefCash;
   summary_line: string;
+  // Cold start: no bank connected AND no posted entries (brand-new user).
+  // The card shows "here's how to begin" instead of "you're all caught up".
+  onboarding?: boolean;
   ask_cfo_href: string;
   sources_ok: Record<string, boolean>;
 };

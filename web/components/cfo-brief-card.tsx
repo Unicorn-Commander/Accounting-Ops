@@ -14,9 +14,12 @@ import {
   CheckCircle,
   Clock,
   FileText,
+  Landmark,
+  ListChecks,
   MessageSquare,
   ShieldAlert,
-  Sparkles
+  Sparkles,
+  Upload
 } from "lucide-react";
 import { Card } from "@/components/primitives";
 import { cn } from "@/lib/cn";
@@ -24,6 +27,40 @@ import type {
   CfoBriefPriority,
   CfoBriefResponse
 } from "@/lib/cfo-brief";
+
+// Cold-start guidance shown in place of "what needs you now" when the workspace
+// has no bank connected and no posted entries (brief.onboarding). The whole
+// point of the concierge home is to GUIDE a brand-new user to first value, not
+// to congratulate them for being "caught up" before they've done anything.
+const ONBOARDING_STEPS: {
+  Icon: typeof Landmark;
+  href: string;
+  title: string;
+  desc: string;
+  cta: string;
+}[] = [
+  {
+    Icon: Landmark,
+    href: "/connectors",
+    title: "Connect your bank",
+    desc: "The fastest way to live books — every transaction flows in and gets categorized for you.",
+    cta: "Connect"
+  },
+  {
+    Icon: Upload,
+    href: "/documents",
+    title: "Or drop in receipts & statements",
+    desc: "Drag files in and the on-prem AI reads the vendor, date, and amount — nothing leaves your server.",
+    cta: "Upload"
+  },
+  {
+    Icon: ListChecks,
+    href: "/setup",
+    title: "Fine-tune your setup",
+    desc: "Tell the Setup Assistant about your business to tailor your chart of accounts and tax profile.",
+    cta: "Open setup"
+  }
+];
 
 // Map a priority kind → icon + accent. Kept local so the card is the single
 // place that decides the visual language of the brief.
@@ -123,9 +160,9 @@ export function CfoBriefCard({ brief }: { brief: CfoBriefResponse }) {
         <div className="lg:col-span-2 lg:border-r lg:border-subtle/70">
           <div className="flex items-center justify-between px-5 pb-2 pt-4 md:px-6">
             <p className="text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
-              What needs you now
+              {brief.onboarding ? "Get started — a couple of quick steps" : "What needs you now"}
             </p>
-            {!allClear ? (
+            {!allClear && !brief.onboarding ? (
               <Link
                 href="/open-items"
                 className="text-[11px] text-ink-secondary hover:text-ink-primary"
@@ -135,7 +172,38 @@ export function CfoBriefCard({ brief }: { brief: CfoBriefResponse }) {
             ) : null}
           </div>
 
-          {allClear ? (
+          {brief.onboarding ? (
+            <ul className="divide-y divide-subtle/50">
+              {ONBOARDING_STEPS.map((s, idx) => (
+                <li key={s.href}>
+                  <Link
+                    href={s.href}
+                    className="group flex items-start gap-3 px-5 py-3 transition hover:bg-white/[0.02] md:px-6"
+                  >
+                    <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-500/15 text-brand-300">
+                      <s.Icon size={14} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-[10px] text-ink-tertiary">
+                          {idx + 1}
+                        </span>
+                        <p className="truncate text-sm font-medium text-ink-primary">
+                          {s.title}
+                        </p>
+                      </div>
+                      <p className="mt-0.5 line-clamp-2 text-xs text-ink-tertiary">
+                        {s.desc}
+                      </p>
+                    </div>
+                    <span className="shrink-0 self-center whitespace-nowrap text-[11px] font-medium text-brand-300 opacity-80 group-hover:opacity-100">
+                      {s.cta} <ArrowRight size={11} className="inline" />
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          ) : allClear ? (
             <div className="flex items-center gap-3 px-5 py-6 md:px-6">
               <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-credit/15 text-credit">
                 <CheckCircle size={16} />

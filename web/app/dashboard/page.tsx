@@ -131,7 +131,7 @@ export default async function DashboardPage() {
                   </span>
                 </div>
               </Link>
-            ) : openItemsCounts && openItemsCounts.counts.action_required === 0 ? (
+            ) : openItemsCounts && openItemsCounts.counts.action_required === 0 && !cfoBrief?.onboarding ? (
               <Link
                 href="/open-items"
                 className="mb-5 block rounded-lg border border-credit/30 bg-credit/[0.04] px-5 py-3 transition hover:border-credit/50"

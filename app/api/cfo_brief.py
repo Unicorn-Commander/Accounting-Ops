@@ -130,6 +130,11 @@ class CfoBriefResponse(BaseModel):
     # A single plain-language summary sentence ("3 things need your OK; you
     # have ~7 months of runway"). Deterministically composed.
     summary_line: str
+    # Cold-start flag: TRUE when this workspace has no bank connected AND no
+    # posted journal entries — a brand-new user who hasn't started yet. The card
+    # uses this to show "here's how to begin" guidance instead of the misleading
+    # "you're all caught up" (which reads like the product is empty/broken).
+    onboarding: bool = False
     # Deep-link to keep talking to the CFO about everything here.
     ask_cfo_href: str
     # Which sources actually contributed (for graceful-degradation debugging
@@ -528,7 +533,11 @@ async def get_cfo_brief(
         _log.warning("cfo-brief: cash-position source failed: %s", exc)
 
     # --- Source 3: open sentinel findings (direct read, scope-enforced) ---
+    # has_journal_entries defaults True so we NEVER mislabel an established
+    # workspace as "onboarding" on an error — onboarding guidance only shows
+    # when we positively confirm zero posted entries.
     findings: list[dict[str, Any]] = []
+    has_journal_entries = True
     try:
         scope = assert_entity_in_scope(workspace, entity_id)
         async with workspace_session(SessionLocal, workspace.workspace_id) as session:
@@ -565,6 +574,16 @@ async def get_cfo_brief(
                 )
             ).mappings().all()
             findings = [dict(r) for r in rows]
+            # Cheap cold-start signal (same session): any posted journal entry?
+            try:
+                ex = (
+                    await session.execute(
+                        text("SELECT EXISTS(SELECT 1 FROM journal_entry)")
+                    )
+                ).scalar()
+                has_journal_entries = bool(ex)
+            except Exception:  # noqa: BLE001 — leave default True on any failure
+                pass
         sources_ok["sentinel"] = True
     except Exception as exc:  # noqa: BLE001 — table may be absent / RLS gap
         _log.warning("cfo-brief: sentinel source failed: %s", exc)
@@ -598,7 +617,17 @@ async def get_cfo_brief(
         oi_action = int(counts.get("action_required") or 0)
     action_required_total = oi_action + len(findings)
 
-    summary = _summary_line(ranked, cash_status)
+    # Cold start: no bank connected AND no posted entries. A brand-new user who
+    # hasn't started — guide them instead of saying "you're all caught up".
+    onboarding = (not cash_status.configured) and (not has_journal_entries)
+
+    if onboarding:
+        summary = (
+            "Welcome — let's get your books started. Connect your bank to see "
+            "live transactions, or drop in a receipt or statement to begin."
+        )
+    else:
+        summary = _summary_line(ranked, cash_status)
 
     return CfoBriefResponse(
         workspace_id=str(workspace_id),
@@ -608,6 +637,7 @@ async def get_cfo_brief(
         action_required_total=action_required_total,
         cash=cash_status,
         summary_line=summary,
+        onboarding=onboarding,
         ask_cfo_href="/chat?persona=cfo-agent",
         sources_ok=sources_ok,
     )

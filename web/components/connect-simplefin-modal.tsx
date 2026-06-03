@@ -96,9 +96,10 @@ export function ConnectSimplefinModal({
                     {success.accounts_count === 1 ? "account" : "accounts"} visible.
                   </p>
                   <p className="mt-1 text-ink-secondary">
-                    Credential encrypted with AES-256-GCM + per-workspace key derivation
-                    and stored in <code className="font-mono text-xs">tenant_credentials</code>.
-                    Refresh the dashboard to see live balances + transactions.
+                    Your bank connection is encrypted and stored securely in your
+                    workspace — we never log it or keep it in plaintext, and you can
+                    revoke it any time. Refresh the dashboard to see live balances and
+                    start categorizing transactions.
                   </p>
                 </div>
               </div>
@@ -115,21 +116,39 @@ export function ConnectSimplefinModal({
             </div>
           ) : (
             <div className="space-y-5 px-6 py-5">
-              <Dialog.Description className="text-sm leading-relaxed text-ink-secondary">
-                Paste the base64-encoded <strong>setup token</strong> from{" "}
-                <a
-                  href="https://beta-bridge.simplefin.org/"
-                  target="_blank"
-                  rel="noopener"
-                  className="inline-flex items-center gap-1 text-brand-400 underline-offset-2 hover:underline"
-                >
-                  beta-bridge.simplefin.org
-                  <ExternalLink size={11} />
-                </a>
-                . The server claims it once (single-use), encrypts the resulting access URL,
-                and stores it in your workspace. We never log the secret, never write it to
-                disk in plaintext, and you can revoke it any time.
-              </Dialog.Description>
+              <div className="space-y-3">
+                <Dialog.Description className="text-sm leading-relaxed text-ink-secondary">
+                  Accounting-Ops reads your bank through <strong>SimpleFIN</strong> — a
+                  privacy-first, <strong>read-only</strong> aggregator. It can never move
+                  money, and you can revoke access any time.
+                </Dialog.Description>
+                <ol className="space-y-1.5 rounded-md border border-subtle bg-canvas/40 px-4 py-3 text-xs leading-relaxed text-ink-secondary">
+                  <li>
+                    <span className="font-medium text-ink-primary">1.</span> First time?
+                    Create a free account and link your bank at{" "}
+                    <a
+                      href="https://beta-bridge.simplefin.org/"
+                      target="_blank"
+                      rel="noopener"
+                      className="inline-flex items-center gap-1 text-brand-400 underline-offset-2 hover:underline"
+                    >
+                      SimpleFIN Bridge
+                      <ExternalLink size={10} />
+                    </a>
+                    .
+                  </li>
+                  <li>
+                    <span className="font-medium text-ink-primary">2.</span> It gives you a
+                    one-time <strong>setup token</strong> — a long string of letters and
+                    numbers.
+                  </li>
+                  <li>
+                    <span className="font-medium text-ink-primary">3.</span> Paste that token
+                    below. We claim it once, encrypt it, and never store the secret in
+                    plaintext.
+                  </li>
+                </ol>
+              </div>
 
               <label className="block">
                 <span className="text-xs font-medium uppercase tracking-wider text-ink-tertiary">
@@ -139,7 +158,7 @@ export function ConnectSimplefinModal({
                   type="text"
                   value={label}
                   onChange={(e) => setLabel(e.target.value)}
-                  placeholder="e.g. Aaron BofA + USAA"
+                  placeholder="e.g. Business checking + savings"
                   maxLength={256}
                   className="mt-1.5 w-full rounded-md border border-default bg-canvas px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
                 />
