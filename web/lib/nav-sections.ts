@@ -21,6 +21,7 @@ import {
   BarChart3,
   BookOpen,
   Cog,
+  CreditCard,
   Database,
   FileSpreadsheet,
   FileText,
@@ -115,10 +116,14 @@ export const NAV_SECTIONS: NavSection[] = [
     ],
   },
   {
-    // adminOnly section — gated by canAdmin in the rendering components.
+    // adminOnly section — gated by canAdmin (owner/client_owner/admin/
+    // platform_admin) in the rendering components. The BYOK inference key +
+    // (coming soon) credit/Claude-subscription billing live here so lower
+    // roles never see the link; the page itself also re-checks the role.
     label: "Admin only",
     adminOnly: true,
     items: [
+      { label: "Inference & billing", href: "/settings/inference", icon: CreditCard },
       { label: "Period Close", href: "/admin/period-close", icon: ShieldCheck },
     ],
   },

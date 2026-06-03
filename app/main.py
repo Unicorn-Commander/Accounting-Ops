@@ -31,6 +31,7 @@ from app.api.category_overrides import router as category_overrides_router
 from app.api.clients import router as clients_router
 from app.api.credentials import router as credentials_router
 from app.api.documents import router as documents_router
+from app.api.inference_settings import router as inference_settings_router
 from app.api.invoices import router as invoices_router
 from app.api.journal import router as journal_router
 from app.api.members import router as members_router
@@ -140,6 +141,9 @@ app.include_router(cfo_brief_router)
 app.include_router(transactions_router)
 app.include_router(sentinel_router)
 app.include_router(personal_access_tokens_router)
+# BYOK inference settings (additive — status/store/remove a workspace's own LLM
+# key; the chat path reads it via workspace_llm_keys.get_byok, untouched here).
+app.include_router(inference_settings_router)
 app.include_router(tools_router)
 app.include_router(consolidated_router)
 # chat router was already included earlier; do not double-register
