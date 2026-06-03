@@ -80,6 +80,15 @@ async def get_or_mint_virtual_key(
     if existing:
         return existing
 
+    # No per-workspace key yet. Minting requires a scoped admin key; when it is
+    # not configured (e.g. the internal ring routes everyone through a single
+    # platform virtual key), return quietly so the resolver falls back to the
+    # platform key — no per-turn mint attempt and no per-turn warning.
+    from app.config import get_settings
+
+    if not get_settings().llm_gateway_admin_key:
+        return None
+
     try:
         key = await mint_virtual_key(
             customer_id=lago_customer_id_for(workspace_id),
