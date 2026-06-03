@@ -6,7 +6,6 @@ invitations land, switch this to count stale invites.
 """
 from __future__ import annotations
 
-import datetime as dt
 from typing import Any
 
 from sqlalchemy import text

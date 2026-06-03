@@ -30,7 +30,6 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
             continue
         if ent.country_code != "US":
             continue
-        topic = f"sentinel-formalities-{ent.slug}-{year_key}"
         title = f"Corporate formalities checklist — {ent.display_name} {year_key}"
         summary = (
             f"{ent.display_name} ({ent.kind.upper()}): annual corporate-formality "

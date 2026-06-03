@@ -57,19 +57,19 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
         rev_last, exp_last = await _yearly_totals(ctx.session, str(ent.id), last_y)
 
         flagged = []
-        for label, t, l in (
+        for label, cur, last in (
             ("revenue", rev_this, rev_last),
             ("expense", exp_this, exp_last),
         ):
-            if abs(t) < ABS_THRESHOLD and abs(l) < ABS_THRESHOLD:
+            if abs(cur) < ABS_THRESHOLD and abs(last) < ABS_THRESHOLD:
                 continue
-            base = abs(l) if abs(l) > 0 else Decimal(1)
-            pct = ((abs(t) - abs(l)) / base) * Decimal(100)
-            if abs(pct) >= PCT_THRESHOLD and abs(abs(t) - abs(l)) >= ABS_THRESHOLD:
+            base = abs(last) if abs(last) > 0 else Decimal(1)
+            pct = ((abs(cur) - abs(last)) / base) * Decimal(100)
+            if abs(pct) >= PCT_THRESHOLD and abs(abs(cur) - abs(last)) >= ABS_THRESHOLD:
                 flagged.append({
                     "label": label,
-                    "current": str(t),
-                    "prior": str(l),
+                    "current": str(cur),
+                    "prior": str(last),
                     "pct_change": str(pct.quantize(Decimal('0.1'))),
                 })
         if not flagged:

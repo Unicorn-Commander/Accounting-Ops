@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text

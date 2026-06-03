@@ -21,14 +21,12 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
     findings = 0
     actions = 0
     today = dt.date.today()
-    year_key = str(today.year)
 
     for ent in entities:
         if ent.kind != "c_corp":
             continue
         if ent.country_code != "US":
             continue
-        topic = f"sentinel-qsbs-{ent.slug}-{year_key}"
         title = f"§1202 QSBS holding-period tracking — {ent.display_name}"
 
         # When did the entity incorporate? Holding period starts at issuance.
