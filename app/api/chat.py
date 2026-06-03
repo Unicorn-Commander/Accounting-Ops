@@ -657,6 +657,42 @@ async def send_chat_message(
         except Exception:  # noqa: BLE001 - grounding is best-effort, never blocks chat
             _log.debug("CFO memory context unavailable; proceeding without it", exc_info=True)
 
+    # --- Resolve the inference route for this turn (gateway vs OpenRouter). ---
+    # DEFAULT-SAFE: with route_chat_through_gateway OFF + no workspace key, this
+    # returns today's OpenRouter triple, so the explicit values passed to the
+    # runner + delegation below are byte-identical to the runner's own defaults.
+    # resolve_chat_inference is itself fail-safe; this guard is belt-and-suspenders
+    # so a resolver bug can never block chat.
+    from agents.chat.inference_config import resolve_chat_inference
+    from agents.chat.persona_registry import GATEWAY_MODEL_SONNET
+
+    _resolved = None
+    try:
+        _resolved = await resolve_chat_inference(
+            workspace_id=str(workspace.workspace_id),
+            persona=persona,
+            requested_model=body.model,
+        )
+    except Exception:  # noqa: BLE001 — never block chat on routing
+        _log.warning("inference resolver failed; using OpenRouter default", exc_info=True)
+
+    _runner_route: dict[str, Any] = {}
+    _deleg_route: dict[str, Any] = {}
+    if _resolved is not None:
+        _runner_route = {
+            "openrouter_base_url": _resolved.base_url,
+            "openrouter_api_key": _resolved.api_key,
+        }
+        _deleg_route = {
+            "openrouter_base_url": _resolved.base_url,
+            "openrouter_api_key": _resolved.api_key,
+            "consult_model": (
+                GATEWAY_MODEL_SONNET
+                if _resolved.source != "openrouter_default"
+                else None
+            ),
+        }
+
     # CFO Agent: enable silent specialist delegation (agents-as-tools).
     # The CFO's LLM gets a local consult_specialist tool; when it consults a
     # specialist, the run is bounded + depth-1 + scope-safe (same workspace /
@@ -678,6 +714,7 @@ async def send_chat_message(
                 tax_year=tax_year,
                 cfo_agent_id=persona_slug,
                 agent_session_id=str(session_id),
+                **_deleg_route,
             )
         except Exception:  # noqa: BLE001 - delegation is best-effort
             _log.debug("CFO delegation unavailable; proceeding without it", exc_info=True)
@@ -686,7 +723,9 @@ async def send_chat_message(
 
     user_message_id = user_msg["id"]
     assistant_message_id = assistant_msg["id"]
-    selected_model = (body.model or DEFAULT_MODEL)
+    selected_model = (
+        _resolved.model if _resolved is not None else (body.model or DEFAULT_MODEL)
+    )
 
     async def _generator() -> AsyncIterator[bytes]:
         # First frame: correlation ids for the client.
@@ -718,6 +757,7 @@ async def send_chat_message(
                 model=selected_model,
                 cancel_check=lambda: _is_cancelled(str(session_id)),
                 delegation=delegation_ctx,
+                **_runner_route,
             ):
                 etype = event.get("type", "text_delta")
                 if etype == "text_delta":
