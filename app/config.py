@@ -102,6 +102,16 @@ class Settings(BaseModel):
     # gateway per the resolver precedence (BYOK > platform/UC-credit > OpenRouter).
     route_chat_through_gateway: bool = False
 
+    # ---- UC Ops-Center (platform billing/entitlement control plane) ----
+    # Ops-Center owns subscribe/pay (Stripe) + org identity + per-app entitlement
+    # (org_features/tier_features). AO READS entitlement + links out for plan
+    # management; it NEVER duplicates billing or mutates Lago/Stripe. See
+    # docs/INFERENCE-AND-BILLING.md.
+    ops_center_base_url: str = "https://unicorncommander.ai"
+    # Deep-link target where a user manages their plan / billing (Ops-Center
+    # portal — Stripe lives there, behind the shared uchub SSO session).
+    ops_center_billing_url: str = "https://unicorncommander.ai/billing"
+
 
 def get_admin_database_url() -> str:
     """DB URL for DDL/owner operations (migrations + provisioning).
@@ -159,4 +169,10 @@ def get_settings() -> Settings:
         route_chat_through_gateway=os.getenv(
             "AO_ROUTE_CHAT_THROUGH_GATEWAY", ""
         ).strip().lower() in ("1", "true", "yes", "on"),
+        ops_center_base_url=os.getenv(
+            "OPS_CENTER_BASE_URL", defaults.ops_center_base_url
+        ),
+        ops_center_billing_url=os.getenv(
+            "OPS_CENTER_BILLING_URL", defaults.ops_center_billing_url
+        ),
     )

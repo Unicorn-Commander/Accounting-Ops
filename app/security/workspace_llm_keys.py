@@ -28,13 +28,20 @@ CONNECTOR_BYOK = "byo_llm_key"
 _VIRTUAL_LABEL = "platform"
 
 
-def lago_customer_id_for(workspace_id: str) -> str:
-    """Deterministic Lago customer id for a workspace — the virtual key's
-    ``user_id`` and the gateway's ``ai_api_call`` event ``user``. v1 derives it;
-    swap to a real ``workspace.lago_customer_id`` column later without touching
-    any caller.
+async def resolve_billing_customer_id(workspace_id: str) -> str | None:
+    """The Lago customer id a workspace's usage meters under — the virtual key's
+    ``user_id`` and the gateway's ``ai_api_call`` event ``user``.
+
+    This is the **UC platform org** (``org_<uuid>``), resolved via
+    ``app.platform.org_resolver``: usage must meter to the org that actually owns
+    the UC subscription, NOT a per-workspace synthetic. Returns ``None`` when the
+    workspace has no resolved org yet (unbackfilled + no org claim) — the caller
+    then declines to mint rather than create a key billed to a customer that
+    doesn't exist in Lago.
     """
-    return f"ao-ws-{workspace_id}"
+    from app.platform.org_resolver import resolve_org_id
+
+    return await resolve_org_id(str(workspace_id))
 
 
 async def get_byok(workspace_id: str) -> tuple[str, str, str | None] | None:
@@ -89,12 +96,27 @@ async def get_or_mint_virtual_key(
     if not get_settings().llm_gateway_admin_key:
         return None
 
+    # Mint AGAINST THE ORG, never a per-workspace synthetic — usage has to meter
+    # to the UC customer that owns the subscription. No resolved org ⇒ no mint;
+    # the resolver falls back to the platform key, so chat still works while the
+    # org bridge is unbackfilled (rather than spawning an orphan Lago customer).
+    customer_id = await resolve_billing_customer_id(workspace_id)
+    if not customer_id:
+        _log.info(
+            "virtual-key mint skipped: workspace %s has no resolved UC org", workspace_id
+        )
+        return None
+
     try:
         key = await mint_virtual_key(
-            customer_id=lago_customer_id_for(workspace_id),
+            customer_id=customer_id,
             max_budget=max_budget,
             models=DEFAULT_ALLOWED_MODELS,
-            metadata={"workspace_id": str(workspace_id), "source": "accounting-ops"},
+            metadata={
+                "workspace_id": str(workspace_id),
+                "org_id": customer_id,
+                "source": "accounting-ops",
+            },
         )
     except Exception as e:  # noqa: BLE001 — minting is best-effort
         _log.warning("virtual-key mint skipped for workspace %s: %s", workspace_id, e)
