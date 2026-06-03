@@ -61,9 +61,15 @@ def test_state_signature_tamper_rejected(monkeypatch, tmp_path):
     monkeypatch.setattr(ebay_oauth, "MASTER_KEY_PATH", key_file)
 
     token = ebay_oauth._sign_state(_build_payload())
-    # Flip a character in the signature half.
+    # Corrupt the FIRST signature char, not the last. The signature is base64
+    # with padding stripped; its LAST char carries only 4 significant bits + 2
+    # base64 padding bits, so substituting it can decode to the SAME bytes and
+    # the "tamper" becomes a silent no-op (~1/16 of runs, since the payload —
+    # and thus the HMAC — is random per run). The first char's 6 bits are all
+    # significant. Pick a replacement guaranteed different from the original.
     p64, s64 = token.split(".")
-    tampered = f"{p64}.{s64[:-1]}A"
+    flipped = "Z" if s64[0] != "Z" else "Y"
+    tampered = f"{p64}.{flipped}{s64[1:]}"
 
     with pytest.raises(HTTPException) as exc:
         ebay_oauth._verify_state(tampered)
