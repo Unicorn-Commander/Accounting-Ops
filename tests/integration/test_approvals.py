@@ -11,7 +11,7 @@ finalized. These prove the full loop end-to-end against the real app + DB:
       row marked rejected.
   (3) proposed rule (add_specialty_rule, inactive) -> APPROVE -> becomes ACTIVE,
       i.e. now visible to query_specialty_rules.
-  (4) RBAC: a viewer cannot list approvals; an accountant (< admin) cannot decide.
+  (4) RBAC: a viewer cannot list approvals; a bookkeeper (< accountant) cannot decide.
   (5) cross-workspace + out-of-scope-entity decide are denied.
 
 All assertions read back through the owner DB pool. The decide calls go through
@@ -457,7 +457,7 @@ async def test_approve_compliance_rule_activates_it(
 
 
 # ==========================================================================
-# (4) RBAC — viewer can't list; accountant (< admin) can't decide
+# (4) RBAC — viewer can't list; below-accountant can't decide
 # ==========================================================================
 @pytest.mark.asyncio
 async def test_list_approvals_denied_for_viewer_is_below_accountant(
@@ -473,11 +473,12 @@ async def test_list_approvals_denied_for_viewer_is_below_accountant(
 
 
 @pytest.mark.asyncio
-async def test_decide_denied_for_accountant_below_admin(
+async def test_decide_denied_below_accountant_floor(
     db: asyncpg.Pool, seeded_workspace: StackConfig
 ) -> None:
-    """Deciding requires admin (a human attestation). An accountant is denied,
-    and the held action is NOT applied."""
+    """Deciding is a professional attestation gated at the `accountant` floor (so
+    a CPA/accountant serving a client can act on it). A bookkeeper — below
+    accountant — is denied, and the held action is NOT applied."""
     base, token = seeded_workspace.base_url, seeded_workspace.token
     original_id = await _post_expense(
         base, token, f"appr-rbac-{_run_tag()}", cents=-30000, category="SaaS · AI"
@@ -486,7 +487,7 @@ async def test_decide_denied_for_accountant_below_admin(
         db, original_id, "Infrastructure · VPS"
     )
 
-    async with _membership_as(db, seeded_workspace.uc_uid, role="accountant", entity_scope=None):
+    async with _membership_as(db, seeded_workspace.uc_uid, role="bookkeeper", entity_scope=None):
         r = await _decide(base, token, approval_id, "approve")
     assert r.status_code == 403, r.text
 

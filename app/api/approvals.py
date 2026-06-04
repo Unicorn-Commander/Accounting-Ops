@@ -185,8 +185,12 @@ async def decide_approval(
 ) -> dict:
     """Approve or reject a pending approval. APPROVE applies the held action.
 
-    Role floor is `admin`: deciding a material action is a human attestation, the
-    same floor add_specialty_rule's HTTP route requires. On APPROVE the structured
+    Role floor is `accountant`: deciding a single approval is a routine professional
+    attestation by whoever reviews the books — the same floor that lists approvals
+    and that surfaces the item in the cross-client work inbox, so a CPA/accountant
+    serving a client can actually act on it. (Creating a standing, auto-applying
+    rule via add_specialty_rule stays `admin`: it's broader-impact than deciding one
+    item.) On APPROVE the structured
     action in approval_queue.payload is applied (recat -> reversal+restatement via
     the shared apply-primitive; rule -> activated). The row is then marked decided
     and a decision_audit row is written. On REJECT nothing in the ledger/rules
@@ -196,7 +200,7 @@ async def decide_approval(
     whole thing rolls back: the row stays 'pending', no ledger entry was posted,
     no audit claims success — fail-safe for financial data.
     """
-    require_role(workspace, "admin")
+    require_role(workspace, "accountant")
 
     decision = body.decision.strip().lower()
     if decision not in ("approve", "reject"):

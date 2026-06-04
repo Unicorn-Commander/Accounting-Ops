@@ -471,18 +471,18 @@ async def bulk_decide(
     Returns the per-item results from the underlying tool so the UI can
     show "47 of 50 approved; 3 had errors".
     """
-    # Role floor: skip is accountant-tolerant (queue triage); approve/reject
-    # remain admin-only (financial attestation).
+    # Role floor: `accountant` for all of skip/approve/reject — deciding an
+    # approval (single or bulk) is a routine professional attestation, gated at
+    # the same floor as the single-decide endpoint + the work inbox that surfaces
+    # the items. (add_specialty_rule stays admin: standing auto-applying rules are
+    # broader-impact than deciding items.)
     decision = body.decision.strip().lower()
     if decision not in ("approve", "reject", "skip"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="decision must be 'approve', 'reject', or 'skip'",
         )
-    if decision == "skip":
-        require_role(workspace, "accountant")
-    else:
-        require_role(workspace, "admin")
+    require_role(workspace, "accountant")
 
     # ---- Resolve target approval IDs ----
     if body.cluster_id and body.approval_ids:
