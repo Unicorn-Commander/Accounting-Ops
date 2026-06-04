@@ -35,6 +35,7 @@ from app.api.inference_settings import router as inference_settings_router
 from app.api.invoices import router as invoices_router
 from app.api.journal import router as journal_router
 from app.api.members import router as members_router
+from app.api.metrics import router as metrics_router
 from app.api.personal_access_tokens import router as personal_access_tokens_router
 from app.api.reports import router as reports_router
 from app.api.sentinel import router as sentinel_router
@@ -121,6 +122,8 @@ app.include_router(invoices_router)
 app.include_router(approvals_router)
 app.include_router(approval_clusters_router)
 app.include_router(approval_recommendations_router)
+# Read-only accuracy metrics (AI-decision agreement rate / review-vs-redo KPI).
+app.include_router(metrics_router)
 app.include_router(chat_router)
 app.include_router(specialist_runs_router)
 app.include_router(specialist_pdf_router)
