@@ -268,10 +268,13 @@ async def _build_manifest() -> dict[str, Any]:
                 "trusted_issuer": "https://brigade.unicorncommander.ai",
                 "jwks_url": "https://brigade.unicorncommander.ai/.well-known/jwks.json",
                 "expected_audience": "accounting-ops",
-                "signing_algorithm": "ed25519",
-                # Brigade may also sign RS256 — we accept either. Listed
-                # explicitly so Brigade can pick whichever is convenient.
-                "accepted_algorithms": ["EdDSA", "RS256"],
+                # Brigade signs RS256 (its live JWKS serves a single RS256 key)
+                # and its manifest validator requires this field to equal exactly
+                # "RS256" or it rejects registration. Our verifier still accepts
+                # EdDSA too (accepted_algorithms), so this is forward-compatible
+                # if Brigade ever rotates to Ed25519 keys.
+                "signing_algorithm": "RS256",
+                "accepted_algorithms": ["RS256", "EdDSA"],
             },
         },
         "tools": tools_out,

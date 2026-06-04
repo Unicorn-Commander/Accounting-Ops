@@ -70,9 +70,11 @@ async def test_manifest_auth_block():
     assert fed["trusted_issuer"] == "https://brigade.unicorncommander.ai"
     assert fed["jwks_url"].endswith("/jwks.json")
     assert fed["expected_audience"] == "accounting-ops"
-    assert fed["signing_algorithm"] == "ed25519"
-    assert "EdDSA" in fed["accepted_algorithms"]
+    # Must equal "RS256" exactly — Brigade's manifest validator requires it and
+    # Brigade signs RS256. We still accept EdDSA too (forward-compat).
+    assert fed["signing_algorithm"] == "RS256"
     assert "RS256" in fed["accepted_algorithms"]
+    assert "EdDSA" in fed["accepted_algorithms"]
 
 
 async def test_manifest_rate_limits():
