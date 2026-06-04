@@ -41,7 +41,7 @@ import logging
 import os
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -361,7 +361,6 @@ async def _try_authenticate_pat(token: str) -> AuthContext | None:
     from app.db import SessionLocal
     from app.security.pat import (
         find_active_pat_by_token,
-        touch_last_used,
     )
 
     try:
@@ -500,6 +499,14 @@ async def authenticate_token(token: str) -> AuthContext:
             brigade_claims = None
         if brigade_claims is not None:
             b_uc_uid = brigade_claims.get("uc_uid") or brigade_claims.get("sub")
+            # Brigade mints sub = the customer's EMAIL today; AO keys accounts on
+            # the opaque uc_uid. Translate an email-shaped identifier to the
+            # canonical uc_uid via public.user_account.email (mirrors project-ops's
+            # fallback). Unresolved → b_uc_uid becomes None and we fall through to
+            # the 401 path: Brigade can't conjure an AO identity by minting a JWT.
+            # Forward-compatible: an opaque sub skips this and matches directly.
+            if isinstance(b_uc_uid, str) and "@" in b_uc_uid:
+                b_uc_uid = await _uc_uid_for_email(b_uc_uid)
             if b_uc_uid:
                 b_act = brigade_claims.get("act") or {}
                 b_agent_id: str | None = None
@@ -642,6 +649,36 @@ async def validate_bearer_token(
     return await authenticate_token(credentials.credentials)
 
 
+async def _uc_uid_for_email(email: str) -> str | None:
+    """Resolve an email to its canonical uc_uid via public.user_account.
+
+    Used only by the Brigade path: Brigade mints ``sub = email`` today, while AO
+    keys accounts on the opaque uc_uid. Active accounts only; returns None (→ the
+    caller fails closed) on no match or any DB error. Case-insensitive; if more
+    than one active row shares an email, the most-recently-seen wins.
+    """
+    from sqlalchemy import text
+
+    from app.db import SessionLocal
+
+    try:
+        async with SessionLocal() as session:
+            row = (
+                await session.execute(
+                    text(
+                        "SELECT uc_uid FROM public.user_account "
+                        "WHERE lower(email) = lower(:email) AND is_active "
+                        "ORDER BY last_seen_at DESC NULLS LAST LIMIT 1"
+                    ),
+                    {"email": email},
+                )
+            ).first()
+    except Exception as exc:  # pragma: no cover - DB blip → fail closed
+        _log.warning("brigade email→uc_uid lookup failed: %s", exc.__class__.__name__)
+        return None
+    return row[0] if row and row[0] else None
+
+
 async def _try_brigade(token: str) -> AuthContext | None:
     """Try the Brigade JWT verifier. Return an AuthContext on success, None on miss.
 
@@ -670,6 +707,21 @@ async def _try_brigade(token: str) -> AuthContext | None:
     uc_uid = claims.get("uc_uid") or claims.get("sub")
     if not isinstance(uc_uid, str) or not uc_uid:
         return None
+
+    # Brigade mints sub = the customer's EMAIL today (its shared identifier; it
+    # will upgrade to the opaque uchub sub once it stores keycloakId at OIDC
+    # login). AO keys accounts on the opaque uc_uid, not email — so when the
+    # Brigade identifier is email-shaped, translate it to the canonical uc_uid via
+    # public.user_account.email (mirrors project-ops's email fallback). Forward-
+    # compatible: once Brigade mints the opaque sub this branch is skipped and
+    # uc_uid matches directly. Fail CLOSED when the email maps to no active
+    # account — Brigade must not conjure an AO identity just by minting a JWT.
+    if "@" in uc_uid:
+        resolved = await _uc_uid_for_email(uc_uid)
+        if not resolved:
+            _log.info("brigade sub email did not resolve to an active user_account")
+            return None
+        uc_uid = resolved
 
     # RFC 8693 act claim — Brigade may carry the acting agent identity here.
     act = claims.get("act") or {}

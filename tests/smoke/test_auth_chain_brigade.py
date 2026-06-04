@@ -14,9 +14,6 @@ Specifically:
 """
 from __future__ import annotations
 
-import base64
-import json
-import time
 
 import pytest
 from fastapi import HTTPException
@@ -27,13 +24,9 @@ from app.config import get_settings
 
 # Re-use the helpers from test_brigade_jwt
 from tests.smoke.test_brigade_jwt import (
-    EXPECTED_AUD,
-    KID_ED,
-    TRUSTED_ISS,
     _ED_JWK,
     _ED_PRIV,
     _RS_JWK,
-    _b64url,
     _base_claims,
     _make_ed25519_keys,
     _mint_ed25519,
@@ -42,8 +35,6 @@ from tests.smoke.test_brigade_jwt import (
 # Keycloak test material: re-use the existing test_jwt_audience helpers.
 from tests.smoke.test_jwt_audience import (
     APP_AUD,
-    ISSUER as KC_ISSUER,
-    KID as KC_KID,
     _PRIVATE_PEM as KC_PRIV_PEM,
     _PUBLIC_JWK as KC_PUB_JWK,
     _base_claims as kc_base_claims,
@@ -235,3 +226,48 @@ async def test_service_token_still_wins(monkeypatch):
     ctx = await auth.authenticate_token(secret)
     assert ctx.uc_uid == "svc-user"
     assert ctx.agent_id == "receipt-reconciler"
+
+
+async def test_brigade_email_sub_resolves_to_canonical_uc_uid(monkeypatch):
+    """Brigade mints sub = email today; AO translates it to the opaque uc_uid via
+    user_account.email (the project-ops-style fallback). The AuthContext must
+    carry the CANONICAL uc_uid, never the raw email."""
+
+    async def _fake_lookup(email: str):
+        assert email == "aaron@magicunicorn.tech"
+        return "kc-opaque-sub-123"
+
+    monkeypatch.setattr(auth, "_uc_uid_for_email", _fake_lookup)
+    token = _mint_ed25519(_ED_PRIV, _base_claims(sub="aaron@magicunicorn.tech"))
+    ctx = await auth.authenticate_token(token)
+    assert ctx.uc_uid == "kc-opaque-sub-123"
+
+
+async def test_brigade_email_sub_unknown_fails_closed(monkeypatch):
+    """An email sub that maps to no active account must FAIL CLOSED (401) — never
+    authenticate as the raw email. Brigade can't conjure an AO account."""
+
+    async def _no_match(email: str):
+        return None
+
+    monkeypatch.setattr(auth, "_uc_uid_for_email", _no_match)
+    token = _mint_ed25519(_ED_PRIV, _base_claims(sub="ghost@nowhere.test"))
+    with pytest.raises(HTTPException) as exc:
+        await auth.authenticate_token(token)
+    assert exc.value.status_code == 401
+
+
+async def test_brigade_opaque_sub_skips_email_lookup(monkeypatch):
+    """A non-email (opaque) sub must NOT trigger the email lookup — forward-compat
+    for when Brigade upgrades to minting the opaque uchub sub directly."""
+    called = {"n": 0}
+
+    async def _should_not_call(email: str):
+        called["n"] += 1
+        return None
+
+    monkeypatch.setattr(auth, "_uc_uid_for_email", _should_not_call)
+    token = _mint_ed25519(_ED_PRIV, _base_claims(sub="opaque-kc-sub"))
+    ctx = await auth.authenticate_token(token)
+    assert ctx.uc_uid == "opaque-kc-sub"
+    assert called["n"] == 0
