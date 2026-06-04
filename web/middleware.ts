@@ -6,6 +6,10 @@ const PUBLIC = [
   "/",                  // marketing landing
   "/login",             // sign-in page
   "/api/auth",          // NextAuth callbacks
+  // eBay's OAuth redirect lands here with no Bearer (third-party top-level
+  // navigation); it's secured by the HMAC-signed single-use state token, not
+  // session auth. See web/app/api/connectors/ebay/oauth/callback/route.ts.
+  "/api/connectors/ebay/oauth/callback",
   "/_next",             // Next.js internals
   "/favicon.ico"
 ];
