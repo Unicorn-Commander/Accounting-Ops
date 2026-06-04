@@ -3,10 +3,12 @@ import { redirect } from "next/navigation";
 import { ArrowRight, ArrowUpRight, Plus, Sparkles, Wifi } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { AgentActivitySection } from "@/components/agent-activity-section";
+import { AiAgreementCard } from "@/components/ai-agreement-card";
 import { CfoBriefCard } from "@/components/cfo-brief-card";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
 import { getActiveContext } from "@/lib/active-context";
+import { fetchAiAgreement } from "@/lib/ai-agreement";
 import { getCashPosition, formatUSD } from "@/lib/cash-position";
 import { fetchCfoBrief } from "@/lib/cfo-brief";
 import { getProfitAndLoss } from "@/lib/journal";
@@ -47,6 +49,12 @@ export default async function DashboardPage() {
   // before (the card simply doesn't appear).
   const cfoBrief = ctx.activeWorkspace
     ? await fetchCfoBrief(ctx.activeWorkspace.id, { entityId: entityFilter })
+    : null;
+  // AI agreement (review-vs-redo) — read-only accuracy KPI. Best-effort:
+  // returns null on any backend failure, in which case the card renders a soft
+  // "unavailable" state instead of crashing the dashboard.
+  const aiAgreement = ctx.activeWorkspace
+    ? await fetchAiAgreement(ctx.activeWorkspace.id, { entityId: entityFilter })
     : null;
   const liveTxns: LiveTransaction[] = txnData?.transactions ?? [];
   const subtitle = ctx.activeWorkspace
@@ -443,6 +451,10 @@ export default async function DashboardPage() {
                 )}
               </ul>
             </Card>
+
+            {/* AI agreement (review-vs-redo) — read-only accuracy KPI. Degrades
+                to a soft "unavailable"/empty state; never crashes the page. */}
+            <AiAgreementCard metric={aiAgreement} />
 
             <Card padded={false}>
               <div className="flex items-center gap-2 border-b border-subtle px-5 py-3">
