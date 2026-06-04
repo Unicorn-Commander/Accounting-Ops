@@ -29,6 +29,7 @@ from app.api.cash_position import router as cash_position_router
 from app.api.cfo_brief import router as cfo_brief_router
 from app.api.category_overrides import router as category_overrides_router
 from app.api.clients import router as clients_router
+from app.api.work_inbox import router as work_inbox_router
 from app.api.credentials import router as credentials_router
 from app.api.documents import router as documents_router
 from app.api.inference_settings import router as inference_settings_router
@@ -113,6 +114,10 @@ app.include_router(a2a_router)
 app.include_router(workspaces_router)
 app.include_router(members_router)
 app.include_router(clients_router)
+# Cross-client CPA "work inbox" (read-only): one merged, stalest-first list of
+# OPEN actionable items (pending approvals + open tax-review) across every
+# workspace the caller can act in. Aggregator only — touches no ledger table.
+app.include_router(work_inbox_router)
 app.include_router(credentials_router)
 app.include_router(documents_router)
 app.include_router(account_mappings_router)
