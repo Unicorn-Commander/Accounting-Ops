@@ -99,6 +99,8 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       { label: "Members", href: "/settings/members", icon: Users },
       { label: "Clients", href: "/clients", icon: Users },
+      // Cross-client CPA work inbox — the actionable companion to /clients.
+      { label: "Work inbox", href: "/clients/inbox", icon: Inbox },
     ],
   },
   {

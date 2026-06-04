@@ -1,6 +1,7 @@
+import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
 import { Card, EmptyState, PageShell, SectionHeader } from "@/components/primitives";
-import { Users } from "lucide-react";
+import { Inbox, Users } from "lucide-react";
 import { ClientsTable } from "@/components/clients-table";
 import { RecentActivityRow } from "@/components/clients-recent-activity";
 import { getClientsTriage, getCpaRecentActivity } from "@/lib/api";
@@ -24,6 +25,19 @@ export default async function ClientsPage() {
               : triage?.persona === "platform_admin"
                 ? "All workspaces in the platform — platform_admin view."
                 : "Every workspace you belong to."
+          }
+          action={
+            triage && triage.workspaces.length > 0 ? (
+              // The triage table shows cross-client COUNTS; the work inbox is
+              // the companion surface that lists the actual items (stalest
+              // first) so a CPA can act without switching workspaces.
+              <Link
+                href="/clients/inbox"
+                className="inline-flex items-center gap-1.5 rounded-md bg-brand-500/15 px-3 py-1.5 text-sm font-medium text-brand-300 transition hover:bg-brand-500/25"
+              >
+                <Inbox size={14} /> Work inbox
+              </Link>
+            ) : undefined
           }
         />
 
