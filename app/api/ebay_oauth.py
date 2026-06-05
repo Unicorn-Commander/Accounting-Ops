@@ -457,6 +457,14 @@ async def ebay_oauth_callback(
 # ---------------------------------------------------------------------------
 
 
+from app.util.ttl_cache import TTLCache as _TTLCache  # noqa: E402
+
+# eBay status is read on every dashboard navigation; cache it briefly so
+# inter-screen nav reuses it instead of re-decrypting + re-querying the DB.
+# Staleness is bounded by the TTL (a connect/disconnect shows within ~10s).
+_EBAY_STATUS_CACHE = _TTLCache(10.0)
+
+
 @router.get("/api/workspaces/{workspace_id}/connectors/ebay/status")
 async def ebay_status(
     workspace_id: UUID,
@@ -482,6 +490,10 @@ async def ebay_status(
         }
     """
     require_role(workspace, "viewer")
+    _ck = str(workspace_id)
+    _hit = _EBAY_STATUS_CACHE.get(_ck)
+    if _hit is not None:
+        return _hit
     # Pull the credential metadata + decrypt the blob so we can show the UI.
     from app.security.credentials import get_credential_plaintext
     from datetime import datetime, timezone
@@ -548,7 +560,7 @@ async def ebay_status(
     except Exception as exc:
         _log.info("ebay_status_dashboard_lookup_failed: %s", exc.__class__.__name__)
 
-    return {
+    return _EBAY_STATUS_CACHE.put(_ck, {
         "configured": True,
         "seller_handle": blob.get("ebay_user_handle"),
         "environment": blob.get("environment", "production"),
@@ -560,7 +572,7 @@ async def ebay_status(
         "last_sync_at_iso": last_sync_at,
         "last_sync_outcome": last_sync_outcome,
         "recent_imports_count": recent_imports,
-    }
+    })
 
 
 # ---------------------------------------------------------------------------

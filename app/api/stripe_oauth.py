@@ -385,6 +385,14 @@ async def stripe_set_webhook_secret(
 # ---------------------------------------------------------------------------
 
 
+from app.util.ttl_cache import TTLCache as _TTLCache  # noqa: E402
+
+# Stripe status is read on every dashboard navigation; cache it briefly so
+# inter-screen nav reuses it instead of re-decrypting + re-querying the DB.
+# Staleness is bounded by the TTL (a connect/disconnect shows within ~10s).
+_STRIPE_STATUS_CACHE = _TTLCache(10.0)
+
+
 @router.get("/api/workspaces/{workspace_id}/connectors/stripe/status")
 async def stripe_status(
     workspace_id: UUID,
@@ -411,6 +419,10 @@ async def stripe_status(
         }
     """
     require_role(workspace, "viewer")
+    _ck = str(workspace_id)
+    _hit = _STRIPE_STATUS_CACHE.get(_ck)
+    if _hit is not None:
+        return _hit
     from app.workspace_session import workspace_session
 
     async with SessionLocal() as session:
@@ -484,7 +496,7 @@ async def stripe_status(
     except Exception as exc:
         _log.info("stripe_status_dashboard_lookup_failed: %s", exc.__class__.__name__)
 
-    return {
+    return _STRIPE_STATUS_CACHE.put(_ck, {
         "configured": True,
         "account_id": blob.get("account_id"),
         "business_name": blob.get("business_name"),
@@ -498,7 +510,7 @@ async def stripe_status(
         "last_sync_outcome": last_sync_outcome,
         "recent_imports_count": recent_imports,
         "warnings": warnings,
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
