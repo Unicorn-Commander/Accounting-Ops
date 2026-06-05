@@ -154,7 +154,12 @@ async def create_invoice_from_draft(
 
     Role floor: accountant.
     """
-    await authorize_workspace(workspace_id, entity_id, min_role="accountant")
+    # Authorize ONCE (this resolves a federation registry workspace_id -> the
+    # internal AO workspace id) and use ctx.workspace_id everywhere below, so the
+    # RLS session + ledger post bind to the resolved internal workspace, never the
+    # raw (possibly uc-registry) arg.
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")
+    wid = ctx.workspace_id
 
     # Entitlement gate for the cross-app (PO-originated) path. Standalone is a
     # no-op inside assert_entitled_for_invoice. EntitlementError subclasses
@@ -162,17 +167,14 @@ async def create_invoice_from_draft(
     auth = current_auth()
     claims = auth.claims if auth is not None else None
     assert_entitled_for_invoice(
-        claims, external_source=external_source, workspace_id=workspace_id
+        claims, external_source=external_source, workspace_id=wid
     )
 
     try:
-        async with workspace_session(SessionLocal, workspace_id) as session:
-            ctx = await authorize_workspace(
-                workspace_id, entity_id, min_role="accountant"
-            )
+        async with workspace_session(SessionLocal, wid) as session:
             view = await _create_invoice(
                 session,
-                workspace_id=str(workspace_id),
+                workspace_id=str(wid),
                 entity_id=str(entity_id),
                 actor_uc_uid=ctx.user_uc_uid,
                 external_source=external_source,
@@ -191,7 +193,7 @@ async def create_invoice_from_draft(
     except InvoiceError as exc:
         raise ValueError(str(exc)) from exc
 
-    return _shape_invoice_result(view, workspace_id)
+    return _shape_invoice_result(view, wid)
 
 
 # ---------------------------------------------------------------------------
@@ -217,11 +219,12 @@ async def get_invoice(
     Role floor: viewer.
     """
     ctx = await authorize_workspace(workspace_id, None, min_role="viewer")
+    wid = ctx.workspace_id  # resolved (federation registry id -> internal AO id)
     try:
-        async with workspace_session(SessionLocal, workspace_id) as session:
+        async with workspace_session(SessionLocal, wid) as session:
             view = await _get_invoice(
                 session,
-                workspace_id=str(workspace_id),
+                workspace_id=str(wid),
                 invoice_id=str(invoice_id) if invoice_id else None,
                 external_source=external_source,
                 external_ref=external_ref,
@@ -236,7 +239,7 @@ async def get_invoice(
     scope = assert_entity_in_scope(ctx, None)
     if scope is not None and UUID(view["entity_id"]) not in scope:
         raise LookupError("invoice not found")
-    return _shape_invoice_result(view, workspace_id)
+    return _shape_invoice_result(view, wid)
 
 
 # ---------------------------------------------------------------------------
@@ -266,11 +269,12 @@ async def void_invoice(
     Role floor: accountant.
     """
     ctx = await authorize_workspace(workspace_id, None, min_role="accountant")
+    wid = ctx.workspace_id  # resolved (federation registry id -> internal AO id)
     try:
-        async with workspace_session(SessionLocal, workspace_id) as session:
+        async with workspace_session(SessionLocal, wid) as session:
             # Scope check: resolve the invoice's entity then assert it's in scope.
             view = await _get_invoice(
-                session, workspace_id=str(workspace_id), invoice_id=str(invoice_id)
+                session, workspace_id=str(wid), invoice_id=str(invoice_id)
             )
             from app.authz import assert_entity_in_scope
 
@@ -279,14 +283,14 @@ async def void_invoice(
                 raise LookupError("invoice not found")
             updated = await _void_invoice(
                 session,
-                workspace_id=str(workspace_id),
+                workspace_id=str(wid),
                 invoice_id=str(invoice_id),
                 actor_uc_uid=ctx.user_uc_uid,
                 reason=reason,
             )
     except InvoiceError as exc:
         raise ValueError(str(exc)) from exc
-    return _shape_invoice_result(updated, workspace_id)
+    return _shape_invoice_result(updated, wid)
 
 
 # ---------------------------------------------------------------------------

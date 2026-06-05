@@ -155,6 +155,26 @@ async def authorize_workspace(
     if auth is None:
         raise PermissionError("No authenticated caller for this MCP request")
 
+    # Federation: a verified Brigade token carries the uc-registry tenant id as
+    # its workspace_id. Map it to the internal AO workspace BEFORE membership +
+    # RLS binding so AO's existing membership authz applies UNCHANGED (no bypass:
+    # the delegated user must still be a member of the resolved workspace). The
+    # tool-arg workspace_id must equal the token's scoped workspace_id claim, so a
+    # federated caller can only act within the workspace Brigade scoped it to.
+    from app.platform.workspace_registry import (
+        federation_claim_workspace_id,
+        is_federation_token,
+        resolve_internal_workspace_id,
+    )
+
+    if is_federation_token(auth):
+        claim_wsid = federation_claim_workspace_id(auth)
+        if claim_wsid and str(workspace_id) != claim_wsid:
+            raise PermissionError(
+                "workspace does not match the federation token's scoped workspace"
+            )
+        workspace_id = await resolve_internal_workspace_id(workspace_id)
+
     try:
         role, entity_scope, hipaa, slug = await _resolve_membership(
             auth.uc_uid, workspace_id
