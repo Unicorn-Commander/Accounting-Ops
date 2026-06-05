@@ -668,6 +668,11 @@ async def send_chat_message(
 
     _resolved = None
     try:
+        # WIRING NOTE: once the uchub realm emits an org claim (org_id /
+        # organization / uc_org_id), pass it here as claims=<verified token
+        # claims> so inference meters straight to the UC org. No such claim is
+        # emitted today, so it's omitted — resolve_org_id then falls back to the
+        # workspace.uc_org_id column (the operator-backfilled bridge).
         _resolved = await resolve_chat_inference(
             workspace_id=str(workspace.workspace_id),
             persona=persona,

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from typing import Any
 
 from app.db import SessionLocal
 from app.security.credentials import get_credential_plaintext, store_credential
@@ -28,7 +29,9 @@ CONNECTOR_BYOK = "byo_llm_key"
 _VIRTUAL_LABEL = "platform"
 
 
-async def resolve_billing_customer_id(workspace_id: str) -> str | None:
+async def resolve_billing_customer_id(
+    workspace_id: str, *, claims: dict[str, Any] | None = None
+) -> str | None:
     """The Lago customer id a workspace's usage meters under — the virtual key's
     ``user_id`` and the gateway's ``ai_api_call`` event ``user``.
 
@@ -41,7 +44,7 @@ async def resolve_billing_customer_id(workspace_id: str) -> str | None:
     """
     from app.platform.org_resolver import resolve_org_id
 
-    return await resolve_org_id(str(workspace_id))
+    return await resolve_org_id(str(workspace_id), claims=claims)
 
 
 async def get_byok(workspace_id: str) -> tuple[str, str, str | None] | None:
@@ -67,7 +70,10 @@ async def get_byok(workspace_id: str) -> tuple[str, str, str | None] | None:
 
 
 async def get_or_mint_virtual_key(
-    workspace_id: str, *, max_budget: float | None = None
+    workspace_id: str,
+    *,
+    max_budget: float | None = None,
+    claims: dict[str, Any] | None = None,
 ) -> str | None:
     """Return the workspace's gateway virtual key, lazily minting + storing it on
     first use. Returns ``None`` when minting is unconfigured (no scoped admin
@@ -100,7 +106,7 @@ async def get_or_mint_virtual_key(
     # to the UC customer that owns the subscription. No resolved org ⇒ no mint;
     # the resolver falls back to the platform key, so chat still works while the
     # org bridge is unbackfilled (rather than spawning an orphan Lago customer).
-    customer_id = await resolve_billing_customer_id(workspace_id)
+    customer_id = await resolve_billing_customer_id(workspace_id, claims=claims)
     if not customer_id:
         _log.info(
             "virtual-key mint skipped: workspace %s has no resolved UC org", workspace_id

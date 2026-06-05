@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from app.config import get_settings
 
@@ -80,6 +81,7 @@ async def resolve_chat_inference(
     persona=None,
     requested_model: str | None = None,
     is_consult: bool = False,
+    claims: dict[str, Any] | None = None,
 ) -> ResolvedInference:
     """Resolve (base_url, api_key, model) for a chat/agent turn. Never raises."""
     settings = get_settings()
@@ -116,7 +118,7 @@ async def resolve_chat_inference(
         try:
             from app.security.workspace_llm_keys import get_or_mint_virtual_key
 
-            platform_key = await get_or_mint_virtual_key(workspace_id)
+            platform_key = await get_or_mint_virtual_key(workspace_id, claims=claims)
         except Exception as e:  # noqa: BLE001 — fail-safe
             _log.warning("virtual-key resolution failed (ws=%s): %s", workspace_id, e)
             platform_key = None
