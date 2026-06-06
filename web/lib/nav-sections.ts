@@ -21,6 +21,7 @@ import {
   BarChart3,
   BookOpen,
   Cog,
+  Contact,
   CreditCard,
   Database,
   FileSpreadsheet,
@@ -75,6 +76,7 @@ export const NAV_SECTIONS: NavSection[] = [
     label: "Books",
     items: [
       { label: "Transactions", href: "/transactions", icon: Receipt },
+      { label: "Contacts", href: "/contacts", icon: Contact },
       { label: "Invoices", href: "/invoices", icon: FileCheck2 },
       { label: "Reconciliation", href: "/reconciliation-queue", icon: ListChecks },
       { label: "Journal", href: "/journal", icon: BookOpen },

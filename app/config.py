@@ -31,6 +31,19 @@ class Settings(BaseModel):
     # keycloak_client_id (the app's own client id) when ACCEPTED_AUDIENCE unset.
     accepted_audience: str = "accounting-ops-app"
 
+    # Contact-Ops federation (pull a user's contacts → AO counterparties).
+    # AO obtains an on-behalf-of token via uchub RFC-8693 token-exchange, then
+    # calls the Contact-Ops MCP. ``contact_ops_audience`` is the audience the
+    # exchanged token must carry (must match what Contact-Ops validates). The
+    # exchange uses contact_ops_client_id/secret if set, else the app's own
+    # keycloak_client_id/secret. Sync is DISABLED (endpoint returns a clear
+    # 503) until a client secret + audience are present — go-live is gated on
+    # the uchub client registration + tenant alignment, not on this code.
+    contact_ops_mcp_url: str = "https://mcp.contacts.magicunicorn.dev/mcp"
+    contact_ops_audience: str = "contact-ops-mcp"
+    contact_ops_client_id: str | None = None
+    contact_ops_client_secret: str | None = None
+
     falkordb_host: str = "192.168.10.10"
     falkordb_port: int = 6379
     falkordb_password: str = ""  # set via FALKORDB_PASSWORD; "" = connect without AUTH
@@ -138,6 +151,10 @@ def get_settings() -> Settings:
         keycloak_client_id=keycloak_client_id,
         keycloak_client_secret=os.getenv("KEYCLOAK_CLIENT_SECRET"),
         accepted_audience=os.getenv("ACCEPTED_AUDIENCE", keycloak_client_id),
+        contact_ops_mcp_url=os.getenv("CONTACT_OPS_MCP_URL", defaults.contact_ops_mcp_url),
+        contact_ops_audience=os.getenv("CONTACT_OPS_AUDIENCE", defaults.contact_ops_audience),
+        contact_ops_client_id=os.getenv("CONTACT_OPS_CLIENT_ID"),
+        contact_ops_client_secret=os.getenv("CONTACT_OPS_CLIENT_SECRET"),
         falkordb_host=os.getenv("FALKORDB_HOST", defaults.falkordb_host),
         falkordb_port=int(os.getenv("FALKORDB_PORT", str(defaults.falkordb_port))),
         falkordb_password=os.getenv("FALKORDB_PASSWORD", defaults.falkordb_password),
