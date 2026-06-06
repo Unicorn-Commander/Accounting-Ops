@@ -54,20 +54,36 @@ class ContactOpsNotConfigured(ContactOpsError):
 
 
 def is_configured() -> bool:
-    """True iff we have enough to attempt a token-exchange + MCP call."""
+    """True only when Contact-Ops sync is EXPLICITLY enabled.
+
+    We require a DEDICATED ``contact_ops_client_secret`` — we deliberately do
+    NOT fall back to the app's own ``keycloak_client_secret``. That fallback
+    secret exists in every deployment, but the app's own client is not
+    authorized to token-exchange into the Contact-Ops audience until a
+    dedicated uchub client is registered (see docs/CONTACT-OPS-SYNC.md). Gating
+    on the dedicated secret keeps the "Pull from Contact-Ops" button hidden
+    until the federation is really wired — no button that 502s on click.
+    """
     s = get_settings()
-    secret = s.contact_ops_client_secret or s.keycloak_client_secret
-    return bool(s.contact_ops_mcp_url and s.contact_ops_audience and secret)
+    return bool(
+        s.contact_ops_mcp_url
+        and s.contact_ops_audience
+        and s.contact_ops_client_secret
+    )
 
 
 def _exchange_client_creds() -> tuple[str, str]:
     s = get_settings()
-    client_id = s.contact_ops_client_id or s.keycloak_client_id
-    secret = s.contact_ops_client_secret or s.keycloak_client_secret
+    # The dedicated secret is required (is_configured gates on it). The client
+    # id pairs with it: CONTACT_OPS_CLIENT_ID, or the app's client id if the
+    # dedicated client reuses it.
+    secret = s.contact_ops_client_secret
     if not secret:
         raise ContactOpsNotConfigured(
-            "Contact-Ops sync is not connected yet (no client secret configured)."
+            "Contact-Ops sync is not connected yet (no dedicated client secret "
+            "configured — set CONTACT_OPS_CLIENT_SECRET)."
         )
+    client_id = s.contact_ops_client_id or s.keycloak_client_id
     return client_id, secret
 
 
