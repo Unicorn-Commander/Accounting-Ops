@@ -31,10 +31,13 @@ the platform uses gates the response. There is no admin override.
 from __future__ import annotations
 
 import logging
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app.auth import AuthContext, validate_bearer_token
@@ -538,6 +541,260 @@ async def list_my_clients_triage(
         "total_waiting_on_client": sum(
             w["waiting_on_client_count"] for w in workspaces
         ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Persona (cheap) + CPA-originated client onboarding.
+#
+# `/api/me/clients` (GET) and `/triage` peek into every workspace schema, which
+# is too heavy for a login-time redirect. `GET /api/me/persona` answers the one
+# question the landing router needs — "is this caller a CPA?" — from the
+# membership table alone (no per-workspace schema sessions).
+#
+# `POST /api/me/clients` is the CPA-originated onboarding path. The existing
+# member-invite endpoints (app/api/members.py) are deliberately client-
+# originated and admin-gated: a CPA can NEVER self-grant privilege inside an
+# existing customer workspace. This endpoint does not violate that — it
+# *provisions a brand-new workspace*, makes the caller a ``cpa`` member (the
+# accountant-rank role that can do the books but cannot invite), and issues the
+# client-owner an ``owner`` invitation. Granting someone ABOVE you in a
+# workspace you just created is not self-escalation, so issuing the owner invite
+# here (bypassing the admin gate) is correct and safe.
+# ---------------------------------------------------------------------------
+
+# Roles that mark an "established practitioner" allowed to onboard new clients.
+# A truly cold account (zero memberships) cannot self-provision — that open-
+# registration path is gated on pricing/billing and handled separately.
+_PRACTITIONER_ROLES = (
+    "cpa",
+    "accountant",
+    "admin",
+    "owner",
+    "client_owner",
+    "platform_admin",
+)
+
+
+def _slugify(value: str) -> str:
+    import re
+
+    s = re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
+    return s[:80] or "client"
+
+
+async def _caller_account(uc_uid: str) -> tuple[UUID, str | None, list[str]]:
+    """Return (user_id, email, distinct_roles_held) for the caller.
+
+    Ensures a ``user_account`` row exists (JIT) so a freshly-federated CPA who
+    has never hit a workspace endpoint can still be resolved.
+    """
+    from app.api.workspaces import _ensure_user_account
+
+    user_id = await _ensure_user_account(uc_uid)
+    async with SessionLocal() as session:
+        async with session.begin():
+            email_row = (
+                await session.execute(
+                    text("SELECT email FROM public.user_account WHERE id = :id"),
+                    {"id": user_id},
+                )
+            ).first()
+            role_rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT DISTINCT m.role::text AS role
+                        FROM public.workspace_membership m
+                        JOIN public.workspace w ON w.id = m.workspace_id
+                        WHERE m.user_id = :uid AND w.status = 'active'
+                        """
+                    ),
+                    {"uid": user_id},
+                )
+            ).mappings().all()
+    return (
+        user_id,
+        (email_row.email if email_row else None),
+        [r["role"] for r in role_rows],
+    )
+
+
+@router.get("/api/me/persona")
+async def my_persona(
+    auth: AuthContext = Depends(validate_bearer_token),
+) -> dict[str, Any]:
+    """Cheap persona check for the login-time landing router.
+
+    Membership-table only (no per-workspace schema peek), so it's safe to call
+    on every sign-in. ``can_add_clients`` is true when the caller already holds
+    a practitioner-or-owner role somewhere (the gate POST /api/me/clients
+    enforces).
+    """
+    _user_id, _email, roles = await _caller_account(auth.uc_uid)
+    role_set = set(roles)
+    if "platform_admin" in role_set:
+        persona = "platform_admin"
+    elif "cpa" in role_set:
+        persona = "cpa"
+    elif role_set:
+        persona = "client"
+    else:
+        persona = "new"
+    can_add = bool(role_set & set(_PRACTITIONER_ROLES))
+    return {
+        "persona": persona,
+        "roles": sorted(role_set),
+        "cpa_count": sum(1 for r in roles if r == "cpa"),
+        "workspace_count": len(roles),
+        "can_add_clients": can_add,
+    }
+
+
+class AddClientRequest(BaseModel):
+    business_name: str = Field(..., min_length=2, max_length=160)
+    owner_email: str | None = Field(
+        default=None,
+        max_length=256,
+        description="If set, the client-owner is emailed an 'owner' invitation.",
+    )
+    hipaa_protected: bool = False
+    isolation_tier: str = Field(default="shared")
+
+
+@router.post("/api/me/clients", status_code=status.HTTP_201_CREATED)
+async def add_client(
+    body: AddClientRequest,
+    auth: AuthContext = Depends(validate_bearer_token),
+) -> dict[str, Any]:
+    """CPA-originated client onboarding: provision a workspace + (optionally)
+    invite the business owner.
+
+    The caller becomes a ``cpa`` member (accountant-rank: can run the books,
+    cannot invite). If ``owner_email`` is supplied, the business owner is sent
+    an ``owner`` magic-link invitation so they own their own data while the CPA
+    operates it. Gate: caller must already hold a practitioner/owner role.
+    """
+    # Reuse the proven invite helpers + provisioning path. Imported lazily to
+    # avoid import cycles (members.py imports tenancy which imports nothing here).
+    from app.api.members import (
+        DEFAULT_INVITE_TTL_DAYS,
+        TOKEN_BYTES,
+        _accept_url,
+        _hash_token,
+        _invite_email_body,
+        _normalize_email,
+    )
+    from app.mailer import send_email
+    from scripts.provision_workspace import provision_workspace
+
+    user_id, caller_email, roles = await _caller_account(auth.uc_uid)
+    if not (set(roles) & set(_PRACTITIONER_ROLES)):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Onboarding a client requires an existing CPA, accountant, or "
+                "owner role. Ask Aaron/Shafen to seed your practice workspace "
+                "first."
+            ),
+        )
+
+    owner_email = _normalize_email(body.owner_email) if body.owner_email else None
+
+    # Provision the new workspace. Slug carries an id suffix so two clients with
+    # the same name never collide on the unique slug.
+    wid = uuid4()
+    slug = f"{_slugify(body.business_name)}-{str(wid)[:8]}"
+    schema, _ = await provision_workspace(
+        engine=None,
+        workspace_id=wid,
+        display_name=body.business_name,
+        slug=slug,
+        hipaa_protected=body.hipaa_protected,
+        isolation_tier=body.isolation_tier,
+        entities=None,
+    )
+
+    # Make the caller a cpa member (NOTE: no 'status' column on
+    # workspace_membership — see migration 0001; setup_assistant's INSERT that
+    # references it is a latent bug, fixed separately).
+    async with SessionLocal() as session:
+        async with session.begin():
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO public.workspace_membership
+                        (id, user_id, workspace_id, role, invited_by_uc_uid, created_at)
+                    VALUES (gen_random_uuid(), :uid, :wid, 'cpa', :uc, now())
+                    ON CONFLICT ON CONSTRAINT uq_workspace_membership
+                    DO UPDATE SET role = 'cpa'
+                    """
+                ),
+                {"uid": user_id, "wid": str(wid), "uc": auth.uc_uid},
+            )
+
+    owner_invitation: dict[str, Any] | None = None
+    if owner_email:
+        now = datetime.now(timezone.utc)
+        expires_at = now + timedelta(days=DEFAULT_INVITE_TTL_DAYS)
+        raw_token = secrets.token_urlsafe(TOKEN_BYTES)
+        invitation_id = uuid4()
+        async with SessionLocal() as session:
+            async with session.begin():
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO public.workspace_invitation (
+                            id, workspace_id, email, role, entity_scope,
+                            token_hash, expires_at, created_by_uc_uid
+                        ) VALUES (
+                            :id, :wid, :email, CAST('owner' AS workspace_role),
+                            NULL, :token_hash, :expires_at, :created_by
+                        )
+                        """
+                    ),
+                    {
+                        "id": str(invitation_id),
+                        "wid": str(wid),
+                        "email": owner_email,
+                        "token_hash": _hash_token(raw_token),
+                        "expires_at": expires_at,
+                        "created_by": auth.uc_uid,
+                    },
+                )
+                text_body, html_body = _invite_email_body(
+                    workspace_name=body.business_name,
+                    inviter_email=caller_email,
+                    role="owner",
+                    accept_url=_accept_url(raw_token),
+                    expires_at=expires_at,
+                )
+                delivery = await send_email(
+                    session,
+                    to_email=owner_email,
+                    subject=(
+                        f"You've been invited to {body.business_name} on "
+                        f"Accounting-Ops"
+                    ),
+                    body_text=text_body,
+                    body_html=html_body,
+                    related_invitation_id=invitation_id,
+                )
+        owner_invitation = {
+            "id": str(invitation_id),
+            "email": owner_email,
+            "role": "owner",
+            "expires_at": expires_at.isoformat(),
+            "delivery": delivery,
+        }
+
+    return {
+        "workspace_id": str(wid),
+        "slug": slug,
+        "display_name": body.business_name,
+        "schema": schema,
+        "your_role": "cpa",
+        "owner_invitation": owner_invitation,
     }
 
 

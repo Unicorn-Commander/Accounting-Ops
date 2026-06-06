@@ -268,10 +268,10 @@ async def create_workspace(
                 text(
                     """
                     INSERT INTO public.workspace_membership
-                        (id, user_id, workspace_id, role, status, created_at)
-                    VALUES (gen_random_uuid(), :user_id, :wid, 'owner', 'active', now())
+                        (id, user_id, workspace_id, role, created_at)
+                    VALUES (gen_random_uuid(), :user_id, :wid, 'owner', now())
                     ON CONFLICT ON CONSTRAINT uq_workspace_membership DO UPDATE
-                    SET role = 'owner', status = 'active'
+                    SET role = 'owner'
                     """
                 ),
                 {"user_id": user_id, "wid": str(wid)},

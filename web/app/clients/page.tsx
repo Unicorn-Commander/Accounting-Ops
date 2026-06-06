@@ -4,15 +4,22 @@ import { Card, EmptyState, PageShell, SectionHeader } from "@/components/primiti
 import { Inbox, Users } from "lucide-react";
 import { ClientsTable } from "@/components/clients-table";
 import { RecentActivityRow } from "@/components/clients-recent-activity";
-import { getClientsTriage, getCpaRecentActivity } from "@/lib/api";
+import { AddClientButton } from "@/components/add-client-button";
+import { getClientsTriage, getCpaRecentActivity, getPersona } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
 export default async function ClientsPage() {
-  const [triage, activity] = await Promise.all([
+  const [triage, activity, persona] = await Promise.all([
     getClientsTriage(),
     getCpaRecentActivity(30),
+    getPersona(),
   ]);
+
+  // Whether to surface the "Add client" affordance. Driven by the cheap
+  // persona check (not triage) so a CPA with ZERO clients yet can still
+  // onboard their first one from the empty state.
+  const canAddClients = persona?.can_add_clients ?? false;
 
   return (
     <AppShell>
@@ -27,17 +34,20 @@ export default async function ClientsPage() {
                 : "Every workspace you belong to."
           }
           action={
-            triage && triage.workspaces.length > 0 ? (
-              // The triage table shows cross-client COUNTS; the work inbox is
-              // the companion surface that lists the actual items (stalest
-              // first) so a CPA can act without switching workspaces.
-              <Link
-                href="/clients/inbox"
-                className="inline-flex items-center gap-1.5 rounded-md bg-brand-500/15 px-3 py-1.5 text-sm font-medium text-brand-300 transition hover:bg-brand-500/25"
-              >
-                <Inbox size={14} /> Work inbox
-              </Link>
-            ) : undefined
+            <div className="flex items-center gap-2">
+              {triage && triage.workspaces.length > 0 ? (
+                // The triage table shows cross-client COUNTS; the work inbox is
+                // the companion surface that lists the actual items (stalest
+                // first) so a CPA can act without switching workspaces.
+                <Link
+                  href="/clients/inbox"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-brand-500/15 px-3 py-1.5 text-sm font-medium text-brand-300 transition hover:bg-brand-500/25"
+                >
+                  <Inbox size={14} /> Work inbox
+                </Link>
+              ) : null}
+              {canAddClients ? <AddClientButton /> : null}
+            </div>
           }
         />
 
@@ -48,8 +58,13 @@ export default async function ClientsPage() {
           <EmptyState
             variant="permission-denied"
             icon={<Users size={28} className="text-ink-disabled" aria-hidden="true" />}
-            title="No clients assigned yet."
-            description="A workspace owner needs to invite you with the CPA or accountant role before assigned clients show up here."
+            title="No clients yet."
+            description={
+              canAddClients
+                ? "Add your first client to set up their books — you'll be added as their CPA, and you can invite the owner so they keep ownership of their data. (A workspace owner can also invite you directly.)"
+                : "A workspace owner needs to invite you with the CPA or accountant role before assigned clients show up here."
+            }
+            primaryAction={canAddClients ? <AddClientButton /> : undefined}
           />
         ) : triage.workspaces.length === 0 ? (
           <EmptyState
@@ -57,10 +72,13 @@ export default async function ClientsPage() {
             icon={<Users size={28} className="text-ink-disabled" aria-hidden="true" />}
             title="No clients in this view yet."
             description={
-              triage.persona === "cpa"
-                ? "Once a workspace owner invites you to their books, the client will appear here with open items and review status."
-                : "You belong to no workspaces. Ask an owner to invite you, or create your own from /setup."
+              canAddClients
+                ? "Add a client to set up their books — they'll appear here with open items and review status. (A workspace owner can also invite you to existing books.)"
+                : triage.persona === "cpa"
+                  ? "Once a workspace owner invites you to their books, the client will appear here with open items and review status."
+                  : "You belong to no workspaces. Ask an owner to invite you, or create your own from /setup."
             }
+            primaryAction={canAddClients ? <AddClientButton /> : undefined}
           />
 
         ) : (

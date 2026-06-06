@@ -183,3 +183,16 @@ export async function getCpaRecentActivity(
     `/api/me/cpa-recent-activity?days=${days}`
   );
 }
+
+export type Persona = {
+  persona: "platform_admin" | "cpa" | "client" | "new";
+  roles: string[];
+  cpa_count: number;
+  workspace_count: number;
+  can_add_clients: boolean;
+};
+
+/** Cheap membership-only persona check — safe to call at login for routing. */
+export async function getPersona(): Promise<Persona | null> {
+  return await apiFetch<Persona>("/api/me/persona");
+}

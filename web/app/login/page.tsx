@@ -13,7 +13,10 @@ export default async function LoginPage({
   searchParams: Promise<{ callbackUrl?: string; error?: string; reason?: string }>;
 }) {
   const params = await searchParams;
-  const callbackUrl = params.callbackUrl ?? "/dashboard";
+  // Default to the persona-aware landing router (/start) which forwards CPAs
+  // to their cross-client practice view and everyone else to /dashboard. An
+  // explicit callbackUrl (e.g. a deep link the user was bounced from) wins.
+  const callbackUrl = params.callbackUrl ?? "/start";
   const error = params.error;
   const reason = params.reason;
 
