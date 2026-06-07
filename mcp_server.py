@@ -76,6 +76,7 @@ from app.tools import (
 def build_server():
     try:
         from mcp.server.fastmcp import FastMCP
+        from mcp.server.transport_security import TransportSecuritySettings
     except ImportError as exc:
         raise RuntimeError("Install the PyPI 'mcp' package to run the MCP server") from exc
 
@@ -87,6 +88,11 @@ def build_server():
     server = FastMCP(
         "Accounting-Ops",
         streamable_http_path="/",
+        # /mcp is served behind Traefik (TLS) + MCPAuthMiddleware (Bearer token).
+        # The MCP SDK's DNS-rebinding Host guard otherwise 421s the public FQDN
+        # (accounting-ops.magicunicorn.dev); disable it — the Bearer token and the
+        # reverse proxy are the real controls here, not a localhost Host check.
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         instructions=(
             "Agent-first financial operations for Magic Unicorn. Tools operate on "
             "a workspace_id (+ entity_id for entity-scoped tools). The caller's "
