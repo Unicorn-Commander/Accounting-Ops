@@ -18,9 +18,12 @@ export default {
         "ink-disabled": "hsl(240 8% 38%)",
         // Brand — Unicorn Violet
         brand: {
+          200: "hsl(265 92% 86%)",
+          300: "hsl(265 88% 79%)",
           400: "hsl(265 85% 72%)",
           500: "hsl(265 78% 62%)",
-          600: "hsl(265 70% 52%)"
+          600: "hsl(265 70% 52%)",
+          700: "hsl(265 64% 43%)"
         },
         // Agent accent — Unicorn cyan
         agent: {

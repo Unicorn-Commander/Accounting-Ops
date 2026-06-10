@@ -6,7 +6,7 @@ import { AgentActivitySection } from "@/components/agent-activity-section";
 import { AiAgreementCard } from "@/components/ai-agreement-card";
 import { CfoBriefCard } from "@/components/cfo-brief-card";
 import { EntitySelector } from "@/components/entity-selector";
-import { Card, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
+import { Card, EmptyState, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
 import { getActiveContext } from "@/lib/active-context";
 import { fetchAiAgreement } from "@/lib/ai-agreement";
 import { getCashPosition, formatUSD } from "@/lib/cash-position";
@@ -309,7 +309,7 @@ export default async function DashboardPage() {
                       return (
                         <tr
                           key={t.id}
-                          className="group cursor-pointer border-b border-subtle/60 last:border-b-0 hover:bg-white/[0.02]"
+                          className="border-b border-subtle/60 last:border-b-0 hover:bg-white/[0.02]"
                         >
                           <td className="whitespace-nowrap px-6 py-3 font-mono text-xs text-ink-tertiary">
                             {shortDate(t.posted_at)}
@@ -356,32 +356,38 @@ export default async function DashboardPage() {
                   </tbody>
                 </table></div>
               ) : (
-                <div className="px-6 py-10 text-center">
-                  <p className="text-sm text-ink-secondary mb-1">
-                    {txnData?.configured
-                      ? "No transactions in the last 30 days."
-                      : "No live transaction feed yet."}
-                  </p>
-                  <p className="text-xs text-ink-tertiary mb-4">
-                    {txnData?.configured
-                      ? "Activity across your connected accounts will show up here as it posts."
-                      : "Connect a bank aggregator to start populating your transaction history."}
-                  </p>
-                  <div className="flex flex-wrap items-center justify-center gap-2">
-                    <Link
-                      href="/connectors"
-                      className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
-                    >
-                      {txnData?.configured ? "Manage connectors" : "Connect a bank"}
-                      <ArrowRight size={11} />
-                    </Link>
-                    <Link
-                      href="/documents"
-                      className="inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
-                    >
-                      Or drag in documents
-                    </Link>
-                  </div>
+                <div className="px-6 py-10">
+                  <EmptyState
+                    variant={txnData?.configured ? "no-data" : "not-connected"}
+                    title={
+                      txnData?.configured
+                        ? "No transactions in the last 30 days."
+                        : "No live transaction feed yet."
+                    }
+                    description={
+                      txnData?.configured
+                        ? "Activity across your connected accounts will show up here as it posts."
+                        : "Connect a bank aggregator to start populating your transaction history."
+                    }
+                    primaryAction={
+                      <Link
+                        href="/connectors"
+                        className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
+                      >
+                        {txnData?.configured ? "Manage connectors" : "Connect a bank"}
+                        <ArrowRight size={11} />
+                      </Link>
+                    }
+                    secondaryAction={
+                      <Link
+                        href="/documents"
+                        className="inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
+                      >
+                        Or drag in documents
+                      </Link>
+                    }
+                    className="border-0 bg-transparent"
+                  />
                 </div>
               )}
             </Card>

@@ -162,7 +162,7 @@ export function TrialBalanceView({
         <Card padded={false}>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[760px] text-sm">
-              <thead>
+              <thead className="sticky top-0 z-10 bg-surface">
                 <tr className="border-b border-subtle text-left text-[10px] uppercase tracking-wider text-ink-tertiary">
                   <th className="px-5 py-3 font-medium">Account</th>
                   <th className="px-5 py-3 font-medium">Type</th>

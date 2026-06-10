@@ -282,7 +282,7 @@ export function LiveTransactionsTable({
         </div>
       ) : (
         <div className="overflow-x-auto"><table className="w-full min-w-[640px] text-sm">
-          <thead className="text-[10px] uppercase tracking-wider text-ink-tertiary">
+          <thead className="sticky top-0 z-10 bg-surface text-[10px] uppercase tracking-wider text-ink-tertiary">
             <tr className="border-b border-subtle">
               <th className="px-5 py-2.5 text-left font-medium">Date</th>
               <th className="px-2 py-2.5 text-left font-medium">Payee</th>
@@ -313,7 +313,7 @@ export function LiveTransactionsTable({
               return (
                 <tr
                   key={t.id}
-                  className="group cursor-pointer border-b border-subtle/60 last:border-b-0 hover:bg-white/[0.02]"
+                  className="border-b border-subtle/60 last:border-b-0 hover:bg-white/[0.02]"
                 >
                   <td className="whitespace-nowrap px-5 py-3 font-mono text-xs text-ink-tertiary">
                     {shortDate(t.posted_at)}

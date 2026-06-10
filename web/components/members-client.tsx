@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import * as Dialog from "@radix-ui/react-dialog";
 import {
   AlertTriangle,
   Building2,
@@ -12,6 +13,7 @@ import {
   RotateCw,
   Trash2,
   User,
+  X,
   XCircle,
 } from "lucide-react";
 import type {
@@ -381,17 +383,16 @@ export function MembersClient({
         )}
       </Card>
 
-      {inviting ? (
-        <InviteModal
-          workspaceId={workspaceId}
-          entities={entities}
-          canOwner={canOwner}
-          onClose={(refresh) => {
-            setInviting(false);
-            if (refresh) startTransition(() => router.refresh());
-          }}
-        />
-      ) : null}
+      <InviteModal
+        open={inviting}
+        workspaceId={workspaceId}
+        entities={entities}
+        canOwner={canOwner}
+        onClose={(refresh) => {
+          setInviting(false);
+          if (refresh) startTransition(() => router.refresh());
+        }}
+      />
 
       {/* H11: shared confirmation dialog for member-removal + invite-cancel.
           Replaces the native confirm() that fired raw browser prompts. */}
@@ -504,11 +505,13 @@ function RoleBadge({ role }: { role: WorkspaceRole }) {
 }
 
 function InviteModal({
+  open,
   workspaceId,
   entities,
   canOwner,
   onClose,
 }: {
+  open: boolean;
   workspaceId: string;
   entities: Entity[];
   canOwner: boolean;
@@ -521,20 +524,41 @@ function InviteModal({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  function reset() {
+    setEmail("");
+    setRole("cpa");
+    setScope([]);
+    setTtl(7);
+    setBusy(false);
+    setErr(null);
+  }
+
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-canvas/80 backdrop-blur-sm"
-      onClick={() => onClose(false)}
+    <Dialog.Root
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) {
+          onClose(false);
+          // Defer reset so the modal animates out cleanly.
+          setTimeout(reset, 200);
+        }
+      }}
     >
-      <div
-        className="w-full max-w-md rounded-lg border border-default bg-surface p-5 shadow-card"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3 className="text-base font-semibold">Invite member</h3>
-        <p className="mt-1 text-xs text-ink-tertiary">
-          Sends a magic link to the email below. The invitation expires after
-          the TTL you set.
-        </p>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-canvas/80 backdrop-blur-sm" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] max-w-md max-h-[calc(100vh-2rem)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-default bg-surface p-5 shadow-card focus:outline-none">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <Dialog.Title className="text-base font-semibold">Invite member</Dialog.Title>
+            <Dialog.Description className="mt-1 text-xs text-ink-tertiary">
+              Sends a magic link to the email below. The invitation expires after
+              the TTL you set.
+            </Dialog.Description>
+          </div>
+          <Dialog.Close className="shrink-0 rounded p-1 text-ink-tertiary hover:bg-white/5 hover:text-ink-primary">
+            <X size={16} />
+          </Dialog.Close>
+        </div>
 
         {err ? (
           <div className="mt-3 rounded-md border border-debit/30 bg-debit/10 px-3 py-2 text-sm text-debit">
@@ -662,13 +686,9 @@ function InviteModal({
         </div>
 
         <div className="mt-5 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => onClose(false)}
-            className="rounded-md border border-subtle px-3 py-1.5 text-sm text-ink-secondary hover:bg-white/[0.04]"
-          >
+          <Dialog.Close className="rounded-md border border-subtle px-3 py-1.5 text-sm text-ink-secondary hover:bg-white/[0.04]">
             Cancel
-          </button>
+          </Dialog.Close>
           <button
             type="button"
             disabled={!email || busy}
@@ -706,7 +726,8 @@ function InviteModal({
             {busy ? "Sending…" : "Send invite"}
           </button>
         </div>
-      </div>
-    </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

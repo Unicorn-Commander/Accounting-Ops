@@ -144,7 +144,7 @@ export function ChatLauncher({
           onClick={() => setSurfacePersisted("float")}
           aria-label="Open agent chat"
           aria-expanded={false}
-          className="fixed bottom-4 right-4 z-40 inline-flex items-center gap-2 rounded-full border border-default bg-elevated/95 px-3.5 py-2.5 text-xs font-medium text-ink-secondary shadow-ticker backdrop-blur transition hover:bg-elevated hover:text-ink-primary"
+          className="fixed bottom-[calc(env(safe-area-inset-bottom)+1rem)] right-4 z-40 inline-flex items-center gap-2 rounded-full border border-default bg-elevated/95 px-3.5 py-2.5 text-xs font-medium text-ink-secondary shadow-ticker backdrop-blur transition hover:bg-elevated hover:text-ink-primary"
         >
           <span className="relative flex h-2 w-2">
             <span className="absolute inline-flex h-full w-full rounded-full bg-agent-500 opacity-75 animate-pulse-soft" />
@@ -162,7 +162,7 @@ export function ChatLauncher({
           aria-modal="false"
           aria-label="Agent chat"
           tabIndex={-1}
-          className="fixed bottom-4 right-4 z-40 flex max-h-[min(36rem,calc(100vh-2rem))] w-96 max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg border border-default bg-elevated/95 shadow-ticker backdrop-blur outline-none animate-fade-in"
+          className="fixed bottom-[calc(env(safe-area-inset-bottom)+1rem)] right-4 z-40 flex max-h-[min(36rem,calc(100vh-2rem))] w-96 max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg border border-default bg-elevated/95 shadow-ticker backdrop-blur outline-none animate-fade-in"
         >
           <ChatHeader
             onDock={() => setSurfacePersisted("dock")}

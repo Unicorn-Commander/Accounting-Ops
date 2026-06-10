@@ -76,7 +76,7 @@ export function ConnectSimplefinModal({
       <Dialog.Trigger asChild>{trigger}</Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-canvas/80 backdrop-blur-sm" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-lg border border-default bg-surface shadow-card focus:outline-none">
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] max-w-lg max-h-[calc(100vh-2rem)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-lg border border-default bg-surface shadow-card focus:outline-none">
           <div className="flex items-center justify-between border-b border-subtle px-6 py-4">
             <Dialog.Title className="text-base font-semibold">
               Connect SimpleFIN to {workspaceName}

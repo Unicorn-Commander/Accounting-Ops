@@ -188,8 +188,9 @@ export function ManualEntryForm({
   return (
     <Card>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <Field label="Entity">
+        <Field id="manual-entity" label="Entity">
           <select
+            id="manual-entity"
             value={entityId}
             onChange={(e) => setEntityId(e.target.value)}
             className="w-full rounded-md border border-default bg-canvas py-1.5 px-3 text-sm"
@@ -201,8 +202,9 @@ export function ManualEntryForm({
             ))}
           </select>
         </Field>
-        <Field label="Effective date">
+        <Field id="manual-effective-date" label="Effective date">
           <input
+            id="manual-effective-date"
             type="date"
             value={effectiveDate}
             onChange={(e) => setEffectiveDate(e.target.value)}
@@ -210,18 +212,25 @@ export function ManualEntryForm({
           />
         </Field>
 
-        <Field label="Amount (USD)" hint="Positive number; direction is determined by accounts.">
+        <Field
+          id="manual-amount"
+          label="Amount (USD)"
+          hint="Positive number; direction is determined by accounts."
+        >
           <input
+            id="manual-amount"
             type="number"
             step="0.01"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
             placeholder="0.00"
+            aria-describedby="manual-amount-hint"
             className="w-full rounded-md border border-default bg-canvas py-1.5 px-3 text-sm font-mono"
           />
         </Field>
-        <Field label="Category">
+        <Field id="manual-category" label="Category">
           <select
+            id="manual-category"
             value={category}
             onChange={(e) => setCategory(e.target.value)}
             className="w-full rounded-md border border-default bg-canvas py-1.5 px-3 text-sm"
@@ -236,20 +245,35 @@ export function ManualEntryForm({
         </Field>
 
         <Field
+          id="manual-debit-account"
           label="Debit account"
           hint="Where the value goes IN (expense/asset on outflow; asset on inflow)."
         >
-          <AccountSelect coa={coa} value={debitAccount} onChange={setDebitAccount} />
+          <AccountSelect
+            id="manual-debit-account"
+            coa={coa}
+            value={debitAccount}
+            onChange={setDebitAccount}
+            describedBy="manual-debit-account-hint"
+          />
         </Field>
         <Field
+          id="manual-credit-account"
           label="Credit account"
           hint="Where the value comes FROM (cash on outflow; revenue/owner on inflow)."
         >
-          <AccountSelect coa={coa} value={creditAccount} onChange={setCreditAccount} />
+          <AccountSelect
+            id="manual-credit-account"
+            coa={coa}
+            value={creditAccount}
+            onChange={setCreditAccount}
+            describedBy="manual-credit-account-hint"
+          />
         </Field>
 
-        <Field label="Payee">
+        <Field id="manual-payee" label="Payee">
           <input
+            id="manual-payee"
             type="text"
             value={payee}
             onChange={(e) => setPayee(e.target.value)}
@@ -257,18 +281,25 @@ export function ManualEntryForm({
             className="w-full rounded-md border border-default bg-canvas py-1.5 px-3 text-sm"
           />
         </Field>
-        <Field label="Source ID" hint="Optional — for idempotency. Defaults to manual-{timestamp}.">
+        <Field
+          id="manual-source-id"
+          label="Source ID"
+          hint="Optional — for idempotency. Defaults to manual-{timestamp}."
+        >
           <input
+            id="manual-source-id"
             type="text"
             value={sourceExternalId}
             onChange={(e) => setSourceExternalId(e.target.value)}
             placeholder="manual-2026-05-22-owner-contrib"
+            aria-describedby="manual-source-id-hint"
             className="w-full rounded-md border border-default bg-canvas py-1.5 px-3 text-sm font-mono"
           />
         </Field>
 
-        <Field label="Description" className="md:col-span-2">
+        <Field id="manual-description" label="Description" className="md:col-span-2">
           <input
+            id="manual-description"
             type="text"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
@@ -276,8 +307,9 @@ export function ManualEntryForm({
             className="w-full rounded-md border border-default bg-canvas py-1.5 px-3 text-sm"
           />
         </Field>
-        <Field label="Memo" className="md:col-span-2">
+        <Field id="manual-memo" label="Memo" className="md:col-span-2">
           <textarea
+            id="manual-memo"
             value={memo}
             onChange={(e) => setMemo(e.target.value)}
             rows={2}
@@ -315,35 +347,49 @@ export function ManualEntryForm({
 }
 
 function Field({
+  id,
   label,
   hint,
   children,
   className
 }: {
+  id: string;
   label: string;
   hint?: string;
   children: React.ReactNode;
   className?: string;
 }) {
+  const hintId = hint ? `${id}-hint` : undefined;
   return (
     <div className={className}>
-      <label className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
+      <label
+        htmlFor={id}
+        className="mb-1 block text-[10px] font-medium uppercase tracking-wider text-ink-tertiary"
+      >
         {label}
       </label>
       {children}
-      {hint && <p className="mt-1 text-[10px] text-ink-tertiary">{hint}</p>}
+      {hint && (
+        <p id={hintId} className="mt-1 text-[10px] text-ink-tertiary">
+          {hint}
+        </p>
+      )}
     </div>
   );
 }
 
 function AccountSelect({
+  id,
   coa,
   value,
-  onChange
+  onChange,
+  describedBy
 }: {
+  id?: string;
   coa: CoaAccount[];
   value: string;
   onChange: (v: string) => void;
+  describedBy?: string;
 }) {
   const groups: Record<string, CoaAccount[]> = {};
   for (const a of coa) {
@@ -363,6 +409,8 @@ function AccountSelect({
   ];
   return (
     <select
+      id={id}
+      aria-describedby={describedBy}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       className="w-full rounded-md border border-default bg-canvas py-1.5 px-3 text-sm font-mono"

@@ -86,7 +86,7 @@ export default async function ContactsPage() {
               </p>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full min-w-[720px] text-sm">
                 <thead className="text-left text-[11px] uppercase tracking-wider text-ink-tertiary">
                   <tr className="border-b border-subtle">
                     <th className="py-2 pr-3">Name</th>

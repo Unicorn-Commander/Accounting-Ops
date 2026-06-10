@@ -423,7 +423,17 @@ export function ChatClient({
   // Render
   // -------------------------------------------------------------------------
   return (
-    <div className="flex h-[calc(100vh-6.5rem)] min-h-[34rem] flex-col gap-4 md:h-[calc(100vh-7rem)] lg:flex-row">
+    <div
+      className={cn(
+        "flex flex-col gap-4 lg:flex-row",
+        // The /setup (hideSidebar) flow shares the page with the onboarding
+        // hero + checklist, so the chat is shorter on mobile to avoid an
+        // overlong first-run scroll; the standalone /chat page fills the view.
+        hideSidebar
+          ? "min-h-[26rem] h-[70vh] md:h-[calc(100vh-7rem)]"
+          : "h-[calc(100vh-6.5rem)] min-h-[34rem] md:h-[calc(100vh-7rem)]"
+      )}
+    >
       {/* Left sidebar — hidden when caller wants a focused single-pane view (e.g. /setup) */}
       {!hideSidebar && (
         <ChatSidebar

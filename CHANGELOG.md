@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.5.1 - 2026-06-10
+
+- fix(web): UI/UX audit pass. Define the missing `brand-200/300/700` Tailwind
+  tokens (137 colorless `text-brand-*` usages across 48 files now render their
+  intended violet accents — active nav, selected filters, onboarding accents,
+  tax-review tabs). Plus: mobile-safe SimpleFIN + invite dialogs (invite modal
+  converted to a real Radix Dialog — focus-trap, Escape, `role`/`aria-modal`);
+  `htmlFor`/`id` + `aria-describedby` on the manual journal-entry form; sticky
+  table headers (transactions / journal / trial-balance / invoices / PATs);
+  `cursor-pointer` cleanup on non-clickable rows (journal rows stay navigable
+  with `focus-within`); shared `EmptyState` on the dashboard; contacts table
+  min-width; card-radius consistency; safe-area offset for the chat launcher;
+  compact setup-chat height on mobile.
+
 ## 0.5.0 - 2026-06-10
 
 - feat(onboarding): Self-service first-run onboarding. A brand-new user (zero

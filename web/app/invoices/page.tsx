@@ -200,7 +200,7 @@ export default async function InvoicesPage(props: {
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[760px] text-sm">
-                <thead className="text-[10px] uppercase tracking-wider text-ink-tertiary">
+                <thead className="sticky top-0 z-10 bg-surface text-[10px] uppercase tracking-wider text-ink-tertiary">
                   <tr className="border-b border-subtle">
                     <th className="px-5 py-2.5 text-left font-medium">Invoice</th>
                     <th className="px-2 py-2.5 text-left font-medium">Customer</th>

@@ -247,7 +247,7 @@ export const SetupChecklist = forwardRef<
     return (
       <aside
         className={cn(
-          "rounded-xl border border-default bg-surface p-4 text-xs text-ink-tertiary",
+          "rounded-lg border border-default bg-surface p-4 text-xs text-ink-tertiary",
           className
         )}
       >
@@ -263,7 +263,7 @@ export const SetupChecklist = forwardRef<
     return (
       <aside
         className={cn(
-          "rounded-xl border border-debit/40 bg-debit/[0.04] p-4 text-xs text-debit",
+          "rounded-lg border border-debit/40 bg-debit/[0.04] p-4 text-xs text-debit",
           className
         )}
       >
@@ -290,7 +290,7 @@ export const SetupChecklist = forwardRef<
   return (
     <aside
       className={cn(
-        "flex flex-col gap-3 rounded-xl border border-default bg-surface p-4",
+        "flex flex-col gap-3 rounded-lg border border-default bg-surface p-4",
         className
       )}
       aria-label="Setup checklist"

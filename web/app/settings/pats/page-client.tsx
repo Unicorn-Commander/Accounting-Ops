@@ -178,7 +178,7 @@ export function PATsClient({
         <Card padded={false}>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[760px] text-left text-sm">
-              <thead className="border-b border-subtle text-[10px] uppercase tracking-wider text-ink-tertiary">
+              <thead className="sticky top-0 z-10 bg-surface border-b border-subtle text-[10px] uppercase tracking-wider text-ink-tertiary">
                 <tr>
                   <th className="px-4 py-3 font-medium">Name</th>
                   <th className="px-4 py-3 font-medium">Prefix</th>
