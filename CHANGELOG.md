@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-06-10
+
 - feat(onboarding): Self-service first-run onboarding. A brand-new user (zero
   workspace memberships) can now provision their OWN workspace and become its
   `owner` via `POST /api/onboarding/provision-first-workspace` — the one
