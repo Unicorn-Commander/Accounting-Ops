@@ -18,6 +18,11 @@ import { cn } from "@/lib/cn";
 
 export default async function DashboardPage() {
   const ctx = await getActiveContext();
+  // No workspace at all → route to the self-service first-run flow so the user
+  // can provision one. Must run BEFORE any workspace-dependent code below.
+  if (!ctx.activeWorkspace) {
+    redirect("/welcome");
+  }
   // If the active workspace has zero entities, the dashboard is meaningless —
   // send the user to /setup so the Setup Assistant can provision their first
   // entity. We only redirect when a workspace EXISTS but is empty; the

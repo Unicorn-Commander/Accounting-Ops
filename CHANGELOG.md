@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- feat(onboarding): Self-service first-run onboarding. A brand-new user (zero
+  workspace memberships) can now provision their OWN workspace and become its
+  `owner` via `POST /api/onboarding/provision-first-workspace` — the one
+  provisioning path that does NOT require an existing admin/owner (additional
+  workspaces stay admin-gated via `create_workspace`). The web `/welcome` route
+  auto-catches no-workspace users (dashboard / root / setup / chat redirect
+  there), provisions on one click, sets the active-workspace cookie, then hands
+  off to the existing `/setup` Setup Assistant (entity → chart of accounts →
+  connect bank). As `owner` the user can connect banks immediately. Idempotent
+  under double-submit (returns the existing workspace, never a duplicate).
+  Tests: `tests/smoke/test_onboarding_smoke.py` (model + route),
+  `tests/integration/test_onboarding_provision.py` (auth + no-duplicate guard).
 - feat(contacts): Contacts module — counterparties (customers/vendors) with a
   list/search page (`/contacts`, Books nav) and an **Import** flow. Two sources
   into one review-then-confirm screen (tag customer/vendor/skip; nothing

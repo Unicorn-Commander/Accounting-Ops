@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { APP_VERSION_LABEL } from "@/lib/version";
 import {
   ArrowUpRight,
@@ -14,8 +15,19 @@ import {
   Terminal
 } from "lucide-react";
 import { SiteHeader } from "@/components/site-header";
+import { auth } from "@/lib/auth";
+import { getActiveContext } from "@/lib/active-context";
 
-export default function LandingPage() {
+export default async function LandingPage() {
+  // Signed-in users with no workspace yet get routed straight into the
+  // self-service first-run flow. Unauthenticated visitors and already-onboarded
+  // users (who have a workspace) fall through to the marketing landing page.
+  const session = await auth();
+  if (session?.accessToken) {
+    const ctx = await getActiveContext();
+    if (!ctx.activeWorkspace) redirect("/welcome");
+  }
+
   return (
     <>
       <SiteHeader variant="marketing" />

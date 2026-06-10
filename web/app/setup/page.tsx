@@ -13,7 +13,7 @@
 // Hands the heavy lifting to SetupClient (a thin wrapper around ChatClient
 // that locks the persona and listens for `mark_intake_complete`).
 
-import Link from "next/link";
+import { redirect } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { PageShell, SectionHeader, Card } from "@/components/primitives";
 import { getActiveContext } from "@/lib/active-context";
@@ -31,26 +31,7 @@ export default async function SetupPage({
   const sp = await searchParams;
 
   if (!ctx.activeWorkspace) {
-    return (
-      <AppShell>
-        <PageShell>
-          <SectionHeader
-            title="Setup Assistant"
-            subtitle="No workspace is provisioned for your account yet."
-          />
-          <Card>
-            <p className="text-sm text-ink-secondary">
-              You need a workspace before you can set up an entity. Talk to an
-              admin to be invited, or visit{" "}
-              <Link href="/help" className="text-brand-400 hover:underline">
-                /help
-              </Link>{" "}
-              to get one created.
-            </p>
-          </Card>
-        </PageShell>
-      </AppShell>
-    );
+    redirect("/welcome");
   }
 
   // Pre-fetch personas + sessions (the Setup Assistant is one of them).
@@ -96,6 +77,7 @@ export default async function SetupPage({
   const entityKindParam = typeof sp.entity_kind === "string" ? sp.entity_kind : null;
   const dbaParam = sp.dba === "true";
   const fromChat = sp.from_chat === "true";
+  const fromWelcome = sp.from_welcome === "true";
   const requestedSession = typeof sp.session === "string" ? sp.session : null;
   const initialActiveSessionId =
     requestedSession && sessions.some((s) => s.id === requestedSession)
@@ -109,7 +91,11 @@ export default async function SetupPage({
 
   const subtitleParts: string[] = [];
   if (!hasEntities) {
-    subtitleParts.push("Welcome — let's get your first entity set up.");
+    subtitleParts.push(
+      fromWelcome
+        ? "Your workspace is ready — let's set up your first business."
+        : "Welcome — let's get your first entity set up."
+    );
   } else if (dbaParam) {
     subtitleParts.push("Add a DBA (no new entity row, just a sub-account label).");
   } else if (entityKindParam) {

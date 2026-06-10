@@ -11,6 +11,7 @@
 // The Client Component handles all the streaming + state.
 
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { EntitySelector } from "@/components/entity-selector";
 import { PageShell, SectionHeader } from "@/components/primitives";
@@ -29,20 +30,7 @@ export default async function ChatPage({
   const sp = await searchParams;
 
   if (!ctx.activeWorkspace) {
-    return (
-      <AppShell>
-        <PageShell>
-          <SectionHeader
-            title="Chat with your agents"
-            subtitle="No workspace is provisioned for your account yet."
-          />
-          <p className="text-sm text-ink-tertiary">
-            Talk to <Link href="/help" className="text-brand-400 hover:underline">/help</Link>
-            {" "}to get a workspace started.
-          </p>
-        </PageShell>
-      </AppShell>
-    );
+    redirect("/welcome");
   }
 
   const canConsolidate = ["owner", "admin"].includes(ctx.activeWorkspace.role);

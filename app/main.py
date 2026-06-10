@@ -41,6 +41,7 @@ from app.api.metrics import router as metrics_router
 from app.api.personal_access_tokens import router as personal_access_tokens_router
 from app.api.reports import router as reports_router
 from app.api.sentinel import router as sentinel_router
+from app.api.onboarding import router as onboarding_router
 from app.api.setup import router as setup_router
 from app.api.test_brigade_jwt import router as test_brigade_jwt_router
 from app.api.tools import consolidated_router, router as tools_router
@@ -113,6 +114,7 @@ if _mcp_http_app is not None:
     app.mount("/mcp", MCPAuthMiddleware(_mcp_http_app))
 app.include_router(a2a_router)
 app.include_router(workspaces_router)
+app.include_router(onboarding_router)
 app.include_router(members_router)
 app.include_router(clients_router)
 app.include_router(contacts_router)
