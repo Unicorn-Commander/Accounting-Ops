@@ -14,6 +14,10 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
+# Feature flag for the v2 "Living Ledger" dashboard. NEXT_PUBLIC_* values are
+# inlined at build time, so it must be present here. Default off → v1 dashboard.
+ARG NEXT_PUBLIC_DASHBOARD_V2=false
+ENV NEXT_PUBLIC_DASHBOARD_V2=$NEXT_PUBLIC_DASHBOARD_V2
 RUN npm run build
 
 
