@@ -7,17 +7,23 @@ import { Menu, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { NAV_SECTIONS } from "@/lib/nav-sections";
 import { APP_VERSION_LABEL } from "@/lib/version";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { CommandK } from "@/components/command-k";
 
 export function SiteHeaderClient({
   variant,
   userBlock,
   children,
-  canAdmin = false
+  canAdmin = false,
+  workspaceId,
+  entityId
 }: {
   variant: "app" | "marketing";
   userBlock: React.ReactNode;
   children?: React.ReactNode;
   canAdmin?: boolean;
+  workspaceId?: string;
+  entityId?: string;
 }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -105,6 +111,10 @@ export function SiteHeaderClient({
                 </div>
                 {/* Workspace/Entity selectors — hide on small screens since drawer has them */}
                 <div className="hidden md:flex items-center gap-2">{children}</div>
+                <div className="hidden md:flex">
+                  <CommandK workspaceId={workspaceId} entityId={entityId} />
+                </div>
+                <ThemeToggle />
                 {userBlock}
               </>
             )}

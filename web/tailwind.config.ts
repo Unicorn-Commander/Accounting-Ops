@@ -8,7 +8,9 @@ export default {
       colors: {
         // Canvas
         canvas: "hsl(240 14% 7%)",
+        "canvas-2": "hsl(240 16% 6.5%)",
         surface: "hsl(240 11% 12%)",
+        "surface-2": "hsl(240 13% 12.5%)",
         elevated: "hsl(240 10% 18%)",
         overlay: "hsl(240 8% 24%)",
         // Ink
@@ -27,6 +29,7 @@ export default {
         },
         // Agent accent — Unicorn cyan
         agent: {
+          300: "hsl(188 95% 76%)",
           400: "hsl(188 95% 66%)",
           500: "hsl(188 95% 56%)",
           600: "hsl(188 95% 46%)"
@@ -54,23 +57,35 @@ export default {
         reasoning: ["var(--font-inter)", "system-ui", "sans-serif"]
       },
       fontSize: {
-        // I19: removed negative letter-spacing. Numeric type read too tight
-        // on dense finance tables; restored to natural (0em) so KPIs stay
-        // legible at small viewports.
         "numeric-lg": ["1.75rem", { lineHeight: "1", fontWeight: "500" }],
         "numeric-xl": ["2.5rem", { lineHeight: "1", fontWeight: "500" }]
       },
       boxShadow: {
-        card: "0 4px 24px rgba(0,0,0,0.4)",
+        card: "0 1px 0 0 hsla(0 0% 100% / 0.08) inset, 0 2px 5px hsla(0 0% 0% / 0.4), 0 14px 38px hsla(0 0% 0% / 0.46)",
+        hover: "0 1px 0 0 hsla(0 0% 100% / 0.08) inset, 0 6px 14px hsla(0 0% 0% / 0.5), 0 26px 60px hsla(0 0% 0% / 0.55)",
+        pop: "0 1px 0 0 hsla(0 0% 100% / 0.08) inset, 0 12px 34px hsla(0 0% 0% / 0.55), 0 36px 90px hsla(0 0% 0% / 0.6)",
         ticker: "0 8px 32px rgba(0,0,0,0.5)",
-        "brand-glow": "0 0 24px hsl(265 78% 62% / 0.35)",
-        "agent-glow": "0 0 8px hsl(188 95% 56% / 0.6)"
+        "brand-glow": "0 0 0 1px hsla(265 80% 65% / 0.35), 0 0 30px hsla(265 80% 65% / 0.3)",
+        "agent-glow": "0 0 0 1px hsla(188 95% 57% / 0.5), 0 0 24px hsla(188 95% 57% / 0.42)"
+      },
+      borderRadius: {
+        "2xl": "17px"
       },
       animation: {
         "pulse-soft": "pulse-soft 1.6s ease-in-out infinite",
         "fade-in": "fade-in 220ms ease-out",
         "slide-in-left": "slide-in-left 220ms ease-out",
-        "slide-in-right": "slide-in-right 220ms ease-out"
+        "slide-in-right": "slide-in-right 220ms ease-out",
+        "pulse-live": "pulse-live 2.4s infinite",
+        "pulse-agent": "pulse-agent 2.2s infinite",
+        "scan": "scan 1.5s infinite",
+        "shimmer": "shimmer 2s linear infinite",
+        "blink": "blink 1s steps(2) infinite",
+        "toast-in": "toast-in 0.45s cubic-bezier(0.2, 0.8, 0.2, 1)",
+        "overlay-in": "overlay-in 0.18s ease",
+        "pop-in": "pop-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)",
+        "slide-in-down": "slide-in-down 0.5s cubic-bezier(0.2, 0.7, 0.2, 1)",
+        "count-up": "count-up 0.9s cubic-bezier(0.2, 0.7, 0.2, 1)"
       },
       keyframes: {
         "pulse-soft": {
@@ -88,6 +103,46 @@ export default {
         "slide-in-right": {
           from: { transform: "translateX(100%)" },
           to: { transform: "translateX(0)" }
+        },
+        "pulse-live": {
+          "0%": { boxShadow: "0 0 0 0 hsla(157 66% 53% / 0.55)" },
+          "70%": { boxShadow: "0 0 0 7px hsla(157 66% 53% / 0)" },
+          "100%": { boxShadow: "0 0 0 0 hsla(157 66% 53% / 0)" }
+        },
+        "pulse-agent": {
+          "0%": { boxShadow: "0 0 0 0 hsla(188 95% 57% / 0.6)" },
+          "70%": { boxShadow: "0 0 0 6px hsla(188 95% 57% / 0)" },
+          "100%": { boxShadow: "0 0 0 0 hsla(188 95% 57% / 0)" }
+        },
+        scan: {
+          from: { transform: "translateX(-120%)" },
+          to: { transform: "translateX(360%)" }
+        },
+        shimmer: {
+          to: { backgroundPosition: "-200% 0" }
+        },
+        blink: {
+          "50%": { opacity: "0" }
+        },
+        "toast-in": {
+          from: { opacity: "0", transform: "translateX(22px) scale(0.97)" },
+          to: { opacity: "1", transform: "none" }
+        },
+        "overlay-in": {
+          from: { opacity: "0" },
+          to: { opacity: "1" }
+        },
+        "pop-in": {
+          from: { opacity: "0", transform: "translateY(-14px) scale(0.98)" },
+          to: { opacity: "1", transform: "none" }
+        },
+        "slide-in-down": {
+          from: { opacity: "0", transform: "translateY(-12px) scale(0.99)" },
+          to: { opacity: "1", transform: "none" }
+        },
+        "count-up": {
+          from: { opacity: "0" },
+          to: { opacity: "1" }
         }
       }
     }

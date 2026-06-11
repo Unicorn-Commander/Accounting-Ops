@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Inter } from "next/font/google";
+import { cookies } from "next/headers";
 import "./globals.css";
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-geist-sans", display: "swap" });
@@ -10,9 +11,6 @@ export const metadata: Metadata = {
   title: "Accounting-Ops — Your books. Your machine. Your rules.",
   description:
     "Agent-first financial operations platform for operators who refuse to send their books to a frontier AI provider. Self-hostable. Multi-entity. Audit-defensible by construction.",
-  // Icons are wired via the App Router file convention (app/favicon.ico,
-  // app/icon.svg, app/apple-icon.png) — Next auto-injects the <link> tags and
-  // serves /favicon.ico, which kills the bare GET /favicon.ico 404.
   openGraph: {
     title: "Accounting-Ops",
     description: "Your books. Your machine. Your rules.",
@@ -21,12 +19,24 @@ export const metadata: Metadata = {
   }
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const cookieStore = await cookies();
+  const theme = cookieStore.get("aops_theme")?.value ?? "dark";
+
   return (
     <html
       lang="en"
-      className={`${geist.variable} ${geistMono.variable} ${inter.variable} dark`}
+      data-theme={theme}
+      suppressHydrationWarning
+      className={`${geist.variable} ${geistMono.variable} ${inter.variable}${theme === "dark" ? " dark" : ""}`}
     >
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem("aops_theme")||"dark";document.documentElement.setAttribute("data-theme",t);if(t==="dark")document.documentElement.classList.add("dark");else document.documentElement.classList.remove("dark")}catch(e){}})()`
+          }}
+        />
+      </head>
       <body className="min-h-screen bg-canvas text-ink-primary antialiased">
         {children}
       </body>

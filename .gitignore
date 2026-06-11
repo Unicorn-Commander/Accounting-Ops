@@ -22,6 +22,9 @@ vendor/anthropic-financial-services/
 secrets/
 .env.integration
 
+# Design prototypes — ground-truth spec for the Living Ledger redesign
+web/_design/
+
 # Local agent hand-off prompts (not part of the app)
 agent-prompts/
 .claude/

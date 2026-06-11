@@ -7,7 +7,11 @@ import { AiAgreementCard } from "@/components/ai-agreement-card";
 import { CfoBriefCard } from "@/components/cfo-brief-card";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, EmptyState, KpiCard, MaterialityBadge, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
+import { DashboardV2 } from "@/components/dashboard-v2";
 import { getActiveContext } from "@/lib/active-context";
+import { fetchAIActivity } from "@/lib/ai-activity";
+import { activityRowToDecision } from "@/components/agent-stream/map-activity";
+import { buildRealCashSeries } from "@/lib/cash-series";
 import { fetchAiAgreement } from "@/lib/ai-agreement";
 import { getCashPosition, formatUSD } from "@/lib/cash-position";
 import { fetchCfoBrief } from "@/lib/cfo-brief";
@@ -16,17 +20,13 @@ import { fetchOpenItems } from "@/lib/open-items";
 import { getRecentTransactions, shortDate, type LiveTransaction } from "@/lib/transactions";
 import { cn } from "@/lib/cn";
 
+const V2_ENABLED = process.env.NEXT_PUBLIC_DASHBOARD_V2 === "true";
+
 export default async function DashboardPage() {
   const ctx = await getActiveContext();
-  // No workspace at all → route to the self-service first-run flow so the user
-  // can provision one. Must run BEFORE any workspace-dependent code below.
   if (!ctx.activeWorkspace) {
     redirect("/welcome");
   }
-  // If the active workspace has zero entities, the dashboard is meaningless —
-  // send the user to /setup so the Setup Assistant can provision their first
-  // entity. We only redirect when a workspace EXISTS but is empty; the
-  // "no workspace at all" case is handled by EmptyWorkspaceState below.
   if (ctx.activeWorkspace && ctx.entities.length === 0) {
     redirect("/setup");
   }
@@ -49,22 +49,63 @@ export default async function DashboardPage() {
   const openItemsCounts = ctx.activeWorkspace
     ? await fetchOpenItems(ctx.activeWorkspace.id, { entityId: entityFilter })
     : null;
-  // CFO brief — the plain-language concierge header. Best-effort: returns null
-  // on any backend failure, in which case we render the dashboard exactly as
-  // before (the card simply doesn't appear).
   const cfoBrief = ctx.activeWorkspace
     ? await fetchCfoBrief(ctx.activeWorkspace.id, { entityId: entityFilter })
     : null;
-  // AI agreement (review-vs-redo) — read-only accuracy KPI. Best-effort:
-  // returns null on any backend failure, in which case the card renders a soft
-  // "unavailable" state instead of crashing the dashboard.
   const aiAgreement = ctx.activeWorkspace
     ? await fetchAiAgreement(ctx.activeWorkspace.id, { entityId: entityFilter })
+    : null;
+  // Real recent agent decisions for the v2 "Agents at work" stream.
+  const aiActivity = V2_ENABLED && ctx.activeWorkspace
+    ? await fetchAIActivity(ctx.activeWorkspace.id, { entityId: entityFilter, limit: 8 })
+    : null;
+  const initialDecisions = (aiActivity?.rows ?? []).map(activityRowToDecision);
+  // Real 90-day net-cash series for the v2 ribbon — reconstructed from the
+  // actual transaction ledger (no synthetic data).
+  const txns90 = V2_ENABLED && ctx.activeWorkspace
+    ? await getRecentTransactions(ctx.activeWorkspace.id, 90, 1000, entityFilter)
+    : null;
+  const netCashNum = cashPosition
+    ? parseFloat(cashPosition.net_total ?? cashPosition.total_usd ?? "0")
+    : 0;
+  const cashSeries = buildRealCashSeries(netCashNum, txns90?.transactions ?? [], 90);
+  const accountCount = cashPosition?.accounts.length ?? 0;
+  const availableNow = cashPosition?.configured
+    ? parseFloat(cashPosition.assets_total ?? cashPosition.total_usd ?? "0")
     : null;
   const liveTxns: LiveTransaction[] = txnData?.transactions ?? [];
   const subtitle = ctx.activeWorkspace
     ? `${ctx.activeWorkspace.display_name} · ${ctx.entities.length} ${ctx.entities.length === 1 ? "entity" : "entities"} · viewing ${ctx.isConsolidated ? "all entities (consolidated)" : ctx.activeEntity?.display_name ?? "—"}`
     : "Cash position, agent activity, and approvals across all your entities.";
+
+  // V2 dashboard — behind feature flag
+  if (V2_ENABLED) {
+    return (
+      <AppShell>
+        <DashboardV2
+          workspaceId={ctx.activeWorkspace.id}
+          workspaceName={ctx.activeWorkspace.display_name}
+          subtitle={subtitle}
+          entities={ctx.entities}
+          canConsolidate={canConsolidate}
+          entityFilter={entityFilter}
+          isConsolidated={ctx.isConsolidated}
+          cashPosition={cashPosition}
+          plYtd={plYtd}
+          plMtd={plMtd}
+          cfoBrief={cfoBrief}
+          aiAgreement={aiAgreement}
+          openItemsCount={openItemsCounts?.counts.action_required ?? 0}
+          initialDecisions={initialDecisions}
+          cashSeries={cashSeries}
+          accountCount={accountCount}
+          availableNow={availableNow}
+        />
+      </AppShell>
+    );
+  }
+
+  // v1 dashboard (existing code)
   return (
     <AppShell>
       <PageShell>
@@ -96,14 +137,8 @@ export default async function DashboardPage() {
           <EmptyWorkspaceState />
         ) : (
           <>
-            {/* CFO brief — concierge header. Plain-language "what needs you now"
-                + cash status + one-tap deep-links. Renders only when the
-                deterministic brief endpoint succeeded; otherwise the dashboard
-                degrades to exactly its prior content. The denser open-items
-                banner + KPIs below act as the drill-downs. */}
             {cfoBrief ? <CfoBriefCard brief={cfoBrief} /> : null}
 
-            {/* Open-items highlight banner — surfaces "what needs Aaron right now" */}
             {openItemsCounts && openItemsCounts.counts.action_required > 0 ? (
               <Link
                 href="/open-items"
@@ -216,7 +251,6 @@ export default async function DashboardPage() {
           />
         </div>
 
-        {/* Per-entity breakdown — only when viewing consolidated */}
         {cashPosition?.configured && ctx.isConsolidated && cashPosition.per_entity_assets && Object.keys(cashPosition.per_entity_assets).length > 0 && (
           <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4">
             {ctx.entities.map((e) => {
@@ -250,7 +284,6 @@ export default async function DashboardPage() {
           </div>
         )}
 
-        {/* Revenue/Expense secondary KPIs — kept for at-a-glance P&L health */}
         <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
           <KpiCard
             label="Revenue (YTD)"
@@ -463,8 +496,6 @@ export default async function DashboardPage() {
               </ul>
             </Card>
 
-            {/* AI agreement (review-vs-redo) — read-only accuracy KPI. Degrades
-                to a soft "unavailable"/empty state; never crashes the page. */}
             <AiAgreementCard metric={aiAgreement} />
 
             <Card padded={false}>
@@ -505,10 +536,6 @@ export default async function DashboardPage() {
     </AppShell>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Empty / no-workspace state
-// ---------------------------------------------------------------------------
 
 function EmptyWorkspaceState() {
   return (

@@ -31,7 +31,6 @@ export function AppSidebar({
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(initialCollapsed);
 
-  // Hydrate from cookie on the client in case SSR didn't see it.
   useEffect(() => {
     setCollapsed(readCollapsedCookie());
   }, []);
@@ -47,49 +46,67 @@ export function AppSidebar({
   return (
     <aside
       className={cn(
-        "hidden lg:flex sticky top-14 z-20 h-[calc(100vh-3.5rem)] shrink-0 flex-col border-r border-subtle bg-surface/40 backdrop-blur-sm transition-[width] duration-200",
+        "hidden lg:flex sticky top-0 z-20 h-screen shrink-0 flex-col border-r border-subtle transition-[width] duration-200",
+        "bg-gradient-to-b from-[var(--canvas-2)] to-[var(--canvas)]",
         collapsed ? "w-[60px]" : "w-[240px]"
       )}
       aria-label="Primary navigation"
       data-collapsed={collapsed ? "true" : "false"}
     >
-      <div
-        className={cn(
-          "flex items-center border-b border-subtle px-2 py-2",
-          collapsed ? "justify-center" : "justify-between"
-        )}
-      >
-        {!collapsed && (
-          <span className="px-2 text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
-            Navigation
-          </span>
-        )}
-        <button
-          type="button"
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          onClick={toggle}
-          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-tertiary transition hover:bg-white/[0.05] hover:text-ink-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
+      {/* Brand header */}
+      <div className="flex items-center gap-2.5 px-2 py-3.5">
+        <div
+          className="flex h-[31px] w-[31px] shrink-0 items-center justify-center rounded-[9px] text-[15px] font-bold text-white"
+          style={{
+            background: "linear-gradient(135deg, var(--brand-400), var(--brand-600) 55%, var(--agent-500))",
+            boxShadow: "var(--glow-brand)"
+          }}
         >
-          {collapsed ? <ChevronsRight size={16} /> : <ChevronsLeft size={16} />}
-        </button>
+          ◇
+        </div>
+        {!collapsed && (
+          <div>
+            <div className="text-[14px] font-semibold tracking-tight">Accounting-Ops</div>
+            <div className="text-[11px] font-medium text-[var(--ink-3)]" style={{ fontWeight: 450 }}>Living Ledger</div>
+          </div>
+        )}
       </div>
 
-      <nav className="flex-1 overflow-y-auto overflow-x-hidden py-2">
+      {/* Workspace selector */}
+      <div
+        className={cn(
+          "mx-1 flex items-center gap-2 rounded-[11px] border border-[var(--hairline)] bg-[var(--surface)] px-2 py-2 text-[13px] font-medium cursor-pointer transition hover:border-[var(--hairline-strong)] hover:bg-[var(--surface-2)]",
+          collapsed ? "justify-center mx-1.5" : "mx-2"
+        )}
+      >
+        <div
+          className="flex h-[23px] w-[23px] shrink-0 items-center justify-center rounded-[7px] text-[11px] font-bold text-white"
+          style={{
+            background: "linear-gradient(135deg, var(--brand-500), var(--brand-700))"
+          }}
+        >
+          M
+        </div>
+        {!collapsed && <span className="flex-1 truncate tracking-tight">Magic Unicorn Inc</span>}
+        {!collapsed && (
+          <svg className="text-[var(--ink-3)]" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        )}
+      </div>
+
+      <nav className="flex-1 overflow-y-auto overflow-x-hidden py-1">
         {sections.map((section, idx) => (
-          <div
-            key={section.label ?? `g-${idx}`}
-            className={cn(idx > 0 && "mt-3")}
-          >
+          <div key={section.label ?? `g-${idx}`} className={cn(idx > 0 && "mt-2")}>
             {section.label && !collapsed ? (
-              <p className="mb-1 px-3 text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
+              <p className="mb-1 px-3 text-[10px] font-semibold uppercase tracking-[.13em] text-[var(--ink-4)]">
                 {section.label}
               </p>
             ) : null}
             {section.label && collapsed ? (
-              <div className="mx-2 my-1.5 border-t border-subtle" aria-hidden />
+              <div className="mx-2 my-1.5 border-t border-[var(--hairline)]" aria-hidden />
             ) : null}
-            <ul className="flex flex-col gap-0.5 px-2">
+            <ul className="flex flex-col gap-0.5 px-1.5">
               {section.items.map((item) => {
                 const active =
                   pathname === item.href ||
@@ -102,31 +119,64 @@ export function AppSidebar({
                       title={collapsed ? item.label : undefined}
                       aria-current={active ? "page" : undefined}
                       className={cn(
-                        "group relative flex items-center gap-2.5 rounded-md text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
-                        collapsed ? "justify-center px-2 py-2" : "px-2.5 py-2",
+                        "group relative flex items-center gap-2.5 rounded-[10px] text-[13px] font-medium tracking-tight transition-[background,color] duration-150",
+                        collapsed ? "justify-center px-2 py-2" : "px-2.5 py-1.5",
                         active
-                          ? "bg-brand-500/10 text-brand-300"
-                          : "text-ink-secondary hover:bg-white/[0.04] hover:text-ink-primary"
+                          ? "text-[var(--ink-1)] font-semibold"
+                          : "text-[var(--ink-2)] hover:text-[var(--ink-1)] hover:bg-[var(--chip-bg)]"
                       )}
+                      style={active ? {
+                        background: `linear-gradient(90deg, hsl(${item.hue} / 0.16), transparent)`
+                      } : undefined}
                     >
+                      {/* Left accent bar for active item */}
                       {active && (
                         <span
                           aria-hidden
-                          className="absolute inset-y-1 left-0 w-[2px] rounded-r bg-brand-500"
+                          className="absolute left-0 top-[6px] bottom-[6px] w-[3px] rounded-r-[3px]"
+                          style={{
+                            background: `hsl(${item.hue})`,
+                            boxShadow: `0 0 10px hsl(${item.hue} / 0.8)`
+                          }}
                         />
                       )}
-                      <Icon
-                        size={16}
+                      {/* Colored icon chip */}
+                      <span
                         className={cn(
-                          "shrink-0",
-                          active ? "text-brand-300" : "text-ink-tertiary group-hover:text-ink-primary"
+                          "flex h-[27px] w-[27px] shrink-0 items-center justify-center rounded-[8px] border transition-[background,color,box-shadow] duration-150",
+                          collapsed ? "" : ""
                         )}
-                      />
+                        style={{
+                          background: active
+                            ? `hsl(${item.hue})`
+                            : `hsl(${item.hue} / 0.14)`,
+                          color: active ? "#fff" : `hsl(${item.hue})`,
+                          borderColor: active
+                            ? "transparent"
+                            : `hsl(${item.hue} / 0.22)`,
+                          boxShadow: active
+                            ? `0 0 16px hsl(${item.hue} / 0.55)`
+                            : undefined,
+                        }}
+                        onMouseEnter={(e) => {
+                          if (!active) {
+                            e.currentTarget.style.background = `hsl(${item.hue} / 0.24)`;
+                            e.currentTarget.style.boxShadow = `0 0 14px hsl(${item.hue} / 0.25)`;
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          if (!active) {
+                            e.currentTarget.style.background = `hsl(${item.hue} / 0.14)`;
+                            e.currentTarget.style.boxShadow = "none";
+                          }
+                        }}
+                      >
+                        <Icon size={15} />
+                      </span>
                       {!collapsed && (
                         <span className="truncate">{item.label}</span>
                       )}
                       {collapsed && (
-                        // Tooltip on hover for collapsed state
                         <span
                           role="tooltip"
                           className="pointer-events-none invisible absolute left-full top-1/2 z-50 ml-2 -translate-y-1/2 whitespace-nowrap rounded-md border border-default bg-elevated px-2 py-1 text-xs text-ink-primary shadow-card opacity-0 transition group-hover:visible group-hover:opacity-100"
@@ -144,18 +194,15 @@ export function AppSidebar({
       </nav>
 
       {!collapsed && (
-        <div className="border-t border-subtle px-3 py-2">
-          <p className="font-mono text-[10px] text-ink-tertiary">
-            {APP_VERSION_LABEL}
-          </p>
+        <div className="flex items-center gap-2 border-t border-[var(--hairline)] px-3 py-2.5 text-[11px] text-[var(--ink-4)]">
+          <span className="dot-live" />
+          <span>{APP_VERSION_LABEL}</span>
         </div>
       )}
     </aside>
   );
 }
 
-// Mobile drawer-friendly version of the same nav, rendered inside the header
-// drawer for screens below the lg breakpoint.
 export function SidebarMobileNav({
   canAdmin = false,
   onNavigate,

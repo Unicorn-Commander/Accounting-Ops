@@ -39,7 +39,13 @@ export async function SiteHeader({
     : false;
 
   return (
-    <SiteHeaderClient variant={variant} userBlock={userBlock} canAdmin={canAdmin}>
+    <SiteHeaderClient
+      variant={variant}
+      userBlock={userBlock}
+      canAdmin={canAdmin}
+      workspaceId={ctx?.activeWorkspace?.id}
+      entityId={ctx?.activeEntity?.id ?? ctx?.entities[0]?.id}
+    >
       {ctx && (
         <>
           <WorkspaceSwitcher

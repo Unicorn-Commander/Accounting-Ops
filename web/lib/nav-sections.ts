@@ -1,21 +1,3 @@
-// Single source of truth for app sidebar + mobile drawer navigation.
-//
-// Both `web/components/app-sidebar.tsx` (desktop) and
-// `web/components/site-header-client.tsx` (mobile drawer) import from here.
-// Adding/removing routes should happen in this file only.
-//
-// Each item carries a lucide icon (used by the desktop collapsed-rail) and a
-// human-facing label. Sections labelled `Admin` are gated by `canAdmin`.
-//
-// I15 (Tier-2): groups reorganised from arbitrary buckets to job-based
-// sections: Work, Books, Taxes, Team, Admin. Settings/admin pages are
-// consolidated under one Admin area instead of being scattered across
-// Settings/Reports/etc. Renamed labels:
-//   Agent activity        -> Activity log    (already in Tier-1)
-//   Specialty Rules       -> Rules
-//   CPA Export            -> Handoff
-//   Personal Access Tokens-> MCP Access Tokens
-
 import {
   Activity,
   BarChart3,
@@ -47,6 +29,8 @@ export type NavItem = {
   label: string;
   href: string;
   icon: LucideIcon;
+  /** HSL hue for the colored nav chip — e.g. "265 80% 65%" */
+  hue: string;
 };
 
 export type NavSection = {
@@ -55,84 +39,65 @@ export type NavSection = {
   adminOnly?: boolean;
 };
 
-// Ordered top-to-bottom in the rendered sidebar. Section groups follow the
-// daily user mental model: Work (daily action loop) → Books (the ledger) →
-// Taxes (CPA-facing) → Team (people + permissions) → Admin (system).
 export const NAV_SECTIONS: NavSection[] = [
   {
-    // Daily action loop — Dashboard + Open items + Chat + the approvals queue.
     label: "Work",
     items: [
-      { label: "Dashboard", href: "/dashboard", icon: Home },
-      { label: "Documents", href: "/documents", icon: Upload },
-      { label: "Open items", href: "/open-items", icon: Target },
-      { label: "Chat", href: "/chat", icon: MessageSquare },
-      { label: "Approvals", href: "/approvals", icon: Inbox },
-      { label: "Activity log", href: "/agent-activity", icon: Activity },
+      { label: "Dashboard", href: "/dashboard", icon: Home, hue: "265 80% 65%" },
+      { label: "Documents", href: "/documents", icon: Upload, hue: "200 90% 62%" },
+      { label: "Open items", href: "/open-items", icon: Target, hue: "0 85% 68%" },
+      { label: "Chat", href: "/chat", icon: MessageSquare, hue: "188 90% 56%" },
+      { label: "Approvals", href: "/approvals", icon: Inbox, hue: "43 96% 56%" },
+      { label: "Activity log", href: "/agent-activity", icon: Activity, hue: "157 64% 52%" },
     ],
   },
   {
-    // The bookkeeping surfaces — what you do TO the ledger.
     label: "Books",
     items: [
-      { label: "Transactions", href: "/transactions", icon: Receipt },
-      { label: "Contacts", href: "/contacts", icon: Contact },
-      { label: "Invoices", href: "/invoices", icon: FileCheck2 },
-      { label: "Reconciliation", href: "/reconciliation-queue", icon: ListChecks },
-      { label: "Journal", href: "/journal", icon: BookOpen },
-      { label: "Chart of Accounts", href: "/coa", icon: Database },
-      { label: "Reports", href: "/reports", icon: TrendingUp },
-      { label: "Trial Balance", href: "/reports/trial-balance", icon: BarChart3 },
+      { label: "Transactions", href: "/transactions", icon: Receipt, hue: "220 90% 68%" },
+      { label: "Contacts", href: "/contacts", icon: Contact, hue: "330 80% 70%" },
+      { label: "Invoices", href: "/invoices", icon: FileCheck2, hue: "32 95% 60%" },
+      { label: "Reconciliation", href: "/reconciliation-queue", icon: ListChecks, hue: "175 70% 50%" },
+      { label: "Journal", href: "/journal", icon: BookOpen, hue: "280 75% 70%" },
+      { label: "Chart of Accounts", href: "/coa", icon: Database, hue: "280 65% 65%" },
+      { label: "Reports", href: "/reports", icon: TrendingUp, hue: "150 65% 52%" },
+      { label: "Trial Balance", href: "/reports/trial-balance", icon: BarChart3, hue: "150 60% 55%" },
     ],
   },
   {
-    // Tax surfaces — CPA-facing.
     label: "Taxes",
     items: [
-      { label: "Taxes", href: "/taxes", icon: FileText },
-      // I15: "CPA Export" -> "Handoff" (the route stays /cpa-export so links
-      // keep working).
-      { label: "Handoff", href: "/cpa-export", icon: FileSpreadsheet },
+      { label: "Taxes", href: "/taxes", icon: FileText, hue: "12 85% 63%" },
+      { label: "Handoff", href: "/cpa-export", icon: FileSpreadsheet, hue: "32 80% 55%" },
     ],
   },
   {
-    // People + permissions — managing who's in the workspace.
     label: "Team",
     items: [
-      { label: "Members", href: "/settings/members", icon: Users },
-      { label: "Clients", href: "/clients", icon: Users },
-      // Cross-client CPA work inbox — the actionable companion to /clients.
-      { label: "Work inbox", href: "/clients/inbox", icon: Inbox },
+      { label: "Members", href: "/settings/members", icon: Users, hue: "250 80% 72%" },
+      { label: "Clients", href: "/clients", icon: Users, hue: "250 75% 65%" },
+      { label: "Work inbox", href: "/clients/inbox", icon: Inbox, hue: "0 70% 60%" },
     ],
   },
   {
-    // I15: One consolidated Admin area for all system/owner settings.
-    // Sentinel + Period Close (admin-only) sit alongside Rules + MCP Tokens
-    // so admins find configuration in one place.
     label: "Admin",
     items: [
-      // I15: "Specialty Rules" -> "Rules"
-      { label: "Rules", href: "/specialty-rules", icon: Cog },
-      { label: "Sentinel", href: "/settings/sentinel", icon: ShieldCheck },
-      // I15: "Personal Access Tokens" -> "MCP Access Tokens"
-      { label: "MCP Access Tokens", href: "/settings/pats", icon: Key },
-      { label: "Connectors", href: "/connectors", icon: Plug },
+      { label: "Rules", href: "/specialty-rules", icon: Cog, hue: "210 60% 55%" },
+      { label: "Sentinel", href: "/settings/sentinel", icon: ShieldCheck, hue: "157 55% 50%" },
+      { label: "MCP Access Tokens", href: "/settings/pats", icon: Key, hue: "270 60% 60%" },
+      { label: "Connectors", href: "/connectors", icon: Plug, hue: "188 70% 50%" },
     ],
   },
   {
-    // adminOnly section — gated by canAdmin (owner/client_owner/admin/
-    // platform_admin) in the rendering components. The BYOK inference key +
-    // (coming soon) credit/Claude-subscription billing live here so lower
-    // roles never see the link; the page itself also re-checks the role.
     label: "Admin only",
     adminOnly: true,
     items: [
-      { label: "Inference & billing", href: "/settings/inference", icon: CreditCard },
-      { label: "Period Close", href: "/admin/period-close", icon: ShieldCheck },
+      { label: "Inference & billing", href: "/settings/inference", icon: CreditCard, hue: "157 60% 50%" },
+      { label: "Period Close", href: "/admin/period-close", icon: ShieldCheck, hue: "18 85% 55%" },
     ],
   },
   {
     label: null,
-    items: [{ label: "Help", href: "/help", icon: HelpCircle }],
+    items: [{ label: "Help", href: "/help", icon: HelpCircle, hue: "240 20% 60%" }],
   },
 ];

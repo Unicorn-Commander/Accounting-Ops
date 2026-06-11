@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/cn";
 import {
   AlertCircle,
@@ -7,6 +10,280 @@ import {
   Plug,
   Search,
 } from "lucide-react";
+
+// ---------------------------------------------------------------------------
+// Card — gradient + glass-edge + shadow; lift variant on hover
+// ---------------------------------------------------------------------------
+export function Card({
+  children,
+  className,
+  padded = true,
+  lift = false,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  padded?: boolean;
+  lift?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "card-depth",
+        lift && "lift",
+        padded && "p-4 md:p-6",
+        className
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sparkline — hand-rolled SVG with gradient area fill + line + end dot
+// ---------------------------------------------------------------------------
+export function Sparkline({
+  data,
+  width = 90,
+  height = 32,
+  color,
+}: {
+  data: number[];
+  width?: number;
+  height?: number;
+  color: string;
+}) {
+  const n = data.length;
+  if (n === 0) return null;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const pad = 1;
+  const X = (i: number) => (i / (n - 1)) * width;
+  const Y = (v: number) => height - pad - ((v - min) / range) * (height - pad * 2 - 5);
+
+  function smoothPath(pts: [number, number][]): string {
+    let d = `M ${pts[0][0]},${pts[0][1]}`;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i - 1] || pts[i];
+      const b = pts[i];
+      const c = pts[i + 1];
+      const e = pts[i + 2] || c;
+      d += ` C ${b[0] + (c[0] - a[0]) / 6},${b[1] + (c[1] - a[1]) / 6} ${c[0] - (e[0] - b[0]) / 6},${c[1] - (e[1] - b[1]) / 6} ${c[0]},${c[1]}`;
+    }
+    return d;
+  }
+
+  const pts: [number, number][] = data.map((v, i) => [X(i), Y(v)]);
+  const line = smoothPath(pts);
+  const area = line + ` L ${width},${height} L 0,${height} Z`;
+  const fillId = `sf-${Math.random().toString(36).slice(2, 8)}`;
+
+  return (
+    <svg
+      className="spark"
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      style={{ width, height }}
+    >
+      <defs>
+        <linearGradient id={fillId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.28" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={area} fill={`url(#${fillId})`} />
+      <path d={line} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" />
+      <circle cx={X(n - 1)} cy={Y(data[n - 1])} r="2.4" fill={color} />
+    </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// KpiCard — big tabular-nums value with count-up on mount, delta chip, sparkline
+// ---------------------------------------------------------------------------
+function useCountUp(target: number, duration = 900) {
+  const ref = useRef<HTMLDivElement>(null);
+  const animated = useRef(false);
+
+  useEffect(() => {
+    if (animated.current) return;
+    animated.current = true;
+    const node = ref.current;
+    if (!node) return;
+
+    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReduced) {
+      node.textContent = formatNumber(target);
+      return;
+    }
+
+    const t0 = performance.now();
+    function tick(t: number) {
+      const k = Math.min(1, (t - t0) / duration);
+      const ease = 1 - Math.pow(1 - k, 3);
+      if (node) node.textContent = formatNumber(target * ease);
+      if (k < 1) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }, [target, duration]);
+
+  return ref;
+}
+
+function formatNumber(v: number): string {
+  return v.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+export function KpiCard({
+  label,
+  value,
+  delta,
+  deltaTone = "ink",
+  sparklineData,
+  sparklineColor,
+  prefix = "$",
+  targetValue,
+  onClick,
+}: {
+  label: string;
+  value: string;
+  delta?: string;
+  deltaTone?: "credit" | "debit" | "pending" | "ink";
+  sparklineData?: number[];
+  sparklineColor?: string;
+  prefix?: string;
+  targetValue?: number;
+  onClick?: () => void;
+}) {
+  const deltaMap: Record<string, string> = {
+    credit: "text-credit",
+    debit: "text-debit",
+    pending: "text-pending",
+    ink: "text-ink-tertiary",
+  };
+
+  const countUpRef = targetValue !== undefined ? useCountUp(targetValue) : undefined;
+
+  return (
+    <div className="card-depth kpi cursor-pointer" onClick={onClick}>
+      <div className="lbl">{label}</div>
+      <div className="v num" ref={countUpRef}>
+        {countUpRef ? `${prefix}0.00` : value}
+      </div>
+      <div className="meta">
+        {delta ? (
+          <span className={cn("d", deltaTone === "credit" ? "up" : deltaTone === "debit" ? "down" : "flat")}>
+            {deltaTone === "debit" ? "▼" : "▲"} {delta.replace(/^[+\-▲▼]/, "")}
+          </span>
+        ) : (
+          <span />
+        )}
+        {sparklineData && sparklineColor ? (
+          <Sparkline data={sparklineData} color={sparklineColor} />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ConfidenceRing — conic-gradient ring with % label and "conf" caption
+// ---------------------------------------------------------------------------
+export function ConfidenceRing({
+  value,
+  size = 40,
+  color,
+}: {
+  value: number;
+  size?: number;
+  color?: string;
+}) {
+  const p = Math.round(value);
+  const c =
+    color ??
+    (p >= 90
+      ? "var(--credit)"
+      : p >= 70
+        ? "var(--pending)"
+        : "var(--debit)");
+  const s = { "--p": p, "--c": c } as React.CSSProperties;
+  return (
+    <div
+      className="ring"
+      style={{ ...s, width: size, height: size }}
+    >
+      <span>{p}</span>
+      <small>conf</small>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// StatusBadge — appr | await | block | think
+// ---------------------------------------------------------------------------
+const STATUS_MAP: Record<string, { label: string; cls: string }> = {
+  appr: { label: "auto-approved", cls: "status appr" },
+  await: { label: "needs you", cls: "status await" },
+  block: { label: "blocked", cls: "status block" },
+  think: { label: "thinking", cls: "status think" },
+};
+
+export function StatusBadge({
+  variant,
+}: {
+  variant: "appr" | "await" | "block" | "think";
+}) {
+  const s = STATUS_MAP[variant];
+  return <span className={s.cls}>{s.label}</span>;
+}
+
+// ---------------------------------------------------------------------------
+// Odometer — animates a number old→new, cubic ease ~1.1s
+// ---------------------------------------------------------------------------
+export function Odometer({
+  from,
+  to,
+  prefix = "$",
+  duration = 1100,
+}: {
+  from: number;
+  to: number;
+  prefix?: string;
+  duration?: number;
+}) {
+  const ref = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+
+    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReduced) {
+      node.textContent = prefix + formatNumber(to);
+      return;
+    }
+
+    const t0 = performance.now();
+    function tick(t: number) {
+      const k = Math.min(1, (t - t0) / duration);
+      const ease = 1 - Math.pow(1 - k, 3);
+      const current = from + (to - from) * ease;
+      if (node) node.textContent = prefix + formatNumber(current);
+      if (k < 1) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }, [from, to, prefix, duration]);
+
+  return <span ref={ref} className="num">{prefix}{formatNumber(from)}</span>;
+}
+
+// ---------------------------------------------------------------------------
+// Original primitives below — kept as-is for backward compat
+// ---------------------------------------------------------------------------
 
 export function StatusChip({
   tone,
@@ -73,32 +350,6 @@ export function ConfidenceDot({ value }: { value: number }) {
   );
 }
 
-export function KpiCard({
-  label,
-  value,
-  delta,
-  deltaTone = "ink"
-}: {
-  label: string;
-  value: string;
-  delta?: string;
-  deltaTone?: "credit" | "debit" | "pending" | "ink";
-}) {
-  const deltaMap: Record<string, string> = {
-    credit: "text-credit",
-    debit: "text-debit",
-    pending: "text-pending",
-    ink: "text-ink-tertiary"
-  };
-  return (
-    <div className="rounded-lg border border-default bg-surface p-4 md:p-6 transition hover:border-strong">
-      <p className="text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">{label}</p>
-      <p className="mt-2 md:mt-3 font-mono text-numeric-lg text-ink-primary break-all">{value}</p>
-      {delta ? <p className={cn("mt-1 text-xs md:text-sm", deltaMap[deltaTone])}>{delta}</p> : null}
-    </div>
-  );
-}
-
 export function SectionHeader({
   title,
   subtitle,
@@ -124,58 +375,17 @@ export function SectionHeader({
   );
 }
 
-export function Card({
-  children,
-  className,
-  padded = true
-}: {
-  children: React.ReactNode;
-  className?: string;
-  padded?: boolean;
-}) {
-  return (
-    <div
-      className={cn(
-        // I19: 8px corner radius for cards (rounded-lg = 0.5rem = 8px)
-        "rounded-lg border border-default bg-surface",
-        padded && "p-4 md:p-6",
-        className
-      )}
-    >
-      {children}
-    </div>
-  );
-}
-
 export function PageShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mx-auto w-full max-w-7xl px-4 py-5 md:px-6 md:py-8">
+    <div className="relative z-10 mx-auto w-full max-w-7xl px-4 py-5 md:px-6 md:py-8">
       {children}
     </div>
   );
 }
 
 // ----------------------------------------------------------------------------
-// Empty / Error / Skeleton primitives (Tier-2 audit H9/H10)
+// Empty / Error / Skeleton primitives (unchanged)
 // ----------------------------------------------------------------------------
-//
-// EmptyState
-//   Shared empty-state UX. Differentiates between four meaningful "nothing
-//   to show" cases so the copy + CTAs match the actual situation:
-//
-//     not-connected   — service prerequisite missing (e.g. "Connect a bank")
-//     no-data         — service is healthy but has no rows yet
-//     filtered-empty  — the user's filter excludes every row
-//     permission-denied — the user is here but lacks the role to see content
-//
-// ErrorState
-//   Shared error-state UX. Surface short user-safe copy + a recovery action,
-//   with technicalDetails hidden inside a collapsed "Details" disclosure
-//   for admins/developers.
-//
-// RouteSkeleton
-//   Per-page loading skeleton variants. Used by `loading.tsx` Suspense
-//   boundaries and inside server components while data is in-flight.
 
 export type EmptyStateVariant =
   | "not-connected"
@@ -215,7 +425,6 @@ export function EmptyState({
   return (
     <div
       className={cn(
-        // 8px radius matches updated Card primitive (I19)
         "rounded-lg border border-default bg-surface px-5 py-10 text-center",
         className
       )}
@@ -254,8 +463,6 @@ export function ErrorState({
   title: string;
   description?: React.ReactNode;
   recoveryAction?: React.ReactNode;
-  /** Hidden behind an admin-only Details disclosure. Use for HTTP codes,
-   *  Docker commands, make targets, etc. Should NOT be visible to founders. */
   technicalDetails?: React.ReactNode;
   className?: string;
   variant?: "default" | "warning";
@@ -299,20 +506,8 @@ export function ErrorState({
 }
 
 // ----------------------------------------------------------------------------
-// RouteSkeleton — per-page-shape skeleton variants
+// RouteSkeleton
 // ----------------------------------------------------------------------------
-//
-// Variants:
-//   dashboard  — header row + 4-up KPI grid + main + side rail
-//   table      — header row + filter strip + dense table rows
-//   narrative  — banner + body paragraphs + companion list
-//   chat       — sidebar shell + message list + composer
-//   coa        — header + grouped account rows
-//   reports    — header + tab pills + dense rows
-//   default    — title + cards stub
-//
-// All skeletons use animate-pulse on neutral surfaces; explicit aria-busy
-// so screen readers announce the loading state.
 
 export type RouteSkeletonVariant =
   | "dashboard"
@@ -362,7 +557,6 @@ export function RouteSkeleton({
   label,
 }: {
   variant?: RouteSkeletonVariant;
-  /** Accessible label announced by screen readers (e.g. "Loading dashboard"). */
   label?: string;
 }) {
   const screenLabel = label ?? `Loading ${variant}`;
