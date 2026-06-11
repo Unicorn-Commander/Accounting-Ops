@@ -8,9 +8,11 @@ surface.
 
 **Anchor**: *Your books. Your machine. Your rules.*
 
-**Production**: https://accounting-ops.magicunicorn.dev
+**Production (customer SaaS)**: https://accounting-ops.unicorncommander.ai (host: centerdeep)
+**Dogfood / internal**: https://accounting-ops.magicunicorn.dev (host: midboy1)
+**Self-service onboarding**: new users land on `/welcome` → provision their own workspace → Setup Assistant (entity → chart of accounts → connect bank)
 **Project-Ops record**: P-00050
-**Host**: midboy1
+**Standup runbook**: `docs/PROD-RING-RUNBOOK.md`
 
 ---
 
