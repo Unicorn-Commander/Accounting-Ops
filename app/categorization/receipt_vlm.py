@@ -32,17 +32,26 @@ Structured extraction (``extract_structured``):
     single missing component. The model is kept as a PURE TRANSCRIBER — it NEVER
     computes or infers totals.
 
-Planned Tier-2 accuracy upgrade (NOT implemented here):
-    A dedicated layout-grounded OCR model — PaddleOCR-VL 1.6 or dots.ocr via
-    vLLM (~8 GB, fits the 3090) — acting as a bbox cross-check oracle. It pairs
-    labels ↔ right-column amounts by y-band/x-position and majority-votes the
-    dollar fields against the VLM transcript. This is the correct fix for
-    right-aligned price column misreads; see docs/PHASE-2-RECEIPT-VLM-PIPELINE.md.
+Tier-2 bbox-oracle cross-check (implemented — see ``_call_bbox_oracle``,
+``_geometric_row_amounts``, ``_bbox_cross_check``):
+    A dedicated traditional-OCR service (bbox-oracle at OCR_BBOX_SERVICE_URL,
+    default http://100.126.207.157:8097) acts as the geometric cross-check tier.
+    It POSTs the raw image bytes (multipart) and returns per-line bounding boxes.
+    ``_geometric_row_amounts`` clusters lines into y-bands, identifies the
+    right-most numeric token per row as the amount, and builds a label→amount map.
+    ``_bbox_cross_check`` then recovers null VLM fields from that map (provenance
+    "recovered_from_bbox") and flags disagreements >1 cent as "disputed".  This
+    is the correct fix for right-aligned price-column misreads by the VLM.
+    The cross-check is fully graceful: if the oracle is unreachable the pipeline
+    returns the VLM-only result unmodified (never raises, never blocks).
+    Disable by setting OCR_BBOX_SERVICE_URL="" in the environment.
 """
 from __future__ import annotations
 
 import base64
 import json
+import logging
+import re
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -51,6 +60,8 @@ from typing import Any, Literal
 import httpx
 
 from app.config import Settings, get_settings
+
+_log = logging.getLogger(__name__)
 
 # MIME types we will actually send to the VLM as an image. A PDF or CSV is NOT
 # an image the VLM can read here (PDF→image rasterization is Phase-2 / out of
@@ -447,6 +458,57 @@ class ReceiptVLMExtractor:
             total=total,
             confidence=confidence,
         )
+
+        # --- Tier-2: bbox-oracle cross-check ---
+        # Call the bbox-oracle in parallel with (already complete) VLM parse.
+        # If the URL is empty or the service is down, oracle_lines is [] and
+        # the cross-check is a no-op.  NEVER raises; NEVER blocks on failure.
+        oracle_lines = await _call_bbox_oracle(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            service_url=settings.ocr_bbox_service_url,
+        )
+        bbox_amounts = _geometric_row_amounts(oracle_lines)
+
+        if bbox_amounts:
+            # Cross-check / recover / dispute against oracle amounts.
+            xc = _bbox_cross_check(
+                vlm_result=validated,
+                bbox_amounts=bbox_amounts,
+                line_items=line_items,
+            )
+            # Use recovered line items if any were fixed.
+            line_items = xc.pop("_recovered_line_items", line_items)
+            validated = xc
+            # Re-run arithmetic with recovered values (oracle may have filled
+            # a null that now makes the equation solvable).
+            validated2 = _validate_arithmetic(
+                line_items=line_items,
+                subtotal=validated.get("subtotal"),
+                tax=validated.get("tax"),
+                tip=validated.get("tip"),
+                discount=validated.get("discount"),
+                total=validated.get("total"),
+                confidence=validated.get("confidence", confidence),
+            )
+            # Merge: keep cross-check provenance annotations over the fresh
+            # arithmetic pass's provenance (the dispute/recover marks are
+            # authoritative; the arithmetic pass only sees "extracted"/"missing").
+            merged_prov = {**validated2["provenance"], **validated["provenance"]}
+            # But if arithmetic now says "ok" or "repaired", reset any field
+            # that was marked "extracted" in the xc pass back to the arithmetic
+            # pass's verdict (e.g. "repaired") without clobbering dispute marks.
+            for fname in ("subtotal", "tax", "tip", "discount", "total"):
+                if validated["provenance"].get(fname) in ("extracted", "missing"):
+                    merged_prov[fname] = validated2["provenance"].get(fname, "missing")
+            validated2["provenance"] = merged_prov
+            # Preserve cross-check notes (prepend so they're visible).
+            xc_notes = [n for n in validated.get("notes", []) if "bbox-oracle" in n or "disputed" in n]
+            validated2["notes"] = xc_notes + [n for n in validated2["notes"] if n not in xc_notes]
+            # Honour confidence downgrade from dispute (arithmetic pass resets to input conf).
+            if validated.get("confidence", confidence) < validated2.get("confidence", confidence):
+                validated2["confidence"] = validated["confidence"]
+            validated = validated2
 
         # The canonical amount callers rely on is the validated total.
         final_amount = validated["total"]
@@ -947,6 +1009,293 @@ def _parse_structured_receipt_json(
     return vendor, date, currency, line_items, subtotal, tax, tip, discount, total, confidence
 
 
+# --------------------------------------------------------------------------- #
+# Tier-2 bbox-oracle: client + geometric reconcile + cross-check
+# --------------------------------------------------------------------------- #
+
+# Regex for a bare numeric token that looks like a price (digits, optional dot,
+# up to 2 decimal places).  Tolerates a leading currency symbol.
+_PRICE_RE = re.compile(r"^[\$£€¥]?(\d{1,6}(?:\.\d{1,2})?)$")
+
+# Fraction of image width that defines the "right column" for amount extraction.
+# Tokens whose left x-edge is beyond this fraction are considered right-side.
+_RIGHT_COLUMN_X_FRACTION = 0.55
+
+# Maximum vertical gap (in pixels) between two bbox midpoints to be considered
+# the same row.  Receipts vary in font size; 20 px is conservative and covers
+# even large-font line totals.
+_ROW_BAND_PX = 20
+
+
+async def _call_bbox_oracle(
+    *,
+    image_bytes: bytes,
+    mime_type: str,
+    service_url: str,
+    timeout_s: int = 10,
+) -> list[dict[str, Any]]:
+    """POST image bytes to the bbox-oracle service; return parsed ``lines``.
+
+    Returns an empty list on ANY failure (timeout, HTTP error, bad JSON,
+    missing ``lines`` key, service URL empty/disabled).  NEVER raises.
+    The caller treats an empty return as "oracle unavailable" and proceeds
+    with the VLM-only result.
+
+    Args:
+        image_bytes: Raw image data (PNG or JPEG).
+        mime_type: MIME type string, used as the multipart content-type.
+        service_url: Base URL for the bbox-oracle (e.g. "http://host:8097").
+            Empty string disables the call entirely.
+        timeout_s: HTTP timeout in seconds.
+
+    Returns:
+        List of line dicts: ``[{"text": str, "bbox": [x1,y1,x2,y2],
+        "score": float}, ...]``.  May be empty.
+    """
+    if not service_url or not image_bytes:
+        return []
+    url = service_url.rstrip("/") + "/ocr"
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            resp = await client.post(
+                url,
+                files={"file": (f"receipt.{mime_type.split('/')[-1]}", image_bytes, mime_type)},
+            )
+            resp.raise_for_status()
+        data = resp.json()
+        lines = data.get("lines")
+        if isinstance(lines, list):
+            return lines
+        return []
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("bbox-oracle unavailable (%s: %s) — skipping cross-check", type(exc).__name__, exc)
+        return []
+
+
+def _geometric_row_amounts(
+    lines: list[dict[str, Any]],
+    *,
+    row_band_px: int = _ROW_BAND_PX,
+    right_column_fraction: float = _RIGHT_COLUMN_X_FRACTION,
+) -> dict[str, str]:
+    """Cluster bbox lines into rows; extract right-column amounts per row.
+
+    Algorithm (deterministic geometry — no model):
+    1. For each bbox line, compute the vertical midpoint (y_mid = (y1+y2)/2).
+    2. Cluster lines by y_mid using a greedy band: if a line's y_mid is within
+       ``row_band_px`` of the current band centre, merge into that band;
+       otherwise start a new band.
+    3. Within each band, find the image width by scanning all bboxes for the
+       maximum x2 coordinate.  Tokens whose left edge (x1) is beyond
+       ``right_column_fraction`` of that width are "right-side".
+    4. Among right-side tokens, keep only those whose text matches ``_PRICE_RE``
+       (looks like a bare price).  Pick the rightmost one (highest x2) as the
+       row's amount.
+    5. The row label is formed by joining the text of all LEFT-side tokens in
+       that row (x1 < right_column_fraction × width), lower-cased and stripped.
+       If a row has no label tokens, we still record the amount under the key
+       ``"row_{band_index}"``.
+
+    Returns:
+        ``{label: amount_decimal_string}`` — e.g.
+        ``{"total": "11.34", "tax": "0.84", "sandwich": "8.50"}``.
+        Empty dict if ``lines`` is empty or no numeric right-column tokens found.
+    """
+    if not lines:
+        return {}
+
+    # Step 1 + 2: build bands sorted by y position.
+    # Each entry: {"y_mid": float, "items": [line_dict, ...]}
+    bands: list[dict[str, Any]] = []
+    for line in lines:
+        bbox = line.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+        try:
+            x1, y1, x2, y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+        except (TypeError, ValueError):
+            continue
+        y_mid = (y1 + y2) / 2.0
+        # Try to merge into an existing band.
+        merged = False
+        for band in bands:
+            if abs(y_mid - band["y_mid"]) < row_band_px:
+                band["items"].append({"line": line, "x1": x1, "x2": x2})
+                # Re-centre the band on the running average y_mid.
+                old_n = len(band["items"]) - 1
+                band["y_mid"] = (band["y_mid"] * old_n + y_mid) / len(band["items"])
+                merged = True
+                break
+        if not merged:
+            bands.append({"y_mid": y_mid, "items": [{"line": line, "x1": x1, "x2": x2}]})
+
+    if not bands:
+        return {}
+
+    # Step 3: determine image width from the maximum x2 across ALL lines.
+    all_x2 = [it["x2"] for band in bands for it in band["items"]]
+    img_width = max(all_x2) if all_x2 else 1.0
+    right_threshold = img_width * right_column_fraction
+
+    # Steps 4 + 5: extract label + amount per band.
+    result: dict[str, str] = {}
+    for band_idx, band in enumerate(sorted(bands, key=lambda b: b["y_mid"])):
+        left_texts: list[tuple[float, str]] = []   # (x1, text)
+        right_prices: list[tuple[float, str]] = []  # (x2, amount_str)
+
+        for it in band["items"]:
+            text = it["line"].get("text", "").strip()
+            if not text:
+                continue
+            if it["x1"] >= right_threshold:
+                # Right-side: check if it looks like a price.
+                m = _PRICE_RE.match(text)
+                if m:
+                    amt = _normalize_amount(m.group(1))
+                    if amt is not None:
+                        right_prices.append((it["x2"], amt))
+            else:
+                left_texts.append((it["x1"], text))
+
+        if not right_prices:
+            continue  # No numeric right-side token in this row.
+
+        # Pick the rightmost price token.
+        right_prices.sort(key=lambda t: t[0], reverse=True)
+        row_amount = right_prices[0][1]
+
+        # Build label from left-side tokens sorted by x1 (reading order).
+        left_texts.sort(key=lambda t: t[0])
+        label = " ".join(t[1] for t in left_texts).lower().strip()
+        if not label:
+            label = f"row_{band_idx}"
+
+        result[label] = row_amount
+
+    return result
+
+
+def _bbox_cross_check(
+    *,
+    vlm_result: dict[str, Any],
+    bbox_amounts: dict[str, str],
+    line_items: list[LineItem],
+) -> dict[str, Any]:
+    """Cross-check VLM money fields against bbox-oracle geometric amounts.
+
+    For each of the top-level money fields (subtotal, tax, tip, discount, total)
+    and each line-item amount that is null or fails reconciliation:
+
+    1. **Recovery:** if the VLM field is ``None`` and the bbox-oracle map contains
+       a matching label (fuzzy: the field name appears anywhere in the label), set
+       the field to the bbox value and mark provenance ``"recovered_from_bbox"``.
+       Recovery is also attempted for line-item amounts via description matching.
+
+    2. **Agreement boost:** if both VLM and bbox agree within ±1 cent, no change
+       needed — the existing provenance stays (the arithmetic pass will mark "ok").
+
+    3. **Dispute:** if both VLM and bbox have a value and they disagree by more
+       than 1 cent, mark provenance as ``"disputed"`` and downgrade confidence by
+       ``_ARITHMETIC_MISMATCH_PENALTY``.  NEVER silently pick one value.
+
+    The function mutates a copy of ``vlm_result`` (a dict with the same keys as
+    ``_validate_arithmetic`` output) and returns the updated copy.
+
+    ``bbox_amounts`` is the output of ``_geometric_row_amounts``.  Empty dict
+    means the oracle produced nothing useful — function returns ``vlm_result``
+    unchanged.
+
+    The caller should re-run ``_validate_arithmetic`` after this function to
+    refresh ``arithmetic`` status with any recovered values.
+    """
+    if not bbox_amounts:
+        return vlm_result
+
+    out = dict(vlm_result)
+    prov: dict[str, str] = dict(out.get("provenance", {}))
+    notes: list[str] = list(out.get("notes", []))
+    confidence: float = out.get("confidence", 0.5)
+    line_items_out: list[LineItem] = list(line_items)
+
+    def _find_bbox_value(field_name: str) -> str | None:
+        """Return the bbox-oracle amount for the best label match, or None.
+
+        Matches on word boundaries to avoid "subtotal" matching the "total"
+        field (or "tip" matching "subtip", etc.).  Checks:
+        1. Exact label match.
+        2. Field name appears as a whole word within the label (split on spaces).
+        """
+        label_words_map = {label: set(label.split()) for label in bbox_amounts}
+        # 1. Exact match (highest priority).
+        if field_name in bbox_amounts:
+            return bbox_amounts[field_name]
+        # 2. Field name is a whole word within the label.
+        for label, words in label_words_map.items():
+            if field_name in words:
+                return bbox_amounts[label]
+        return None
+
+    def _within_1cent(a: str | None, b: str | None) -> bool:
+        if a is None or b is None:
+            return False
+        ca, cb = _to_cents(a), _to_cents(b)
+        if ca is None or cb is None:
+            return False
+        return abs(ca - cb) <= 1
+
+    # Top-level money fields to cross-check.
+    for field_name in ("subtotal", "tax", "tip", "discount", "total"):
+        vlm_val: str | None = out.get(field_name)
+        bbox_val = _find_bbox_value(field_name)
+        if bbox_val is None:
+            continue  # oracle has nothing for this field
+
+        if vlm_val is None:
+            # Recovery: VLM missed it; oracle has it.
+            out[field_name] = bbox_val
+            prov[field_name] = "recovered_from_bbox"
+            notes.append(f"recovered {field_name}={bbox_val} from bbox-oracle")
+        elif _within_1cent(vlm_val, bbox_val):
+            # Agreement — do nothing (provenance stays "extracted").
+            pass
+        else:
+            # Disagreement > 1 cent → dispute.
+            if prov.get(field_name) != "disputed":
+                prov[field_name] = "disputed"
+                confidence = max(0.0, confidence - _ARITHMETIC_MISMATCH_PENALTY)
+                notes.append(
+                    f"disputed {field_name}: VLM={vlm_val} vs bbox-oracle={bbox_val}"
+                )
+
+    # Line-item recovery: for each line item with a null amount, try to match
+    # its description against bbox row labels.
+    recovered_items: list[LineItem] = []
+    for li in line_items_out:
+        if li.amount is not None:
+            recovered_items.append(li)
+            continue
+        desc_lower = li.description.lower()
+        match_val: str | None = None
+        for label, amt in bbox_amounts.items():
+            # Match if any word of the description appears in the label or vice versa.
+            desc_words = set(desc_lower.split())
+            label_words = set(label.split())
+            if desc_words & label_words:
+                match_val = amt
+                break
+        if match_val is not None:
+            recovered_items.append(LineItem(description=li.description, amount=match_val))
+            notes.append(f"recovered line item '{li.description}' amount={match_val} from bbox-oracle")
+        else:
+            recovered_items.append(li)
+
+    out["provenance"] = prov
+    out["notes"] = notes
+    out["confidence"] = confidence
+    out["_recovered_line_items"] = recovered_items
+    return out
+
+
 __all__ = (
     "ReceiptVLMExtractor",
     "ReceiptExtraction",
@@ -960,4 +1309,7 @@ __all__ = (
     "_from_cents",
     "_validate_arithmetic",
     "_tier_for",
+    "_call_bbox_oracle",
+    "_geometric_row_amounts",
+    "_bbox_cross_check",
 )
