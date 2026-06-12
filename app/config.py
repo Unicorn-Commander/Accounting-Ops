@@ -97,6 +97,22 @@ class Settings(BaseModel):
     llm_api_key: str = ""          # blank = local/no-auth; set in env for cloud
     llm_timeout_s: int = 30
 
+    # ---- bbox-oracle (traditional OCR cross-check) ----
+    # URL of the bbox-oracle service.  POST {url}/ocr with multipart field "file"
+    # (PNG/JPG) → {"text": "...", "lines": [{"text", "bbox", "score"}, ...]}.
+    #
+    # Two deployment modes (both env-overridable via OCR_BBOX_SERVICE_URL):
+    #
+    #   STANDALONE (default) — direct to the live bbox-oracle on bigboy:
+    #     OCR_BBOX_SERVICE_URL = http://100.126.207.157:8097
+    #
+    #   SUITE / GATEWAY — point at whatever host exposes the oracle internally.
+    #     OCR_BBOX_SERVICE_URL = http://ocr-oracle.internal:8097
+    #
+    # Set to an empty string ("") to disable the cross-check tier entirely; the
+    # VLM-only result is returned without the geometric reconcile pass.
+    ocr_bbox_service_url: str = "http://100.126.207.157:8097"
+
     # ---- CPA Export service ----
     # URL of the accounting-ops-cpa-export sidecar. Defaults to the docker DNS
     # name used in the compose stack; override with CPA_EXPORT_URL in production.
@@ -204,6 +220,7 @@ def get_settings() -> Settings:
         llm_api_key=os.getenv("LLM_API_KEY", defaults.llm_api_key),
         llm_timeout_s=int(os.getenv("LLM_TIMEOUT_S", str(defaults.llm_timeout_s))),
         llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", str(defaults.llm_max_tokens))),
+        ocr_bbox_service_url=os.getenv("OCR_BBOX_SERVICE_URL", defaults.ocr_bbox_service_url),
         cpa_export_url=os.getenv("CPA_EXPORT_URL", defaults.cpa_export_url),
         llm_gateway_base_url=os.getenv(
             "LLM_GATEWAY_BASE_URL", defaults.llm_gateway_base_url
