@@ -72,16 +72,28 @@ class Settings(BaseModel):
     default_workspace_id: str | None = None
     default_entity_id: str | None = None
 
-    # ---- LLM Categorizer (Tier-2 fallback) ----
+    # ---- LLM Categorizer / Receipt-VLM ----
     # All fields are env-only — no API key ever in code.
     #
-    # The endpoint is OpenAI-compatible (/v1/chat/completions). Point at:
-    #   - Local Ollama / llama.cpp / vLLM (no key needed, llm_api_key="")
-    #   - OpenRouter / OpenAI / Anthropic proxy (set LLM_API_KEY in the environment)
+    # Two deployment modes (both env-overridable via LLM_ENDPOINT_URL / LLM_MODEL /
+    # LLM_API_KEY):
     #
-    # Default targets the local Qwen3.6-35B on midboy1's P40 GPU pair.
+    #   STANDALONE (default) — direct to the local llama.cpp / vLLM server:
+    #     LLM_ENDPOINT_URL = http://100.121.80.175:8088/v1   (midboy1)
+    #     LLM_MODEL        = Qwen3.6-35B-A3B-Vision-p40      (P40 backend — image-safe)
+    #     LLM_API_KEY      = (blank — no auth on local server)
+    #
+    #   SUITE / GATEWAY — through the UC LiteLLM gateway (load-balances P40+3090,
+    #     no-think default, per-org metering):
+    #     LLM_ENDPOINT_URL = http://<gateway-host>:4000/v1
+    #     LLM_MODEL        = qwen3.6-vision
+    #     LLM_API_KEY      = <virtual-key>
+    #
+    # ⚠️  Do NOT default to "Qwen3.6-35B-A3B-Vision" (the RTX-6000 alias): it
+    # OOM-crashes on image input and returns 502. The P40 alias below is the safe
+    # standalone default for receipt OCR. Override via LLM_MODEL for the gateway.
     llm_endpoint_url: str = "http://100.121.80.175:8088/v1"
-    llm_model: str = "Qwen3.6-35B-A3B-Vision"
+    llm_model: str = "Qwen3.6-35B-A3B-Vision-p40"
     llm_api_key: str = ""          # blank = local/no-auth; set in env for cloud
     llm_timeout_s: int = 30
 

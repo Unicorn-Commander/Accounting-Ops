@@ -14,6 +14,14 @@ All inputs SYNTHETIC. No real network — httpx is intercepted by MockTransport
   9. Amount normalization (currency symbols, commas, negatives, junk).
  10. Date normalization (ISO only; slashes/datetimes rejected).
  11. Non-image mime is declined without a model call.
+
+Validator unit tests (all deterministic, no model call):
+ 12. Clean reconcile → arithmetic='ok', confidence unchanged.
+ 13. Single missing component (tax) → auto-repair, arithmetic='repaired'.
+ 14. All present but mismatch → arithmetic='mismatch', confidence downgraded.
+ 15. Missing total but all other components present → total repaired.
+ 16. extract_structured happy path — mock model, check structured fields.
+ 17. Integer-cents helpers (_to_cents / _from_cents).
 """
 from __future__ import annotations
 
@@ -24,11 +32,15 @@ import httpx
 import pytest
 
 from app.categorization.receipt_vlm import (
+    LineItem,
     ReceiptVLMExtractor,
+    _from_cents,
     _normalize_amount,
     _normalize_date,
     _parse_receipt_json,
     _tier_for,
+    _to_cents,
+    _validate_arithmetic,
 )
 from app.config import Settings
 
@@ -202,3 +214,317 @@ def test_tier_for():
     assert _tier_for(vendor="V", amount="1.00", date="2026-01-01", confidence=0.3) == "low"
     assert _tier_for(vendor="V", amount=None, date=None, confidence=0.9) == "low"
     assert _tier_for(vendor=None, amount=None, date=None, confidence=0.9) == "none"
+
+
+# --------------------------------------------------------------------------- #
+# Integer-cents helpers
+# --------------------------------------------------------------------------- #
+
+
+def test_to_cents_basic():
+    assert _to_cents("12.50") == 1250
+    assert _to_cents("0.99") == 99
+    assert _to_cents("100.00") == 10000
+    assert _to_cents("0.00") == 0
+    assert _to_cents(None) is None
+    assert _to_cents("-1.00") is None  # negatives rejected
+    assert _to_cents("not-a-number") is None
+
+
+def test_to_cents_sub_cent_rounds():
+    # A VLM might return an extra decimal; round to nearest cent.
+    assert _to_cents("12.505") == 1251  # rounds up
+    assert _to_cents("12.504") == 1250  # rounds down
+
+
+def test_from_cents():
+    assert _from_cents(1250) == "12.50"
+    assert _from_cents(99) == "0.99"
+    assert _from_cents(10000) == "100.00"
+    assert _from_cents(0) == "0.00"
+    assert _from_cents(5) == "0.05"
+
+
+# --------------------------------------------------------------------------- #
+# Validator: clean reconcile
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_arithmetic_ok():
+    """line_items + tax + tip − discount == total → arithmetic='ok'."""
+    items = [LineItem("Coffee", "3.00"), LineItem("Muffin", "2.50")]
+    result = _validate_arithmetic(
+        line_items=items,
+        subtotal="5.50",
+        tax="0.44",
+        tip=None,
+        discount=None,
+        total="5.94",
+        confidence=0.85,
+    )
+    assert result["arithmetic"] == "ok"
+    assert result["confidence"] == 0.85  # unchanged
+    assert result["total"] == "5.94"
+    assert result["provenance"]["total"] == "extracted"
+    assert result["provenance"]["tax"] == "extracted"
+
+
+def test_validate_arithmetic_ok_with_tip_and_discount():
+    """subtotal=10.00, tax=0.80, tip=2.00, discount=1.00, total=11.80."""
+    result = _validate_arithmetic(
+        line_items=[],
+        subtotal="10.00",
+        tax="0.80",
+        tip="2.00",
+        discount="1.00",
+        total="11.80",
+        confidence=0.9,
+    )
+    assert result["arithmetic"] == "ok"
+    assert result["total"] == "11.80"
+
+
+# --------------------------------------------------------------------------- #
+# Validator: single-missing auto-repair
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_arithmetic_repair_tax():
+    """Tax is null; total − subtotal = tax. Validator should solve it."""
+    # subtotal=10.00, tax=?, tip=None, discount=None, total=10.80
+    # → tax = 10.80 − 10.00 = 0.80
+    items = [LineItem("Widget", "10.00")]
+    result = _validate_arithmetic(
+        line_items=items,
+        subtotal=None,
+        tax=None,
+        tip=None,
+        discount=None,
+        total="10.80",
+        confidence=0.75,
+    )
+    assert result["arithmetic"] == "repaired"
+    assert result["tax"] == "0.80"
+    assert result["provenance"]["tax"] == "repaired"
+    assert result["total"] == "10.80"
+    # Confidence should be nudged UP (or at least not downgraded).
+    assert result["confidence"] >= 0.75
+
+
+def test_validate_arithmetic_repair_missing_total():
+    """Total absent; compute from base + tax."""
+    result = _validate_arithmetic(
+        line_items=[],
+        subtotal="20.00",
+        tax="1.60",
+        tip=None,
+        discount=None,
+        total=None,
+        confidence=0.8,
+    )
+    assert result["arithmetic"] == "repaired"
+    assert result["total"] == "21.60"
+    assert result["provenance"]["total"] == "repaired"
+
+
+def test_validate_arithmetic_repair_discount():
+    """Discount is null; solver finds: discount = base + tax − total."""
+    # base=10.00, tax=0.80, discount=?, total=9.80
+    # discount = 10.00 + 0.80 − 9.80 = 1.00
+    result = _validate_arithmetic(
+        line_items=[],
+        subtotal="10.00",
+        tax="0.80",
+        tip=None,
+        discount=None,
+        total="9.80",
+        confidence=0.7,
+    )
+    assert result["arithmetic"] == "repaired"
+    assert result["discount"] == "1.00"
+    assert result["provenance"]["discount"] == "repaired"
+
+
+# --------------------------------------------------------------------------- #
+# Validator: all-present mismatch → flag, downgrade confidence
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_arithmetic_mismatch():
+    """VLM hallucinated a total that doesn't match the components."""
+    # base=10.00, tax=0.80, total=12.00 (VLM computed it wrong)
+    result = _validate_arithmetic(
+        line_items=[],
+        subtotal="10.00",
+        tax="0.80",
+        tip=None,
+        discount=None,
+        total="12.00",  # wrong: should be 10.80
+        confidence=0.85,
+    )
+    assert result["arithmetic"] == "mismatch"
+    # Confidence must be downgraded.
+    assert result["confidence"] < 0.85
+    # All extracted money fields should be marked disputed.
+    assert result["provenance"]["subtotal"] == "disputed"
+    assert result["provenance"]["total"] == "disputed"
+    # Original values preserved (not silently overwritten).
+    assert result["total"] == "12.00"
+    assert result["subtotal"] == "10.00"
+
+
+def test_validate_arithmetic_mismatch_preserves_original_values():
+    """On mismatch, the raw extracted values must be returned unchanged."""
+    result = _validate_arithmetic(
+        line_items=[],
+        subtotal="5.00",
+        tax="0.40",
+        tip="1.00",
+        discount=None,
+        total="9.99",  # clearly wrong
+        confidence=0.9,
+    )
+    assert result["arithmetic"] == "mismatch"
+    assert result["subtotal"] == "5.00"
+    assert result["tax"] == "0.40"
+    assert result["tip"] == "1.00"
+    assert result["total"] == "9.99"
+
+
+# --------------------------------------------------------------------------- #
+# Validator: partial (not enough fields)
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_arithmetic_partial_no_fields():
+    """No components at all → partial, nothing changed."""
+    result = _validate_arithmetic(
+        line_items=[],
+        subtotal=None,
+        tax=None,
+        tip=None,
+        discount=None,
+        total=None,
+        confidence=0.3,
+    )
+    assert result["arithmetic"] == "partial"
+    assert result["total"] is None
+
+
+# --------------------------------------------------------------------------- #
+# extract_structured integration (mocked VLM)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_extract_structured_happy_path():
+    """extract_structured: clean receipt, arithmetic ok, returns structured result."""
+    structured_payload = {
+        "vendor": "Corner Deli",
+        "date": "2026-03-10",
+        "currency": "USD",
+        "line_items": [
+            {"description": "Sandwich", "amount": 8.50},
+            {"description": "Soda", "amount": 2.00},
+        ],
+        "subtotal": "10.50",
+        "tax": "0.84",
+        "tip": None,
+        "discount": None,
+        "total": "11.34",
+        "confidence": 0.92,
+    }
+    body = _completion(structured_payload)
+    ex = ReceiptVLMExtractor(_SETTINGS)
+    with patch("httpx.AsyncClient", return_value=_mock(_resp_for(body))):
+        r = await ex.extract_structured(image_bytes=_PNG, mime_type="image/png")
+
+    assert r.arithmetic == "ok"
+    assert r.vendor == "Corner Deli"
+    assert r.date == "2026-03-10"
+    assert r.currency == "USD"
+    assert r.total == "11.34"
+    assert r.amount == "11.34"  # canonical amount = validated total
+    assert len(r.line_items) == 2
+    assert r.line_items[0].description == "Sandwich"
+    assert r.line_items[0].amount == "8.50"
+    assert r.error is None
+    assert r.tier in ("high", "low")
+
+
+@pytest.mark.asyncio
+async def test_extract_structured_repaired_tax():
+    """extract_structured: tax absent, validator repairs it."""
+    structured_payload = {
+        "vendor": "Repair Shop",
+        "date": "2026-04-01",
+        "currency": "USD",
+        "line_items": [{"description": "Part", "amount": 50.00}],
+        "subtotal": None,
+        "tax": None,
+        "tip": None,
+        "discount": None,
+        "total": "53.00",
+        "confidence": 0.80,
+    }
+    body = _completion(structured_payload)
+    ex = ReceiptVLMExtractor(_SETTINGS)
+    with patch("httpx.AsyncClient", return_value=_mock(_resp_for(body))):
+        r = await ex.extract_structured(image_bytes=_PNG, mime_type="image/png")
+
+    assert r.arithmetic == "repaired"
+    assert r.tax == "3.00"
+    assert r.provenance.get("tax") == "repaired"
+    assert r.total == "53.00"
+    assert r.amount == "53.00"
+
+
+@pytest.mark.asyncio
+async def test_extract_structured_mismatch_downgrades_confidence():
+    """extract_structured: VLM total doesn't reconcile → mismatch + lower conf."""
+    structured_payload = {
+        "vendor": "Bad Math Cafe",
+        "date": "2026-05-01",
+        "currency": "USD",
+        "line_items": [{"description": "Coffee", "amount": 4.00}],
+        "subtotal": "4.00",
+        "tax": "0.32",
+        "tip": None,
+        "discount": None,
+        "total": "9.99",  # wrong: should be 4.32
+        "confidence": 0.88,
+    }
+    body = _completion(structured_payload)
+    ex = ReceiptVLMExtractor(_SETTINGS)
+    with patch("httpx.AsyncClient", return_value=_mock(_resp_for(body))):
+        r = await ex.extract_structured(image_bytes=_PNG, mime_type="image/png")
+
+    assert r.arithmetic == "mismatch"
+    assert r.confidence < 0.88
+    assert r.total == "9.99"  # raw value preserved, not silently fixed
+    assert r.tier in ("low", "none")  # downgraded confidence should drop tier
+
+
+@pytest.mark.asyncio
+async def test_extract_structured_declines_non_image():
+    """extract_structured declines non-image mime without a model call."""
+    ex = ReceiptVLMExtractor(_SETTINGS)
+    with patch("httpx.AsyncClient") as mock_ac:
+        r = await ex.extract_structured(image_bytes=b"%PDF-1.4", mime_type="application/pdf")
+    assert r.tier == "none"
+    assert r.arithmetic == "skipped"
+    mock_ac.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_extract_structured_timeout_never_raises():
+    """extract_structured: timeout → tier='none', arithmetic='skipped', no raise."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.TimeoutException("slow", request=request)
+
+    ex = ReceiptVLMExtractor(_SETTINGS)
+    with patch("httpx.AsyncClient", return_value=_mock(handler)):
+        r = await ex.extract_structured(image_bytes=_PNG, mime_type="image/png")
+    assert r.tier == "none"
+    assert r.arithmetic == "skipped"
+    assert r.error == "vlm timeout"
