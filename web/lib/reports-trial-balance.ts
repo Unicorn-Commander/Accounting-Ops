@@ -103,11 +103,31 @@ export async function closePeriod(
   );
 }
 
+// Normalize a money string to integer cents. Accepts EITHER a decimal-dollar
+// string from the backend (Postgres NUMERIC, e.g. "51064.4800000000000000")
+// OR an integer-cents string produced by our own addCents/subtotal helpers.
+// The decimal point is the discriminator (the API always sends decimals; our
+// intermediates never do), so BigInt() is only ever handed integers.
+export function valueToCents(value: string): bigint {
+  const s = (value ?? "0").trim();
+  if (!s) return 0n;
+  const negative = s.startsWith("-");
+  const abs = s.replace(/^-/, "");
+  let cents: bigint;
+  if (abs.includes(".")) {
+    const [intPart, fracRaw = ""] = abs.split(".");
+    const frac = (fracRaw + "00").slice(0, 2); // first 2 decimals = cents
+    cents = BigInt(intPart || "0") * 100n + BigInt(frac || "0");
+  } else {
+    cents = BigInt(abs || "0"); // already integer cents
+  }
+  return negative ? -cents : cents;
+}
+
 export function centsToDollars(value: string): string {
-  if (!value) return "$0.00";
-  const negative = value.trim().startsWith("-");
-  const digits = value.trim().replace(/^-/, "");
-  const cents = BigInt(digits || "0");
+  const signed = valueToCents(value);
+  const negative = signed < 0n;
+  const cents = negative ? -signed : signed;
   const dollars = cents / 100n;
   const remainder = cents % 100n;
   return `${negative ? "-" : ""}$${dollars.toLocaleString("en-US")}.${remainder
@@ -116,8 +136,8 @@ export function centsToDollars(value: string): string {
 }
 
 export function centsAbsDiff(a: string, b: string): string {
-  const left = BigInt(a || "0");
-  const right = BigInt(b || "0");
+  const left = valueToCents(a);
+  const right = valueToCents(b);
   const diff = left >= right ? left - right : right - left;
   return diff.toString();
 }

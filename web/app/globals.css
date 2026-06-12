@@ -31,6 +31,19 @@
   --ink-2: hsl(240 11% 71%);
   --ink-3: hsl(240 9% 53%);
   --ink-4: hsl(240 8% 39%);
+  /* Raw HSL channels for Tailwind tokens — these let the neutral utilities
+     (bg-canvas, text-ink-primary, borders) switch with the theme AND keep
+     opacity modifiers working. */
+  --canvas-ch: 240 17% 5%;
+  --canvas-2-ch: 240 16% 6.5%;
+  --surface-ch: 240 13% 10%;
+  --surface-2-ch: 240 13% 12.5%;
+  --elevated-ch: 240 12% 16%;
+  --overlay-ch: 240 8% 24%;
+  --ink-primary-ch: 240 24% 97%;
+  --ink-secondary-ch: 240 11% 71%;
+  --ink-tertiary-ch: 240 9% 53%;
+  --ink-disabled-ch: 240 8% 39%;
   --brand-200: hsl(265 92% 86%);
   --brand-300: hsl(265 88% 80%);
   --brand-400: hsl(265 85% 72%);
@@ -79,6 +92,17 @@
   --ink-2: hsl(220 12% 36%);
   --ink-3: hsl(220 10% 46%);
   --ink-4: hsl(220 9% 60%);
+  /* Channels for Tailwind tokens — light values (see dark block for why). */
+  --canvas-ch: 220 16% 95.5%;
+  --canvas-2-ch: 220 16% 93.5%;
+  --surface-ch: 0 0% 100%;
+  --surface-2-ch: 220 30% 98.5%;
+  --elevated-ch: 0 0% 100%;
+  --overlay-ch: 220 16% 90%;
+  --ink-primary-ch: 225 22% 15%;
+  --ink-secondary-ch: 220 12% 36%;
+  --ink-tertiary-ch: 220 10% 46%;
+  --ink-disabled-ch: 220 9% 60%;
   --brand-200: hsl(265 62% 52%);
   --brand-300: hsl(258 60% 50%);
   --brand-400: hsl(258 62% 48%);

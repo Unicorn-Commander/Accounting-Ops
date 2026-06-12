@@ -9,6 +9,7 @@ import { cn } from "@/lib/cn";
 import {
   centsAbsDiff,
   centsToDollars,
+  valueToCents,
   type TrialBalance,
   type TrialBalanceAccount,
 } from "@/lib/reports-trial-balance";
@@ -47,7 +48,7 @@ function groupFor(accountType: string): AccountGroup {
 }
 
 function addCents(a: string, b: string): string {
-  return (BigInt(a || "0") + BigInt(b || "0")).toString();
+  return (valueToCents(a) + valueToCents(b)).toString();
 }
 
 function subtotal(rows: TrialBalanceAccount[], key: keyof TrialBalanceAccount): string {

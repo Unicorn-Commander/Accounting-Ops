@@ -6,18 +6,20 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Canvas
-        canvas: "hsl(240 14% 7%)",
-        "canvas-2": "hsl(240 16% 6.5%)",
-        surface: "hsl(240 11% 12%)",
-        "surface-2": "hsl(240 13% 12.5%)",
-        elevated: "hsl(240 10% 18%)",
-        overlay: "hsl(240 8% 24%)",
+        // Neutrals reference per-theme CSS channels so every utility
+        // (bg-canvas, text-ink-primary, …) switches with the active theme and
+        // still supports /opacity (e.g. bg-canvas/8). Channels live in globals.css.
+        canvas: "hsl(var(--canvas-ch) / <alpha-value>)",
+        "canvas-2": "hsl(var(--canvas-2-ch) / <alpha-value>)",
+        surface: "hsl(var(--surface-ch) / <alpha-value>)",
+        "surface-2": "hsl(var(--surface-2-ch) / <alpha-value>)",
+        elevated: "hsl(var(--elevated-ch) / <alpha-value>)",
+        overlay: "hsl(var(--overlay-ch) / <alpha-value>)",
         // Ink
-        "ink-primary": "hsl(240 18% 94%)",
-        "ink-secondary": "hsl(240 8% 68%)",
-        "ink-tertiary": "hsl(240 9% 50%)",
-        "ink-disabled": "hsl(240 8% 38%)",
+        "ink-primary": "hsl(var(--ink-primary-ch) / <alpha-value>)",
+        "ink-secondary": "hsl(var(--ink-secondary-ch) / <alpha-value>)",
+        "ink-tertiary": "hsl(var(--ink-tertiary-ch) / <alpha-value>)",
+        "ink-disabled": "hsl(var(--ink-disabled-ch) / <alpha-value>)",
         // Brand — Unicorn Violet
         brand: {
           200: "hsl(265 92% 86%)",
@@ -47,9 +49,11 @@ export default {
         "conf-low": "hsl(0 91% 71%)"
       },
       borderColor: {
-        DEFAULT: "rgba(255,255,255,0.10)",
-        subtle: "rgba(255,255,255,0.06)",
-        strong: "rgba(255,255,255,0.16)"
+        // Tinted by the primary-ink channel → light hairlines on dark,
+        // dark hairlines on light. Switches with the theme.
+        DEFAULT: "hsl(var(--ink-primary-ch) / 0.10)",
+        subtle: "hsl(var(--ink-primary-ch) / 0.06)",
+        strong: "hsl(var(--ink-primary-ch) / 0.16)"
       },
       fontFamily: {
         sans: ["var(--font-geist-sans)", "system-ui", "sans-serif"],
