@@ -505,6 +505,17 @@ async def authenticate_token(token: str) -> AuthContext:
             _log.info("brigade verifier raised %s, falling through to Keycloak", exc)
             brigade_claims = None
         if brigade_claims is not None:
+            # RFC-8693 act claim: on a Brigade federation exchange the ACTING
+            # APP is ``act.client_id`` (``act.sub`` is the federated subject).
+            # A trusted server-to-server caller (ACCTOPS_TRUSTED_M2M_CALLERS,
+            # e.g. tax-planning-ops) is authorized for the federation endpoints
+            # WITHOUT an AO user identity — same allow-list the Keycloak M2M
+            # path uses, just keyed off the Brigade actor instead of azp.
+            b_act = brigade_claims.get("act") or {}
+            b_actor_app = b_act.get("client_id") if isinstance(b_act, dict) else None
+            b_is_m2m = bool(
+                b_actor_app and b_actor_app in get_settings().trusted_m2m_callers
+            )
             b_uc_uid = brigade_claims.get("uc_uid") or brigade_claims.get("sub")
             # Brigade mints sub = the customer's EMAIL today; AO keys accounts on
             # the opaque uc_uid. Translate an email-shaped identifier to the
@@ -512,10 +523,13 @@ async def authenticate_token(token: str) -> AuthContext:
             # fallback). Unresolved → b_uc_uid becomes None and we fall through to
             # the 401 path: Brigade can't conjure an AO identity by minting a JWT.
             # Forward-compatible: an opaque sub skips this and matches directly.
-            if isinstance(b_uc_uid, str) and "@" in b_uc_uid:
+            # M2M callers skip resolution entirely — they get a synthetic uc_uid
+            # (m2m:<actor>) that never matches a real user_account row.
+            if b_is_m2m:
+                b_uc_uid = f"m2m:{b_actor_app}"
+            elif isinstance(b_uc_uid, str) and "@" in b_uc_uid:
                 b_uc_uid = await _uc_uid_for_email(b_uc_uid)
             if b_uc_uid:
-                b_act = brigade_claims.get("act") or {}
                 b_agent_id: str | None = None
                 if isinstance(b_act, dict):
                     b_agent_id = b_act.get("sub") or b_act.get("client_id")
@@ -534,6 +548,7 @@ async def authenticate_token(token: str) -> AuthContext:
                     agent_id=b_agent_id,
                     scopes=b_scopes,
                     claims=brigade_claims,
+                    is_trusted_m2m=b_is_m2m,
                 )
                 _stamp_audit_actor(ctx)
                 return ctx
@@ -732,27 +747,36 @@ async def _try_brigade(token: str) -> AuthContext | None:
     # claims['uc_uid'] when present; otherwise fall back to sub. Either way,
     # the value must resolve to an existing user_account in the workspace's
     # tenancy layer for any tool call to succeed.
-    uc_uid = claims.get("uc_uid") or claims.get("sub")
-    if not isinstance(uc_uid, str) or not uc_uid:
-        return None
-
-    # Brigade mints sub = the customer's EMAIL today (its shared identifier; it
-    # will upgrade to the opaque uchub sub once it stores keycloakId at OIDC
-    # login). AO keys accounts on the opaque uc_uid, not email — so when the
-    # Brigade identifier is email-shaped, translate it to the canonical uc_uid via
-    # public.user_account.email (mirrors project-ops's email fallback). Forward-
-    # compatible: once Brigade mints the opaque sub this branch is skipped and
-    # uc_uid matches directly. Fail CLOSED when the email maps to no active
-    # account — Brigade must not conjure an AO identity just by minting a JWT.
-    if "@" in uc_uid:
-        resolved = await _uc_uid_for_email(uc_uid)
-        if not resolved:
-            _log.info("brigade sub email did not resolve to an active user_account")
-            return None
-        uc_uid = resolved
-
-    # RFC 8693 act claim — Brigade may carry the acting agent identity here.
+    # RFC 8693 act claim — the acting APP is act.client_id (act.sub is the
+    # federated subject). A trusted M2M caller is authorized without an AO user.
     act = claims.get("act") or {}
+    actor_app = act.get("client_id") if isinstance(act, dict) else None
+    is_m2m = bool(actor_app and actor_app in get_settings().trusted_m2m_callers)
+
+    uc_uid = claims.get("uc_uid") or claims.get("sub")
+    if is_m2m:
+        # Synthetic uc_uid — never matches a real user_account; the M2M caller
+        # has no AO membership and never auto-provisions one. Skip resolution.
+        uc_uid = f"m2m:{actor_app}"
+    else:
+        if not isinstance(uc_uid, str) or not uc_uid:
+            return None
+
+        # Brigade mints sub = the customer's EMAIL today (its shared identifier; it
+        # will upgrade to the opaque uchub sub once it stores keycloakId at OIDC
+        # login). AO keys accounts on the opaque uc_uid, not email — so when the
+        # Brigade identifier is email-shaped, translate it to the canonical uc_uid via
+        # public.user_account.email (mirrors project-ops's email fallback). Forward-
+        # compatible: once Brigade mints the opaque sub this branch is skipped and
+        # uc_uid matches directly. Fail CLOSED when the email maps to no active
+        # account — Brigade must not conjure an AO identity just by minting a JWT.
+        if "@" in uc_uid:
+            resolved = await _uc_uid_for_email(uc_uid)
+            if not resolved:
+                _log.info("brigade sub email did not resolve to an active user_account")
+                return None
+            uc_uid = resolved
+
     agent_id: str | None = None
     if isinstance(act, dict):
         agent_id = act.get("sub") or act.get("client_id")
@@ -761,7 +785,13 @@ async def _try_brigade(token: str) -> AuthContext | None:
     # Both routed through one helper so the plural-vs-singular precedence and
     # the malformed-claim → empty-tuple safety contract live in one place.
     scopes = _extract_brigade_scopes(claims)
-    ctx = AuthContext(uc_uid=uc_uid, agent_id=agent_id, scopes=scopes, claims=claims)
+    ctx = AuthContext(
+        uc_uid=uc_uid,
+        agent_id=agent_id,
+        scopes=scopes,
+        claims=claims,
+        is_trusted_m2m=is_m2m,
+    )
     _stamp_audit_actor(ctx)
     return ctx
 
