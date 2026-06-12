@@ -139,6 +139,11 @@ async def ai_categorize_pending(
                       -- repeated bulk runs make progress instead of re-grinding
                       -- the same un-categorizable newest rows every call.
                       AND NOT COALESCE((payload->>'ai_attempted')::boolean, false)
+                      -- skip rows with a null / non-object payload: there's no
+                      -- transaction text to categorize, and the jsonb-merge marker
+                      -- can't stick to a null payload (NULL || x = NULL), which
+                      -- would otherwise re-select them forever.
+                      AND jsonb_typeof(payload) = 'object'
                       {year_filter}
                     ORDER BY created_at DESC
                     LIMIT :lim
@@ -156,7 +161,20 @@ async def ai_categorize_pending(
             elif isinstance(payload, str):
                 payload = json.loads(payload)
             if not isinstance(payload, dict):
+                # Null / malformed payload — no transaction text to categorize.
+                # The SELECT already excludes these, but mark + skip defensively so
+                # a row that slips through can never be re-selected into a spin.
                 unchanged += 1
+                if not dry_run:
+                    await session.execute(
+                        text(
+                            "UPDATE approval_queue "
+                            "SET payload = COALESCE(payload, '{}'::jsonb) "
+                            "    || jsonb_build_object('ai_attempted', true) "
+                            "WHERE id = CAST(:id AS uuid) AND status = 'pending'"
+                        ),
+                        {"id": r["approval_id"]},
+                    )
                 continue
 
             amount = _amount_from_payload(payload)
@@ -188,7 +206,8 @@ async def ai_categorize_pending(
                     await session.execute(
                         text(
                             "UPDATE approval_queue "
-                            "SET payload = payload || jsonb_build_object('ai_attempted', true) "
+                            "SET payload = COALESCE(payload, '{}'::jsonb) "
+                            "    || jsonb_build_object('ai_attempted', true) "
                             "WHERE id = CAST(:id AS uuid) AND status = 'pending'"
                         ),
                         {"id": r["approval_id"]},
@@ -204,7 +223,7 @@ async def ai_categorize_pending(
                     text(
                         """
                         UPDATE approval_queue
-                        SET payload = payload || jsonb_build_object(
+                        SET payload = COALESCE(payload, '{}'::jsonb) || jsonb_build_object(
                                 'category', CAST(:cat AS text),
                                 'category_status', CAST(:cstatus AS text),
                                 'categorization_source', CAST(:src AS text),

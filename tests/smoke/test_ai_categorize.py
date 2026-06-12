@@ -144,3 +144,20 @@ async def test_hallucinated_category_is_not_written(monkeypatch):
     assert session.audits == []
     # …but the row IS marked ai_attempted so a later bulk run skips it.
     assert any("cat" not in u for u in session.updates)
+
+
+@pytest.mark.asyncio
+async def test_null_payload_row_is_marked_not_looped(monkeypatch):
+    """A row with a null/non-dict payload must be marked ai_attempted (not just
+    counted unchanged) so a bulk run can never re-select it into a spin."""
+    rows = [{"approval_id": str(uuid4()), "payload": None}]
+    session = _install(monkeypatch, rows, [])  # LLM never called for this row
+
+    out = await mod.ai_categorize_pending(uuid4(), uuid4(), limit=50)
+
+    assert out["scanned"] == 1
+    assert out["suggested"] == 0
+    assert out["unchanged"] == 1
+    # No category suggestion, but the row is marked so it won't loop.
+    assert [u for u in session.updates if "cat" in u] == []
+    assert any("cat" not in u for u in session.updates)
