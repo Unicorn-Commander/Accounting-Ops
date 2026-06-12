@@ -114,6 +114,24 @@ _FEW_SHOT_EXAMPLES = [
             '"reasoning":"ACH credit payout pattern matches marketplace revenue."}'
         ),
     },
+    {
+        "role": "user",
+        "content": (
+            "Transaction: description='Zelle payment from Jordan Lee', "
+            "amount=500.00, payee=None, memo=None\n"
+            "Allowed categories: [\"Revenue · Marketplace\", "
+            "\"Owner's Contribution\", \"Owner's Draw\", \"Uncategorized\"]\n"
+            "Reply with JSON only."
+        ),
+    },
+    {
+        "role": "assistant",
+        "content": (
+            '{"category":"Owner\'s Contribution","confidence":0.80,'
+            '"reasoning":"Incoming Zelle in an individual\'s name is the owner '
+            'funding the business, not third-party revenue."}'
+        ),
+    },
 ]
 
 _SYSTEM_PROMPT = (
@@ -127,9 +145,14 @@ _SYSTEM_PROMPT = (
     "The allowed categories use a middle-dot character `·` (U+00B7) as a separator — "
     "for example `\"Office · Supplies\"` NOT `\"Office Supplies\"`. "
     "Copy the category string character-for-character from the provided list. "
-    "If you cannot confidently categorize the transaction, set category to "
-    '"Uncategorized" if it appears in the allowed list, otherwise use the closest '
-    "allowed category and set confidence low. "
+    "If no allowed category is a clear, confident fit, choose \"Uncategorized\" "
+    "(when it is in the allowed list) with low confidence. Do NOT force a poor "
+    "match into an unrelated bucket — abstaining is better than guessing wrong. "
+    "Money the business owner moves to or from the business in their own name "
+    "(e.g. Zelle / Venmo / Cash App to or from the owner) is an OWNER transfer, "
+    "not income or an expense: use \"Owner's Contribution\" for money received "
+    "from the owner and \"Owner's Draw\" for money paid to the owner or spent "
+    "personally — but only when those categories appear in the allowed list. "
     "Do not include any text outside the JSON object."
 )
 

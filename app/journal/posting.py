@@ -54,6 +54,14 @@ CATEGORY_TO_ACCOUNT: dict[str, str] = {
     "Banking · Fees": "6700",
     "Banking · Interest": "7010",  # routes to interest income; sign disambiguates
     "Inter-entity transfer": "6900",
+    # Equity — owner moving their own money in/out of the business. Sign-based
+    # posting handles direction: a +inflow CREDITs the equity account (owner puts
+    # money in), a -outflow DEBITs it (owner takes money out / personal spend).
+    # These map to the DEFAULT_COA equity accounts every entity is seeded with
+    # (3010/3020), so no per-entity backfill is needed. Covers the personal
+    # Zelle/Venmo/Cash-App traffic that has no business income/expense bucket.
+    "Owner's Contribution": "3010",  # money IN from the owner (e.g. self-funding)
+    "Owner's Draw": "3020",          # money OUT to the owner / personal spend
     "Travel · Lodging": "6500",
     "Travel · Transport": "6510",
     "Meals": "6520",

@@ -121,9 +121,9 @@ class TestCoverageComplete:
 
     def test_all_1120_mappings_have_required_fields(self):
         for cat, mapping in CATEGORY_TO_1120.items():
-            assert mapping.section in ("income", "deductions", "tax", "other_income"), (
-                f"Category {cat!r} has invalid section {mapping.section!r}"
-            )
+            assert mapping.section in (
+                "income", "deductions", "tax", "other_income", "excluded"
+            ), f"Category {cat!r} has invalid section {mapping.section!r}"
             assert mapping.line, f"Category {cat!r} has empty line reference"
             assert mapping.label, f"Category {cat!r} has empty label"
             assert mapping.confidence in ("high", "medium", "low"), (
