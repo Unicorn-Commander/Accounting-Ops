@@ -215,7 +215,7 @@ async def well_known_mcps() -> dict:
     /settings/pats UI delivers on.
     """
     tools_curated = [
-        "analyze_pending_approvals",
+        "analyze_pending_approvals", "ai_categorize_pending",
         "list_transactions", "get_transaction",
         "categorize_transaction", "link_receipt_to_transaction",
         "query_specialty_rules", "add_specialty_rule",

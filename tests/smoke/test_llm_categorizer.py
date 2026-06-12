@@ -60,11 +60,13 @@ _ALLOWED = [
 ]
 
 # Minimal settings that point at a fake URL (never contacted in these tests).
+# The categorizer reads the CATEGORIZER_* (text) knobs, distinct from the vision
+# receipt-VLM llm_* knobs — see app/config.py.
 _TEST_SETTINGS = Settings(
-    llm_endpoint_url="http://fake-llm.internal/v1",
-    llm_model="fake-model",
-    llm_api_key="",      # no key — local/no-auth mode
-    llm_timeout_s=5,
+    categorizer_endpoint_url="http://fake-llm.internal/v1",
+    categorizer_model="fake-model",
+    categorizer_api_key="",      # no key — local/no-auth mode
+    categorizer_timeout_s=5,
     llm_max_tokens=200,
 )
 

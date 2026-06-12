@@ -4,10 +4,15 @@ This module is a **platform feature**, not a bespoke script. Any future customer
 can point their own Accounting-Ops deployment at their preferred model by setting
 three environment variables:
 
-    LLM_ENDPOINT_URL   — any OpenAI-compatible /v1/chat/completions endpoint
-    LLM_MODEL          — the model identifier the endpoint expects
-    LLM_API_KEY        — blank for local/no-auth (Ollama / llama.cpp / vLLM),
-                         or the cloud API key for OpenRouter / OpenAI / Anthropic
+    CATEGORIZER_LLM_ENDPOINT_URL — any OpenAI-compatible /v1/chat/completions endpoint
+    CATEGORIZER_LLM_MODEL        — the model identifier the endpoint expects
+    CATEGORIZER_LLM_API_KEY      — blank for local/no-auth (Ollama / llama.cpp / vLLM),
+                                   or the virtual/cloud key for the metered gateway
+
+These are SEPARATE from the vision receipt-OCR knobs (LLM_ENDPOINT_URL / LLM_MODEL /
+LLM_API_KEY), which stay pinned to an image-capable model. Categorization is pure
+text classification, so it routes to a text model (default: local Qwen text;
+suite: the metered gateway alias ``qwen3.6-35b-a3b``). See app/config.py.
 
 The categorizer is intentionally thin and opinionated:
 
@@ -203,7 +208,7 @@ class LLMCategorizer:
         ]
 
         payload: dict[str, Any] = {
-            "model": settings.llm_model,
+            "model": settings.categorizer_model,
             "messages": messages,
             "max_tokens": settings.llm_max_tokens,
             "temperature": 0.0,   # deterministic; we want consistent categorization
@@ -215,14 +220,14 @@ class LLMCategorizer:
             "chat_template_kwargs": {"enable_thinking": False},
         }
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        if settings.llm_api_key:
-            headers["Authorization"] = f"Bearer {settings.llm_api_key}"
+        if settings.categorizer_api_key:
+            headers["Authorization"] = f"Bearer {settings.categorizer_api_key}"
 
-        url = settings.llm_endpoint_url.rstrip("/") + "/chat/completions"
+        url = settings.categorizer_endpoint_url.rstrip("/") + "/chat/completions"
 
         t0 = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=settings.llm_timeout_s) as client:
+            async with httpx.AsyncClient(timeout=settings.categorizer_timeout_s) as client:
                 response = await client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
         except httpx.TimeoutException:
@@ -245,8 +250,8 @@ class LLMCategorizer:
             confidence=max(0.0, min(1.0, float(confidence))),
             reasoning=reasoning[:500],   # guard against runaway reasoning strings
             raw_response=raw_json,
-            model=settings.llm_model,
-            endpoint=settings.llm_endpoint_url,
+            model=settings.categorizer_model,
+            endpoint=settings.categorizer_endpoint_url,
             duration_ms=duration_ms,
         )
 
@@ -257,24 +262,24 @@ class LLMCategorizer:
         and optionally error (str).
         """
         settings = self._settings
-        url = settings.llm_endpoint_url.rstrip("/") + "/models"
+        url = settings.categorizer_endpoint_url.rstrip("/") + "/models"
         headers: dict[str, str] = {}
-        if settings.llm_api_key:
-            headers["Authorization"] = f"Bearer {settings.llm_api_key}"
+        if settings.categorizer_api_key:
+            headers["Authorization"] = f"Bearer {settings.categorizer_api_key}"
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(url, headers=headers)
                 reachable = resp.status_code < 500
         except Exception as exc:
             return {
-                "endpoint": settings.llm_endpoint_url,
-                "model": settings.llm_model,
+                "endpoint": settings.categorizer_endpoint_url,
+                "model": settings.categorizer_model,
                 "reachable": False,
                 "error": str(exc),
             }
         return {
-            "endpoint": settings.llm_endpoint_url,
-            "model": settings.llm_model,
+            "endpoint": settings.categorizer_endpoint_url,
+            "model": settings.categorizer_model,
             "reachable": reachable,
         }
 

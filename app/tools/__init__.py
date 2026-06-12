@@ -1,3 +1,4 @@
+from app.tools.ai_categorize import ai_categorize_pending
 from app.tools.analyze_pending_approvals import analyze_pending_approvals
 from app.tools.ar_invoicing import (
     create_invoice_from_draft,
@@ -83,6 +84,7 @@ from app.tools.transactions import get_transaction, list_transactions
 
 __all__ = [
     "add_specialty_rule",
+    "ai_categorize_pending",
     "analyze_pending_approvals",
     "bulk_decide_approvals",
     "categorize_transaction",

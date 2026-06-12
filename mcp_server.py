@@ -6,6 +6,7 @@ from uuid import UUID
 from app.config import get_settings
 from app.tools import (
     add_specialty_rule,
+    ai_categorize_pending,
     analyze_pending_approvals,
     bulk_decide_approvals,
     categorize_transaction,
@@ -114,6 +115,7 @@ def build_server():
     # Approval queue
     # =====================================================================
     server.tool()(analyze_pending_approvals)        # writes recommendations only
+    server.tool()(ai_categorize_pending)            # LLM Tier-2: suggests categories, no auto-post
     server.tool()(list_pending_approvals)
     server.tool()(list_approval_recommendations)
     server.tool()(decide_approval)

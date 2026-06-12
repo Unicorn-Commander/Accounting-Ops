@@ -97,6 +97,38 @@ class Settings(BaseModel):
     llm_api_key: str = ""          # blank = local/no-auth; set in env for cloud
     llm_timeout_s: int = 30
 
+    # ---- LLM Categorizer (TEXT) — SEPARATE from the vision receipt-VLM block ----
+    # The block ABOVE (llm_*) is the VISION path: receipt OCR needs a vision model,
+    # so it stays pinned to the image-safe Qwen vision alias. Transaction
+    # categorization is a pure TEXT-classification task, so it gets its OWN model +
+    # endpoint + key here. This lets the suite route categorization through the
+    # METERED LiteLLM gateway (qwen3.6-35b-a3b, Lago `ai_token_usage`) while
+    # receipts keep calling the local vision model directly — one config knob can't
+    # serve both.
+    #
+    # Two deployment modes (env-overridable via CATEGORIZER_LLM_ENDPOINT_URL /
+    # CATEGORIZER_LLM_MODEL / CATEGORIZER_LLM_API_KEY):
+    #
+    #   STANDALONE (default) — local text model, no auth, unmetered:
+    #     CATEGORIZER_LLM_ENDPOINT_URL = http://100.121.80.175:8088/v1   (midboy1)
+    #     CATEGORIZER_LLM_MODEL        = Qwen3.6-35B-A3B-p40             (P40 text)
+    #     CATEGORIZER_LLM_API_KEY      = (blank)
+    #
+    #   SUITE / GATEWAY (dogfood + prod) — metered Qwen text through the internal
+    #     UC LiteLLM gateway (per-deployment virtual key; Lago meters every call):
+    #     CATEGORIZER_LLM_ENDPOINT_URL = http://<gateway-host>:4000/v1
+    #     CATEGORIZER_LLM_MODEL        = qwen3.6-35b-a3b
+    #     CATEGORIZER_LLM_API_KEY      = <virtual-key>
+    #
+    # enable_thinking:false + temperature 0.0 are sent by LLMCategorizer itself
+    # (Qwen3 burns the whole budget on reasoning otherwise → empty content). The
+    # timeout is higher than the vision block's because the gateway idle-unloads
+    # the 35B and a cold first call can take ~30-60s.
+    categorizer_endpoint_url: str = "http://100.121.80.175:8088/v1"
+    categorizer_model: str = "Qwen3.6-35B-A3B-p40"
+    categorizer_api_key: str = ""
+    categorizer_timeout_s: int = 60
+
     # ---- bbox-oracle (traditional OCR cross-check) ----
     # URL of the bbox-oracle service.  POST {url}/ocr with multipart field "file"
     # (PNG/JPG) → {"text": "...", "lines": [{"text", "bbox", "score"}, ...]}.
@@ -220,6 +252,14 @@ def get_settings() -> Settings:
         llm_api_key=os.getenv("LLM_API_KEY", defaults.llm_api_key),
         llm_timeout_s=int(os.getenv("LLM_TIMEOUT_S", str(defaults.llm_timeout_s))),
         llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", str(defaults.llm_max_tokens))),
+        categorizer_endpoint_url=os.getenv(
+            "CATEGORIZER_LLM_ENDPOINT_URL", defaults.categorizer_endpoint_url
+        ),
+        categorizer_model=os.getenv("CATEGORIZER_LLM_MODEL", defaults.categorizer_model),
+        categorizer_api_key=os.getenv("CATEGORIZER_LLM_API_KEY", defaults.categorizer_api_key),
+        categorizer_timeout_s=int(
+            os.getenv("CATEGORIZER_LLM_TIMEOUT_S", str(defaults.categorizer_timeout_s))
+        ),
         ocr_bbox_service_url=os.getenv("OCR_BBOX_SERVICE_URL", defaults.ocr_bbox_service_url),
         cpa_export_url=os.getenv("CPA_EXPORT_URL", defaults.cpa_export_url),
         llm_gateway_base_url=os.getenv(

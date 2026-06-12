@@ -26,6 +26,7 @@ from app.tenancy import (
 )
 from app.tools import (
     add_specialty_rule,
+    ai_categorize_pending,
     categorize_transaction,
     get_consolidated_p_and_l,
     get_p_and_l,
@@ -177,6 +178,29 @@ async def http_categorize_transaction(
         )
     except NotImplementedError as exc:
         raise _phase_1(exc) from exc
+
+
+@router.post("/approvals/ai-categorize")
+async def http_ai_categorize_pending(
+    limit: int = 50,
+    year: int | None = None,
+    dry_run: bool = False,
+    ctx: EntityContext = Depends(resolve_entity),
+) -> dict:
+    """Human/GUI trigger for LLM Tier-2 categorization of Uncategorized pending
+    approvals. Co-equal with the ``ai_categorize_pending`` MCP tool (agents call
+    that one); both delegate to the same engine. Writes ``status='suggest'``
+    suggestions into the review queue — never auto-posts. Pass ``dry_run=true``
+    to preview the model's suggestions without writing them.
+    """
+    require_role(ctx.workspace, "accountant")
+    return await ai_categorize_pending(
+        ctx.workspace.workspace_id,
+        ctx.entity_id,
+        limit=limit,
+        year=year,
+        dry_run=dry_run,
+    )
 
 
 @router.post("/receipts/link")

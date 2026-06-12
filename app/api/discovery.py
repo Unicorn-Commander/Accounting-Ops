@@ -65,6 +65,9 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     # ----- Approval queue ---------------------------------------------------
     # analyze_pending_approvals writes recommendations rows so it is NOT read-only.
     "analyze_pending_approvals":     {"min_role": "accountant", "read_only": False, "latency_ms": 1200},
+    # ai_categorize_pending runs the LLM over uncategorized rows + writes suggestions
+    # into payloads — NOT read-only; latency scales with the row count (LLM per row).
+    "ai_categorize_pending":         {"min_role": "accountant", "read_only": False, "latency_ms": 8000},
     "list_pending_approvals":        {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
     "list_approval_recommendations": {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
     "decide_approval":               {"min_role": "admin",      "read_only": False, "latency_ms": 800},
