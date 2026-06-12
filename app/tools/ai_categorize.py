@@ -135,6 +135,10 @@ async def ai_categorize_pending(
                       AND subject_type = 'bank_transaction_import'
                       AND status = 'pending'
                       AND COALESCE(payload->>'category', 'Uncategorized') = 'Uncategorized'
+                      -- skip rows the AI already looked at + couldn't place, so
+                      -- repeated bulk runs make progress instead of re-grinding
+                      -- the same un-categorizable newest rows every call.
+                      AND NOT COALESCE((payload->>'ai_attempted')::boolean, false)
                       {year_filter}
                     ORDER BY created_at DESC
                     LIMIT :lim
@@ -176,6 +180,19 @@ async def ai_categorize_pending(
             # "Uncategorized"). Only write when the model actually placed it.
             if suggestion.category == "Uncategorized" or suggestion.category not in CATEGORY_TO_ACCOUNT:
                 unchanged += 1
+                # Mark the row as AI-attempted so a later bulk run doesn't re-grind
+                # it (the model — Qwen and, if configured, the frontier fallback —
+                # already looked and couldn't confidently place it). A human can
+                # still categorize it manually; clearing ai_attempted re-opens it.
+                if not dry_run:
+                    await session.execute(
+                        text(
+                            "UPDATE approval_queue "
+                            "SET payload = payload || jsonb_build_object('ai_attempted', true) "
+                            "WHERE id = CAST(:id AS uuid) AND status = 'pending'"
+                        ),
+                        {"id": r["approval_id"]},
+                    )
                 continue
 
             if not dry_run:
@@ -192,7 +209,8 @@ async def ai_categorize_pending(
                                 'category_status', CAST(:cstatus AS text),
                                 'categorization_source', CAST(:src AS text),
                                 'sign_matched', CAST(:sm AS boolean),
-                                'ai_suggested', true
+                                'ai_suggested', true,
+                                'ai_attempted', true
                             )
                         WHERE id = CAST(:id AS uuid) AND status = 'pending'
                         """

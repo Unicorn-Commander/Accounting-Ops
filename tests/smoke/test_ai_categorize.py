@@ -101,10 +101,13 @@ async def test_writes_one_suggestion_and_audits(monkeypatch):
     assert out["suggested"] == 1
     assert out["unchanged"] == 1
     assert out["dry_run"] is False
-    # Exactly one row updated, with the valid category; one audit row written.
-    assert len(session.updates) == 1
-    assert session.updates[0]["cat"] == _VALID_CATEGORY
-    assert session.updates[0]["cstatus"] == "suggest"
+    # Exactly one SUGGESTION written (rows updated with a category), with the
+    # valid category; one audit row. The abstained row also gets a lightweight
+    # ai_attempted marker update (no 'cat'), so separate the two.
+    sugg_updates = [u for u in session.updates if "cat" in u]
+    assert len(sugg_updates) == 1
+    assert sugg_updates[0]["cat"] == _VALID_CATEGORY
+    assert sugg_updates[0]["cstatus"] == "suggest"
     assert len(session.audits) == 1
     # The result echoes the suggestion for the human/agent.
     assert out["results"][0]["suggested_category"] == _VALID_CATEGORY
@@ -136,5 +139,8 @@ async def test_hallucinated_category_is_not_written(monkeypatch):
 
     assert out["suggested"] == 0
     assert out["unchanged"] == 1
-    assert session.updates == []
+    # No category suggestion was written (the hallucinated category is rejected)…
+    assert [u for u in session.updates if "cat" in u] == []
     assert session.audits == []
+    # …but the row IS marked ai_attempted so a later bulk run skips it.
+    assert any("cat" not in u for u in session.updates)
