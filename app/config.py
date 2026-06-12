@@ -129,6 +129,26 @@ class Settings(BaseModel):
     categorizer_api_key: str = ""
     categorizer_timeout_s: int = 60
 
+    # ---- Categorizer frontier FALLBACK (per-agent routing policy) ----
+    # The categorizer's instance of "route routine work → Qwen, escalate the hard
+    # cases → frontier". When the primary (Qwen) returns NO valid result, or a
+    # confidence BELOW categorizer_escalate_below_confidence, the categorizer
+    # re-runs the SAME prompt against this fallback model (a frontier model via the
+    # cloud gateway / OpenRouter) and prefers that answer. The model actually used
+    # is recorded on every suggestion (audit trail), so we can see how often Qwen
+    # was good enough vs. how often it escalated.
+    #
+    #   Blank fallback model  => NO escalation (Qwen-only; today's behavior).
+    #   Threshold 0.0         => escalate ONLY when Qwen returns nothing valid.
+    #   Threshold 0.5         => also escalate Qwen's low-confidence guesses.
+    #
+    # Env: CATEGORIZER_FALLBACK_MODEL / CATEGORIZER_FALLBACK_ENDPOINT_URL /
+    #      CATEGORIZER_FALLBACK_API_KEY / CATEGORIZER_ESCALATE_BELOW_CONFIDENCE.
+    categorizer_fallback_model: str = ""
+    categorizer_fallback_endpoint_url: str = ""
+    categorizer_fallback_api_key: str = ""
+    categorizer_escalate_below_confidence: float = 0.0
+
     # ---- bbox-oracle (traditional OCR cross-check) ----
     # URL of the bbox-oracle service.  POST {url}/ocr with multipart field "file"
     # (PNG/JPG) → {"text": "...", "lines": [{"text", "bbox", "score"}, ...]}.
@@ -259,6 +279,12 @@ def get_settings() -> Settings:
         categorizer_api_key=os.getenv("CATEGORIZER_LLM_API_KEY", defaults.categorizer_api_key),
         categorizer_timeout_s=int(
             os.getenv("CATEGORIZER_LLM_TIMEOUT_S", str(defaults.categorizer_timeout_s))
+        ),
+        categorizer_fallback_model=os.getenv("CATEGORIZER_FALLBACK_MODEL", ""),
+        categorizer_fallback_endpoint_url=os.getenv("CATEGORIZER_FALLBACK_ENDPOINT_URL", ""),
+        categorizer_fallback_api_key=os.getenv("CATEGORIZER_FALLBACK_API_KEY", ""),
+        categorizer_escalate_below_confidence=float(
+            os.getenv("CATEGORIZER_ESCALATE_BELOW_CONFIDENCE", "0.0") or "0.0"
         ),
         ocr_bbox_service_url=os.getenv("OCR_BBOX_SERVICE_URL", defaults.ocr_bbox_service_url),
         cpa_export_url=os.getenv("CPA_EXPORT_URL", defaults.cpa_export_url),

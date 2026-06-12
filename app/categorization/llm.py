@@ -230,27 +230,82 @@ class LLMCategorizer:
             {"role": "user", "content": user_content},
         ]
 
-        payload: dict[str, Any] = {
-            "model": settings.categorizer_model,
-            "messages": messages,
-            "max_tokens": settings.llm_max_tokens,
-            "temperature": 0.0,   # deterministic; we want consistent categorization
-            # Suppress Qwen3 / llama.cpp extended-thinking mode.
-            # Without this, Qwen3 spending all token budget on reasoning_content
-            # and produces an empty content field (observed: 148/148 → None).
-            # The parameter is silently ignored by endpoints that don't support it
-            # (OpenAI, Anthropic, standard vLLM), so it is safe to send everywhere.
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if settings.categorizer_api_key:
-            headers["Authorization"] = f"Bearer {settings.categorizer_api_key}"
+        # --- Primary model (routine tier — Qwen by default) ---
+        primary = await self._run_model(
+            model=settings.categorizer_model,
+            endpoint=settings.categorizer_endpoint_url,
+            api_key=settings.categorizer_api_key,
+            timeout=settings.categorizer_timeout_s,
+            messages=messages,
+            allowed_categories=allowed_categories,
+        )
 
-        url = settings.categorizer_endpoint_url.rstrip("/") + "/chat/completions"
+        # --- Frontier fallback (per-agent routing policy) ---
+        # Escalate to the configured frontier model when the primary returned
+        # nothing valid, OR returned a confidence below the threshold. The
+        # escalated answer is preferred; if it too fails we keep the primary.
+        # The returned suggestion's ``model`` field records which model actually
+        # produced it, so the audit trail shows when/where we escalated.
+        fb_model = settings.categorizer_fallback_model
+        if fb_model:
+            needs_escalation = primary is None or (
+                primary.confidence < settings.categorizer_escalate_below_confidence
+            )
+            if needs_escalation:
+                fallback = await self._run_model(
+                    model=fb_model,
+                    endpoint=(
+                        settings.categorizer_fallback_endpoint_url
+                        or settings.categorizer_endpoint_url
+                    ),
+                    api_key=settings.categorizer_fallback_api_key,
+                    timeout=settings.categorizer_timeout_s,
+                    messages=messages,
+                    allowed_categories=allowed_categories,
+                )
+                if fallback is not None:
+                    return fallback
+
+        return primary
+
+    async def _run_model(
+        self,
+        *,
+        model: str,
+        endpoint: str,
+        api_key: str,
+        timeout: int,
+        messages: list[dict[str, str]],
+        allowed_categories: list[str],
+    ) -> LLMCategorySuggestion | None:
+        """Run ONE categorization call against a specific model/endpoint.
+
+        Returns a validated suggestion, or None on timeout / HTTP error /
+        malformed JSON / hallucinated category. Shared by both the primary
+        (Qwen) and frontier-fallback paths so the prompt + validation are
+        identical across models.
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": self._settings.llm_max_tokens,
+            "temperature": 0.0,   # deterministic; consistent categorization
+        }
+        # Only Qwen3 / llama.cpp needs thinking suppressed (otherwise it burns the
+        # whole budget on reasoning_content → empty content). Frontier models
+        # (Anthropic/OpenAI via the gateway) don't take this param — and some
+        # gateways reject unknown params — so send it ONLY to Qwen models.
+        if "qwen" in model.lower():
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        url = endpoint.rstrip("/") + "/chat/completions"
 
         t0 = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=settings.categorizer_timeout_s) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(url, json=payload, headers=headers)
                 response.raise_for_status()
         except httpx.TimeoutException:
@@ -273,8 +328,8 @@ class LLMCategorizer:
             confidence=max(0.0, min(1.0, float(confidence))),
             reasoning=reasoning[:500],   # guard against runaway reasoning strings
             raw_response=raw_json,
-            model=settings.categorizer_model,
-            endpoint=settings.categorizer_endpoint_url,
+            model=model,
+            endpoint=endpoint,
             duration_ms=duration_ms,
         )
 
