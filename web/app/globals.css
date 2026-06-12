@@ -26,6 +26,7 @@
   --hairline: hsla(0 0% 100% / 0.08);
   --hairline-soft: hsla(0 0% 100% / 0.05);
   --hairline-strong: hsla(0 0% 100% / 0.15);
+  --ink-hero: hsl(240 24% 99%);
   --ink-1: hsl(240 24% 97%);
   --ink-2: hsl(240 11% 71%);
   --ink-3: hsl(240 9% 53%);
@@ -58,42 +59,48 @@
    ============================================================ */
 :root[data-theme="light"] {
   color-scheme: light;
-  --canvas: hsl(250 30% 97%);
-  --canvas-2: hsl(250 36% 95%);
+  /* Tinted gray canvas + pure-white cards (card sits ABOVE canvas), per
+     premium light-fintech practice (Stripe/Linear). Shadows are navy-tinted,
+     not black, and layered; a hairline does the crisp edge work shadows can't. */
+  --canvas: hsl(220 16% 95.5%);
+  --canvas-2: hsl(220 16% 93.5%);
   --surface: hsl(0 0% 100%);
-  --surface-2: hsl(250 36% 99%);
+  --surface-2: hsl(220 30% 98.5%);
   --elevated: hsl(0 0% 100%);
-  --card-grad-top: hsla(0 0% 100% / 0.7);
-  --card-grad-bot: hsla(250 40% 92% / 0);
+  --card-grad-top: hsla(0 0% 100% / 0.6);
+  --card-grad-bot: hsla(220 30% 96% / 0);
   --glass-edge: hsla(0 0% 100% / 0.9);
-  --hairline: hsla(250 25% 22% / 0.10);
-  --hairline-soft: hsla(250 25% 22% / 0.06);
-  --hairline-strong: hsla(250 25% 22% / 0.17);
-  --ink-1: hsl(250 30% 13%);
-  --ink-2: hsl(250 13% 34%);
-  --ink-3: hsl(250 9% 50%);
-  --ink-4: hsl(250 8% 64%);
-  --brand-200: hsl(265 70% 60%);
-  --brand-300: hsl(265 70% 55%);
-  --brand-400: hsl(265 68% 52%);
-  --brand-500: hsl(265 68% 50%);
-  --brand-600: hsl(265 66% 45%);
-  --brand-700: hsl(265 64% 39%);
-  --agent-400: hsl(188 80% 44%);
-  --agent-500: hsl(188 82% 38%);
-  --agent-600: hsl(188 84% 31%);
-  --credit: hsl(157 58% 37%);
-  --debit: hsl(0 72% 51%);
-  --pending: hsl(36 92% 43%);
-  --blocked: hsl(18 86% 47%);
-  --shadow-card: 0 1px 2px hsla(250 20% 30% / 0.06), 0 10px 28px hsla(250 20% 30% / 0.09);
-  --shadow-hover: 0 2px 6px hsla(250 20% 30% / 0.09), 0 20px 48px hsla(250 20% 30% / 0.14);
-  --shadow-pop: 0 4px 10px hsla(250 20% 30% / 0.1), 0 30px 70px hsla(250 20% 30% / 0.18);
-  --glow-brand: 0 0 0 1px hsla(265 68% 50% / 0.3), 0 0 24px hsla(265 68% 50% / 0.18);
-  --glow-agent: 0 0 0 1px hsla(188 82% 38% / 0.4), 0 0 18px hsla(188 82% 38% / 0.22);
-  --chip-bg: hsla(250 30% 20% / 0.05);
-  --scrim: hsla(250 30% 40% / 0.35);
-  --grain: 0.02;
+  --hairline: rgba(16, 24, 40, 0.10);
+  --hairline-soft: rgba(16, 24, 40, 0.06);
+  --hairline-strong: rgba(16, 24, 40, 0.16);
+  /* Ink: hero numbers near-black; no readable text lighter than ~L46%. */
+  --ink-hero: hsl(225 25% 10%);
+  --ink-1: hsl(225 22% 15%);
+  --ink-2: hsl(220 12% 36%);
+  --ink-3: hsl(220 10% 46%);
+  --ink-4: hsl(220 9% 60%);
+  --brand-200: hsl(265 62% 52%);
+  --brand-300: hsl(258 60% 50%);
+  --brand-400: hsl(258 62% 48%);
+  --brand-500: hsl(260 64% 50%);
+  --brand-600: hsl(262 66% 44%);
+  --brand-700: hsl(264 68% 38%);
+  --agent-400: hsl(190 80% 36%);
+  --agent-500: hsl(190 84% 32%);
+  --agent-600: hsl(192 86% 27%);
+  /* Semantic colors darkened + saturated to hold ≥4.5:1 on white. */
+  --credit: hsl(151 55% 32%);
+  --debit: hsl(356 64% 44%);
+  --pending: hsl(35 85% 36%);
+  --blocked: hsl(18 84% 42%);
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.06), 0 4px 8px rgba(16, 24, 40, 0.04), 0 8px 24px rgba(16, 24, 40, 0.08);
+  --shadow-hover: 0 2px 6px rgba(16, 24, 40, 0.09), 0 12px 24px rgba(16, 24, 40, 0.08), 0 24px 48px rgba(16, 24, 40, 0.12);
+  --shadow-pop: 0 2px 6px rgba(16, 24, 40, 0.08), 0 12px 28px rgba(16, 24, 40, 0.10), 0 28px 56px rgba(16, 24, 40, 0.14);
+  --glow-brand: 0 0 0 1px hsla(260 64% 50% / 0.28), 0 0 24px hsla(260 64% 50% / 0.16);
+  --glow-agent: 0 0 0 1px hsla(190 84% 32% / 0.35), 0 0 18px hsla(190 84% 32% / 0.18);
+  --chip-bg: rgba(16, 24, 40, 0.05);
+  --scrim: hsla(225 30% 30% / 0.4);
+  --grain: 0.014;
 }
 
 html, body {
@@ -225,6 +232,7 @@ body::after {
   font-weight: 600;
   letter-spacing: -0.03em;
   line-height: 1;
+  color: var(--ink-hero);
   margin-top: 8px;
   cursor: pointer;
   transition: color 0.15s;
@@ -325,6 +333,7 @@ body::after {
   letter-spacing: -0.02em;
   margin-top: 9px;
   line-height: 1;
+  color: var(--ink-hero);
 }
 .kpi .meta {
   display: flex;

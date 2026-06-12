@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { SiteHeader } from "@/components/site-header";
 import { AppSidebar } from "@/components/app-sidebar";
+import { BottomNav } from "@/components/bottom-nav";
 import { ChatLauncher } from "@/components/chat/chat-launcher";
 import { ContextBreadcrumb } from "@/components/context-breadcrumb";
 import { GlobalToast } from "@/components/global-toast";
@@ -41,7 +42,11 @@ export async function AppShell({
     <>
       <SiteHeader variant="app" />
       <div className="flex">
-        <AppSidebar canAdmin={canAdmin} initialCollapsed={collapsed} />
+        <AppSidebar
+          canAdmin={canAdmin}
+          initialCollapsed={collapsed}
+          workspaceName={ctx?.activeWorkspace?.display_name ?? "Workspace"}
+        />
         <main className="min-w-0 flex-1 pb-24">
           {ctx?.activeWorkspace && (
             <div className="border-b border-subtle bg-canvas/40 px-4 py-2 md:px-6">
@@ -63,6 +68,7 @@ export async function AppShell({
         />
       )}
       <GlobalToast />
+      {ctx?.activeWorkspace && <BottomNav canAdmin={canAdmin} />}
     </>
   );
 }

@@ -1,7 +1,13 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono, Inter } from "next/font/google";
 import { cookies } from "next/headers";
 import "./globals.css";
+
+export const viewport: Viewport = {
+  // Required for env(safe-area-inset-*) to resolve on notched devices —
+  // used by the mobile bottom nav.
+  viewportFit: "cover",
+};
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-geist-sans", display: "swap" });
 const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono", display: "swap" });

@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Menu, X } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { NAV_SECTIONS } from "@/lib/nav-sections";
+import { visibleSections } from "@/lib/nav-sections";
 import { APP_VERSION_LABEL } from "@/lib/version";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { CommandK } from "@/components/command-k";
@@ -45,7 +45,7 @@ export function SiteHeaderClient({
     };
   }, [mobileOpen]);
 
-  const sections = NAV_SECTIONS.filter((s) => !s.adminOnly || canAdmin);
+  const sections = visibleSections(canAdmin);
 
   return (
     <>
