@@ -326,9 +326,10 @@ async def resolve_workspace_for_federation(
     For trusted M2M callers it synthesizes a viewer WorkspaceContext WITHOUT
     requiring a workspace_membership row. The workspace must exist and be active.
     Entity scope is None (full workspace view), role is capped at 'viewer'.
-    HIPAA workspaces are accessible to trusted M2M callers — if a workspace is
-    HIPAA-protected, operators MUST ensure the TPO service account is under a
-    BAA-equivalent agreement. Log it so the audit trail is clear.
+    HIPAA workspaces are NOT accessible to trusted M2M callers — a 403 is
+    returned immediately so no PHI can leave over an unauthenticated federation
+    channel. Operators must use the normal membership path (with an explicit
+    BAA-equivalent agreement) to grant federation access to HIPAA workspaces.
 
     SECURITY NOTES:
     - is_trusted_m2m is only set after full KC JWT validation in authenticate_token.
@@ -347,11 +348,9 @@ async def resolve_workspace_for_federation(
     slug, hipaa = await _workspace_exists(workspace_id)
 
     if hipaa:
-        _log_federation.warning(
-            "[acctops.tenancy.federation] trusted M2M caller %r accessing "
-            "HIPAA-protected workspace %s — ensure BAA coverage",
-            auth.uc_uid,
-            workspace_id,
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="HIPAA workspace: federation not permitted",
         )
 
     _log_federation.info(

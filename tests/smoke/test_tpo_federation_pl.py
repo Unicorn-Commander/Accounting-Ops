@@ -431,3 +431,74 @@ async def test_m2m_caller_404_for_unknown_workspace(
             workspace_id_header=None,
         )
     assert exc.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Test 8: HIPAA guard — trusted M2M caller is blocked on HIPAA workspaces
+# ---------------------------------------------------------------------------
+
+
+async def test_hipaa_workspace_blocks_federation(monkeypatch):
+    """A trusted M2M caller (tax-planning-ops) targeting a HIPAA-flagged
+    workspace must get 403 with detail='HIPAA workspace: federation not permitted'.
+    No PHI must leave over the unauthenticated federation channel."""
+    hipaa_workspace_id = uuid4()
+
+    async def _fake_hipaa_workspace(workspace_id):
+        if workspace_id == hipaa_workspace_id:
+            return ("hipaa-workspace", True)  # hipaa_protected=True
+        raise HTTPException(status_code=404, detail="Workspace not found or not active")
+
+    monkeypatch.setattr(tenancy_module, "_workspace_exists", _fake_hipaa_workspace)
+
+    token = _mint(_PRIVATE_PEM, _tpo_claims())
+    ctx = await authenticate_token(token)
+    assert ctx.is_trusted_m2m is True
+
+    class _FakeRequest:
+        path_params = {"workspace_id": str(hipaa_workspace_id)}
+        headers: dict = {}
+
+    with pytest.raises(HTTPException) as exc:
+        await resolve_workspace_for_federation(
+            request=_FakeRequest(),  # type: ignore[arg-type]
+            auth=ctx,
+            workspace_id_header=None,
+        )
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "HIPAA workspace: federation not permitted"
+
+
+async def test_non_hipaa_workspace_allows_federation(monkeypatch):
+    """A trusted M2M caller (tax-planning-ops) targeting a non-HIPAA workspace
+    must succeed and receive a viewer WorkspaceContext (hipaa_protected=False)."""
+    non_hipaa_workspace_id = uuid4()
+    non_hipaa_slug = "standard-workspace"
+
+    async def _fake_non_hipaa_workspace(workspace_id):
+        if workspace_id == non_hipaa_workspace_id:
+            return (non_hipaa_slug, False)  # hipaa_protected=False
+        raise HTTPException(status_code=404, detail="Workspace not found or not active")
+
+    monkeypatch.setattr(tenancy_module, "_workspace_exists", _fake_non_hipaa_workspace)
+
+    token = _mint(_PRIVATE_PEM, _tpo_claims())
+    ctx = await authenticate_token(token)
+    assert ctx.is_trusted_m2m is True
+
+    class _FakeRequest:
+        path_params = {"workspace_id": str(non_hipaa_workspace_id)}
+        headers: dict = {}
+
+    ws = await resolve_workspace_for_federation(
+        request=_FakeRequest(),  # type: ignore[arg-type]
+        auth=ctx,
+        workspace_id_header=None,
+    )
+
+    assert ws.role == "viewer"
+    assert ws.entity_scope is None
+    assert ws.workspace_id == non_hipaa_workspace_id
+    assert ws.workspace_slug == non_hipaa_slug
+    assert ws.hipaa_protected is False
+    assert ws.user_uc_uid == f"m2m:{TPO_CLIENT}"
