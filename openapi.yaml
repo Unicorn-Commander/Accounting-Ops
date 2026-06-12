@@ -4,7 +4,7 @@ info:
   version: 0.1.0
   description: Contract for Accounting-Ops FastAPI, MCP discovery, A2A Agent Card, and Phase 1 tool endpoints.
 servers:
-  - url: https://accounting.magicunicorn.dev
+  - url: https://accounting-ops.magicunicorn.dev
 security:
   - keycloakOAuth: [accounting:read]
 components:
