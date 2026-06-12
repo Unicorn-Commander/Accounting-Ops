@@ -137,6 +137,21 @@ class Settings(BaseModel):
     # portal — Stripe lives there, behind the shared uchub SSO session).
     ops_center_billing_url: str = "https://unicorncommander.ai/billing"
 
+    # ---- Server-to-server (M2M) trusted callers ----
+    # Space-separated list of Keycloak client IDs (azp claim values) that are
+    # permitted to call federation read endpoints without a workspace membership
+    # row. These are Keycloak client-credentials-grant callers (machine-to-machine,
+    # no end user). They MUST still present a valid uchub JWT with
+    # aud=accounting-ops-app; the azp value is the additional gate.
+    #
+    # Access is restricted to READ-ONLY operations on specific endpoints. Each
+    # endpoint that accepts trusted M2M callers explicitly opts in via the
+    # resolve_workspace_for_federation dependency (not the default resolve_workspace).
+    #
+    # Example .env:
+    #   ACCTOPS_TRUSTED_M2M_CALLERS=tax-planning-ops
+    trusted_m2m_callers: frozenset[str] = frozenset()
+
 
 def get_admin_database_url() -> str:
     """DB URL for DDL/owner operations (migrations + provisioning).
@@ -203,5 +218,10 @@ def get_settings() -> Settings:
         ),
         ops_center_billing_url=os.getenv(
             "OPS_CENTER_BILLING_URL", defaults.ops_center_billing_url
+        ),
+        trusted_m2m_callers=frozenset(
+            c.strip()
+            for c in os.getenv("ACCTOPS_TRUSTED_M2M_CALLERS", "").split()
+            if c.strip()
         ),
     )

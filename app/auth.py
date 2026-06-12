@@ -101,6 +101,13 @@ class AuthContext:
     # tokens (no constraint — the user's full membership applies). Set when
     # the bearer matched a service token that declared scope fields.
     service_scope: ServiceScope | None = None
+    # True when the bearer is a Keycloak client-credentials JWT whose azp
+    # (authorized party) is in the ACCTOPS_TRUSTED_M2M_CALLERS allow-list.
+    # These callers have no workspace membership row; specific endpoints
+    # (P&L federation read) opt in via resolve_workspace_for_federation.
+    # This flag is NEVER set by the service-token or Brigade paths — only
+    # by the Keycloak JWT path after audience + azp allow-list validation.
+    is_trusted_m2m: bool = False
 
 
 # JWKS cache: avoid refetching Keycloak's signing keys on every request.
@@ -629,7 +636,28 @@ async def authenticate_token(token: str) -> AuthContext:
     if isinstance(act, dict):
         agent_id = act.get("sub") or act.get("client_id")
     scope = tuple(str(claims.get("scope", "")).split())
-    ctx = AuthContext(uc_uid=uc_uid, agent_id=agent_id, scopes=scope, claims=claims)
+
+    # Trusted M2M detection: if the token's azp is in the configured allow-list
+    # of trusted server-to-server callers, mark the context so the federation
+    # endpoint can synthesize a workspace context without a membership row.
+    # We use a stable synthetic uc_uid (m2m:<azp>) so these callers never
+    # collide with real user accounts and never auto-provision user_account rows.
+    # SECURITY: is_trusted_m2m is ONLY set here, after full KC JWT validation
+    # (signature + issuer + expiry + audience all already verified above).
+    azp: str | None = claims.get("azp") or claims.get("client_id")
+    trusted_callers = settings.trusted_m2m_callers
+    is_trusted_m2m = bool(azp and azp in trusted_callers)
+    if is_trusted_m2m:
+        # Synthetic uc_uid — never matches a real user_account row.
+        uc_uid = f"m2m:{azp}"
+
+    ctx = AuthContext(
+        uc_uid=uc_uid,
+        agent_id=agent_id,
+        scopes=scope,
+        claims=claims,
+        is_trusted_m2m=is_trusted_m2m,
+    )
     _stamp_audit_actor(ctx)
     return ctx
 

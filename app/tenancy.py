@@ -287,6 +287,95 @@ def _cap_role(actual: str, ceiling: str) -> str:
     return actual if a_idx <= c_idx else ceiling
 
 
+async def _workspace_exists(workspace_id: UUID) -> tuple[str, bool]:
+    """Return (slug, hipaa_protected) for an active workspace, or raise 404."""
+    async with SessionLocal() as session:
+        async with session.begin():
+            row = (
+                await session.execute(
+                    text(
+                        "SELECT slug, hipaa_protected "
+                        "FROM public.workspace "
+                        "WHERE id = :wid AND status = 'active'"
+                    ),
+                    {"wid": workspace_id},
+                )
+            ).first()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace not found or not active",
+        )
+    return str(row.slug), bool(row.hipaa_protected)
+
+
+async def resolve_workspace_for_federation(
+    request: Request,
+    auth: AuthContext = Depends(validate_bearer_token),
+    workspace_id_header: str | None = Header(default=None, alias="X-Workspace-Id"),
+) -> WorkspaceContext:
+    """FastAPI dependency: resolve workspace for trusted M2M federation callers.
+
+    This dependency is used ONLY on read-only federation endpoints (currently
+    P&L only). It accepts callers that:
+      1. Hold a valid uchub KC JWT (signature + issuer + expiry + audience all
+         verified by validate_bearer_token), AND
+      2. Have azp in ACCTOPS_TRUSTED_M2M_CALLERS (is_trusted_m2m=True), OR
+      3. Are a normal workspace member (falls through to resolve_workspace).
+
+    For trusted M2M callers it synthesizes a viewer WorkspaceContext WITHOUT
+    requiring a workspace_membership row. The workspace must exist and be active.
+    Entity scope is None (full workspace view), role is capped at 'viewer'.
+    HIPAA workspaces are accessible to trusted M2M callers — if a workspace is
+    HIPAA-protected, operators MUST ensure the TPO service account is under a
+    BAA-equivalent agreement. Log it so the audit trail is clear.
+
+    SECURITY NOTES:
+    - is_trusted_m2m is only set after full KC JWT validation in authenticate_token.
+    - The azp allow-list (ACCTOPS_TRUSTED_M2M_CALLERS) is the narrow gate; an
+      empty list blocks all M2M callers.
+    - Role is hard-coded to 'viewer' — M2M callers can never elevate beyond read.
+    - No user_account row is created (uc_uid is synthetic m2m:<azp>).
+    - This dependency is intentionally NOT wired to resolve_workspace; it is a
+      separate opt-in so only explicitly-labelled endpoints open the M2M path.
+    """
+    if not auth.is_trusted_m2m:
+        # Not a trusted M2M caller — fall back to the normal membership path.
+        return await resolve_workspace(request, auth, workspace_id_header)
+
+    workspace_id = _extract_workspace_id(request, workspace_id_header, auth.claims)
+    slug, hipaa = await _workspace_exists(workspace_id)
+
+    if hipaa:
+        _log_federation.warning(
+            "[acctops.tenancy.federation] trusted M2M caller %r accessing "
+            "HIPAA-protected workspace %s — ensure BAA coverage",
+            auth.uc_uid,
+            workspace_id,
+        )
+
+    _log_federation.info(
+        "[acctops.tenancy.federation] trusted M2M caller %r granted viewer "
+        "access to workspace %s (slug=%r)",
+        auth.uc_uid,
+        workspace_id,
+        slug,
+    )
+
+    return WorkspaceContext(
+        workspace_id=workspace_id,
+        workspace_slug=slug,
+        role="viewer",
+        user_uc_uid=auth.uc_uid,
+        agent_id=auth.agent_id,
+        entity_scope=None,
+        hipaa_protected=hipaa,
+    )
+
+
+_log_federation = __import__("logging").getLogger("acctops.tenancy.federation")
+
+
 async def resolve_entity(
     request: Request,
     workspace: WorkspaceContext = Depends(resolve_workspace),
@@ -353,6 +442,7 @@ __all__: Iterable[str] = (
     "EntityContext",
     "TenantContext",  # deprecated
     "resolve_workspace",
+    "resolve_workspace_for_federation",
     "resolve_entity",
     "resolve_tenant",  # deprecated
     "role_at_least",

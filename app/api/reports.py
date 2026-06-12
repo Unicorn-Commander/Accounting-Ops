@@ -31,7 +31,7 @@ from sqlalchemy import text
 
 from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
-from app.tenancy import WorkspaceContext, require_role, resolve_workspace
+from app.tenancy import WorkspaceContext, require_role, resolve_workspace, resolve_workspace_for_federation
 from app.workspace_session import workspace_session
 
 router = APIRouter(tags=["reports"])
@@ -328,9 +328,15 @@ async def profit_and_loss(
     workspace_id: UUID,
     period: str = "ytd",
     entity_id: str | None = None,
-    workspace: WorkspaceContext = Depends(resolve_workspace),
+    workspace: WorkspaceContext = Depends(resolve_workspace_for_federation),
 ) -> dict:
-    """Profit & Loss for the period. See ``compute_profit_and_loss``."""
+    """Profit & Loss for the period. See ``compute_profit_and_loss``.
+
+    Accepts both normal workspace-member JWTs and trusted M2M client-credentials
+    JWTs (azp in ACCTOPS_TRUSTED_M2M_CALLERS). The M2M path is authorized via
+    resolve_workspace_for_federation which synthesizes a viewer-role context
+    without a membership row. Role floor is always 'viewer' for M2M callers.
+    """
     require_role(workspace, "viewer")
     return await compute_profit_and_loss(workspace, period, entity_id)
 
