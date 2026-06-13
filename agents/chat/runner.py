@@ -353,6 +353,16 @@ async def stream_assistant_turn(
                             "https://accounting.magicunicorn.dev",
                         ),
                         "X-Title": "Accounting-Ops Chat",
+                        # DO NOT REMOVE: the UC gateway (llm.unicorncommander.ai)
+                        # sits behind Cloudflare bot-management, which 403s the
+                        # openai SDK's default "OpenAI/Python ..." User-Agent
+                        # ("Your request was blocked"). Sending a descriptive,
+                        # non-SDK UA makes chat pass. Verified: default UA = 403,
+                        # this UA = 200. Overridable via AO_CHAT_USER_AGENT.
+                        "User-Agent": os.environ.get(
+                            "AO_CHAT_USER_AGENT",
+                            "Mozilla/5.0 (compatible; Accounting-Ops-Chat/1.0; +https://unicorncommander.ai)",
+                        ),
                     },
                 )
 
