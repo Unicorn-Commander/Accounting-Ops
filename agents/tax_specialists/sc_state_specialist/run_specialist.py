@@ -8,11 +8,11 @@ endpoint. Supports two backends:
   Anthropic SDK's native MCP client integration (``beta.messages.create``
   with ``mcp_servers``). No local tool-call loop needed.
 
-- **openai** (default when ``LLM_ENDPOINT_URL`` is set): uses the OpenAI
-  Python SDK (>= 1.0) aimed at any OpenAI-compatible local endpoint (e.g.
-  llama-server / Qwen3.6-35B-A3B-Vision on midboy1:8088). Implements a
-  manual MCP tool-call loop because local endpoints have no native MCP
-  integration.
+- **openai** (default when ``CPATEAM_LLM_ENDPOINT_URL`` is set): uses the
+  OpenAI Python SDK (>= 1.0) aimed at any OpenAI-compatible endpoint. The
+  CPA-team frontier config defaults to OpenRouter
+  (anthropic/claude-sonnet-4.6). Implements a manual MCP tool-call loop
+  because such endpoints have no native MCP integration.
 
 Usage — Anthropic path::
 
@@ -26,11 +26,9 @@ Usage — Anthropic path::
         --output       ./drafts/mu-inc-2023-1120-draft.md \\
         --model        sonnet
 
-Usage — local Qwen path::
+Usage — OpenRouter (openai-compatible) path::
 
-    export LLM_ENDPOINT_URL="http://midboy1:8088/v1"
-    export LLM_MODEL="Qwen3.6-35B-A3B-Vision"
-    export LLM_API_KEY="local-qwen"
+    export CPATEAM_LLM_API_KEY="sk-or-..."   # or set OPENROUTER_API_KEY
     export ACCTOPS_SERVICE_TOKEN="<keycloak-service-token>"
 
     uv run python agents/tax_specialists/sc_state_specialist/run_specialist.py \\
@@ -47,12 +45,12 @@ Environment variables:
     ACCTOPS_MCP_URL         Override the MCP endpoint base URL.
                             Default: http://localhost:8000/mcp
     ANTHROPIC_API_KEY       Anthropic API key. Required for --backend anthropic.
-    LLM_ENDPOINT_URL        Base URL for OpenAI-compatible endpoint.
-                            Default: http://localhost:8088/v1
-    LLM_MODEL               Model name served by the local endpoint.
-                            Default: Qwen3.6-35B-A3B-Vision
-    LLM_API_KEY             API key for the local endpoint (often a placeholder).
-                            Default: local-qwen
+    CPATEAM_LLM_ENDPOINT_URL  Base URL for the CPA-team frontier endpoint (the
+                            --backend openai path). Default: OpenRouter
+                            (https://openrouter.ai/api/v1).
+    CPATEAM_LLM_MODEL       Frontier model name. Default: anthropic/claude-sonnet-4.6.
+    CPATEAM_LLM_API_KEY     API key for the frontier endpoint. Falls back to
+                            OPENROUTER_API_KEY when unset.
 
 Notes:
 
@@ -109,9 +107,6 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MCP_URL = "http://localhost:8000/mcp"
-_DEFAULT_LLM_ENDPOINT_URL = "http://localhost:8088/v1"
-_DEFAULT_LLM_MODEL = "Qwen3.6-35B-A3B-Vision"
-_DEFAULT_LLM_API_KEY = "local-qwen"
 
 _MODEL_MAP = {
     "sonnet": "claude-sonnet-4-6",
@@ -750,11 +745,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
               -- Anthropic backend --
               ANTHROPIC_API_KEY       Anthropic API key                               [required for --backend anthropic]
 
-              -- OpenAI / local backend --
-              LLM_ENDPOINT_URL        Base URL for OpenAI-compatible local endpoint   [default: http://localhost:8088/v1]
-              LLM_MODEL               Model name at the local endpoint                [default: Qwen3.6-35B-A3B-Vision]
-              LLM_API_KEY             API key for the local endpoint                  [default: local-qwen]
-              OPENROUTER_API_KEY      Fleet-wide OpenRouter key (alternative to LLM_API_KEY)
+              -- OpenAI / OpenRouter backend (CPA-team frontier) --
+              CPATEAM_LLM_ENDPOINT_URL  Frontier endpoint base URL                    [default: https://openrouter.ai/api/v1]
+              CPATEAM_LLM_MODEL         Frontier model name                           [default: anthropic/claude-sonnet-4.6]
+              CPATEAM_LLM_API_KEY       Frontier API key (falls back to OPENROUTER_API_KEY)
+              OPENROUTER_API_KEY        Fleet-wide OpenRouter key (used when CPATEAM_LLM_API_KEY unset)
 
             {HELP_TEXT_LLM_API_KEY}
         """),
@@ -806,33 +801,33 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "LLM backend: 'anthropic' (default when ANTHROPIC_API_KEY set) or "
-            "'openai' (default when LLM_ENDPOINT_URL set). "
+            "'openai' (default when CPATEAM_LLM_ENDPOINT_URL set). "
             "Explicitly setting this flag overrides the env-var heuristic."
         ),
     )
-    # ---- OpenAI / local LLM flags ----
+    # ---- OpenAI / OpenRouter (CPA-team frontier) flags ----
     parser.add_argument(
         "--llm-endpoint-url",
         default=None,
         help=(
-            "Base URL for the OpenAI-compatible local endpoint. "
-            "Default: $LLM_ENDPOINT_URL or http://localhost:8088/v1"
+            "Override the CPA-team frontier endpoint base URL. "
+            "Default: $CPATEAM_LLM_ENDPOINT_URL or OpenRouter."
         ),
     )
     parser.add_argument(
         "--llm-model",
         default=None,
         help=(
-            "Model name served by the local endpoint. "
-            "Default: $LLM_MODEL or Qwen3.6-35B-A3B-Vision"
+            "Override the frontier model name. "
+            "Default: $CPATEAM_LLM_MODEL or anthropic/claude-sonnet-4.6"
         ),
     )
     parser.add_argument(
         "--llm-api-key",
         default=None,
         help=(
-            "API key for the local endpoint. DEPRECATED — visible via `ps`. "
-            "Prefer $LLM_API_KEY, $OPENROUTER_API_KEY, or --llm-api-key-file."
+            "API key for the frontier endpoint. DEPRECATED — visible via `ps`. "
+            "Prefer $CPATEAM_LLM_API_KEY, $OPENROUTER_API_KEY, or --llm-api-key-file."
         ),
     )
     parser.add_argument(
