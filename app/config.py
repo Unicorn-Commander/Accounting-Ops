@@ -149,6 +149,24 @@ class Settings(BaseModel):
     categorizer_fallback_api_key: str = ""
     categorizer_escalate_below_confidence: float = 0.0
 
+    # ---- CPA-team FRONTIER path (narrative generator + specialist runners) ----
+    # SEPARATE from the vision llm_* block above — same lesson as the categorizer.
+    # The narrative generator synthesises long-form CPA prose (a frontier job), but
+    # it reads LLM_ENDPOINT_URL/LLM_MODEL/LLM_API_KEY via the shared runner env +
+    # resolve_llm_api_key(), which the vision/OCR work repurposed for the
+    # receipt-VLM (Qwen vision @ :8088). That collision silently pointed narration
+    # at the vision model/key → 401 on OpenRouter. These dedicated knobs give the
+    # CPA-team frontier path its own endpoint/model/key (default OpenRouter
+    # Sonnet-4.6); trigger_tax_narrative injects them as LLM_* into the runner
+    # subprocess so resolve_llm_api_key picks up the RIGHT key. For the
+    # sovereign/air-gapped fallback, point these at the local 131K Qwen text model
+    # (NARRATIVE_LLM_MODEL=qwen3.6-35b-p40, NARRATIVE_LLM_ENDPOINT_URL=<gateway>:4000/v1).
+    # Blank api_key => fall back to OPENROUTER_API_KEY.
+    # Env: NARRATIVE_LLM_ENDPOINT_URL / NARRATIVE_LLM_MODEL / NARRATIVE_LLM_API_KEY.
+    narrative_llm_endpoint_url: str = "https://openrouter.ai/api/v1"
+    narrative_llm_model: str = "anthropic/claude-sonnet-4.6"
+    narrative_llm_api_key: str = ""
+
     # ---- bbox-oracle (traditional OCR cross-check) ----
     # URL of the bbox-oracle service.  POST {url}/ocr with multipart field "file"
     # (PNG/JPG) → {"text": "...", "lines": [{"text", "bbox", "score"}, ...]}.
@@ -286,6 +304,11 @@ def get_settings() -> Settings:
         categorizer_escalate_below_confidence=float(
             os.getenv("CATEGORIZER_ESCALATE_BELOW_CONFIDENCE", "0.0") or "0.0"
         ),
+        narrative_llm_endpoint_url=os.getenv(
+            "NARRATIVE_LLM_ENDPOINT_URL", defaults.narrative_llm_endpoint_url
+        ),
+        narrative_llm_model=os.getenv("NARRATIVE_LLM_MODEL", defaults.narrative_llm_model),
+        narrative_llm_api_key=os.getenv("NARRATIVE_LLM_API_KEY", defaults.narrative_llm_api_key),
         ocr_bbox_service_url=os.getenv("OCR_BBOX_SERVICE_URL", defaults.ocr_bbox_service_url),
         cpa_export_url=os.getenv("CPA_EXPORT_URL", defaults.cpa_export_url),
         llm_gateway_base_url=os.getenv(

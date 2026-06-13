@@ -339,6 +339,14 @@ def _run_openai(
                     if verbose:
                         print(f"[narrative] LLM iteration {iteration + 1}")
 
+                    # Qwen3 burns its whole budget on reasoning_content and returns
+                    # empty content unless thinking is disabled — required for the
+                    # local-Qwen sovereign fallback (harmless for frontier models).
+                    extra_body = (
+                        {"chat_template_kwargs": {"enable_thinking": False}}
+                        if "qwen" in llm_model.lower()
+                        else None
+                    )
                     response = llm.chat.completions.create(
                         model=llm_model,
                         messages=messages,
@@ -346,6 +354,7 @@ def _run_openai(
                         tool_choice="auto" if openai_tools else None,
                         max_tokens=_MAX_OUTPUT_TOKENS,
                         temperature=0.1,
+                        extra_body=extra_body,
                     )
 
                     choice = response.choices[0]
