@@ -52,6 +52,12 @@ export type EmbeddedChatProps = {
   defaultTaxYear?: number;
   /** Show the inline persona picker in the header row. Off for the tightest layouts. */
   showPersonaPicker?: boolean;
+  /** Empty-state heading override (defaults to "Chat with {persona}"). */
+  emptyTitle?: string;
+  /** Empty-state hint line under the heading (defaults to the finance-queue copy). */
+  emptyHint?: string;
+  /** Clickable starter prompts shown in the empty state; clicking sends one. */
+  suggestedPrompts?: string[];
   /** Fired whenever the active session id changes (null → created, or loaded).
    *  Used by the launcher to build the "pop out to window" URL. */
   onSessionChange?: (sessionId: string | null) => void;
@@ -67,6 +73,9 @@ export function EmbeddedChat({
   initialSessionId = null,
   defaultTaxYear = DEFAULT_TAX_YEAR,
   showPersonaPicker = true,
+  emptyTitle,
+  emptyHint,
+  suggestedPrompts,
   onSessionChange,
   className
 }: EmbeddedChatProps) {
@@ -140,8 +149,8 @@ export function EmbeddedChat({
   const personaLabel =
     personas.find((p) => p.slug === personaInUse)?.display_name ?? personaInUse;
 
-  const send = useCallback(async () => {
-    const text = draft.trim();
+  const send = useCallback(async (textOverride?: string) => {
+    const text = (textOverride ?? draft).trim();
     if (!text) return;
 
     // 1. Ensure a session exists (create lazily, bound to persona + entity + year).
@@ -237,7 +246,13 @@ export function EmbeddedChat({
           <p className="text-center text-xs text-ink-tertiary">Loading conversation…</p>
         )}
         {!loadingSession && allMessages.length === 0 && (
-          <EmbeddedEmptyState personaLabel={personaLabel} />
+          <EmbeddedEmptyState
+            personaLabel={personaLabel}
+            title={emptyTitle}
+            hint={emptyHint}
+            suggestedPrompts={suggestedPrompts}
+            onPick={(p) => void send(p)}
+          />
         )}
         {allMessages.map((m) => (
           <MessageBubble
@@ -293,15 +308,43 @@ function ErrorRow({
   );
 }
 
-function EmbeddedEmptyState({ personaLabel }: { personaLabel: string }) {
+function EmbeddedEmptyState({
+  personaLabel,
+  title,
+  hint,
+  suggestedPrompts,
+  onPick
+}: {
+  personaLabel: string;
+  title?: string;
+  hint?: string;
+  suggestedPrompts?: string[];
+  onPick?: (prompt: string) => void;
+}) {
   return (
-    <div className="mx-auto max-w-xs py-6 text-center text-sm text-ink-secondary">
+    <div className="mx-auto max-w-sm py-6 text-center text-sm text-ink-secondary">
       <Bot size={24} className="mx-auto text-agent-500" />
-      <p className="mt-2 font-medium text-ink-primary">Chat with {personaLabel}</p>
-      <p className="mt-1 text-xs text-ink-tertiary">
-        Ask about your books or this entity&apos;s tax year. DRAFT memos route to
-        the CPA queue — nothing changes without an explicit approval.
+      <p className="mt-2 font-medium text-ink-primary">
+        {title ?? `Chat with ${personaLabel}`}
       </p>
+      <p className="mt-1 text-xs text-ink-tertiary">
+        {hint ??
+          "Ask about your books or this entity's tax year. DRAFT memos route to the CPA queue — nothing changes without an explicit approval."}
+      </p>
+      {suggestedPrompts && suggestedPrompts.length > 0 && (
+        <div className="mt-4 flex flex-col gap-1.5 text-left">
+          {suggestedPrompts.map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => onPick?.(p)}
+              className="rounded-lg border border-default bg-elevated/60 px-3 py-2 text-xs text-ink-secondary transition hover:border-strong hover:text-ink-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
