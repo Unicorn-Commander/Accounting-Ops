@@ -353,6 +353,16 @@ async def stream_assistant_turn(
                             "https://accounting.magicunicorn.dev",
                         ),
                         "X-Title": "Accounting-Ops Chat",
+                        # DO NOT REMOVE: the UC gateway (llm.unicorncommander.ai)
+                        # sits behind Cloudflare bot-management, which 403s the
+                        # openai SDK's default "OpenAI/Python ..." User-Agent
+                        # ("Your request was blocked"). Sending a descriptive,
+                        # non-SDK UA makes chat pass. Verified: default UA = 403,
+                        # this UA = 200. Overridable via AO_CHAT_USER_AGENT.
+                        "User-Agent": os.environ.get(
+                            "AO_CHAT_USER_AGENT",
+                            "Mozilla/5.0 (compatible; Accounting-Ops-Chat/1.0; +https://unicorncommander.ai)",
+                        ),
                     },
                 )
 
@@ -382,7 +392,23 @@ async def stream_assistant_turn(
                         stream = await client.chat.completions.create(**kwargs)
                     except Exception as exc:
                         _log.warning("LLM request failed: %s", exc)
-                        yield {"type": "error", "message": f"LLM request failed: {exc}"}
+                        _status = getattr(exc, "status_code", None) or getattr(
+                            getattr(exc, "response", None), "status_code", None
+                        )
+                        if _status in (401, 403):
+                            _msg = (
+                                f"The assistant is unavailable — the AI gateway blocked this "
+                                f"request (HTTP {_status}). This workspace's LLM key may be "
+                                f"unauthorized or over budget; an admin should check the "
+                                f"gateway / billing settings."
+                            )
+                        elif _status == 429:
+                            _msg = "The assistant is rate-limited right now — please try again in a moment."
+                        elif _status and 500 <= int(_status) < 600:
+                            _msg = f"The assistant is temporarily unavailable (gateway HTTP {_status}) — please try again."
+                        else:
+                            _msg = "The assistant couldn't respond — please try again."
+                        yield {"type": "error", "message": _msg}
                         return
 
                     async for chunk in stream:

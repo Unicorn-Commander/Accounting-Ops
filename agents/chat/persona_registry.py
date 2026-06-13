@@ -187,6 +187,18 @@ _KNOWLEDGE_TOOLS: tuple[str, ...] = (
     "get_current_rule",
 )
 
+# Read-only tools the in-app Guide (product-help persona) may use to GROUND a
+# how-to answer in the caller's live state ("you have N pending transactions").
+# A deliberately small subset of _READ_TOOLS — the Guide explains the app, it is
+# not an analyst — and it has NO draft/queue/write tools at all.
+_GUIDE_READ_TOOLS: tuple[str, ...] = (
+    "list_transactions",
+    "get_transaction",
+    "get_p_and_l",
+    "get_runway",
+    "get_period_journal",
+)
+
 
 # Builder helper — keeps the per-persona definitions readable.
 def _persona(
@@ -321,6 +333,19 @@ PERSONAS: tuple[Persona, ...] = (
             "flag_for_cpa_review",
             "mark_intake_complete",
         ),
+        needs_tax_year=False,
+        tier="operational",
+    ),
+    # In-app product Guide — answers "how do I use Accounting-Ops?" (wayfinding,
+    # workflow walk-throughs, concept explanations). Read-only; hands off all
+    # finance/tax substance to the personas above. Surfaced on /help and in the
+    # global chat launcher's picker.
+    _persona(
+        "product-guide",
+        "Guide",
+        "Shows you how to use Accounting-Ops — where things are, how a screen works, how to run a workflow.",
+        "product_guide",
+        tools=_GUIDE_READ_TOOLS,
         needs_tax_year=False,
         tier="operational",
     ),

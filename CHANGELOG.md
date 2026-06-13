@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## 0.6.0 - 2026-06-13
+
+- feat(web): In-app **Guide** help agent on `/help`. A new read-only
+  `product-guide` chat persona answers "how do I use Accounting-Ops?"
+  (wayfinding, workflow walk-throughs, concept explanations — materiality
+  gate, hash chain, sign mismatch) grounded in the real app. Reuses the
+  shared chat surface: a guide-locked `EmbeddedChat` with clickable starter
+  prompts sits atop the static help cards; replaces the stale "Ask the agent
+  (planned)" link. Read-only tools only (no draft/queue/write); hands
+  finance/tax substance to the existing CFO/tax personas. `EmbeddedChat` +
+  `Composer` gained backward-compatible props (custom empty state, starter
+  prompts, configurable footnote) — the global launcher is unchanged.
+- fix(chat): Root-caused and fixed the gateway 403 "Your request was
+  blocked". Cloudflare bot-management in front of the UC LLM gateway was
+  rejecting the openai SDK's default `User-Agent`; the chat runner now sends
+  a descriptive UA (override via `AO_CHAT_USER_AGENT`). Keeps the metering
+  architecture intact (gateway + per-workspace keys); fixes both dogfood and
+  prod. (Belt-and-suspenders follow-up: a Cloudflare WAF exemption for the
+  gateway API.)
+- fix(chat): Surface LLM/gateway errors instead of an infinite typing
+  spinner — the SSE `error` frame is now terminal and rendered. Also repair
+  the `Composer` send-arrow button, which forwarded a `MouseEvent` into the
+  new `send(textOverride)` and crashed on every `EmbeddedChat` surface (the
+  Cmd+Enter and starter-prompt paths masked it). And reset a surfaced error
+  on session navigation (New chat / switch session) so it doesn't linger.
+- polish(web): Configurable `Composer` footnote; the read-only Guide shows
+  "The Guide is read-only — it explains how to use Accounting-Ops and never
+  changes your books."
+
 ## 0.5.1 - 2026-06-10
 
 - fix(web): UI/UX audit pass. Define the missing `brand-200/300/700` Tailwind

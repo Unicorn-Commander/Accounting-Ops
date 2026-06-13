@@ -2,6 +2,7 @@ import Link from "next/link";
 import {
   BarChart3,
   Book,
+  Bot,
   CheckCircle2,
   Edit3,
   Filter,
@@ -13,15 +14,79 @@ import {
 } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { Card, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
+import { EmbeddedChat } from "@/components/chat/embedded-chat";
+import { getActiveContext } from "@/lib/active-context";
+import { fetchChatPersonas } from "@/lib/chat";
 
-export default function HelpPage() {
+export const dynamic = "force-dynamic";
+
+const GUIDE_SLUG = "product-guide";
+
+const GUIDE_PROMPTS = [
+  "How do I reconcile a transaction?",
+  "How do I record an owner contribution?",
+  "What does the materiality gate do?",
+  "How do I hand off to my CPA at year-end?"
+];
+
+export default async function HelpPage() {
+  // Best-effort: resolve the active workspace + entity + personas so we can
+  // mount the live Guide agent at the top. If anything is missing (no
+  // workspace yet, or the persona isn't registered on the backend), we fall
+  // back to the static help below — the page must never break.
+  const ctx = await getActiveContext().catch(() => null);
+  const entity = ctx?.activeWorkspace
+    ? ctx.activeEntity ?? ctx.entities[0] ?? null
+    : null;
+  const personasRes =
+    ctx?.activeWorkspace && entity ? await fetchChatPersonas() : null;
+  const personas = personasRes?.personas ?? [];
+  const guideAvailable =
+    !!ctx?.activeWorkspace &&
+    !!entity &&
+    personas.some((p) => p.slug === GUIDE_SLUG);
+
   return (
     <AppShell>
       <PageShell>
         <SectionHeader
           title="Help"
-          subtitle="What each page does, how to do the common workflows, and where to dig in deeper."
+          subtitle="Ask the Guide, or browse what each page does, the common workflows, and where to dig in deeper."
         />
+
+        {guideAvailable && ctx?.activeWorkspace && entity && (
+          <section aria-label="Ask the Guide" className="mb-10">
+            <div className="overflow-hidden rounded-xl border border-default bg-elevated/50 shadow-card">
+              <div className="flex items-center gap-2.5 border-b border-subtle px-4 py-3">
+                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-agent-500/15 text-agent-500">
+                  <Bot size={17} />
+                </span>
+                <div className="min-w-0">
+                  <h2 className="text-sm font-semibold text-ink-primary">Ask the Guide</h2>
+                  <p className="text-xs text-ink-tertiary">
+                    A real agent that knows how Accounting-Ops works — ask it
+                    anything, like &ldquo;how do I&hellip;?&rdquo;
+                  </p>
+                </div>
+              </div>
+              <div className="h-[460px]">
+                <EmbeddedChat
+                  workspaceId={ctx.activeWorkspace.id}
+                  entityId={entity.id}
+                  entityName={entity.display_name}
+                  personas={personas}
+                  defaultPersonaSlug={GUIDE_SLUG}
+                  showPersonaPicker={false}
+                  emptyTitle="How can I help you use Accounting-Ops?"
+                  emptyHint="I can show you where things are, walk you through a workflow, or explain what a screen means. Try one of these:"
+                  suggestedPrompts={GUIDE_PROMPTS}
+                  footnote="The Guide is read-only — it explains how to use Accounting-Ops and never changes your books."
+                  className="h-full"
+                />
+              </div>
+            </div>
+          </section>
+        )}
 
         {/* Tour grid */}
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-ink-tertiary">
@@ -222,11 +287,11 @@ export default function HelpPage() {
         </Card>
 
         <p className="mt-8 text-[11px] text-ink-tertiary">
-          Need help that's not here?{" "}
+          Need help that&apos;s not here? Ask the Guide above, or open the{" "}
           <Link href="/chat" className="text-brand-400 hover:underline">
-            Ask the agent (planned)
+            full chat
           </Link>
-          {" "}or check the latest commits on the repo.
+          {" "}to reach the CFO and tax agents.
         </p>
       </PageShell>
     </AppShell>

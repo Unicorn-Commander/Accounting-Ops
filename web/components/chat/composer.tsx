@@ -17,7 +17,8 @@ export function Composer({
   onCancel,
   streaming,
   disabled,
-  placeholder
+  placeholder,
+  footnote = "DRAFT memos and DRAFT recommendations are allowed; final approval still requires an explicit click in the Approvals queue."
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -26,6 +27,9 @@ export function Composer({
   streaming: boolean;
   disabled?: boolean;
   placeholder?: string;
+  /** Disclaimer under the composer. Defaults to the draft/approval note;
+   *  pass a surface-specific string, or "" to hide it (e.g. the read-only Guide). */
+  footnote?: string;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -82,7 +86,7 @@ export function Composer({
           ) : (
             <button
               type="button"
-              onClick={onSubmit}
+              onClick={() => onSubmit()}
               disabled={disabled || !value.trim()}
               aria-label="Send message"
               className={cn(
@@ -95,10 +99,9 @@ export function Composer({
           )}
         </div>
       </div>
-      <p className="mt-2 text-[10px] text-ink-tertiary">
-        DRAFT memos and DRAFT recommendations are allowed; final approval still
-        requires an explicit click in the Approvals queue.
-      </p>
+      {footnote ? (
+        <p className="mt-2 text-[10px] text-ink-tertiary">{footnote}</p>
+      ) : null}
     </div>
   );
 }
