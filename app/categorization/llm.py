@@ -132,6 +132,24 @@ _FEW_SHOT_EXAMPLES = [
             'funding the business, not third-party revenue."}'
         ),
     },
+    {
+        "role": "user",
+        "content": (
+            "Transaction: description='CHECKCARD AMAZON MUSIC*9K8V 888-802-3080 WA', "
+            "amount=-9.80, payee=None, memo=None\n"
+            "Allowed categories: [\"SaaS · Productivity\", \"SaaS · AI\", "
+            "\"Office · Supplies\", \"Uncategorized\"]\n"
+            "Reply with JSON only."
+        ),
+    },
+    {
+        "role": "assistant",
+        "content": (
+            '{"category":"Uncategorized","confidence":0.30,'
+            '"reasoning":"A music streaming subscription is entertainment; no '
+            'allowed category fits, so abstain rather than mislabel it productivity."}'
+        ),
+    },
 ]
 
 _SYSTEM_PROMPT = (
@@ -148,6 +166,20 @@ _SYSTEM_PROMPT = (
     "If no allowed category is a clear, confident fit, choose \"Uncategorized\" "
     "(when it is in the allowed list) with low confidence. Do NOT force a poor "
     "match into an unrelated bucket — abstaining is better than guessing wrong. "
+    "CALIBRATION (important): only assign a real category when the merchant's "
+    "SPECIFIC nature clearly matches it. If you are inferring from a vague keyword, "
+    "or the merchant could plausibly fit several buckets, set category to "
+    "\"Uncategorized\" with confidence 0.3 or lower — reserve confidence above 0.7 "
+    "for unambiguous matches. Common traps to AVOID: a phone / internet / telecom "
+    "bill (AT&T, Verizon, Comcast, T-Mobile) is NOT email or AI software. A music "
+    "or video streaming subscription (Amazon Music, Spotify, Netflix, Hulu) is "
+    "entertainment — if there is no entertainment/subscription category, use "
+    "\"Uncategorized\", NOT \"productivity\". A bar, restaurant, brewery, cafe, "
+    "diner, or music venue is \"Meals\", NOT \"Travel · Lodging\" — lodging means "
+    "hotels / motels / Airbnb only. A government or municipal charge (city, county, "
+    "DMV, parks) is usually \"Uncategorized\" unless it is clearly a specific listed "
+    "service. When unsure between a specific bucket and Uncategorized, prefer "
+    "Uncategorized — a downstream reviewer will refine it. "
     "Money the business owner moves to or from the business in their own name "
     "(e.g. Zelle / Venmo / Cash App to or from the owner) is an OWNER transfer, "
     "not income or an expense: use \"Owner's Contribution\" for money received "
@@ -248,8 +280,12 @@ class LLMCategorizer:
         # produced it, so the audit trail shows when/where we escalated.
         fb_model = settings.categorizer_fallback_model
         if fb_model:
-            needs_escalation = primary is None or (
-                primary.confidence < settings.categorizer_escalate_below_confidence
+            needs_escalation = (
+                primary is None
+                # Qwen abstaining IS "I couldn't place this" — give frontier a
+                # shot regardless of how confident Qwen is in the abstention.
+                or primary.category == "Uncategorized"
+                or primary.confidence < settings.categorizer_escalate_below_confidence
             )
             if needs_escalation:
                 fallback = await self._run_model(

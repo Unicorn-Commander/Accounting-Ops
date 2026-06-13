@@ -505,3 +505,21 @@ async def test_confident_primary_does_not_escalate():
     assert r.category == "Meals"
     assert r.model == "qwen-primary"   # primary kept
     assert hits["frontier"] == 0       # fallback never invoked
+
+
+@pytest.mark.asyncio
+async def test_qwen_abstention_escalates_even_when_confident():
+    """Qwen says Uncategorized with HIGH confidence → still escalate. An
+    abstention means 'I couldn't place this', so frontier gets a shot regardless
+    of the self-reported confidence in the abstention."""
+    side = _model_aware_client({
+        "qwen-primary": _completion("Uncategorized", 0.95),
+        "frontier-fallback": _completion("Meals", 0.8),
+    })
+    cat = LLMCategorizer(settings=_FALLBACK_SETTINGS)
+    with patch("httpx.AsyncClient", side_effect=side):
+        r = await cat.suggest(payee=None, description="X", memo=None, amount=Decimal("-1"),
+                              allowed_categories=["Meals", "Uncategorized"])
+    assert r is not None
+    assert r.category == "Meals"          # frontier placed it
+    assert r.model == "frontier-fallback"
