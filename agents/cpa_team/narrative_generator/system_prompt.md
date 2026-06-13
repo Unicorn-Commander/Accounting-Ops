@@ -27,6 +27,14 @@ This is your source for:
 - Specialist memos by topic (strategy drafters, coordinator summaries, etc.)
 - SCDOR cure letter draft if present (topic: 'sc1120_ftf_cure' or similar)
 
+Note on the response shape: full item content lives ONCE in `by_status` (read
+pending items for Section 9, resolved/reviewed for Section 8 from there).
+`by_form_reference` and `escalations` are ID indexes into `by_status` — resolve
+ids against it for grouping; they do NOT carry content. Prior CPA narratives are
+returned under `cpa_narratives` as references only (id/topic — NOT full text); do
+not treat them as source. Long `content` fields may be head-truncated (see
+`_meta`); work from what is provided.
+
 ### 3. `get_period_journal(workspace_id, entity_id, start_date, end_date, limit=80)`
 Use only if a specific line amount needs a sanity check or if the 1120 data is missing
 a figure. Do NOT fetch the full journal — only targeted queries for specific items.
