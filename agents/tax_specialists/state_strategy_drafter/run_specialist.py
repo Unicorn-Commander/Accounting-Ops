@@ -99,6 +99,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from agents._shared.api_keys import HELP_TEXT_LLM_API_KEY, resolve_llm_api_key
+from agents._shared.cpateam_llm import resolve_cpateam_llm
 from agents._shared.limits import MAX_OUTPUT_TOKENS
 
 # ---------------------------------------------------------------------------
@@ -899,7 +900,7 @@ def _resolve_backend(args: argparse.Namespace) -> str:
         return args.backend
     if os.environ.get("ANTHROPIC_API_KEY"):
         return "anthropic"
-    if os.environ.get("LLM_ENDPOINT_URL"):
+    if os.environ.get("CPATEAM_LLM_ENDPOINT_URL") or os.environ.get("LLM_ENDPOINT_URL"):
         return "openai"
     return "anthropic"
 
@@ -939,20 +940,11 @@ def main(argv: list[str] | None = None) -> None:
         )
         sys.exit(1)
 
-    llm_endpoint_url = (
-        args.llm_endpoint_url
-        or os.environ.get("LLM_ENDPOINT_URL")
-        or _DEFAULT_LLM_ENDPOINT_URL
-    )
-    llm_model = (
-        args.llm_model
-        or os.environ.get("LLM_MODEL")
-        or _DEFAULT_LLM_MODEL
-    )
-    llm_api_key = resolve_llm_api_key(
-        args.llm_api_key,
-        args.llm_api_key_file,
-        default=_DEFAULT_LLM_API_KEY,
+    # CPA-team FRONTIER config — dedicated CPATEAM_LLM_* (OpenRouter sonnet-4.6 by
+    # default), NOT the vision-repurposed LLM_*/resolve_llm_api_key, which would
+    # silently point this frontier synthesis at the receipt-VLM → 401.
+    llm_endpoint_url, llm_model, llm_api_key = resolve_cpateam_llm(
+        args.llm_endpoint_url, args.llm_model, args.llm_api_key, args.llm_api_key_file,
     )
 
     run(
