@@ -93,6 +93,8 @@ export function EmbeddedChat({
 
   const threadRef = useRef<HTMLDivElement>(null);
   const stream = useChatStream();
+  // Stable (useCallback []); drops a surfaced error when abandoning the turn.
+  const { clearError } = stream;
 
   // Notify the host when the session id changes (created or resumed).
   useEffect(() => {
@@ -104,6 +106,7 @@ export function EmbeddedChat({
     async (sid: string) => {
       setLoadingSession(true);
       setPendingError(null);
+      clearError();
       setMessages([]);
       try {
         const res = await fetch(
@@ -128,7 +131,7 @@ export function EmbeddedChat({
         setLoadingSession(false);
       }
     },
-    [workspaceId]
+    [workspaceId, clearError]
   );
 
   // On mount (and whenever the resumed id prop changes), load it once.
@@ -153,7 +156,9 @@ export function EmbeddedChat({
     personas.find((p) => p.slug === personaInUse)?.display_name ?? personaInUse;
 
   const send = useCallback(async (textOverride?: string) => {
-    const text = (textOverride ?? draft).trim();
+    // Guard: only a string override counts. Composer/other callers may wire this
+    // to an onClick that forwards a SyntheticEvent — never .trim() that.
+    const text = (typeof textOverride === "string" ? textOverride : draft).trim();
     if (!text) return;
 
     // 1. Ensure a session exists (create lazily, bound to persona + entity + year).

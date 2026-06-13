@@ -245,5 +245,10 @@ export function useChatStream() {
     setInflight(null);
   }, []);
 
-  return { inflight, streaming, error, start, cancel, clear };
+  // Explicitly clear a surfaced error — call when abandoning the current turn
+  // (new chat, switching/resuming a session) so a prior failure's ErrorRow
+  // doesn't linger under the fresh thread until the next send.
+  const clearError = useCallback(() => setError(null), []);
+
+  return { inflight, streaming, error, start, cancel, clear, clearError };
 }

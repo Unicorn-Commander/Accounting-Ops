@@ -106,6 +106,9 @@ export function ChatClient({
 
   const threadRef = useRef<HTMLDivElement>(null);
   const stream = useChatStream();
+  // Referentially stable (useCallback []); safe to depend on without churning
+  // loadSession. Used to drop a surfaced error when abandoning the current turn.
+  const { clearError } = stream;
 
   // -------------------------------------------------------------------------
   // Load a session when the user clicks one (or on first mount if initial id).
@@ -114,6 +117,7 @@ export function ChatClient({
     async (sid: string) => {
       setLoadingSession(true);
       setPendingError(null);
+      clearError();
       setMessages([]);
       setCanvas(null);
       setCanvasPinned(false);
@@ -150,7 +154,7 @@ export function ChatClient({
         setLoadingSession(false);
       }
     },
-    [workspaceId, defaultPersonaSlug]
+    [workspaceId, defaultPersonaSlug, clearError]
   );
 
   useEffect(() => {
@@ -331,13 +335,14 @@ export function ChatClient({
     }
     setActiveSessionId(null);
     setActiveSessionMeta(null);
+    clearError();
     setMessages([]);
     setCanvas(null);
     setCanvasPinned(false);
     setStagedPersona(defaultPersonaSlug);
     setStagedTaxYear(DEFAULT_TAX_YEAR);
     setDraft("");
-  }, [defaultPersonaSlug, stream]);
+  }, [defaultPersonaSlug, stream, clearError]);
 
   // -------------------------------------------------------------------------
   // Save as memo

@@ -86,7 +86,7 @@ export function Composer({
           ) : (
             <button
               type="button"
-              onClick={onSubmit}
+              onClick={() => onSubmit()}
               disabled={disabled || !value.trim()}
               aria-label="Send message"
               className={cn(
