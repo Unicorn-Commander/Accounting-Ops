@@ -80,6 +80,7 @@ export default async function HelpPage() {
                   emptyTitle="How can I help you use Accounting-Ops?"
                   emptyHint="I can show you where things are, walk you through a workflow, or explain what a screen means. Try one of these:"
                   suggestedPrompts={GUIDE_PROMPTS}
+                  footnote="The Guide is read-only — it explains how to use Accounting-Ops and never changes your books."
                   className="h-full"
                 />
               </div>

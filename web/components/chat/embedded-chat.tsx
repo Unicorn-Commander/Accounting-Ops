@@ -58,6 +58,8 @@ export type EmbeddedChatProps = {
   emptyHint?: string;
   /** Clickable starter prompts shown in the empty state; clicking sends one. */
   suggestedPrompts?: string[];
+  /** Composer disclaimer override. "" hides it (e.g. the read-only Guide). */
+  footnote?: string;
   /** Fired whenever the active session id changes (null → created, or loaded).
    *  Used by the launcher to build the "pop out to window" URL. */
   onSessionChange?: (sessionId: string | null) => void;
@@ -76,6 +78,7 @@ export function EmbeddedChat({
   emptyTitle,
   emptyHint,
   suggestedPrompts,
+  footnote,
   onSessionChange,
   className
 }: EmbeddedChatProps) {
@@ -274,6 +277,7 @@ export function EmbeddedChat({
         onCancel={() => stream.cancel()}
         streaming={stream.streaming}
         disabled={loadingSession}
+        footnote={footnote}
         placeholder={
           isExistingSession
             ? `Reply to ${personaLabel}…`
