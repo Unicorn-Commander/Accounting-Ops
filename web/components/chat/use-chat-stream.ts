@@ -196,7 +196,15 @@ export function useChatStream() {
               };
             }
           } else if (evt.type === "error") {
+            // Terminal: the backend sends NO `stop` frame after an error, so we
+            // settle the turn here. Otherwise the still-"streaming" placeholder
+            // gets committed by onStreamEnd as an eternal typing bubble.
             setError(evt.message);
+            setInflight(null);
+            final =
+              final && final.kind === "assistant" && (final.text || final.toolEvents.length)
+                ? { ...final, streaming: false } // keep partial output, settled
+                : null; // nothing useful streamed → don't commit an empty bubble
           }
         }
       }
@@ -231,8 +239,10 @@ export function useChatStream() {
   }, []);
 
   const clear = useCallback(() => {
+    // NB: deliberately does NOT reset `error`. onStreamEnd calls clear() right
+    // after a turn settles; clearing the error here would wipe a just-set
+    // failure before the user sees it. The next start() resets error instead.
     setInflight(null);
-    setError(null);
   }, []);
 
   return { inflight, streaming, error, start, cancel, clear };
