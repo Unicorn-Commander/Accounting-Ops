@@ -26,6 +26,7 @@ from app.api.tax_status import router as tax_status_router
 from app.api.tax_filing_submissions import router as tax_filing_submissions_router
 from app.api.usps_tracking import router as usps_tracking_router
 from app.api.cash_position import router as cash_position_router
+from app.api.cash_history import router as cash_history_router
 from app.api.cfo_brief import router as cfo_brief_router
 from app.api.category_overrides import router as category_overrides_router
 from app.api.clients import router as clients_router
@@ -149,6 +150,7 @@ app.include_router(ai_activity_router)
 app.include_router(reports_router)
 app.include_router(setup_router)
 app.include_router(cash_position_router)
+app.include_router(cash_history_router)
 app.include_router(cfo_brief_router)
 app.include_router(transactions_router)
 app.include_router(sentinel_router)
