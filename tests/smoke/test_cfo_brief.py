@@ -283,6 +283,25 @@ def test_cash_configured_plain_words():
     assert c.tone == "credit"  # positive net, healthy runway
 
 
+def test_cash_monthly_burn_threads_through():
+    # The ⌘K glance cards need the monthly burn alongside runway. It's optional
+    # (default None for back-compat) and surfaced as a string when provided.
+    mod = _load()
+    c = mod._plain_cash_status(
+        {"configured": True, "assets_total": "100000", "liabilities_total": "0", "net_total": "100000"},
+        Decimal("8.0"),
+        Decimal("12500.00"),
+    )
+    assert c.monthly_burn == "12500.00"
+    assert c.months_runway == "8.0"
+    # Omitted (existing callers) → stays None.
+    c2 = mod._plain_cash_status(
+        {"configured": True, "assets_total": "100000", "liabilities_total": "0", "net_total": "100000"},
+        None,
+    )
+    assert c2.monthly_burn is None
+
+
 def test_cash_low_runway_flips_tone_to_pending():
     mod = _load()
     c = mod._plain_cash_status(

@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Search, Sparkles } from "lucide-react";
 import { useChatStream } from "@/components/chat/use-chat-stream";
+import { formatUSD } from "@/lib/cash-position";
+import type { CfoBriefResponse } from "@/lib/cfo-brief";
 
 const GOTO_ITEMS = [
   { label: "Approvals queue", href: "/approvals", hue: "43 96% 56%", shortcut: "↵" },
@@ -26,6 +28,8 @@ export function CommandK({
   const [createError, setCreateError] = useState<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const stream = useChatStream();
+  const [cfo, setCfo] = useState<CfoBriefResponse | null>(null);
+  const [cfoLoading, setCfoLoading] = useState(false);
 
   // ⌘K / Esc
   useEffect(() => {
@@ -46,9 +50,35 @@ export function CommandK({
       setAsked(false);
       setCreateError(null);
       sessionIdRef.current = null;
+      setCfo(null);
       stream.clear();
     }
   }, [open, stream]);
+
+  // Live burn / cash / runway for the glance cards — fetched when the palette
+  // opens, from the same cfo-brief assembler the dashboard card uses (so the
+  // numbers match). Best-effort: on any failure the cards just show "—".
+  useEffect(() => {
+    if (!open || !workspaceId) return;
+    let cancelled = false;
+    setCfoLoading(true);
+    const params = new URLSearchParams();
+    if (entityId) params.set("entity_id", entityId);
+    fetch(`/api/workspaces/${workspaceId}/cfo-brief?${params.toString()}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setCfo(d as CfoBriefResponse | null);
+      })
+      .catch(() => {
+        if (!cancelled) setCfo(null);
+      })
+      .finally(() => {
+        if (!cancelled) setCfoLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, workspaceId, entityId]);
 
   const ask = useCallback(async () => {
     const text = query.trim();
@@ -92,6 +122,13 @@ export function CommandK({
 
   const answer = stream.inflight?.text ?? "";
 
+  // Glance mini-card view-model (real cfo-brief data; null fields render as "—").
+  const cash = cfo?.cash;
+  const miniConfigured = !!cash?.configured;
+  const netNum = cash?.net_total != null ? parseFloat(cash.net_total) : null;
+  const burnNum = cash?.monthly_burn != null ? parseFloat(cash.monthly_burn) : null;
+  const runwayNum = cash?.months_runway != null ? parseFloat(cash.months_runway) : null;
+
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
       <button className="kbtn" id="kbtn" onClick={() => setOpen(true)} aria-label="Ask anything (⌘K)">
@@ -121,6 +158,55 @@ export function CommandK({
             />
             <span className="esc">esc</span>
           </div>
+
+          {/* Live glance: burn / cash / runway (real cfo-brief data). Hidden once
+              you ask, to focus on the answer. */}
+          {!asked && (
+            <div className="kmini">
+              {miniConfigured ? (
+                <>
+                  <div className="m">
+                    <div className="l">Cash</div>
+                    <div className={`vv ${netNum != null && netNum < 0 ? "debit" : "credit"}`}>
+                      {netNum != null ? formatUSD(netNum) : "$—"}
+                    </div>
+                  </div>
+                  <div className="m">
+                    <div className="l">Burn / mo</div>
+                    <div className="vv">
+                      {burnNum != null && burnNum > 0 ? formatUSD(burnNum) : "—"}
+                    </div>
+                  </div>
+                  <div className="m">
+                    <div className="l">Runway</div>
+                    <div
+                      className={`vv ${
+                        runwayNum != null
+                          ? runwayNum < 6
+                            ? "pending"
+                            : "credit"
+                          : burnNum != null && burnNum <= 0
+                            ? "credit"
+                            : ""
+                      }`}
+                    >
+                      {runwayNum != null
+                        ? `${runwayNum.toLocaleString(undefined, { maximumFractionDigits: 1 })} mo`
+                        : burnNum != null && burnNum <= 0
+                          ? "∞"
+                          : "—"}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="hint">
+                  {cfoLoading
+                    ? "Loading your cash position…"
+                    : "Connect a bank to see cash, burn & runway."}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Answer — streamed from the real CFO agent. Only shown after asking. */}
           {asked && (
