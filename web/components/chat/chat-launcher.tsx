@@ -37,6 +37,7 @@ type Surface = "closed" | "float" | "dock";
 
 const OPEN_KEY = "aops_chat_open"; // "1" while a surface is open
 const MODE_KEY = "aops_chat_mode"; // "float" | "dock"
+const SESSION_KEY = "aops_chat_session"; // JSON {e:entityId,s:sessionId} — resume the last thread on refresh
 
 export type ChatLauncherProps = {
   workspaceId: string;
@@ -55,6 +56,11 @@ export function ChatLauncher({
 }: ChatLauncherProps) {
   const [surface, setSurface] = useState<Surface>("closed");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // The session to resume + the entity it belongs to. Separate from the live
+  // `sessionId` so feeding it to EmbeddedChat can't create a parent↔child reload
+  // loop, and entity-tagged so we never resume one entity's chat under another.
+  const [restoredSessionId, setRestoredSessionId] = useState<string | null>(null);
+  const [restoredEntity, setRestoredEntity] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
 
   const panelRef = useRef<HTMLDivElement>(null);
@@ -63,10 +69,9 @@ export function ChatLauncher({
   // Hydrate persisted open/mode from localStorage (client-only; SSR renders
   // the closed pill to avoid a hydration mismatch).
   useEffect(() => {
-    let mode: Surface = "float";
     try {
       const m = window.localStorage.getItem(MODE_KEY);
-      if (m === "dock" || m === "float") mode = m;
+      const mode: Surface = m === "dock" || m === "float" ? m : "float";
       const open = window.localStorage.getItem(OPEN_KEY) === "1";
       setSurface(open ? mode : "closed");
     } catch {
@@ -74,6 +79,46 @@ export function ChatLauncher({
     }
     setHydrated(true);
   }, []);
+
+  // Resolve which session to resume for the CURRENT entity — on mount AND on
+  // every entity/workspace switch (a switch is router.refresh, which re-renders
+  // this component in place with a new entityId). Tag it with the entity so the
+  // render guard below never feeds a cross-entity session to the chat.
+  useEffect(() => {
+    if (!hydrated) return;
+    let resume: string | null = null;
+    try {
+      const raw = window.localStorage.getItem(SESSION_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw) as { e?: string; s?: string };
+        if (saved.e === entityId && saved.s) resume = saved.s;
+      }
+    } catch {
+      /* ignore */
+    }
+    setRestoredSessionId(resume);
+    setRestoredEntity(entityId);
+    setSessionId(resume);
+  }, [entityId, hydrated]);
+
+  // Persist ONLY when the chat itself reports a session — at that moment it
+  // belongs to the current entity, so the (entity, session) pair is always
+  // correct. This is what prevents binding entity B to entity A's session on a
+  // switch (the bug the agent-stream restart fix already closed elsewhere).
+  const handleSessionChange = useCallback(
+    (s: string | null) => {
+      setSessionId(s);
+      try {
+        if (s) window.localStorage.setItem(SESSION_KEY, JSON.stringify({ e: entityId, s }));
+      } catch {
+        /* ignore */
+      }
+    },
+    [entityId]
+  );
+
+  // Only ever hand the chat a session known to belong to the current entity.
+  const initialSessionForEntity = restoredEntity === entityId ? restoredSessionId : null;
 
   const persist = useCallback((next: Surface) => {
     try {
@@ -170,12 +215,14 @@ export function ChatLauncher({
             onClose={close}
           />
           <EmbeddedChat
+            key={entityId}
             workspaceId={workspaceId}
             entityId={entityId}
             entityName={entityName}
             personas={personas}
             defaultPersonaSlug={defaultPersonaSlug}
-            onSessionChange={setSessionId}
+            initialSessionId={initialSessionForEntity}
+            onSessionChange={handleSessionChange}
             className="flex-1 min-h-0"
           />
         </aside>
@@ -197,12 +244,14 @@ export function ChatLauncher({
             onClose={close}
           />
           <EmbeddedChat
+            key={entityId}
             workspaceId={workspaceId}
             entityId={entityId}
             entityName={entityName}
             personas={personas}
             defaultPersonaSlug={defaultPersonaSlug}
-            onSessionChange={setSessionId}
+            initialSessionId={initialSessionForEntity}
+            onSessionChange={handleSessionChange}
             className="flex-1 min-h-0"
           />
         </aside>

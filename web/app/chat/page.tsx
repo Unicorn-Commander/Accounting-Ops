@@ -61,10 +61,17 @@ export default async function ChatPage({
 
   const requestedSession =
     typeof sp.session === "string" ? sp.session : null;
+  // A ?persona= deep link (from specialty-rules, taxes, etc.) wants a FRESH
+  // staged chat — don't hijack it by auto-resuming the last thread.
+  const stagingNewChat = typeof sp.persona === "string";
   const initialActiveSessionId =
     requestedSession && sessions.some((s) => s.id === requestedSession)
       ? requestedSession
-      : null;
+      : stagingNewChat
+        ? null
+        : // No ?session= and not staging → resume the most-recent thread instead
+          // of opening blank (sessions are ordered by last_activity_at DESC).
+          sessions[0]?.id ?? null;
 
   return (
     <AppShell>
