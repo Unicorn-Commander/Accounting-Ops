@@ -633,7 +633,10 @@ async def get_open_items(
     # every other tenant (e.g. Shafen) must not see his PII or be asked for his
     # documents. TODO: replace with per-workspace document_request data and drop
     # these module constants entirely.
-    _own_checklist = workspace.workspace_slug == "aaron-stransky"
+    # Gate by the IMMUTABLE workspace UUID (Aaron's = DEFAULT_WORKSPACE_ID), not a
+    # slug: a slug can be renamed, and silently emptying Aaron's own "what's on my
+    # plate" dashboard would be a worse regression than the leak we're closing.
+    _own_checklist = str(workspace.workspace_id) == "77753ea5-efe9-5539-a846-6b20ddc841b9"
     for doc in (_AARON_DOCUMENT_CHECKLIST if _own_checklist else []):
         # Tax-year filter: hide a doc only if it doesn't intersect the
         # requested year. Show all years if no filter.
