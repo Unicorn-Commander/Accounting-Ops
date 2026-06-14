@@ -6,7 +6,13 @@ import { activityRowToDecision, countByStatus } from "./map-activity";
 import type { AgentDecision, AgentStreamState } from "./types";
 
 const MAX_VISIBLE = 6;
-const POLL_MS = 6000;
+const POLL_MS = 6000; // responsive fallback cadence when the SSE stream is down
+// Slow completeness poll that runs ALONGSIDE a healthy SSE: the stream only
+// watches decision_audit, so a periodic poll still catches agent rows that write
+// straight to tax_review_queue (draft_memo / flag_for_cpa_review). 30s keeps the
+// ticker complete while cutting idle DB load ~5x vs the old 6s poll.
+const SAFETY_POLL_MS = 30000;
+const ACTIVITY_DEBOUNCE_MS = 400; // coalesce a burst of stream frames into one refresh
 
 // Demo simulation is ONLY active behind this build-time flag. By default the
 // stream shows real agent decisions (or a clean empty state) — never fabricated
@@ -46,7 +52,10 @@ export function useAgentStream(opts: {
     return { decisions, counts: countByStatus(decisions) };
   });
 
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null); // interval poll (demo tick, safety net, or fallback)
+  const abortRef = useRef<AbortController | null>(null); // live SSE connection
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null); // activity-frame coalescing
+  const stoppedRef = useRef(false); // set by stopStream; guards fallback/teardown races
   const poolPosRef = useRef(0);
   const seenRef = useRef<Set<string>>(new Set(initialDecisions.map((d) => d.id)));
 
@@ -71,7 +80,10 @@ export function useAgentStream(opts: {
     });
   }, []);
 
-  // ---- real poll ----
+  // ---- real poll (the rich-row data path) ----
+  // The poll endpoint merges decision_audit + agent tax-review rows and returns
+  // the full row shape. We keep it as the source of truth; the SSE stream below
+  // only decides WHEN to call it.
   const poll = useCallback(async () => {
     if (!workspaceId) return;
     const params = new URLSearchParams();
@@ -92,24 +104,106 @@ export function useAgentStream(opts: {
     }
   }, [workspaceId, entityId]);
 
+  // ---- interval poll at a given cadence. Runs slow (SAFETY_POLL_MS) alongside a
+  // healthy SSE as a completeness net; tightens to POLL_MS when the SSE drops. ----
+  const startIntervalPoll = useCallback((periodMs: number) => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => void poll(), periodMs);
+  }, [poll]);
+
+  // ---- coalesce a burst of stream frames into a single rich refresh ----
+  const schedulePoll = useCallback(() => {
+    if (debounceRef.current) return;
+    debounceRef.current = setTimeout(() => {
+      debounceRef.current = null;
+      void poll();
+    }, ACTIVITY_DEBOUNCE_MS);
+  }, [poll]);
+
+  // ---- SSE trigger: a real-time signal that new activity landed. Each
+  // 'activity' frame (ignoring ':' heartbeat/open comments) schedules one rich
+  // poll, so the ticker updates within ~a second of the agent acting instead of
+  // waiting on a blind timer. On connect failure or mid-stream drop we tighten
+  // the interval poll to the responsive fallback cadence. ----
+  const openStream = useCallback(async () => {
+    if (!workspaceId) return;
+    const params = new URLSearchParams();
+    if (entityId) params.set("entity_id", entityId);
+    const ctl = new AbortController();
+    abortRef.current = ctl;
+    try {
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/ai-activity/stream${
+          params.toString() ? "?" + params.toString() : ""
+        }`,
+        { signal: ctl.signal, cache: "no-store" }
+      );
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // SSE frames are separated by a blank line.
+        let split: number;
+        while ((split = buf.indexOf("\n\n")) >= 0) {
+          const frame = buf.slice(0, split);
+          buf = buf.slice(split + 2);
+          let eventName = "message";
+          let hasData = false;
+          for (const line of frame.split("\n")) {
+            if (line.startsWith(":")) continue; // heartbeat / open comment
+            if (line.startsWith("event:")) eventName = line.slice(6).trim();
+            else if (line.startsWith("data:")) hasData = true;
+          }
+          // New agent decision(s) landed → refresh the rich rows (debounced).
+          if (eventName === "activity" && hasData) schedulePoll();
+        }
+      }
+      // Upstream closed without our aborting it → tighten to responsive polling.
+      if (!stoppedRef.current) startIntervalPoll(POLL_MS);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Ignore our own aborts (stopStream / entity switch); anything else means
+      // the stream is unavailable, so tighten to the responsive 6s poll.
+      if (!stoppedRef.current && !/abort/i.test(msg)) {
+        startIntervalPoll(POLL_MS);
+      }
+    } finally {
+      if (abortRef.current === ctl) abortRef.current = null;
+    }
+  }, [workspaceId, entityId, schedulePoll, startIntervalPoll]);
+
   const startStream = useCallback(() => {
-    if (timerRef.current) return;
     if (DEMO) {
+      if (timerRef.current) return;
       // seed a thinking card, then cycle
       setState((prev) => ({ ...prev, decisions: [DEMO_THINKING, ...prev.decisions].slice(0, MAX_VISIBLE) }));
       timerRef.current = setInterval(demoTick, 4200);
       return;
     }
-    // real mode: poll the live endpoint
-    void poll();
-    timerRef.current = setInterval(() => void poll(), POLL_MS);
-  }, [demoTick, poll]);
+    if (abortRef.current || timerRef.current) return; // already running
+    stoppedRef.current = false;
+    void poll(); // immediate refresh of the server-seeded rows
+    startIntervalPoll(SAFETY_POLL_MS); // slow completeness net (alongside the SSE)
+    void openStream(); // real-time SSE trigger (tightens the poll to 6s on failure)
+  }, [demoTick, poll, openStream, startIntervalPoll]);
 
   const stopStream = useCallback(() => {
+    stoppedRef.current = true;
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    abortRef.current?.abort();
+    abortRef.current = null;
   }, []);
 
   useEffect(() => stopStream, [stopStream]);
