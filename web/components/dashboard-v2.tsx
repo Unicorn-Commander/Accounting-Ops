@@ -46,10 +46,8 @@ export function DashboardV2({
   workspaceId,
   workspaceName,
   subtitle,
-  entities,
   canConsolidate,
   entityFilter,
-  isConsolidated,
   cashPosition,
   plYtd,
   plMtd,
@@ -93,6 +91,7 @@ export function DashboardV2({
     delta: string;
     deltaTone: "credit" | "debit" | "ink";
     target: LineageTarget;
+    lineageLabel?: string;
   }[] = [
     {
       label: "Cash in bank",
@@ -102,6 +101,7 @@ export function DashboardV2({
       delta: cashPosition?.configured ? "live balance" : "connect a bank",
       deltaTone: "ink",
       target: { metric: "cash" },
+      lineageLabel: "ledger cash",
     },
     {
       label: "Revenue YTD",
@@ -167,7 +167,7 @@ export function DashboardV2({
             accountCount={accountCount}
             availableNow={availableNow}
             annotation={cashSeries.annotation}
-            onBigNumClick={() => openLineage({ metric: "cash" }, formatUSD(netCash), cashBigRef.current)}
+            onBigNumClick={() => openLineage({ metric: "cash" }, "ledger cash", cashBigRef.current)}
           />
         </div>
 
@@ -211,11 +211,11 @@ export function DashboardV2({
               tabIndex={0}
               style={{ cursor: "pointer" }}
               title={`Trace ${kpi.label} to its journal entries`}
-              onClick={(ev) => openLineage(kpi.target, kpi.value, ev.currentTarget)}
+              onClick={(ev) => openLineage(kpi.target, kpi.lineageLabel ?? kpi.value, ev.currentTarget)}
               onKeyDown={(ev) => {
                 if (ev.key === "Enter" || ev.key === " ") {
                   ev.preventDefault();
-                  openLineage(kpi.target, kpi.value, ev.currentTarget);
+                  openLineage(kpi.target, kpi.lineageLabel ?? kpi.value, ev.currentTarget);
                 }
               }}
             >

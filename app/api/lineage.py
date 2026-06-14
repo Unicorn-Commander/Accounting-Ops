@@ -38,9 +38,13 @@ _EXPENSE_RANGES = [(5000, 6999), (8000, 9999)]
 _CASH_RANGES = [(1000, 1099)]
 
 # Tools whose decision_audit rows created/changed a journal entry. The link is
-# loose (no FK): the journal_entry_id lives in the tool call's payload. Best-
-# effort enrichment on top of the entry's own reasoning_trace/model_version.
-_POSTING_TOOLS = ("post_journal_entry", "post_correction", "categorize")
+# loose (no FK): the entry id lives in the tool call's payload under varying
+# keys. Best-effort enrichment on top of the entry's own reasoning_trace /
+# model_version (which are reliable). These are the tool_names actually written
+# to decision_audit (verified against the write sites): an approved bank import
+# stamps response.journal_entry_id; (re)categorization stamps
+# restated_entry_id / reversal_entry_id.
+_POSTING_TOOLS = ("categorize", "approval_decision", "link_receipt")
 
 _TENANT_TOOLS_SQL = ", ".join(f"'{t}'" for t in _POSTING_TOOLS)
 
@@ -204,8 +208,7 @@ async def get_lineage(
                            je.source_document_id::text AS source_document_id,
                            je.source_document_hash,
                            je.reverses_entry_id::text AS reverses_entry_id,
-                           je.approving_human_uc_uid,
-                           encode(je.this_hash, 'hex') AS this_hash_hex
+                           je.approving_human_uc_uid
                     FROM journal_entry je
                     LEFT JOIN entity e ON e.id = je.entity_id
                     WHERE {base_where}
@@ -236,7 +239,8 @@ async def get_lineage(
                             SELECT id::text AS decision_audit_id, tool_name, model_version,
                                    reasoning_trace, outcome, created_at,
                                    COALESCE(response_payload->>'journal_entry_id',
-                                            request_payload->>'journal_entry_id') AS je_id
+                                            response_payload->>'restated_entry_id',
+                                            response_payload->>'reversal_entry_id') AS je_id
                             FROM decision_audit
                             WHERE tool_name IN ({_TENANT_TOOLS_SQL})
                         ) da

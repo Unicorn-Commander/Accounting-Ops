@@ -89,7 +89,7 @@ export function LineagePopover({
   useEffect(() => {
     if (!open || !anchorRef.current || !popRef.current) return;
     const r = anchorRef.current.getBoundingClientRect();
-    popRef.current.style.left = `${Math.min(r.left, window.innerWidth - 400)}px`;
+    popRef.current.style.left = `${Math.min(r.left, window.innerWidth - 352)}px`;
     popRef.current.style.top = `${r.bottom + 10}px`;
   }, [open, anchorRef]);
 
@@ -163,6 +163,12 @@ export function LineagePopover({
           </>
         )}
       </div>
+
+      {target?.metric === "cash" && state.kind === "ready" && (
+        <div className="linmore">
+          Posted ledger cash (10xx) — your live bank balance may differ until all activity is posted.
+        </div>
+      )}
 
       {/* The contributing entries — full provenance + agent trail + reversal. */}
       {data && data.entries.length > 0 && (
