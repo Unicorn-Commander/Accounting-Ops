@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-06-14
+
+- feat(dashboard): **Per-number lineage** — click any figure (cash, revenue,
+  expenses, net income, or a single account) to trace it to the posted journal
+  entries behind it: provenance (source feed, category, materiality), the agent
+  decision trail + reversal links, per-entry hash-chain verify status, and a
+  reconciling net that matches the displayed number.
+- feat(contacts): **Manual contact create** — a "+ New contact" form on
+  `/contacts` (header + empty state) beside Import — and **"add as contact" from
+  a transaction payee** in the reconciliation queue (kind inferred from the
+  amount's sign). Reuses the existing counterparty upsert; no schema change.
+- feat(dashboard): **Cash-ribbon daily-balance** endpoint — true end-of-day cash
+  over the full posted journal, reconciling to the canonical cash figure.
+- feat(dashboard): **Real-time agent stream** — the "Agents at work" ticker now
+  consumes the SSE activity stream instead of polling every 6s (idle DB polling
+  drops to a 30s safety net).
+- feat(dashboard): **⌘K live mini-cards** — burn / cash / runway in the command
+  palette, from the same CFO-brief assembler the dashboard uses.
+- fix(tenancy): Stop serving one workspace's hardcoded document/decision
+  checklist to other tenants — gated to the owning workspace by immutable UUID.
+- fix(chat): Restore the per-entity chat session on page refresh, and never bind
+  one entity's session to another on a workspace switch.
+- fix(onboarding): After connecting a bank (SimpleFIN), a primary CTA routes to
+  the Reconciliation Queue — connecting a bank is not the same as posted books.
+
 ## 0.6.0 - 2026-06-13
 
 - feat(web): In-app **Guide** help agent on `/help`. A new read-only
