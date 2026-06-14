@@ -16,7 +16,8 @@ export function SiteHeaderClient({
   children,
   canAdmin = false,
   workspaceId,
-  entityId
+  entityId,
+  isConsolidated = false
 }: {
   variant: "app" | "marketing";
   userBlock: React.ReactNode;
@@ -24,6 +25,7 @@ export function SiteHeaderClient({
   canAdmin?: boolean;
   workspaceId?: string;
   entityId?: string;
+  isConsolidated?: boolean;
 }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -112,7 +114,7 @@ export function SiteHeaderClient({
                 {/* Workspace/Entity selectors — hide on small screens since drawer has them */}
                 <div className="hidden md:flex items-center gap-2">{children}</div>
                 <div className="hidden md:flex">
-                  <CommandK workspaceId={workspaceId} entityId={entityId} />
+                  <CommandK workspaceId={workspaceId} entityId={entityId} isConsolidated={isConsolidated} />
                 </div>
                 <ThemeToggle />
                 {userBlock}

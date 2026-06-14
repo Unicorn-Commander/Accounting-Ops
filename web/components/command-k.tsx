@@ -17,9 +17,11 @@ const GOTO_ITEMS = [
 export function CommandK({
   workspaceId,
   entityId,
+  isConsolidated = false,
 }: {
   workspaceId?: string;
   entityId?: string;
+  isConsolidated?: boolean;
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -51,6 +53,7 @@ export function CommandK({
       setCreateError(null);
       sessionIdRef.current = null;
       setCfo(null);
+      setCfoLoading(false);
       stream.clear();
     }
   }, [open, stream]);
@@ -61,10 +64,14 @@ export function CommandK({
   useEffect(() => {
     if (!open || !workspaceId) return;
     let cancelled = false;
+    setCfo(null); // drop the previous entity's numbers during a switch/refetch
     setCfoLoading(true);
     const params = new URLSearchParams();
-    if (entityId) params.set("entity_id", entityId);
-    fetch(`/api/workspaces/${workspaceId}/cfo-brief?${params.toString()}`, { cache: "no-store" })
+    // Consolidated → omit entity_id so the brief is workspace-wide (cash only,
+    // burn/runway null) — matching the dashboard CFO-brief card exactly.
+    if (entityId && !isConsolidated) params.set("entity_id", entityId);
+    const qs = params.toString();
+    fetch(`/api/workspaces/${workspaceId}/cfo-brief${qs ? "?" + qs : ""}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!cancelled) setCfo(d as CfoBriefResponse | null);
@@ -78,7 +85,7 @@ export function CommandK({
     return () => {
       cancelled = true;
     };
-  }, [open, workspaceId, entityId]);
+  }, [open, workspaceId, entityId, isConsolidated]);
 
   const ask = useCallback(async () => {
     const text = query.trim();
@@ -162,7 +169,7 @@ export function CommandK({
           {/* Live glance: burn / cash / runway (real cfo-brief data). Hidden once
               you ask, to focus on the answer. */}
           {!asked && (
-            <div className="kmini">
+            <div className="kmini" aria-live="polite">
               {miniConfigured ? (
                 <>
                   <div className="m">
@@ -181,7 +188,7 @@ export function CommandK({
                     <div className="l">Runway</div>
                     <div
                       className={`vv ${
-                        runwayNum != null
+                        runwayNum != null && !Number.isNaN(runwayNum)
                           ? runwayNum < 6
                             ? "pending"
                             : "credit"
@@ -190,7 +197,7 @@ export function CommandK({
                             : ""
                       }`}
                     >
-                      {runwayNum != null
+                      {runwayNum != null && !Number.isNaN(runwayNum)
                         ? `${runwayNum.toLocaleString(undefined, { maximumFractionDigits: 1 })} mo`
                         : burnNum != null && burnNum <= 0
                           ? "∞"
