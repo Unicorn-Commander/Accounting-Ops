@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "accounting-ops"
-version = "0.6.0"
+version = "0.7.0"
 description = "Agent-first, MCP-first financial operations platform for Magic Unicorn Inc."
 requires-python = ">=3.12"
 dependencies = [
