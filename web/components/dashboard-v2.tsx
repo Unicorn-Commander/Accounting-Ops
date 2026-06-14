@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { CashRibbon } from "@/components/cash-ribbon";
 import { AgentStream } from "@/components/agent-stream/agent-stream";
-import { LineagePopover } from "@/components/lineage-popover";
+import { LineagePopover, type LineageTarget } from "@/components/lineage-popover";
 import { CfoBriefCard } from "@/components/cfo-brief-card";
 import type { CashSeries } from "@/lib/cash-series";
 import { formatUSD } from "@/lib/cash-position";
@@ -62,8 +62,19 @@ export function DashboardV2({
   availableNow,
 }: DashboardV2Props) {
   const cashBigRef = useRef<HTMLDivElement | null>(null);
+  const anchorRef = useRef<HTMLElement | null>(null);
   const [lineageOpen, setLineageOpen] = useState(false);
-  const handleLineageOpen = useCallback(() => setLineageOpen(true), []);
+  const [lineageTarget, setLineageTarget] = useState<LineageTarget | null>(null);
+  const [lineageLabel, setLineageLabel] = useState("");
+  const openLineage = useCallback(
+    (t: LineageTarget, lbl: string, el: HTMLElement | null) => {
+      anchorRef.current = el;
+      setLineageTarget(t);
+      setLineageLabel(lbl);
+      setLineageOpen(true);
+    },
+    []
+  );
   const handleLineageClose = useCallback(() => setLineageOpen(false), []);
   // KPI data
   const netCash = cashPosition ? parseFloat(cashPosition.net_total ?? cashPosition.total_usd ?? "0") : 0;
@@ -74,14 +85,23 @@ export function DashboardV2({
   // Deltas are honest, neutral labels — NOT fabricated percentages. No
   // sparklines: there is no real per-KPI daily series yet, and a synthetic one
   // would be fake. (Add them back when a real time series ships.)
-  const kpis = [
+  const kpis: {
+    label: string;
+    value: string;
+    prefix: string;
+    targetValue: number;
+    delta: string;
+    deltaTone: "credit" | "debit" | "ink";
+    target: LineageTarget;
+  }[] = [
     {
       label: "Cash in bank",
       value: formatUSD(netCash),
       prefix: "$",
       targetValue: netCash,
       delta: cashPosition?.configured ? "live balance" : "connect a bank",
-      deltaTone: "ink" as "credit" | "debit" | "ink",
+      deltaTone: "ink",
+      target: { metric: "cash" },
     },
     {
       label: "Revenue YTD",
@@ -89,7 +109,8 @@ export function DashboardV2({
       prefix: "$",
       targetValue: revenueYtd,
       delta: "year to date",
-      deltaTone: "ink" as "credit" | "debit" | "ink",
+      deltaTone: "ink",
+      target: { metric: "revenue", period: "ytd" },
     },
     {
       label: "Expenses YTD",
@@ -97,7 +118,8 @@ export function DashboardV2({
       prefix: "$",
       targetValue: expensesYtd,
       delta: "year to date",
-      deltaTone: "ink" as "credit" | "debit" | "ink",
+      deltaTone: "ink",
+      target: { metric: "expenses", period: "ytd" },
     },
     {
       label: "Net income YTD",
@@ -105,7 +127,8 @@ export function DashboardV2({
       prefix: "$",
       targetValue: netIncomeYtd,
       delta: plMtd ? `MTD ${formatUSD(plMtd.net_income)}` : "from journal",
-      deltaTone: "ink" as "credit" | "debit" | "ink",
+      deltaTone: "ink",
+      target: { metric: "net_income", period: "ytd" },
     },
   ];
 
@@ -144,7 +167,7 @@ export function DashboardV2({
             accountCount={accountCount}
             availableNow={availableNow}
             annotation={cashSeries.annotation}
-            onBigNumClick={handleLineageOpen}
+            onBigNumClick={() => openLineage({ metric: "cash" }, formatUSD(netCash), cashBigRef.current)}
           />
         </div>
 
@@ -181,7 +204,21 @@ export function DashboardV2({
                 ? "down"
                 : "flat";
           return (
-            <div key={i} className="card-depth kpi">
+            <div
+              key={i}
+              className="card-depth kpi"
+              role="button"
+              tabIndex={0}
+              style={{ cursor: "pointer" }}
+              title={`Trace ${kpi.label} to its journal entries`}
+              onClick={(ev) => openLineage(kpi.target, kpi.value, ev.currentTarget)}
+              onKeyDown={(ev) => {
+                if (ev.key === "Enter" || ev.key === " ") {
+                  ev.preventDefault();
+                  openLineage(kpi.target, kpi.value, ev.currentTarget);
+                }
+              }}
+            >
               <div className="lbl">{kpi.label}</div>
               <div className="v num">
                 {kpi.prefix}
@@ -320,25 +357,11 @@ export function DashboardV2({
       <LineagePopover
         open={lineageOpen}
         onClose={handleLineageClose}
-        anchorRef={cashBigRef}
+        anchorRef={anchorRef}
         workspaceId={workspaceId}
         entityId={entityFilter}
-        cashLabel={formatUSD(netCash)}
-        scopeLabel={
-          isConsolidated
-            ? "consolidated"
-            : entities.find((e) => e.id === entityFilter)?.display_name ?? "this entity"
-        }
-        accountName={cashPosition?.accounts?.[0]?.name ?? null}
-        latestDecision={
-          initialDecisions[0]
-            ? {
-                label: initialDecisions[0].agentLabel ?? initialDecisions[0].ag,
-                title: initialDecisions[0].title,
-                status: initialDecisions[0].status,
-              }
-            : null
-        }
+        target={lineageTarget}
+        label={lineageLabel}
       />
     </div>
   );
