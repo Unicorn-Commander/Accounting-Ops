@@ -39,6 +39,7 @@ export type CfoBriefCash = {
   liabilities_total: string | null;
   net_total: string | null;
   months_runway: string | null;
+  monthly_burn: string | null;
   tone: "credit" | "debit" | "pending" | "ink";
 };
 

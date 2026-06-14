@@ -114,6 +114,7 @@ class CfoBriefCash(BaseModel):
     liabilities_total: str | None = None
     net_total: str | None = None
     months_runway: str | None = None  # null = not burning / unknown
+    monthly_burn: str | None = None  # avg monthly net cash burn (>0 = burning); null = unknown
     tone: str  # "credit" | "debit" | "pending" | "ink"
 
 
@@ -195,7 +196,9 @@ def _runway_from_pl(
 
 
 def _plain_cash_status(
-    cash: dict[str, Any] | None, months_runway: Decimal | None
+    cash: dict[str, Any] | None,
+    months_runway: Decimal | None,
+    monthly_burn: Decimal | None = None,
 ) -> CfoBriefCash:
     """Turn the cash-position payload into plain words for a non-accountant.
 
@@ -244,6 +247,7 @@ def _plain_cash_status(
         liabilities_total=str(liabilities),
         net_total=str(net) if net is not None else None,
         months_runway=str(months_runway) if months_runway is not None else None,
+        monthly_burn=str(monthly_burn) if monthly_burn is not None else None,
         tone=tone,
     )
 
@@ -594,6 +598,7 @@ async def get_cfo_brief(
     # (the cash headline still renders). This avoids a second heavy query on
     # the hot path. ---
     months_runway: Decimal | None = None
+    monthly_burn: Decimal | None = None
     if entity_id is not None and cash_payload and cash_payload.get("configured"):
         try:
             from app.tools.reporting import get_runway
@@ -602,11 +607,14 @@ async def get_cfo_brief(
             mr = rw.get("months_of_runway")
             if mr is not None:
                 months_runway = _to_decimal(mr)
+            mb = (rw.get("inputs") or {}).get("avg_monthly_net_burn")
+            if mb is not None:
+                monthly_burn = _to_decimal(mb)
         except Exception as exc:  # noqa: BLE001 — runway is a nice-to-have
             _log.debug("cfo-brief: runway unavailable: %s", exc)
 
     # --- Synthesize ---
-    cash_status = _plain_cash_status(cash_payload, months_runway)
+    cash_status = _plain_cash_status(cash_payload, months_runway, monthly_burn)
     ranked = _rank_priorities(open_items_payload, findings)
     top = ranked[:_TOP_N]
 

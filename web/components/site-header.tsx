@@ -45,6 +45,7 @@ export async function SiteHeader({
       canAdmin={canAdmin}
       workspaceId={ctx?.activeWorkspace?.id}
       entityId={ctx?.activeEntity?.id ?? ctx?.entities[0]?.id}
+      isConsolidated={ctx?.isConsolidated ?? false}
     >
       {ctx && (
         <>
