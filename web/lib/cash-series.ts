@@ -11,6 +11,12 @@
 // endpoint, swap this for it.
 
 import type { LiveTransaction } from "@/lib/transactions";
+import { auth } from "@/lib/auth";
+
+const INTERNAL_BASE =
+  process.env.INTERNAL_API_BASE_URL ??
+  process.env.NEXT_PUBLIC_API_BASE_URL ??
+  "http://app:8000";
 
 const DAYS = 90;
 
@@ -68,6 +74,83 @@ export function buildRealCashSeries(
     current: currentNetCash,
     delta,
     hasHistory: dated > 0,
+    annotation: undefined,
+  };
+}
+
+// Backend GL daily-balance series — the uncapped replacement for the
+// reconstruction above. The endpoint returns real end-of-day cash balances
+// computed over the FULL posted journal (no transaction-fetch cap), so the
+// earliest points no longer drift on high-volume books.
+export type DailyBalanceResponse = {
+  days: number;
+  start_date: string;
+  as_of: string;
+  currency: string;
+  opening: number;
+  series: number[]; // GL ending cash per day, oldest → newest
+  gl_current: number; // = series[last]; reconciles to journal cash as of today
+  has_history: boolean;
+  active_days: number;
+  source: string;
+};
+
+export async function getDailyCashBalance(
+  workspaceId: string,
+  days = DAYS,
+  entityId?: string
+): Promise<DailyBalanceResponse | null> {
+  const session = await auth();
+  if (!session?.accessToken) return null;
+  try {
+    const params = new URLSearchParams({ days: String(days) });
+    if (entityId) params.set("entity_id", entityId);
+    const res = await fetch(
+      `${INTERNAL_BASE}/api/workspaces/${workspaceId}/cash/daily-balance?${params.toString()}`,
+      {
+        headers: {
+          Authorization: `Bearer ${session.accessToken}`,
+          Accept: "application/json"
+        },
+        cache: "no-store"
+      }
+    );
+    if (!res.ok) return null;
+    return (await res.json()) as DailyBalanceResponse;
+  } catch {
+    return null;
+  }
+}
+
+// Assemble a CashSeries from the backend GL series. The ribbon's headline
+// `current` stays anchored to the live net-cash figure shown elsewhere on the
+// dashboard (cashPosition.net_total): when a bank is connected we shift the GL
+// shape by a constant so its last point equals that number — keeping the
+// headline consistent while every movement is real ledger data. With no bank
+// connected we report the journal cash directly.
+export function buildCashSeriesFromDaily(
+  daily: DailyBalanceResponse,
+  currentNetCash: number,
+  configured: boolean
+): CashSeries {
+  const anchorToBank = configured && Number.isFinite(currentNetCash);
+  const offset = anchorToBank ? currentNetCash - daily.gl_current : 0;
+  const series = daily.series.map((v) => round2(v + offset));
+  const current = anchorToBank ? currentNetCash : daily.gl_current;
+
+  const min = series.length ? Math.min(...series) : 0;
+  const max = series.length ? Math.max(...series) : 0;
+  const first = series.length ? series[0] : 0;
+  const last = series.length ? series[series.length - 1] : 0;
+  const delta = first !== 0 ? ((last - first) / Math.abs(first)) * 100 : 0;
+
+  return {
+    series,
+    min,
+    max,
+    current: round2(current),
+    delta,
+    hasHistory: daily.has_history,
     annotation: undefined,
   };
 }

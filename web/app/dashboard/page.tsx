@@ -11,7 +11,7 @@ import { DashboardV2 } from "@/components/dashboard-v2";
 import { getActiveContext } from "@/lib/active-context";
 import { fetchAIActivity } from "@/lib/ai-activity";
 import { activityRowToDecision } from "@/components/agent-stream/map-activity";
-import { buildRealCashSeries } from "@/lib/cash-series";
+import { buildRealCashSeries, getDailyCashBalance, buildCashSeriesFromDaily } from "@/lib/cash-series";
 import { fetchAiAgreement } from "@/lib/ai-agreement";
 import { getCashPosition, formatUSD } from "@/lib/cash-position";
 import { fetchCfoBrief } from "@/lib/cfo-brief";
@@ -60,15 +60,25 @@ export default async function DashboardPage() {
     ? await fetchAIActivity(ctx.activeWorkspace.id, { entityId: entityFilter, limit: 8 })
     : null;
   const initialDecisions = (aiActivity?.rows ?? []).map(activityRowToDecision);
-  // Real 90-day net-cash series for the v2 ribbon — reconstructed from the
-  // actual transaction ledger (no synthetic data).
-  const txns90 = V2_ENABLED && ctx.activeWorkspace
-    ? await getRecentTransactions(ctx.activeWorkspace.id, 90, 1000, entityFilter)
-    : null;
   const netCashNum = cashPosition
     ? parseFloat(cashPosition.net_total ?? cashPosition.total_usd ?? "0")
     : 0;
-  const cashSeries = buildRealCashSeries(netCashNum, txns90?.transactions ?? [], 90);
+  // Real 90-day end-of-day cash series for the v2 ribbon. Prefer the backend
+  // GL daily-balance endpoint (computed over the full posted journal, uncapped);
+  // fall back to the client reconstruction from the ≤1000-txn window only if
+  // the endpoint is unavailable.
+  const dailyBalance = V2_ENABLED && ctx.activeWorkspace
+    ? await getDailyCashBalance(ctx.activeWorkspace.id, 90, entityFilter)
+    : null;
+  let cashSeries = dailyBalance
+    ? buildCashSeriesFromDaily(dailyBalance, netCashNum, cashPosition?.configured ?? false)
+    : null;
+  if (!cashSeries) {
+    const txns90 = V2_ENABLED && ctx.activeWorkspace
+      ? await getRecentTransactions(ctx.activeWorkspace.id, 90, 1000, entityFilter)
+      : null;
+    cashSeries = buildRealCashSeries(netCashNum, txns90?.transactions ?? [], 90);
+  }
   const accountCount = cashPosition?.accounts.length ?? 0;
   const availableNow = cashPosition?.configured
     ? parseFloat(cashPosition.assets_total ?? cashPosition.total_usd ?? "0")
