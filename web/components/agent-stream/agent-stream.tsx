@@ -16,15 +16,20 @@ export function AgentStream({
   entityId?: string;
   initialDecisions?: AgentDecision[];
 }) {
-  const { state, startStream, isDemo } = useAgentStream({
+  const { state, startStream, stopStream, isDemo } = useAgentStream({
     workspaceId,
     entityId,
     initialDecisions,
   });
 
+  // Restart when workspace/entity changes: the cleanup tears down the previous
+  // entity's SSE + timers before the new one opens. Without it, an entity switch
+  // (router.refresh, no remount) leaves the ticker stuck on the prior entity and
+  // leaks its SSE connection.
   useEffect(() => {
     startStream();
-  }, [startStream]);
+    return stopStream;
+  }, [startStream, stopStream]);
 
   const thinkingDecision = state.decisions.find((d) => d.status === "think") ?? null;
   const completedDecisions = state.decisions.filter((d) => d.status !== "think");
