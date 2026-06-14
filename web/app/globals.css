@@ -379,6 +379,21 @@ body::after {
 .kpi .d.up { color: var(--credit); }
 .kpi .d.down { color: var(--debit); }
 .kpi .d.flat { color: var(--ink-3); }
+/* "trace" affordance — signals the KPI is clickable (opens its lineage). */
+.kpi .trace {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ink-4);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.kpi:hover .trace {
+  color: var(--brand-300);
+  border-color: var(--brand-500);
+}
 
 /* Confidence ring — conic gradient */
 .ring {
@@ -1310,6 +1325,48 @@ body::after {
 .hashbar .mono {
   color: var(--ink-3);
   font-size: 10px;
+}
+
+/* Lineage popover — live entries list (per-number provenance) */
+.linsum {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 9px 15px;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+.linsum .big { font-size: 15px; font-weight: 700; color: var(--ink-1); }
+.linsum .lbl { color: var(--ink-2); }
+.linsum .spacer { flex: 1; }
+.linsum .scope { font-size: 10px; color: var(--ink-4); }
+.linlist { max-height: 280px; overflow-y: auto; }
+.linrow { padding: 8px 15px; border-bottom: 1px solid var(--hairline); }
+.linrow:last-child { border-bottom: none; }
+.linrow .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.linrow .dt { font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.linrow .amt { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.linrow .flow { font-size: 10.5px; color: var(--ink-3); margin-top: 2px; }
+.linrow .flow .arr { color: var(--ink-4); }
+.linrow .desc {
+  font-size: 11px; color: var(--ink-2); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.linrow .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.linrow .tag {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 2px 5px; border-radius: 5px;
+  background: var(--chip-bg); color: var(--ink-3); border: 1px solid var(--hairline);
+}
+.linrow .tag.agent { color: var(--agent-500); }
+.linrow .tag.rev { color: var(--pending); }
+.linrow .tag.bad { color: var(--debit); border-color: hsla(0 91% 71% / 0.3); }
+.linrow .tag.mH { color: var(--debit); }
+.linrow .tag.mM { color: var(--pending); }
+.linmore, .linempty {
+  padding: 9px 15px; font-size: 10.5px; color: var(--ink-4); text-align: center;
 }
 
 /* Toast region */
