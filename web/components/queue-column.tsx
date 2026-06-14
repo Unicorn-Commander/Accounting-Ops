@@ -2,10 +2,11 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition, useRef, useCallback, useEffect } from "react";
-import { Check, Loader2, X, ChevronDown, ChevronUp } from "lucide-react";
+import { Check, Loader2, X, ChevronDown, ChevronUp, UserPlus } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { LiveTransaction } from "@/lib/transactions";
 import { QueueRowActions } from "@/components/queue-row-actions";
+import { CreateContactModal } from "@/components/create-contact-modal";
 
 type Outcome =
   | "posted"
@@ -76,6 +77,9 @@ export function QueueColumnClient({
   const [bulkPending, setBulkPending] = useState(false);
   const [bulkResult, setBulkResult] = useState<{ ok: number; skipped: number; failed: string[] } | null>(null);
   const [rejectingIdx, setRejectingIdx] = useState<number | null>(null);
+  // Payee -> "add as contact": one controlled modal for the whole column,
+  // seeded from whichever row's payee was clicked.
+  const [addContact, setAddContact] = useState<{ name: string; kind: string } | null>(null);
   const cardRefs = useRef<HTMLDivElement[]>([]);
   const onShowRejectRef = useRef<(idx: number) => void>(() => {});
   onShowRejectRef.current = (idx: number) => { setRejectingIdx(idx); };
@@ -291,6 +295,10 @@ export function QueueColumnClient({
           {items.map((t, idx) => {
             const amt = parseFloat(t.amount);
             const isCredit = amt >= 0;
+            // One value drives the title, the "+ contact" guard, AND the
+            // pre-filled name, so an empty-string payee can't show a button
+            // that opens with a blank name (and "—" still shows when truly empty).
+            const payeeLabel = (t.payee || t.description || "").trim();
             const mat = materialityFor(t.amount);
             const isSelected = selected.has(t.id);
             const isFocused = idx === focusedIdx;
@@ -323,9 +331,29 @@ export function QueueColumnClient({
                 </div>
 
                 <div className="flex items-start justify-between gap-2 pl-8 pr-3 pt-3">
-                  <h3 className="max-w-[200px] truncate text-sm font-semibold">
-                    {t.payee ?? t.description ?? "\u2014"}
-                  </h3>
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <h3 className="max-w-[200px] truncate text-sm font-semibold">
+                      {payeeLabel || "\u2014"}
+                    </h3>
+                    {payeeLabel && (
+                      <button
+                        type="button"
+                        title="Add as a contact"
+                        aria-label="Add this payee as a contact"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setAddContact({
+                            name: payeeLabel,
+                            // Money in = a customer paid you; money out = a vendor.
+                            kind: isCredit ? "customer" : "vendor"
+                          });
+                        }}
+                        className="shrink-0 rounded p-0.5 text-ink-tertiary opacity-0 transition hover:bg-white/5 hover:text-brand-300 focus:opacity-100 group-hover:opacity-100"
+                      >
+                        <UserPlus size={12} />
+                      </button>
+                    )}
+                  </div>
                   <span
                     className={cn(
                       "shrink-0 font-mono text-sm tabular-nums",
@@ -394,6 +422,17 @@ export function QueueColumnClient({
           })}
         </div>
       )}
+
+      <CreateContactModal
+        workspaceId={workspaceId}
+        open={addContact !== null}
+        onOpenChange={(o) => {
+          if (!o) setAddContact(null);
+        }}
+        initialName={addContact?.name ?? ""}
+        initialKind={addContact?.kind ?? "vendor"}
+        sourceTag="reconciliation"
+      />
     </div>
   );
 }

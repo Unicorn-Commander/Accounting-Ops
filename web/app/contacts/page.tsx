@@ -6,10 +6,24 @@ import {
   SectionHeader,
   StatusChip
 } from "@/components/primitives";
-import { Users } from "lucide-react";
+import { UserPlus, Users } from "lucide-react";
 import { getActiveContext } from "@/lib/active-context";
 import { getContacts, getContactSources } from "@/lib/contacts";
 import { ImportContactsButton } from "@/components/import-contacts-button";
+import { CreateContactModal } from "@/components/create-contact-modal";
+
+function NewContactButton({ workspaceId }: { workspaceId: string }) {
+  return (
+    <CreateContactModal
+      workspaceId={workspaceId}
+      trigger={
+        <button className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600">
+          <UserPlus size={13} /> New contact
+        </button>
+      }
+    />
+  );
+}
 
 export const dynamic = "force-dynamic";
 
@@ -43,10 +57,13 @@ export default async function ContactsPage() {
           subtitle="Customers you bill and vendors you pay. Import from your phone, Google, Outlook, or a spreadsheet."
           action={
             workspace && canEdit ? (
-              <ImportContactsButton
-                workspaceId={workspace.id}
-                contactOpsAvailable={contactOps}
-              />
+              <div className="flex items-center gap-2">
+                <NewContactButton workspaceId={workspace.id} />
+                <ImportContactsButton
+                  workspaceId={workspace.id}
+                  contactOpsAvailable={contactOps}
+                />
+              </div>
             ) : undefined
           }
         />
@@ -65,10 +82,13 @@ export default async function ContactsPage() {
             title="No contacts yet."
             description={
               canEdit
-                ? "Import a .vcf (macOS / iPhone / Google / Outlook) or a .csv to populate your customers and vendors. You review and tag each before anything is saved."
+                ? "Add a contact yourself, or import a .vcf (macOS / iPhone / Google / Outlook) or .csv to populate your customers and vendors. You review and tag each before anything is saved."
                 : "No contacts have been added to this workspace yet."
             }
             primaryAction={
+              canEdit ? <NewContactButton workspaceId={workspace.id} /> : undefined
+            }
+            secondaryAction={
               canEdit ? (
                 <ImportContactsButton
                   workspaceId={workspace.id}
