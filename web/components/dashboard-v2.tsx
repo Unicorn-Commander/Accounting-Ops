@@ -234,6 +234,7 @@ export function DashboardV2({
                   )}
                   {kpi.delta.replace(/[+\-▲▼]/g, "")}
                 </span>
+                <span className="trace">trace →</span>
               </div>
             </div>
           );

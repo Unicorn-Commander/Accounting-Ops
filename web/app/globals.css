@@ -379,6 +379,21 @@ body::after {
 .kpi .d.up { color: var(--credit); }
 .kpi .d.down { color: var(--debit); }
 .kpi .d.flat { color: var(--ink-3); }
+/* "trace" affordance — signals the KPI is clickable (opens its lineage). */
+.kpi .trace {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ink-4);
+  border: 1px solid var(--hairline);
+  border-radius: 6px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.kpi:hover .trace {
+  color: var(--brand-300);
+  border-color: var(--brand-500);
+}
 
 /* Confidence ring — conic gradient */
 .ring {
