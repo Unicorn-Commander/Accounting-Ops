@@ -295,6 +295,10 @@ export function QueueColumnClient({
           {items.map((t, idx) => {
             const amt = parseFloat(t.amount);
             const isCredit = amt >= 0;
+            // One value drives the title, the "+ contact" guard, AND the
+            // pre-filled name, so an empty-string payee can't show a button
+            // that opens with a blank name (and "—" still shows when truly empty).
+            const payeeLabel = (t.payee || t.description || "").trim();
             const mat = materialityFor(t.amount);
             const isSelected = selected.has(t.id);
             const isFocused = idx === focusedIdx;
@@ -329,9 +333,9 @@ export function QueueColumnClient({
                 <div className="flex items-start justify-between gap-2 pl-8 pr-3 pt-3">
                   <div className="flex min-w-0 items-center gap-1.5">
                     <h3 className="max-w-[200px] truncate text-sm font-semibold">
-                      {t.payee ?? t.description ?? "\u2014"}
+                      {payeeLabel || "\u2014"}
                     </h3>
-                    {(t.payee || t.description) && (
+                    {payeeLabel && (
                       <button
                         type="button"
                         title="Add as a contact"
@@ -339,7 +343,7 @@ export function QueueColumnClient({
                         onClick={(e) => {
                           e.stopPropagation();
                           setAddContact({
-                            name: (t.payee ?? t.description ?? "").trim(),
+                            name: payeeLabel,
                             // Money in = a customer paid you; money out = a vendor.
                             kind: isCredit ? "customer" : "vendor"
                           });
