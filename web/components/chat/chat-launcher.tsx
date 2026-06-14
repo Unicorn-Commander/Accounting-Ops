@@ -37,6 +37,7 @@ type Surface = "closed" | "float" | "dock";
 
 const OPEN_KEY = "aops_chat_open"; // "1" while a surface is open
 const MODE_KEY = "aops_chat_mode"; // "float" | "dock"
+const SESSION_KEY = "aops_chat_session"; // JSON {e:entityId,s:sessionId} — resume the last thread on refresh
 
 export type ChatLauncherProps = {
   workspaceId: string;
@@ -55,6 +56,10 @@ export function ChatLauncher({
 }: ChatLauncherProps) {
   const [surface, setSurface] = useState<Surface>("closed");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // The session to resume on mount (restored from localStorage). Kept separate
+  // from the live `sessionId` so feeding it to EmbeddedChat can't create a
+  // parent↔child reload loop.
+  const [restoredSessionId, setRestoredSessionId] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
 
   const panelRef = useRef<HTMLDivElement>(null);
@@ -69,11 +74,32 @@ export function ChatLauncher({
       if (m === "dock" || m === "float") mode = m;
       const open = window.localStorage.getItem(OPEN_KEY) === "1";
       setSurface(open ? mode : "closed");
+      // Resume the last conversation — but only if it belongs to the CURRENT
+      // entity (don't show one entity's chat under another after a switch).
+      const raw = window.localStorage.getItem(SESSION_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw) as { e?: string; s?: string };
+        if (saved.e === entityId && saved.s) {
+          setRestoredSessionId(saved.s);
+          setSessionId(saved.s);
+        }
+      }
     } catch {
       // localStorage blocked (private mode) — just start closed.
     }
     setHydrated(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Persist the active session per-entity so a refresh resumes the same thread.
+  useEffect(() => {
+    if (!hydrated || !sessionId) return;
+    try {
+      window.localStorage.setItem(SESSION_KEY, JSON.stringify({ e: entityId, s: sessionId }));
+    } catch {
+      /* ignore */
+    }
+  }, [sessionId, entityId, hydrated]);
 
   const persist = useCallback((next: Surface) => {
     try {
@@ -175,6 +201,7 @@ export function ChatLauncher({
             entityName={entityName}
             personas={personas}
             defaultPersonaSlug={defaultPersonaSlug}
+            initialSessionId={restoredSessionId}
             onSessionChange={setSessionId}
             className="flex-1 min-h-0"
           />
@@ -202,6 +229,7 @@ export function ChatLauncher({
             entityName={entityName}
             personas={personas}
             defaultPersonaSlug={defaultPersonaSlug}
+            initialSessionId={restoredSessionId}
             onSessionChange={setSessionId}
             className="flex-1 min-h-0"
           />

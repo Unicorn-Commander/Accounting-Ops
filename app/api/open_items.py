@@ -627,7 +627,14 @@ async def get_open_items(
     }
     documents_out: list[dict[str, Any]] = []
     received_count = 0
-    for doc in _AARON_DOCUMENT_CHECKLIST:
+    # _AARON_DOCUMENT_CHECKLIST / _AARON_DECISION_CHECKLIST are Aaron's personal
+    # items (DFAS/VA/military/§195 etc.) hardcoded here and not yet modeled
+    # per-workspace. Until they are, surface them ONLY in Aaron's own workspace —
+    # every other tenant (e.g. Shafen) must not see his PII or be asked for his
+    # documents. TODO: replace with per-workspace document_request data and drop
+    # these module constants entirely.
+    _own_checklist = workspace.workspace_slug == "aaron-stransky"
+    for doc in (_AARON_DOCUMENT_CHECKLIST if _own_checklist else []):
         # Tax-year filter: hide a doc only if it doesn't intersect the
         # requested year. Show all years if no filter.
         if tax_year is not None and tax_year not in doc.get("tax_years", []):
@@ -663,7 +670,7 @@ async def get_open_items(
     }
     decisions_out: list[dict[str, Any]] = []
     decisions_decided = 0
-    for dec in _AARON_DECISION_CHECKLIST:
+    for dec in (_AARON_DECISION_CHECKLIST if _own_checklist else []):
         if tax_year is not None and tax_year not in dec.get("tax_years", []):
             continue
         d = dict(dec)

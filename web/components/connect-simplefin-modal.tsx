@@ -98,8 +98,13 @@ export function ConnectSimplefinModal({
                   <p className="mt-1 text-ink-secondary">
                     Your bank connection is encrypted and stored securely in your
                     workspace — we never log it or keep it in plaintext, and you can
-                    revoke it any time. Refresh the dashboard to see live balances and
-                    start categorizing transactions.
+                    revoke it any time.
+                  </p>
+                  <p className="mt-2 text-ink-secondary">
+                    <strong>Next step:</strong> your transactions flow into the{" "}
+                    <strong>Reconciliation Queue</strong> — review them, assign each
+                    account to an entity, and post them to your books. Nothing hits
+                    your ledger until you post it (that&apos;s why you start at zero).
                   </p>
                 </div>
               </div>
@@ -107,11 +112,21 @@ export function ConnectSimplefinModal({
                 onClick={() => {
                   setOpen(false);
                   reset();
-                  router.refresh();
+                  router.push("/reconciliation-queue");
                 }}
                 className="w-full rounded-md bg-brand-500 px-4 py-2 text-sm font-medium text-white hover:bg-brand-600"
               >
-                Done
+                Review &amp; post transactions →
+              </button>
+              <button
+                onClick={() => {
+                  setOpen(false);
+                  reset();
+                  router.refresh();
+                }}
+                className="w-full rounded-md border border-default px-4 py-2 text-sm text-ink-secondary hover:text-ink-primary"
+              >
+                Later — just show the dashboard
               </button>
             </div>
           ) : (

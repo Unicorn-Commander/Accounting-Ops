@@ -64,7 +64,9 @@ export default async function ChatPage({
   const initialActiveSessionId =
     requestedSession && sessions.some((s) => s.id === requestedSession)
       ? requestedSession
-      : null;
+      : // No (valid) ?session= → resume the most-recent thread instead of opening
+        // blank (sessions are ordered by last_activity_at DESC).
+        sessions[0]?.id ?? null;
 
   return (
     <AppShell>
