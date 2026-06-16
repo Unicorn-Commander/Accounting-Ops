@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.7.1 - 2026-06-16
+
+- fix(journal): extend `CATEGORY_TO_ACCOUNT` with categories that were silently
+  blocking legitimate postings (`category_not_in_CATEGORY_TO_ACCOUNT`): **Revenue
+  · Services** (4030), **Owner Contribution** (3010), **Owner Distribution**
+  (3020), **Contractor · 1099-NEC** (6300), **COGS · Inventory** (5010), **Loan
+  from Nate Ellison** (2400 Notes Payable), **Vehicle · Repairs** (6620). The
+  accounts already existed in the chart of accounts; they just weren't wired into
+  the posting map, so equity / contractor / COGS / services-revenue / loan /
+  vehicle transactions couldn't be approved & posted. Surfaced during the MU Inc
+  catch-up reconciliation (842 bank-import approvals).
+
 ## 0.7.0 - 2026-06-14
 
 - feat(dashboard): **Per-number lineage** — click any figure (cash, revenue,
