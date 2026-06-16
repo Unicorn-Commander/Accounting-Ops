@@ -5,7 +5,7 @@
 // APP_VERSION_LABEL from this module, so the version string can never drift
 // across the app again (it previously hard-coded "v0.1 dev preview" in six
 // places while package.json had moved on).
-export const APP_VERSION = "0.7.0";
+export const APP_VERSION = "0.7.1";
 export const APP_CHANNEL = "dev preview";
 
 /** Standard short badge, e.g. "v0.4.0 dev preview". */
