@@ -88,6 +88,12 @@ def build_server():
     server = FastMCP(
         "Accounting-Ops",
         streamable_http_path="/",
+        # Stateless HTTP: the suite's federation clients (Customer-Ops et al.) make
+        # one-shot tools/call requests without the MCP initialize->session handshake,
+        # matching the other suite MCP servers. FastMCP's stateful default otherwise
+        # 400s those calls ("Missing session ID"). Our tools are stateless reads, so
+        # no per-session continuity is needed.
+        stateless_http=True,
         # /mcp is served behind Traefik (TLS) + MCPAuthMiddleware (Bearer token).
         # The MCP SDK's DNS-rebinding Host guard otherwise 421s the public FQDN
         # (accounting-ops.magicunicorn.dev); disable it — the Bearer token and the
