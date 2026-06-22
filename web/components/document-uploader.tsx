@@ -54,6 +54,12 @@ function isAcceptedName(name: string): boolean {
   return dot >= 0 && ACCEPT_EXTS.has(name.slice(dot + 1).toLowerCase());
 }
 
+// Monotonic row-key source. Date.now() can repeat within a millisecond across
+// rapid/successive folder batches and collide React keys + the r.key===row.key
+// matching in the upload loop — a counter is collision-free.
+let rowSeq = 0;
+const nextRowKey = (name: string): string => `row-${rowSeq++}-${name}`;
+
 // --- folder-aware drop handling -------------------------------------------
 // dataTransfer.files OMITS the contents of dropped folders. The FileSystem
 // entries API (webkitGetAsEntry) exposes them, but the DataTransferItemList is
@@ -209,13 +215,13 @@ export function DocumentUploader({
       // A dropped/picked FOLDER brings everything inside it — partition into
       // uploadable files vs. skips (unsupported type or over the size cap) so we
       // don't fire doomed requests for the junk a folder inevitably contains.
-      const stamp = Date.now();
+      const maxMb = Math.round(MAX_UPLOAD_BYTES / (1024 * 1024));
       const accepted: File[] = [];
       const skippedRows: Row[] = [];
-      incoming.forEach((f, i) => {
+      for (const f of incoming) {
         if (!isAcceptedName(f.name)) {
           skippedRows.push({
-            key: `skip-${stamp}-${i}-${f.name}`,
+            key: nextRowKey(f.name),
             name: f.name,
             size: f.size,
             mime: f.type || "",
@@ -224,21 +230,21 @@ export function DocumentUploader({
           });
         } else if (f.size > MAX_UPLOAD_BYTES) {
           skippedRows.push({
-            key: `skip-${stamp}-${i}-${f.name}`,
+            key: nextRowKey(f.name),
             name: f.name,
             size: f.size,
             mime: f.type || "",
             status: "skipped",
-            error: `Too large (max ${humanSize(MAX_UPLOAD_BYTES)})`,
+            error: `Too large (max ${maxMb} MB)`,
           });
         } else {
           accepted.push(f);
         }
-      });
+      }
 
       // Seed accepted rows as pending (+ any skipped rows, for transparency).
-      const seeded: Row[] = accepted.map((f, i) => ({
-        key: `${stamp}-${i}-${f.name}`,
+      const seeded: Row[] = accepted.map((f) => ({
+        key: nextRowKey(f.name),
         name: f.name,
         size: f.size,
         mime: f.type || "application/octet-stream",
@@ -429,18 +435,18 @@ export function DocumentUploader({
       </div>
 
       {/* Whole-folder affordance — kept OUTSIDE the drop zone so it isn't an
-          interactive control nested inside the role="button" card. */}
-      {!disabled && (
-        <div className="-mt-1 text-center">
-          <button
-            type="button"
-            onClick={() => folderInputRef.current?.click()}
-            className="inline-flex items-center gap-1.5 text-xs font-medium text-brand-400 underline-offset-2 hover:underline"
-          >
-            <FolderUp size={13} /> Upload a whole folder
-          </button>
-        </div>
-      )}
+          interactive control nested inside the role="button" card. Rendered even
+          when disabled (greyed) so the capability stays discoverable. */}
+      <div className="-mt-1 text-center">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => !disabled && folderInputRef.current?.click()}
+          className="inline-flex items-center gap-1.5 text-xs font-medium text-brand-400 underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:no-underline disabled:opacity-50"
+        >
+          <FolderUp size={13} /> Upload a whole folder
+        </button>
+      </div>
 
       {disabled && (
         <p className="rounded-md border border-pending/40 bg-pending/[0.06] px-3 py-2 text-xs text-pending">

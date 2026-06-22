@@ -41,7 +41,10 @@ export async function POST(
   // Read the raw bytes once so we can size-check, then forward as the body.
   // (Files here are bounded by MAX_BYTES; buffering is fine for this size.)
   const buf = await req.arrayBuffer();
-  if (buf.byteLength > MAX_BYTES) {
+  // Headroom over MAX_BYTES for the multipart envelope (boundary + part headers)
+  // so a file at exactly the file-size cap isn't rejected here for its wrapper;
+  // the backend re-checks the actual file part against the real cap.
+  if (buf.byteLength > MAX_BYTES + 1024 * 1024) {
     return NextResponse.json(
       { detail: `File exceeds the ${Math.floor(MAX_BYTES / (1024 * 1024))} MB limit.` },
       { status: 413 }
