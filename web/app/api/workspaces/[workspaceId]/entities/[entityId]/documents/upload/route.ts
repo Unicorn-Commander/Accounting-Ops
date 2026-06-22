@@ -15,10 +15,10 @@ const INTERNAL_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL ??
   "http://app:8000";
 
-// Cap mirrored from the backend default (25 MB) — reject early at the edge so a
+// Cap mirrored from the backend default (100 MB) — reject early at the edge so a
 // giant body never streams all the way to the API. Override via env to match a
-// raised DOCUMENT_UPLOAD_MAX_BYTES.
-const MAX_BYTES = Number(process.env.DOCUMENT_UPLOAD_MAX_BYTES ?? 25 * 1024 * 1024);
+// changed DOCUMENT_UPLOAD_MAX_BYTES.
+const MAX_BYTES = Number(process.env.DOCUMENT_UPLOAD_MAX_BYTES ?? 100 * 1024 * 1024);
 
 export async function POST(
   req: NextRequest,

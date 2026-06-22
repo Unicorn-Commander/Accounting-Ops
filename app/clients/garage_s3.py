@@ -38,10 +38,11 @@ from app.config import Settings, get_settings
 
 _SERVICE = "s3"
 _ALGORITHM = "AWS4-HMAC-SHA256"
-# Default per-call timeout. Uploads are small (≤ document_upload_max_bytes) and
-# Garage is on the same docker network in production, so a tight ceiling is fine
-# and keeps a stuck object store from hanging the request worker.
-_DEFAULT_TIMEOUT_S = 20.0
+# Default per-call timeout. Uploads are bounded by document_upload_max_bytes and
+# Garage is on the same docker network in production, so a 60s ceiling comfortably
+# covers a max-size (100 MB) object while still keeping a stuck object store from
+# hanging the request worker indefinitely.
+_DEFAULT_TIMEOUT_S = 60.0
 
 
 class GarageNotConfigured(RuntimeError):

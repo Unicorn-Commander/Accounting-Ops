@@ -58,9 +58,10 @@ class Settings(BaseModel):
     garage_s3_secret_key: str = ""
     garage_s3_region: str = "garage"
     # Hard ceiling on a single uploaded document (bytes). Defends the app + the
-    # object store from a giant-file DoS. 25 MB comfortably covers a multi-page
-    # PDF receipt or a high-res phone photo; CSV statements are far smaller.
-    document_upload_max_bytes: int = 25 * 1024 * 1024
+    # object store from a giant-file DoS. 100 MB covers large multi-page scanned
+    # tax documents / statement bundles as well as receipts and CSVs. Override via
+    # env DOCUMENT_UPLOAD_MAX_BYTES (the web edge proxy reads the same var).
+    document_upload_max_bytes: int = 100 * 1024 * 1024
 
     otel_exporter_otlp_endpoint: str | None = None
     otel_service_name: str = "accounting-ops"

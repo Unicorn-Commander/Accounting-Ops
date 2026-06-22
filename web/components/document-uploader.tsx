@@ -2,15 +2,18 @@
 
 // DocumentUploader — the PRIMARY "drag in everything, we figure it out" surface.
 //
-// Multi-file drag-drop + click-to-browse. Each file is uploaded one at a time to
+// Multi-file AND whole-FOLDER drag-drop, plus click-to-browse (files) and a
+// "choose a folder" picker. Each file is uploaded one at a time to
 //   POST /api/workspaces/{wid}/entities/{eid}/documents/upload
 // (a dedicated multipart proxy → app/api/documents.py). The backend stores the
 // file in Garage, content-hash-dedups it, runs the LOCAL receipt VLM on images,
 // and queues a 'document_review' approval item. NOTHING is auto-posted.
 //
-// Degrades gracefully: a single file failing never blocks the others; each row
-// shows its own status (queued / duplicate / read / needs-review / error). The
-// component never throws into the page.
+// Dropping/picking a FOLDER walks it recursively (webkitGetAsEntry); junk and
+// oversized files are filtered client-side and shown as "skipped" so the run is
+// honest. Degrades gracefully: a single file failing never blocks the others;
+// each row shows its own status (queued / duplicate / read / needs-review /
+// skipped / error). The component never throws into the page.
 
 import { useCallback, useId, useRef, useState } from "react";
 import Link from "next/link";
@@ -22,6 +25,7 @@ import {
   CloudUpload,
   Copy,
   FileText,
+  FolderUp,
   Image as ImageIcon,
   Loader2,
   Receipt,
@@ -35,7 +39,69 @@ import { cn } from "@/lib/cn";
 const ACCEPT =
   ".pdf,.jpg,.jpeg,.png,.heic,.heif,.webp,.tiff,.tif,.gif,.csv,application/pdf,image/*,text/csv";
 
-type UploadStatus = "pending" | "uploading" | "done" | "duplicate" | "error";
+// Keep in sync with the backend default DOCUMENT_UPLOAD_MAX_BYTES + the edge
+// proxy route. Oversized files are skipped client-side with a clear reason
+// rather than firing a doomed request the server would 413.
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+
+// Extension allow-list (mirrors ACCEPT) — used to filter junk when a whole
+// FOLDER is dropped or picked (folders routinely carry .DS_Store, .docx, etc.).
+const ACCEPT_EXTS = new Set([
+  "pdf", "jpg", "jpeg", "png", "heic", "heif", "webp", "tiff", "tif", "gif", "csv",
+]);
+function isAcceptedName(name: string): boolean {
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 && ACCEPT_EXTS.has(name.slice(dot + 1).toLowerCase());
+}
+
+// --- folder-aware drop handling -------------------------------------------
+// dataTransfer.files OMITS the contents of dropped folders. The FileSystem
+// entries API (webkitGetAsEntry) exposes them, but the DataTransferItemList is
+// invalidated once the drop handler returns — so grab the entries SYNCHRONOUSLY
+// (entriesFromDrop) and walk them async, recursively (walkEntry).
+function entriesFromDrop(dt: DataTransfer): FileSystemEntry[] {
+  const out: FileSystemEntry[] = [];
+  const items = dt.items;
+  if (!items) return out;
+  for (let i = 0; i < items.length; i++) {
+    const entry = items[i].webkitGetAsEntry?.();
+    if (entry) out.push(entry);
+  }
+  return out;
+}
+
+async function walkEntry(entry: FileSystemEntry, out: File[]): Promise<void> {
+  if (entry.isFile) {
+    const file = await new Promise<File | null>((resolve) =>
+      (entry as FileSystemFileEntry).file(
+        (f) => resolve(f),
+        () => resolve(null)
+      )
+    );
+    if (file) out.push(file);
+  } else if (entry.isDirectory) {
+    const reader = (entry as FileSystemDirectoryEntry).createReader();
+    // readEntries yields at most ~100 entries per call — loop until empty.
+    for (;;) {
+      const batch = await new Promise<FileSystemEntry[]>((resolve) =>
+        reader.readEntries(
+          (e) => resolve(e),
+          () => resolve([])
+        )
+      );
+      if (batch.length === 0) break;
+      for (const child of batch) await walkEntry(child, out);
+    }
+  }
+}
+
+type UploadStatus =
+  | "pending"
+  | "uploading"
+  | "done"
+  | "duplicate"
+  | "error"
+  | "skipped";
 
 type UploadResult = {
   ok?: boolean;
@@ -94,6 +160,7 @@ export function DocumentUploader({
   const router = useRouter();
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [dragging, setDragging] = useState(false);
   const [rows, setRows] = useState<Row[]>([]);
   const [busy, setBusy] = useState(false);
@@ -135,30 +202,62 @@ export function DocumentUploader({
 
   const handleFiles = useCallback(
     async (fileList: FileList | File[]) => {
-      const files = Array.from(fileList);
-      if (files.length === 0) return;
+      // Drop dotfiles (.DS_Store, ._resource forks) that ride along in folders.
+      const incoming = Array.from(fileList).filter((f) => !f.name.startsWith("."));
+      if (incoming.length === 0) return;
 
-      // Seed rows as pending.
-      const seeded: Row[] = files.map((f, i) => ({
-        key: `${Date.now()}-${i}-${f.name}`,
+      // A dropped/picked FOLDER brings everything inside it — partition into
+      // uploadable files vs. skips (unsupported type or over the size cap) so we
+      // don't fire doomed requests for the junk a folder inevitably contains.
+      const stamp = Date.now();
+      const accepted: File[] = [];
+      const skippedRows: Row[] = [];
+      incoming.forEach((f, i) => {
+        if (!isAcceptedName(f.name)) {
+          skippedRows.push({
+            key: `skip-${stamp}-${i}-${f.name}`,
+            name: f.name,
+            size: f.size,
+            mime: f.type || "",
+            status: "skipped",
+            error: "Unsupported type",
+          });
+        } else if (f.size > MAX_UPLOAD_BYTES) {
+          skippedRows.push({
+            key: `skip-${stamp}-${i}-${f.name}`,
+            name: f.name,
+            size: f.size,
+            mime: f.type || "",
+            status: "skipped",
+            error: `Too large (max ${humanSize(MAX_UPLOAD_BYTES)})`,
+          });
+        } else {
+          accepted.push(f);
+        }
+      });
+
+      // Seed accepted rows as pending (+ any skipped rows, for transparency).
+      const seeded: Row[] = accepted.map((f, i) => ({
+        key: `${stamp}-${i}-${f.name}`,
         name: f.name,
         size: f.size,
         mime: f.type || "application/octet-stream",
         status: "pending" as UploadStatus,
       }));
-      setRows((prev) => [...seeded, ...prev]);
+      setRows((prev) => [...seeded, ...skippedRows, ...prev]);
+      if (accepted.length === 0) return; // nothing uploadable — only skips
       setBusy(true);
 
       // Upload sequentially so the local VLM isn't hammered with N concurrent
       // image jobs (it's a single shared GPU box) and so the queue order is
       // predictable.
       const outcomes: UploadStatus[] = [];
-      for (let i = 0; i < files.length; i++) {
+      for (let i = 0; i < accepted.length; i++) {
         const row = seeded[i];
         setRows((prev) =>
           prev.map((r) => (r.key === row.key ? { ...r, status: "uploading" } : r))
         );
-        const outcome = await uploadOne(files[i]);
+        const outcome = await uploadOne(accepted[i]);
         outcomes.push(outcome.status);
         setRows((prev) =>
           prev.map((r) =>
@@ -193,8 +292,20 @@ export function DocumentUploader({
       e.preventDefault();
       setDragging(false);
       if (disabled) return;
-      if (e.dataTransfer?.files?.length) {
-        void handleFiles(e.dataTransfer.files);
+      const dt = e.dataTransfer;
+      if (!dt) return;
+      // Capture folder entries SYNCHRONOUSLY (the item list dies after this
+      // handler returns), then walk them — including nested folders — before
+      // handing the flattened file list to the uploader.
+      const entries = entriesFromDrop(dt);
+      if (entries.length > 0) {
+        const collected: File[] = [];
+        void (async () => {
+          for (const entry of entries) await walkEntry(entry, collected);
+          if (collected.length > 0) await handleFiles(collected);
+        })();
+      } else if (dt.files?.length) {
+        void handleFiles(dt.files);
       }
     },
     [handleFiles, disabled]
@@ -209,6 +320,7 @@ export function DocumentUploader({
   const doneRows = rows.filter((r) => r.status === "done");
   const dupeRows = rows.filter((r) => r.status === "duplicate");
   const errorRows = rows.filter((r) => r.status === "error");
+  const skipRows = rows.filter((r) => r.status === "skipped");
   const showSuccess = !busy && !compact && doneRows.length > 0;
   const successNames = doneRows.map((r) => r.name);
   const successLabel =
@@ -261,6 +373,27 @@ export function DocumentUploader({
             e.target.value = "";
           }}
         />
+        {/* Folder picker — a single <input> can't be both multiple-files and a
+            directory, so the "whole folder" path gets its own input. The
+            webkitdirectory/directory attributes aren't in React's input typings,
+            so they're set imperatively via the ref callback. */}
+        <input
+          ref={(el) => {
+            folderInputRef.current = el;
+            if (el) {
+              el.setAttribute("webkitdirectory", "");
+              el.setAttribute("directory", "");
+            }
+          }}
+          type="file"
+          multiple
+          className="sr-only"
+          disabled={disabled}
+          onChange={(e) => {
+            if (e.target.files?.length) void handleFiles(e.target.files);
+            e.target.value = "";
+          }}
+        />
         <span
           className={cn(
             "flex h-12 w-12 items-center justify-center rounded-full transition",
@@ -271,7 +404,9 @@ export function DocumentUploader({
         </span>
         <div>
           <p className="text-sm font-semibold text-ink-primary">
-            {dragging ? "Drop to upload" : "Drag in your documents — or click to browse"}
+            {dragging
+              ? "Drop to upload"
+              : "Drag in documents or a whole folder — or click to browse"}
           </p>
           <p className="mt-1 text-xs text-ink-tertiary">
             Receipts, invoices, PDFs, bank CSVs. We read receipts automatically and
@@ -283,7 +418,7 @@ export function DocumentUploader({
         </div>
         {!compact && (
           <p className="text-[10px] uppercase tracking-wider text-ink-disabled">
-            PDF · JPG · PNG · HEIC · WEBP · TIFF · CSV · up to 25 MB each
+            PDF · JPG · PNG · HEIC · WEBP · TIFF · CSV · up to 100 MB each
           </p>
         )}
         {busy && (
@@ -292,6 +427,20 @@ export function DocumentUploader({
           </span>
         )}
       </div>
+
+      {/* Whole-folder affordance — kept OUTSIDE the drop zone so it isn't an
+          interactive control nested inside the role="button" card. */}
+      {!disabled && (
+        <div className="-mt-1 text-center">
+          <button
+            type="button"
+            onClick={() => folderInputRef.current?.click()}
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-brand-400 underline-offset-2 hover:underline"
+          >
+            <FolderUp size={13} /> Upload a whole folder
+          </button>
+        </div>
+      )}
 
       {disabled && (
         <p className="rounded-md border border-pending/40 bg-pending/[0.06] px-3 py-2 text-xs text-pending">
@@ -319,6 +468,12 @@ export function DocumentUploader({
                 <span className="text-credit/70">
                   {" "}
                   {dupeRows.length} already uploaded earlier.
+                </span>
+              )}
+              {skipRows.length > 0 && (
+                <span className="text-ink-tertiary">
+                  {" "}
+                  {skipRows.length} skipped (unsupported or too large).
                 </span>
               )}
               {errorRows.length > 0 && (
@@ -368,6 +523,7 @@ export function DocumentUploader({
 function UploadRow({ row }: { row: Row }) {
   const Icon = iconFor(row.mime);
   const ex = row.result?.extracted;
+  const isSkip = row.status === "skipped";
   return (
     <li className="flex items-start gap-3 px-4 py-3">
       <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-elevated text-ink-tertiary">
@@ -392,7 +548,9 @@ function UploadRow({ row }: { row: Row }) {
           </p>
         )}
         {row.error && (
-          <p className="mt-0.5 text-[11px] text-debit">{row.error}</p>
+          <p className={cn("mt-0.5 text-[11px]", isSkip ? "text-ink-tertiary" : "text-debit")}>
+            {row.error}
+          </p>
         )}
         {row.result?.message && !row.error && (
           <p className="mt-0.5 text-[11px] text-ink-tertiary">{row.result.message}</p>
@@ -409,6 +567,13 @@ function StatusPill({ row }: { row: Row }) {
       <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-brand-300">
         <Loader2 size={12} className="animate-spin" />
         {row.status === "pending" ? "Queued" : "Uploading"}
+      </span>
+    );
+  }
+  if (row.status === "skipped") {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-tertiary">
+        <X size={12} /> Skipped
       </span>
     );
   }
