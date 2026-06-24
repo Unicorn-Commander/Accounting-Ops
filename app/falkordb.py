@@ -246,6 +246,17 @@ async def ensure_workspace_subgraph(workspace_id: str | uuid.UUID) -> str:
 # Common query helpers — all entity-scoped within a workspace -------------
 
 
+def _node_props(node: object) -> dict:
+    """Coerce a FalkorDB result node to a plain dict of its properties.
+
+    This client build returns ``Node`` objects that are NOT directly
+    ``dict()``-able (``dict(node)`` raises ``'Node' object is not iterable``);
+    their fields live on ``node.properties``. Fall back to ``dict(node)`` for
+    any build/shape that already supports mapping coercion."""
+    props = getattr(node, "properties", None)
+    return dict(props) if props is not None else dict(node)
+
+
 async def get_active_compliance_rules(
     workspace_id: str | uuid.UUID,
     entity_id: str | uuid.UUID,
@@ -264,7 +275,7 @@ async def get_active_compliance_rules(
             """,
             params={"entity_id": str(entity_id), "at": _iso_to_ms(at_time)},
         )
-        return [dict(row[0]) for row in result.result_set or []]
+        return [_node_props(row[0]) for row in result.result_set or []]
 
 
 async def recent_decisions(
