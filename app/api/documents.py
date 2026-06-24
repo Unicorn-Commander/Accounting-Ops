@@ -38,11 +38,20 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
@@ -63,6 +72,8 @@ router = APIRouter(
     tags=["documents"],
     dependencies=[Depends(bind_http_caller)],
 )
+
+_log = logging.getLogger("accounting_ops.documents")
 
 
 # Allow-list of accepted mime types. Anything not here is rejected with 415 so
@@ -130,6 +141,7 @@ def _object_key(workspace_id: UUID, entity_id: UUID, content_hash: str, ext: str
 async def upload_document(
     workspace_id: UUID,
     entity_id: UUID,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict[str, Any]:
@@ -391,6 +403,25 @@ async def upload_document(
             source_document_id=receipt_id,
         )
 
+    # --- Async tax-document extraction (PDFs only, runs AFTER this response). --
+    # Tax forms (1099-R, W-2, SSA-1099, K-1, 1098, IRS notices) are overwhelmingly
+    # scanned PDFs. We classify + transcribe them via the local vision VLM in a
+    # FastAPI background task so a whole folder of tax PDFs uploads INSTANTLY and
+    # the OCR fills in seconds later — never blocking the upload. The receipt
+    # image path (above) is unchanged. The task opens its own session, UPSERTs
+    # one document_extraction row, and never raises (a failure is recorded as
+    # status='failed', not a crash). Only scheduled for a genuinely NEW receipt
+    # (a duplicate re-upload returned earlier, so its extraction already exists).
+    if declared == "application/pdf":
+        background_tasks.add_task(
+            _run_tax_extraction,
+            workspace_id,
+            entity_id,
+            receipt_id,
+            body,
+            declared,
+        )
+
     return {
         "ok": True,
         "duplicate": False,
@@ -428,11 +459,15 @@ async def list_documents(
                     SELECT r.id::text AS id, r.content_hash, r.mime_type,
                            r.amount, r.currency_code, r.extracted_at, r.created_at,
                            r.object_key,
+                           de.doc_type AS doc_type,
+                           de.tax_year AS tax_year,
+                           de.status::text AS extraction_status,
                            (SELECT aq.status::text FROM approval_queue aq
                               WHERE aq.subject_type = 'document_review'
                                 AND aq.subject_id = r.id
                               ORDER BY aq.created_at DESC LIMIT 1) AS review_status
                     FROM receipt r
+                    LEFT JOIN document_extraction de ON de.receipt_id = r.id
                     WHERE r.entity_id = :eid
                     ORDER BY r.created_at DESC
                     LIMIT :limit OFFSET :offset
@@ -496,6 +531,89 @@ async def _maybe_extract(declared_mime: str, body: bytes):
         return await extractor.extract(image_bytes=body, mime_type=declared_mime)
     except Exception:  # noqa: BLE001 — extraction must NEVER break the upload
         return None
+
+
+async def _run_tax_extraction(
+    workspace_id: UUID,
+    entity_id: UUID,
+    receipt_id: UUID,
+    body: bytes,
+    mime_type: str,
+) -> None:
+    """Classify + transcribe a tax document and record it in document_extraction.
+
+    Runs as a FastAPI BackgroundTask AFTER the upload response is sent, so it
+    never adds latency to the upload. Self-contained: opens its OWN workspace
+    session (the request's is closed by now), UPSERTs exactly one row keyed on
+    receipt_id, and NEVER raises. A failed/unreadable doc is still recorded
+    (status='failed', error set) so it is visibly un-read, not silently skipped.
+
+    AO owns the OCR; Tax-Planning-Ops reads these rows over federation by
+    (entity_id, tax_year) rather than re-running the vision model.
+    """
+    try:
+        from app.categorization.tax_doc_vlm import TaxDocExtractor
+
+        result = await TaxDocExtractor().extract(body=body, mime_type=mime_type)
+        status_val = "failed" if result.error else "extracted"
+        confidence = (
+            Decimal(str(result.confidence)) if result.confidence is not None else None
+        )
+        async with workspace_session(SessionLocal, workspace_id) as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO document_extraction (
+                        id, workspace_id, entity_id, receipt_id,
+                        doc_type, tax_year, payer_name, recipient_name,
+                        fields, confidence, status, error, model,
+                        duration_ms, extracted_at
+                    ) VALUES (
+                        :id, :wid, :eid, :rid,
+                        :doc_type, :tax_year, :payer, :recipient,
+                        CAST(:fields AS jsonb), :confidence, :status, :error, :model,
+                        :duration_ms, now()
+                    )
+                    ON CONFLICT (receipt_id) DO UPDATE SET
+                        doc_type = EXCLUDED.doc_type,
+                        tax_year = EXCLUDED.tax_year,
+                        payer_name = EXCLUDED.payer_name,
+                        recipient_name = EXCLUDED.recipient_name,
+                        fields = EXCLUDED.fields,
+                        confidence = EXCLUDED.confidence,
+                        status = EXCLUDED.status,
+                        error = EXCLUDED.error,
+                        model = EXCLUDED.model,
+                        duration_ms = EXCLUDED.duration_ms,
+                        extracted_at = now()
+                    """
+                ),
+                {
+                    "id": str(uuid4()),
+                    "wid": str(workspace_id),
+                    "eid": str(entity_id),
+                    "rid": str(receipt_id),
+                    "doc_type": result.doc_type,
+                    "tax_year": result.tax_year,
+                    "payer": result.payer_name,
+                    "recipient": result.recipient_name,
+                    "fields": _json(result.fields),
+                    "confidence": confidence,
+                    "status": status_val,
+                    "error": result.error,
+                    "model": result.model or None,
+                    "duration_ms": result.duration_ms or None,
+                },
+            )
+        _log.info(
+            "tax extraction receipt=%s doc_type=%s tax_year=%s status=%s",
+            receipt_id,
+            result.doc_type,
+            result.tax_year,
+            status_val,
+        )
+    except Exception:  # noqa: BLE001 — a background task must never crash loudly
+        _log.exception("tax extraction failed for receipt=%s", receipt_id)
 
 
 def _coerce_amount(extraction) -> tuple[Decimal | None, str | None]:

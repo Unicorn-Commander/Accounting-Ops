@@ -177,6 +177,11 @@ function DocRow({ doc }: { doc: UploadedDocument }) {
   const isPdf = mime === "application/pdf";
   const Icon = isImage ? ImageIcon : isPdf ? FileText : Receipt;
   const kindLabel = isImage ? "Receipt" : isPdf ? "PDF" : mime.includes("csv") ? "CSV" : "Doc";
+  // A recognized tax form (1099-R, W-2, SSA-1099, …) gets its form type + year
+  // surfaced; 'other'/null falls back to the generic kind. 'failed' = the OCR
+  // ran but couldn't read it.
+  const isTaxDoc = !!doc.doc_type && doc.doc_type !== "other";
+  const extractionFailed = doc.extraction_status === "failed";
 
   return (
     <tr className="border-b border-subtle/60 last:border-b-0 hover:bg-white/[0.02]">
@@ -190,7 +195,22 @@ function DocRow({ doc }: { doc: UploadedDocument }) {
           </span>
         </div>
       </td>
-      <td className="px-2 py-3 text-xs text-ink-secondary">{kindLabel}</td>
+      <td className="px-2 py-3 text-xs">
+        {isTaxDoc ? (
+          <span className="font-medium text-brand-400">
+            {doc.doc_type}
+            {doc.tax_year ? (
+              <span className="text-ink-tertiary"> · {doc.tax_year}</span>
+            ) : null}
+          </span>
+        ) : extractionFailed ? (
+          <span className="text-ink-tertiary" title="Couldn't read this document automatically">
+            {kindLabel} <span className="text-pending">· unread</span>
+          </span>
+        ) : (
+          <span className="text-ink-secondary">{kindLabel}</span>
+        )}
+      </td>
       <td className="px-2 py-3 font-mono text-xs tabular-nums text-ink-secondary">
         {doc.amount ? `${doc.currency_code ?? ""} ${doc.amount}`.trim() : "—"}
       </td>

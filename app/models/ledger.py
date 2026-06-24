@@ -276,6 +276,71 @@ class Receipt(EntityScopedMixin, Base):
     )
 
 
+class DocumentExtraction(EntityScopedMixin, Base):
+    """Structured result of the tax-document vision pipeline for one uploaded
+    document (one row per source ``receipt``).
+
+    AO owns the OCR/extraction; this table is the durable, queryable home for
+    what the local vision VLM read off a tax form (1099-R, W-2, SSA-1099, K-1,
+    1098, IRS notices, …). Tax-Planning-Ops consumes these rows over the
+    existing federation (by entity + tax_year) instead of re-running OCR.
+
+    Written best-effort by a background task after upload (see
+    app/api/documents.py). A failed extraction STILL records a row
+    (status='failed', error set) so an unreadable doc is visible, never silent.
+    NEVER computes or sums — ``fields`` holds verbatim transcribed box values
+    (e.g. "box 2a taxable amount": "UNKNOWN").
+    """
+
+    __table_args__ = (
+        UniqueConstraint("receipt_id", name="uq_document_extraction_receipt"),
+        Index("ix_document_extraction_workspace", "workspace_id"),
+        Index(
+            "ix_document_extraction_entity_doctype",
+            "entity_id",
+            "doc_type",
+            "tax_year",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # The source document this extraction describes. CASCADE is belt-and-
+    # suspenders: receipts are append-only (no DELETE grant on the runtime role).
+    receipt_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("receipt.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # Classified form type (one of tax_doc_vlm.TAX_DOC_TYPES); 'other' = not a
+    # recognized tax document.
+    doc_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'other'")
+    )
+    tax_year: Mapped[int | None] = mapped_column(Integer)
+    payer_name: Mapped[str | None] = mapped_column(String(300))
+    recipient_name: Mapped[str | None] = mapped_column(String(300))
+    # Verbatim transcribed labeled values, e.g.
+    # {"box 1 gross distribution": "39612.00", "box 2a taxable amount": "UNKNOWN"}.
+    fields: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
+    # 'extracted' = the VLM returned a result; 'failed' = render/VLM error (see
+    # ``error``). Both states are stored so a doc is never silently un-processed.
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'extracted'")
+    )
+    error: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(String(128))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class JournalEntry(EntityScopedMixin, Base):
     __table_args__ = (
         CheckConstraint(

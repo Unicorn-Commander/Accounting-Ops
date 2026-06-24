@@ -1,0 +1,43 @@
+# Keep secrets, backups, VCS metadata, and heavy build artifacts OUT of the
+# Docker build context. Critically: never bake .env (DB/Garage/LLM secrets) into
+# the image — runtime config is injected by compose `env_file`, not the image.
+# (Also: a root-owned .env.bak from an ops change was breaking `docker build`
+# because the unprivileged build user couldn't read it; excluding it fixes that.)
+
+# Secrets + their backups (any .env variant)
+.env
+.env.*
+*.env
+
+# Stray backup files from ops changes
+*.bak
+*.bak-*
+*.bak.*
+
+# VCS
+.git
+.gitignore
+
+# Python caches / build
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# JS/Next build artifacts (the app image is the Python backend; it never needs
+# these, and they bloat the context massively)
+node_modules/
+web/node_modules/
+web/.next/
+web/tsconfig.tsbuildinfo
+
+# Misc
+*.log
+.DS_Store

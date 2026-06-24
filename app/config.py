@@ -80,8 +80,8 @@ class Settings(BaseModel):
     # LLM_API_KEY):
     #
     #   STANDALONE (default) — direct to the local llama.cpp / vLLM server:
-    #     LLM_ENDPOINT_URL = http://100.121.80.175:8088/v1   (midboy1)
-    #     LLM_MODEL        = Qwen3.6-35B-A3B-Vision-p40      (P40 backend — image-safe)
+    #     LLM_ENDPOINT_URL = http://100.66.42.57:8088/v1     (midboy2)
+    #     LLM_MODEL        = Qwen3.6-35B-A3B-Vision          (RTX-6000 + mmproj — image-capable)
     #     LLM_API_KEY      = (blank — no auth on local server)
     #
     #   SUITE / GATEWAY — through the UC LiteLLM gateway (load-balances P40+3090,
@@ -90,11 +90,16 @@ class Settings(BaseModel):
     #     LLM_MODEL        = qwen3.6-vision
     #     LLM_API_KEY      = <virtual-key>
     #
-    # ⚠️  Do NOT default to "Qwen3.6-35B-A3B-Vision" (the RTX-6000 alias): it
-    # OOM-crashes on image input and returns 502. The P40 alias below is the safe
-    # standalone default for receipt OCR. Override via LLM_MODEL for the gateway.
-    llm_endpoint_url: str = "http://100.121.80.175:8088/v1"
-    llm_model: str = "Qwen3.6-35B-A3B-Vision-p40"
+    # NOTE (2026-06-23 GPU reshuffle): the vision model now lives on the RTX 6000
+    # on midboy2 (100.66.42.57:8088), served as "Qwen3.6-35B-A3B-Vision" WITH the
+    # multimodal projector — VERIFIED image-capable (a 1275x1650 page render
+    # classifies correctly from inside the app container). This SUPERSEDES the old
+    # warning that this alias OOM'd on images (true only of the pre-reshuffle
+    # RTX-6000 config). The sibling "Qwen3.6-35B-A3B-p40" on the same port is the
+    # P40 TEXT model (no vision) — do NOT use it for image/PDF OCR. Production sets
+    # the values above via .env.
+    llm_endpoint_url: str = "http://100.66.42.57:8088/v1"
+    llm_model: str = "Qwen3.6-35B-A3B-Vision"
     llm_api_key: str = ""          # blank = local/no-auth; set in env for cloud
     llm_timeout_s: int = 30
 
