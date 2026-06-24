@@ -35,6 +35,7 @@ from app.api.contacts import router as contacts_router
 from app.api.work_inbox import router as work_inbox_router
 from app.api.credentials import router as credentials_router
 from app.api.documents import router as documents_router
+from app.api.federation import router as federation_router
 from app.api.inference_settings import router as inference_settings_router
 from app.api.invoices import router as invoices_router
 from app.api.journal import router as journal_router
@@ -149,6 +150,10 @@ app.include_router(tax_knowledge_router)
 app.include_router(open_items_router)
 app.include_router(ai_activity_router)
 app.include_router(reports_router)
+# Cross-app federation reads (M2M): Tax-Planning-Ops pulls document_extraction
+# over the shared-KC trusted-caller rail. Mirrors the P&L federation read; uses
+# resolve_workspace_for_federation (viewer floor, HIPAA-refused), no membership.
+app.include_router(federation_router)
 app.include_router(setup_router)
 app.include_router(cash_position_router)
 app.include_router(cash_history_router)
