@@ -112,6 +112,29 @@ async def resolve_chat_inference(
         # Gateway off → honor their key against the OpenRouter base + today's model.
         return ResolvedInference(_openrouter_base(), key, requested_model or default_model, "byok")
 
+    # ---- 1.5) LOCAL-first — sovereign qwen, opted in per workspace --------
+    # After BYOK (a customer's explicit endpoint always wins) but ahead of the
+    # platform/OpenRouter tiers. Gated on BOTH a configured local endpoint AND
+    # the workspace's EngagementPolicy.prefer_local_inference flag, so it is a
+    # no-op by default (preserves the default-safety invariant). Fail-safe: any
+    # error reading the flag falls through to the cloud tiers.
+    if settings.chat_local_base_url:
+        prefer_local = False
+        try:
+            from app.engagement.policy import get_prefer_local
+
+            prefer_local = await get_prefer_local(workspace_id)
+        except Exception as e:  # noqa: BLE001 — fail-safe
+            _log.warning("prefer_local lookup failed (ws=%s): %s", workspace_id, e)
+            prefer_local = False
+        if prefer_local:
+            return ResolvedInference(
+                settings.chat_local_base_url,
+                settings.chat_local_api_key or "local",
+                requested_model or settings.chat_local_model,
+                "local",
+            )
+
     # ---- 2) platform / UC-credit virtual key (only when routing ON) ------
     if settings.route_chat_through_gateway:
         platform_key = None

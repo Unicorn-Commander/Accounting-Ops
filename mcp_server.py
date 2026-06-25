@@ -17,6 +17,8 @@ from app.tools import (
     create_workspace,
     decide_approval,
     draft_memo,
+    tax_fill_w4p,
+    tax_prepare_filing,
     finish_specialist_run,
     flag_for_cpa_review,
     get_1099_nec_report,
@@ -214,6 +216,8 @@ def build_server():
     server.tool()(get_1099_payees)
     server.tool()(draft_memo)
     server.tool()(flag_for_cpa_review)
+    server.tool()(tax_fill_w4p)
+    server.tool()(tax_prepare_filing)
 
     # =====================================================================
     # CPA Narrative + tax status dashboard

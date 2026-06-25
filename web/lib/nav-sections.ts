@@ -79,6 +79,7 @@ export const NAV_SECTIONS: NavSection[] = [
     defaultOpen: true,
     items: [
       { label: "Taxes", href: "/taxes", icon: FileText, hue: "12 85% 63%" },
+      { label: "W-4P", href: "/taxes/w-4p", icon: FileCheck2, hue: "22 82% 58%" },
       { label: "Handoff", href: "/cpa-export", icon: FileSpreadsheet, hue: "32 80% 55%" },
     ],
   },

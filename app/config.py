@@ -149,6 +149,17 @@ class Settings(BaseModel):
     # gateway per the resolver precedence (BYOK > platform/UC-credit > OpenRouter).
     route_chat_through_gateway: bool = False
 
+    # ---- LOCAL-first chat tier (sovereign qwen) ----
+    # Highest-precedence inference target (after a workspace's own BYOK) when a
+    # workspace opts in via EngagementPolicy.prefer_local_inference. Points at the
+    # bigboy unicorn-llama-router (an OpenAI-compatible endpoint). Blank base_url
+    # ⇒ the local tier is unavailable and the resolver behaves exactly as today.
+    # NB: deliberately NOT the categorizer's LLM_* / qwen_local_url settings — the
+    # chat path is kept separate from the receipt-VLM path on purpose.
+    chat_local_base_url: str = ""
+    chat_local_model: str = "Qwen3.6-35B-A3B"
+    chat_local_api_key: str = ""
+
     # ---- UC Ops-Center (platform billing/entitlement control plane) ----
     # Ops-Center owns subscribe/pay (Stripe) + org identity + per-app entitlement
     # (org_features/tier_features). AO READS entitlement + links out for plan
@@ -233,6 +244,11 @@ def get_settings() -> Settings:
         ),
         llm_gateway_admin_key=os.getenv("LLM_GATEWAY_ADMIN_KEY", ""),
         llm_platform_virtual_key=os.getenv("LLM_PLATFORM_VIRTUAL_KEY", ""),
+        chat_local_base_url=os.getenv("AO_CHAT_LOCAL_BASE_URL", ""),
+        chat_local_model=os.getenv(
+            "AO_CHAT_LOCAL_MODEL", defaults.chat_local_model
+        ),
+        chat_local_api_key=os.getenv("AO_CHAT_LOCAL_API_KEY", ""),
         route_chat_through_gateway=os.getenv(
             "AO_ROUTE_CHAT_THROUGH_GATEWAY", ""
         ).strip().lower() in ("1", "true", "yes", "on"),

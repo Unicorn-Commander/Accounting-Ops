@@ -435,6 +435,8 @@ PERSONAS: tuple[Persona, ...] = (
             "draft_memo",
             "flag_for_cpa_review",
             "get_current_rule",
+            "tax_fill_w4p",
+            "tax_prepare_filing",
         ),
     ),
 )

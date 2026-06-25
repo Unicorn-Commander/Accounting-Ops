@@ -185,6 +185,79 @@ async def test_failsafe_falls_through_on_exception(monkeypatch):
     assert r.source == "openrouter_default"  # never breaks live chat
 
 
+# -------------------- LOCAL-FIRST TIER --------------------
+
+
+def _local_on(monkeypatch, prefer: bool = True):
+    """Configure a local endpoint + stub the per-workspace prefer_local flag."""
+    monkeypatch.setenv("AO_CHAT_LOCAL_BASE_URL", "http://bigboy:8085/v1")
+    monkeypatch.setenv("AO_CHAT_LOCAL_MODEL", "Qwen3.6-35B-A3B")
+    monkeypatch.setenv("AO_CHAT_LOCAL_API_KEY", "sk-local")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    _clear_settings()
+    import app.engagement.policy as ep
+
+    monkeypatch.setattr(ep, "get_prefer_local", AsyncMock(return_value=prefer))
+
+
+@pytest.mark.asyncio
+async def test_local_tier_when_flag_on(monkeypatch):
+    _flag_off(monkeypatch)
+    _local_on(monkeypatch, prefer=True)
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "local"
+    assert r.base_url == "http://bigboy:8085/v1"
+    assert r.model == "Qwen3.6-35B-A3B"
+    assert r.api_key == "sk-local"
+
+
+@pytest.mark.asyncio
+async def test_local_off_falls_through_to_openrouter(monkeypatch):
+    _flag_off(monkeypatch)
+    _local_on(monkeypatch, prefer=False)  # endpoint configured but workspace opts out
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "openrouter_default"
+    assert r.base_url == _OR_URL
+
+
+@pytest.mark.asyncio
+async def test_local_requested_model_wins(monkeypatch):
+    _flag_off(monkeypatch)
+    _local_on(monkeypatch, prefer=True)
+    r = await resolve_chat_inference(
+        workspace_id="w1", persona=get_persona("cfo-agent"), requested_model="x/y"
+    )
+    assert r.source == "local"
+    assert r.model == "x/y"
+
+
+@pytest.mark.asyncio
+async def test_byok_still_overrides_local(monkeypatch):
+    _flag_off(monkeypatch)
+    _local_on(monkeypatch, prefer=True)
+    import app.security.workspace_llm_keys as wk
+
+    monkeypatch.setattr(
+        wk, "get_byok",
+        AsyncMock(return_value=("sk-cust", "anthropic", "https://api.anthropic.com")),
+    )
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "byok"  # a customer's explicit endpoint wins over local-first
+
+
+@pytest.mark.asyncio
+async def test_local_failsafe_on_flag_error(monkeypatch):
+    _flag_off(monkeypatch)
+    monkeypatch.setenv("AO_CHAT_LOCAL_BASE_URL", "http://bigboy:8085/v1")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    _clear_settings()
+    import app.engagement.policy as ep
+
+    monkeypatch.setattr(ep, "get_prefer_local", AsyncMock(side_effect=RuntimeError("db down")))
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "openrouter_default"  # never breaks live chat
+
+
 # -------------------- PERSONA MODEL MAP --------------------
 
 

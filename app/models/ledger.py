@@ -119,6 +119,44 @@ class EntityStatus(str, enum.Enum):
     dissolved = "dissolved"
 
 
+class ReviewMode(str, enum.Enum):
+    """How much professional review a workspace's work products require.
+
+    The product is an autonomous professional-substitute: when no CPA / EA / tax
+    attorney is available, the user can still complete a finished work product.
+
+      ``pro_required``         classic hard gate — a licensed pro must review
+                               before a work product leaves DRAFT. SAFE DEFAULT,
+                               so existing workspaces are unchanged.
+      ``self_attest_allowed``  a user with no available pro may self-certify and
+                               finish the work product themselves.
+      ``autonomous_off``       agent-initiated preparation is disabled entirely.
+    """
+
+    PRO_REQUIRED = "pro_required"
+    SELF_ATTEST_ALLOWED = "self_attest_allowed"
+    AUTONOMOUS_OFF = "autonomous_off"
+
+
+class WorkProductStatus(str, enum.Enum):
+    """Lifecycle of a generated finished work product (filled form / letter).
+
+    ``status`` drives the rendered watermark (see exports.form_prefill):
+    draft -> DRAFT/"do not file"; self_approved -> softer self-certification
+    banner; pro_reviewed / finalized -> clean.
+    """
+
+    DRAFT = "draft"
+    SELF_APPROVED = "self_approved"
+    PRO_REVIEWED = "pro_reviewed"
+    FINALIZED = "finalized"
+
+
+class AttestationKind(str, enum.Enum):
+    SELF = "self"
+    LICENSED_PRO = "licensed_pro"
+
+
 # ---------------------------------------------------------------------------
 # Mixin
 # ---------------------------------------------------------------------------
@@ -337,6 +375,127 @@ class DocumentExtraction(EntityScopedMixin, Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class WorkProduct(EntityScopedMixin, Base):
+    """A finished, submission-ready tax work product (filled W-4P / ST-3 / 1040 /
+    CP504 response, …) prepared for an entity.
+
+    This is the artifact the platform produces when it takes a user ALL THE WAY:
+    not advice, but a real document. The PDF is re-rendered on demand from
+    ``inputs`` (each a {value, source_ref, origin} record) so there is never a
+    stale snapshot and the watermark always reflects the current ``status``.
+    NEVER fabricates a figure: a non-blank line whose input lacks a ``source_ref``
+    is rejected at render time, and missing data is left blank (conservative
+    blank-fill), never guessed.
+    """
+
+    __table_args__ = (
+        Index("ix_work_product_workspace", "workspace_id"),
+        Index("ix_work_product_entity_kind", "entity_id", "kind", "tax_year"),
+        CheckConstraint(
+            "status IN ('draft','self_approved','pro_reviewed','finalized')",
+            name="ck_work_product_status",
+        ),
+        CheckConstraint(
+            "attestation_kind IS NULL OR attestation_kind IN ('self','licensed_pro')",
+            name="ck_work_product_attestation_kind",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # e.g. 'w-4p', 'st-3', 'cp504', '1040' — matches form_prefill.FormName values
+    # where a fillable form exists.
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    tax_year: Mapped[int | None] = mapped_column(Integer)
+    title: Mapped[str | None] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(
+        String(24), nullable=False, server_default=text("'draft'")
+    )
+    # Provenance-bearing field inputs:
+    #   {field_key: {"value": "...",
+    #                "source_ref": "<document_extraction.id|worksheet|user_entered>",
+    #                "origin": "extracted|computed|user_entered"}}.
+    inputs: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # Extra provenance: source doc ids, worksheet assumptions, engine versions.
+    provenance: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # The originating tax-document extraction (e.g. the 1099-R behind a W-4P),
+    # the anchor source_ref. SET NULL so deleting a source never silently orphans.
+    source_extraction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_extraction.id", ondelete="SET NULL"),
+    )
+    attestation_kind: Mapped[str | None] = mapped_column(String(16))
+    attested_by_uc_uid: Mapped[str | None] = mapped_column(String(128))
+    attested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Optional immutable snapshot key (a finalized artifact persisted to object
+    # storage). Null = re-render on demand from ``inputs``.
+    garage_key: Mapped[str | None] = mapped_column(String(512))
+    created_by_uc_uid: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class EngagementPolicy(WorkspaceScopedMixin, Base):
+    """Per-workspace "is a professional available?" policy — the switch that makes
+    the CPA-review gate OPTIONAL instead of a hard wall.
+
+    One row per workspace, lazily created with safe defaults (``pro_required`` so
+    existing workspaces are unchanged). ``review_mode`` governs whether a user may
+    self-certify a work product to completion when no pro is available.
+    ``prefer_local_inference`` flips chat/reasoning to the sovereign local qwen
+    tier. ``submission_channels`` + ``rail_kill_switch`` govern the dormant
+    SubmissionRail (every transmission channel default-OFF).
+    """
+
+    __table_args__ = (
+        UniqueConstraint("workspace_id", name="uq_engagement_policy_workspace"),
+        Index("ix_engagement_policy_workspace", "workspace_id"),
+        CheckConstraint(
+            "review_mode IN ('pro_required','self_attest_allowed','autonomous_off')",
+            name="ck_engagement_policy_review_mode",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    review_mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'pro_required'")
+    )
+    has_licensed_pro: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    prefer_local_inference: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # Per-channel enable flags for the dormant submission rail, e.g.
+    # {"efile_irs": false, "state_portal": false, "eftps": false, "esign": false}.
+    # Empty = every channel disabled (PaperPrint is the always-on default).
+    submission_channels: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # Global kill-switch for the submission rail (true = even enabled channels
+    # are blocked).
+    rail_kill_switch: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
 

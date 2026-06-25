@@ -109,6 +109,32 @@ for YEAR in "${YEARS[@]}"; do
     fi
 done
 
+# --- Individual forms (current-year fillable) -----------------------------
+# Form W-4P (pension/annuity withholding certificate — professional-substitute
+# path) and Form 1040. W-4P is filed on the current-year form regardless of the
+# 1099-R's year (it elects future withholding).
+echo ""
+echo "=== Individual forms (current) ==="
+
+FW4P_URL="https://www.irs.gov/pub/irs-pdf/fw4p.pdf"
+FW4P_DEST="$FORMS_DIR/f-w4p.pdf"
+if head_check "$FW4P_URL"; then
+    download_form "$FW4P_DEST" "$FW4P_URL" "Form W-4P (current)"
+else
+    echo "  WARN  Form W-4P not available at $FW4P_URL — skipping."
+fi
+
+F1040_URL="https://www.irs.gov/pub/irs-pdf/f1040.pdf"
+F1040_DEST="$FORMS_DIR/f1040.pdf"
+if head_check "$F1040_URL"; then
+    download_form "$F1040_DEST" "$F1040_URL" "Form 1040 (current)"
+else
+    echo "  WARN  Form 1040 not available at $F1040_URL — skipping."
+fi
+
+# Note: SC ST-3 is a SC Department of Revenue form, fetched separately into
+# data/sc_forms/ST-3.pdf from https://dor.sc.gov/sites/dor/files/forms/ST3.pdf
+
 echo ""
 echo "Done. Forms cached in: $FORMS_DIR"
 echo ""
