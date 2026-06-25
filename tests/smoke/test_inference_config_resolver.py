@@ -258,6 +258,39 @@ async def test_local_failsafe_on_flag_error(monkeypatch):
     assert r.source == "openrouter_default"  # never breaks live chat
 
 
+@pytest.mark.asyncio
+async def test_instance_default_forces_local_without_per_workspace_flag(monkeypatch):
+    # AO_CHAT_LOCAL_DEFAULT=1 ⇒ every workspace is local-first even though the
+    # per-workspace flag is OFF (and without ever reading the policy store).
+    _flag_off(monkeypatch)
+    _local_on(monkeypatch, prefer=False)  # per-workspace flag explicitly OFF
+    monkeypatch.setenv("AO_CHAT_LOCAL_DEFAULT", "1")
+    _clear_settings()
+    import app.engagement.policy as ep
+
+    # The DB read must NOT be consulted when the instance default is on.
+    spy = AsyncMock(side_effect=AssertionError("get_prefer_local should be skipped"))
+    monkeypatch.setattr(ep, "get_prefer_local", spy)
+
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "local"
+    assert r.base_url == "http://bigboy:8085/v1"
+    spy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_instance_default_noop_without_local_endpoint(monkeypatch):
+    # The default is gated on a configured endpoint — on with no base_url ⇒ the
+    # resolver still behaves exactly as today (no accidental local routing).
+    _flag_off(monkeypatch)
+    monkeypatch.delenv("AO_CHAT_LOCAL_BASE_URL", raising=False)
+    monkeypatch.setenv("AO_CHAT_LOCAL_DEFAULT", "1")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    _clear_settings()
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "openrouter_default"
+
+
 # -------------------- PERSONA MODEL MAP --------------------
 
 

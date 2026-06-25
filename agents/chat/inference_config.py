@@ -112,21 +112,25 @@ async def resolve_chat_inference(
         # Gateway off → honor their key against the OpenRouter base + today's model.
         return ResolvedInference(_openrouter_base(), key, requested_model or default_model, "byok")
 
-    # ---- 1.5) LOCAL-first — sovereign qwen, opted in per workspace --------
+    # ---- 1.5) LOCAL-first — sovereign qwen --------------------------------
     # After BYOK (a customer's explicit endpoint always wins) but ahead of the
-    # platform/OpenRouter tiers. Gated on BOTH a configured local endpoint AND
-    # the workspace's EngagementPolicy.prefer_local_inference flag, so it is a
-    # no-op by default (preserves the default-safety invariant). Fail-safe: any
-    # error reading the flag falls through to the cloud tiers.
+    # platform/OpenRouter tiers. Gated on a configured local endpoint AND either
+    # the INSTANCE-WIDE chat_local_default (a fully self-hosted, local-only box)
+    # OR the per-workspace EngagementPolicy.prefer_local_inference flag. With both
+    # off it is a no-op (preserves the default-safety invariant). When the
+    # instance default is on we skip the per-workspace DB read entirely — faster
+    # and robust even if the policy store is unavailable. Fail-safe: any error
+    # reading the flag falls through to the cloud tiers.
     if settings.chat_local_base_url:
-        prefer_local = False
-        try:
-            from app.engagement.policy import get_prefer_local
+        prefer_local = settings.chat_local_default
+        if not prefer_local:
+            try:
+                from app.engagement.policy import get_prefer_local
 
-            prefer_local = await get_prefer_local(workspace_id)
-        except Exception as e:  # noqa: BLE001 — fail-safe
-            _log.warning("prefer_local lookup failed (ws=%s): %s", workspace_id, e)
-            prefer_local = False
+                prefer_local = await get_prefer_local(workspace_id)
+            except Exception as e:  # noqa: BLE001 — fail-safe
+                _log.warning("prefer_local lookup failed (ws=%s): %s", workspace_id, e)
+                prefer_local = False
         if prefer_local:
             return ResolvedInference(
                 settings.chat_local_base_url,

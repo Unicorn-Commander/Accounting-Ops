@@ -159,6 +159,14 @@ class Settings(BaseModel):
     chat_local_base_url: str = ""
     chat_local_model: str = "Qwen3.6-35B-A3B"
     chat_local_api_key: str = ""
+    # INSTANCE-WIDE default for the local tier. When True (and chat_local_base_url
+    # is set) every workspace defaults to local-first WITHOUT needing the
+    # per-workspace EngagementPolicy.prefer_local_inference flag — the one-knob
+    # setting for a fully self-hosted, local-only instance. Because the local tier
+    # sits ahead of the gateway + OpenRouter branches, this also permanently
+    # closes the OpenRouter fall-through for every turn. Default False ⇒ behavior
+    # is unchanged (per-workspace opt-in only).
+    chat_local_default: bool = False
 
     # ---- UC Ops-Center (platform billing/entitlement control plane) ----
     # Ops-Center owns subscribe/pay (Stripe) + org identity + per-app entitlement
@@ -249,6 +257,10 @@ def get_settings() -> Settings:
             "AO_CHAT_LOCAL_MODEL", defaults.chat_local_model
         ),
         chat_local_api_key=os.getenv("AO_CHAT_LOCAL_API_KEY", ""),
+        chat_local_default=os.getenv("AO_CHAT_LOCAL_DEFAULT", "")
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
         route_chat_through_gateway=os.getenv(
             "AO_ROUTE_CHAT_THROUGH_GATEWAY", ""
         ).strip().lower() in ("1", "true", "yes", "on"),
