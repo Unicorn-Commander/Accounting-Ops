@@ -88,7 +88,30 @@ async def resolve_chat_inference(
     default_model = _default_model()
     gw_model = _gateway_model_for(persona, is_consult)
 
-    # ---- 1) BYOK — highest precedence ------------------------------------
+    # Cloud-on-demand: a turn "wants cloud" when it explicitly names a model that
+    # is NOT the local one. On a local-default instance this is the ONLY thing
+    # that leaves local — routine turns (no model, or the local model) stay on the
+    # free local qwen; an explicit frontier model escalates to the cloud tiers
+    # (BYOK → gateway → OpenRouter). Also fixes a latent bug: without this, an
+    # explicit cloud model on a local-preferring workspace was sent to the local
+    # router (404) or silently ignored.
+    local_available = bool(settings.chat_local_base_url)
+    wants_cloud = bool(requested_model) and requested_model != settings.chat_local_model
+
+    # ---- 0) INSTANCE-LOCAL FAST PATH -------------------------------------
+    # A local-default box answers routine turns locally even when the workspace
+    # has a BYOK key: BYOK becomes the ON-DEMAND cloud target (tier 1 below), not
+    # the default. Gated entirely on chat_local_default, so a normal BYOK customer
+    # (flag off) is unaffected — BYOK still always wins for them.
+    if settings.chat_local_default and local_available and not wants_cloud:
+        return ResolvedInference(
+            settings.chat_local_base_url,
+            settings.chat_local_api_key or "local",
+            requested_model or settings.chat_local_model,
+            "local",
+        )
+
+    # ---- 1) BYOK — highest precedence (the on-demand cloud key) ----------
     byok = None
     try:
         from app.security.workspace_llm_keys import get_byok
@@ -121,7 +144,10 @@ async def resolve_chat_inference(
     # instance default is on we skip the per-workspace DB read entirely — faster
     # and robust even if the policy store is unavailable. Fail-safe: any error
     # reading the flag falls through to the cloud tiers.
-    if settings.chat_local_base_url:
+    # (Skipped when wants_cloud: an explicit non-local model escalates past local
+    # to the cloud tiers — the instance fast path above already handled the
+    # chat_local_default + routine case.)
+    if local_available and not wants_cloud:
         prefer_local = settings.chat_local_default
         if not prefer_local:
             try:
