@@ -141,12 +141,17 @@ async def store_byok(
 
 
 async def grant_credit(
-    workspace_id: uuid.UUID, budget: float, org_id: str | None
+    workspace_id: uuid.UUID,
+    budget: float,
+    org_id: str | None,
+    budget_duration: str | None = None,
 ) -> None:
     """Mint a budget-capped gateway virtual key + store it as the platform key.
 
-    Imports the gateway admin client lazily so the byok/org modes never require a
-    configured LLM_GATEWAY_ADMIN_KEY.
+    ``budget_duration`` (e.g. "30d") makes the budget RESET each period — a
+    recurring monthly comp; omit it for a one-time cumulative cap. Imports the
+    gateway admin client lazily so the byok/org modes never require a configured
+    LLM_GATEWAY_ADMIN_KEY.
     """
     from app.security.litellm_admin import (
         DEFAULT_ALLOWED_MODELS,
@@ -165,6 +170,7 @@ async def grant_credit(
         key = await mint_virtual_key(
             customer_id=customer_id,
             max_budget=budget,
+            budget_duration=budget_duration,
             models=DEFAULT_ALLOWED_MODELS,
             metadata={
                 "workspace_id": str(workspace_id),
@@ -187,8 +193,9 @@ async def grant_credit(
             created_by_uc_uid=None,
         )
         await session.commit()
+    period = f"/{budget_duration}" if budget_duration else " (one-time)"
     print(
-        f"  credit key : minted …{_last4(key)} budget=${budget:g} "
+        f"  credit key : minted …{_last4(key)} budget=${budget:g}{period} "
         f"customer={customer_id}"
     )
     print(
@@ -243,14 +250,17 @@ async def _run(args: argparse.Namespace) -> None:
     elif args.mode == "credit":
         if args.budget <= 0:
             raise SystemExit("ERROR: --budget must be a positive USD amount.")
+        period = f"/{args.budget_duration}" if args.budget_duration else " (one-time)"
         if args.dry_run:
             cust = args.org_id or await _current_uc_org_id(workspace_id) or "(unresolved)"
             print(
-                f"  would mint a ${args.budget:g} budget-capped key for customer "
-                f"{cust} and store it as the platform key."
+                f"  would mint a ${args.budget:g}{period} budget-capped key for "
+                f"customer {cust} and store it as the platform key."
             )
         else:
-            await grant_credit(workspace_id, args.budget, args.org_id)
+            await grant_credit(
+                workspace_id, args.budget, args.org_id, args.budget_duration
+            )
 
     print("done.")
 
@@ -275,6 +285,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_credit.add_argument("--workspace", required=True, help="Workspace UUID")
     p_credit.add_argument(
         "--budget", required=True, type=float, help="Comped credit ceiling in upstream USD"
+    )
+    p_credit.add_argument(
+        "--budget-duration",
+        help="Reset the budget each period (e.g. '30d' for a monthly $/mo comp). "
+        "Omit for a one-time cumulative cap.",
     )
     p_credit.add_argument(
         "--org-id", help="UC org / Lago customer id (default: workspace.uc_org_id)"

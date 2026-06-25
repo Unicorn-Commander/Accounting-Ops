@@ -63,6 +63,12 @@ def test_parser_credit_and_org():
     assert credit.mode == "credit"
     assert credit.budget == 25.0
     assert credit.uc_org_id == "org_1"
+    assert credit.budget_duration is None  # one-time cap by default
+
+    monthly = parser.parse_args(
+        ["credit", "--workspace", "w", "--budget", "25", "--budget-duration", "30d"]
+    )
+    assert monthly.budget_duration == "30d"  # recurring $/mo comp
 
     org = parser.parse_args(["org", "--workspace", "w", "--uc-org-id", "org_2"])
     assert org.mode == "org"

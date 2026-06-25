@@ -36,6 +36,7 @@ async def mint_virtual_key(
     *,
     customer_id: str,
     max_budget: float | None = None,
+    budget_duration: str | None = None,
     models: tuple[str, ...] | list[str] = DEFAULT_ALLOWED_MODELS,
     rpm_limit: int | None = None,
     tpm_limit: int | None = None,
@@ -58,6 +59,10 @@ async def mint_virtual_key(
     body: dict = {"user_id": customer_id, "models": list(models)}
     if max_budget is not None:
         body["max_budget"] = max_budget
+    if budget_duration is not None:
+        # LiteLLM resets the key's spend against max_budget every duration
+        # (e.g. "30d", "1mo"). Omit ⇒ max_budget is a one-time cumulative cap.
+        body["budget_duration"] = budget_duration
     if rpm_limit is not None:
         body["rpm_limit"] = rpm_limit
     if tpm_limit is not None:
