@@ -1,0 +1,5 @@
+# State income-tax form PDFs (e.g. CA Form 540) — same posture as
+# data/irs_forms and data/sc_forms: public-domain agency documents (ftb.ca.gov),
+# fetched on demand, too large for git. Each developer/server downloads them
+# after checkout (see ca_540_fill._ca540_form_path for the expected names).
+*.pdf

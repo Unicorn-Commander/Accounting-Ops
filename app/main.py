@@ -47,6 +47,8 @@ from app.api.sentinel import router as sentinel_router
 from app.api.submission import router as submission_router
 from app.api.engagement import router as engagement_router
 from app.api.work_products import router as work_products_router
+from app.api.esign import router as esign_router
+from app.api.efile import router as efile_router
 from app.api.onboarding import router as onboarding_router
 from app.api.setup import router as setup_router
 from app.api.test_brigade_jwt import router as test_brigade_jwt_router
@@ -167,6 +169,8 @@ app.include_router(sentinel_router)
 app.include_router(submission_router)
 app.include_router(engagement_router)
 app.include_router(work_products_router)
+app.include_router(esign_router)
+app.include_router(efile_router)
 app.include_router(personal_access_tokens_router)
 # BYOK inference settings (additive — status/store/remove a workspace's own LLM
 # key; the chat path reads it via workspace_llm_keys.get_byok, untouched here).

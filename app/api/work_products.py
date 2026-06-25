@@ -42,7 +42,7 @@ from sqlalchemy import text
 from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
 from app.engagement.policy import get_or_create_policy
-from app.exports.form_prefill import WatermarkMode, W4PFill, generate_w4p_pdf
+from app.exports.form_prefill import WatermarkMode
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
 
@@ -53,14 +53,6 @@ router = APIRouter(tags=["work-products"])
 # ---------------------------------------------------------------------------
 # Render (re-render on demand from inputs; watermark by status)
 # ---------------------------------------------------------------------------
-
-_W4P_TEXT_KEYS = (
-    "first_name_mi", "last_name", "address", "city_state_zip", "ssn",
-    "filing_status",
-    "step2a", "step2b", "step2c",
-    "step3a_child", "step3b_other", "step3c_credits", "step3_total",
-    "step4a_income", "step4b_deductions", "step4c_extra",
-)
 
 
 def _assert_provenance(inputs: dict[str, Any]) -> None:
@@ -86,36 +78,16 @@ def _watermark_for_status(status: str) -> WatermarkMode:
     return WatermarkMode.DRAFT
 
 
-def _w4p_fill_from_inputs(tax_year: int, inputs: dict[str, Any]) -> W4PFill:
-    kwargs: dict[str, str] = {}
-    for key in _W4P_TEXT_KEYS:
-        rec = inputs.get(key)
-        if rec and rec.get("value") not in (None, ""):
-            kwargs[key] = str(rec["value"])
-    nw = inputs.get("no_withholding") or {}
-    no_withholding = str(nw.get("value", "")).strip().lower() in ("true", "1", "yes")
-    return W4PFill(tax_year=tax_year, no_withholding=no_withholding, **kwargs)
-
-
 def _render_work_product(
     kind: str, tax_year: int | None, status: str, inputs: dict[str, Any]
 ) -> tuple[bytes, str]:
     """Render a work product to PDF bytes. Raises ValueError on bad/missing data."""
     _assert_provenance(inputs)
     mode = _watermark_for_status(status)
-    if kind == "w-4p":
-        fill = _w4p_fill_from_inputs(tax_year or 2026, inputs)
-        return generate_w4p_pdf(fill, mode)
-    if kind == "cp504":
-        from app.exports.cp504_letter import render_cp504
-        return render_cp504(tax_year, mode, inputs)
-    if kind == "st-3":
-        from app.exports.st3_fill import render_st3
-        return render_st3(tax_year, mode, inputs)
-    if kind == "1040":
-        from app.exports.f1040_fill import render_1040
-        return render_1040(tax_year, mode, inputs)
-    raise ValueError(f"No renderer for work-product kind {kind!r} yet.")
+    # Dispatch through the form registry — every form (existing + breadth) is one
+    # registry entry + a render_<kind> module. Keeps this path form-agnostic.
+    from app.exports.form_registry import render_form
+    return render_form(kind, tax_year, mode, inputs)
 
 
 # ---------------------------------------------------------------------------

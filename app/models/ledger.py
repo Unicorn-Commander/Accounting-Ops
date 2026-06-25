@@ -500,6 +500,67 @@ class EngagementPolicy(WorkspaceScopedMixin, Base):
     )
 
 
+class SignatureRequest(EntityScopedMixin, Base):
+    """A request for a client's e-signature on a finished work product.
+
+    REAL, not dormant: this is the taxpayer's OWN signature on the taxpayer's
+    OWN document (a filled W-4P / 1040 / engagement letter, …) — there is no
+    unauthorized-practice-of-law or IRS-transmission concern, so unlike the
+    dormant e-FILE / EFTPS rail this is genuinely usable. Creation is still
+    gated behind a per-workspace feature flag (``submission_channels.esign``).
+
+    The work-product PDF is re-rendered on demand (anti-fabrication provenance
+    enforced at render time) and handed to a provider — a self-hostable Docuseal
+    instance when configured, else the always-available Manual provider
+    (download → wet-sign → re-upload). The completed/signed PDF is stored to
+    Garage (``signed_garage_key``) or the local filesystem (``signed_path``).
+    Entity-scoped + workspace-isolated by RLS like the other tenant tables.
+    """
+
+    __table_args__ = (
+        Index("ix_signature_request_work_product", "work_product_id"),
+        CheckConstraint(
+            "status IN ('created','sent','out_for_signature','signed',"
+            "'declined','canceled')",
+            name="ck_signature_request_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # The finished work product being signed. CASCADE: a signature request has no
+    # meaning once its work product is gone (work products are append-only at the
+    # row level, so this is belt-and-suspenders).
+    work_product_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("work_product.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # 'docuseal' | 'manual' — which backend owns external_id / signing_url.
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    # The provider's id for this request (e.g. a Docuseal submission id). Null for
+    # the Manual provider (no external system).
+    external_id: Mapped[str | None] = mapped_column(String(256))
+    status: Mapped[str] = mapped_column(
+        String(24), nullable=False, server_default=text("'created'")
+    )
+    signer_name: Mapped[str | None] = mapped_column(String(300))
+    signer_email: Mapped[str | None] = mapped_column(String(320))
+    # The signer-facing URL for a remote provider (Null for Manual / wet-sign).
+    signing_url: Mapped[str | None] = mapped_column(Text)
+    # Where the completed/signed PDF lives. Exactly one is set once signed:
+    # signed_garage_key (object store) OR signed_path (local filesystem).
+    signed_garage_key: Mapped[str | None] = mapped_column(String(512))
+    signed_path: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class JournalEntry(EntityScopedMixin, Base):
     __table_args__ = (
         CheckConstraint(
@@ -779,6 +840,7 @@ for table in (
     ActivityEvent,
     FxRate,
     ReconLink,
+    SignatureRequest,
 ):
     Index(f"ix_{table.__tablename__}_workspace_id", table.workspace_id)
 
@@ -794,5 +856,6 @@ for table in (
     DecisionAudit,
     ActivityEvent,
     ReconLink,
+    SignatureRequest,
 ):
     Index(f"ix_{table.__tablename__}_entity_id", table.entity_id)

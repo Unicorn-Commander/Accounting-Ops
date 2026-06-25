@@ -53,11 +53,15 @@ class W4PYearConfig:
     ctc_threshold_mfj: int     # Step 3 income threshold (MFJ/QSS)
 
 
-# Verified against irs.gov (Rev. Proc. inflation adjustments + OBBBA).
-# 2024/2025: CTC $2,000 per child. 2026: CTC raised to $2,200 per child.
+# Verified against IRS Rev. Proc. 2024-40 (TY2025) + Rev. Proc. 2025-32 (TY2026)
+# and OBBBA (enacted 2025-07-04, retroactive to TY2025) — same authoritative
+# source as app/tax/engines/configs_1040.py (kept in sync via the cross-check
+# test). 2025 standard deductions reflect OBBBA: 15,750 / 31,500 / 23,625 (NOT
+# the pre-OBBBA 15,000 / 30,000 / 22,500). 2024 predates OBBBA (unchanged).
+# CTC: $2,000/child for 2024-2025, raised to $2,200 for 2026.
 _YEAR_CONFIGS: dict[int, W4PYearConfig] = {
     2024: W4PYearConfig(2024, 14600, 29200, 21900, 2000, 500, 200000, 400000),
-    2025: W4PYearConfig(2025, 15000, 30000, 22500, 2000, 500, 200000, 400000),
+    2025: W4PYearConfig(2025, 15750, 31500, 23625, 2000, 500, 200000, 400000),
     2026: W4PYearConfig(2026, 16100, 32200, 24150, 2200, 500, 200000, 400000),
 }
 

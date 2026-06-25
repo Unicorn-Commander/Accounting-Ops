@@ -850,6 +850,34 @@ def generate_w4p_pdf(
     return _build_w4p(fill, watermark_mode), "application/pdf"
 
 
+# Keys read from a WorkProduct.inputs map onto W4PFill (registry-uniform path).
+_W4P_INPUT_KEYS = (
+    "first_name_mi", "last_name", "address", "city_state_zip", "ssn",
+    "filing_status", "step2a", "step2b", "step2c",
+    "step3a_child", "step3b_other", "step3c_credits", "step3_total",
+    "step4a_income", "step4b_deductions", "step4c_extra",
+)
+
+
+def render_w4p(
+    tax_year: int | None,
+    watermark_mode: WatermarkMode,
+    inputs: dict,
+) -> tuple[bytes, str]:
+    """Registry-uniform W-4P renderer: build a W4PFill from a WorkProduct.inputs
+    map ({key: {value, source_ref, origin}}) and render. Only present, non-blank
+    values are filled (conservative blank-fill)."""
+    kwargs: dict[str, str] = {}
+    for key in _W4P_INPUT_KEYS:
+        rec = inputs.get(key)
+        if rec and rec.get("value") not in (None, ""):
+            kwargs[key] = str(rec["value"])
+    nw = inputs.get("no_withholding") or {}
+    no_withholding = str(nw.get("value", "")).strip().lower() in ("true", "1", "yes")
+    fill = W4PFill(tax_year=tax_year or 2026, no_withholding=no_withholding, **kwargs)
+    return generate_w4p_pdf(fill, watermark_mode)
+
+
 # ---------------------------------------------------------------------------
 # Context builder — merges queue + cpa-export data
 # ---------------------------------------------------------------------------

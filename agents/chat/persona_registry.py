@@ -437,6 +437,7 @@ PERSONAS: tuple[Persona, ...] = (
             "get_current_rule",
             "tax_fill_w4p",
             "tax_prepare_filing",
+            "tax_compute_1040",
         ),
     ),
 )

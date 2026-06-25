@@ -152,6 +152,9 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     # tax_prepare_filing creates a CP504 / ST-3 / 1040 work-product from
     # provenance-bearing fields (writes a work_product DRAFT row).
     "tax_prepare_filing":            {"min_role": "accountant", "read_only": False, "latency_ms": 900},
+    # tax_compute_1040 runs the deterministic engine over a client's income to
+    # produce a computed 1040 work-product (writes a work_product DRAFT row).
+    "tax_compute_1040":              {"min_role": "accountant", "read_only": False, "latency_ms": 1100},
 
     # ----- CPA Narrative + tax status dashboard ----------------------------
     "get_tax_narrative":             {"min_role": "viewer",     "read_only": True,  "latency_ms": 350},

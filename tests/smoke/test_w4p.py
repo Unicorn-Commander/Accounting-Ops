@@ -64,7 +64,18 @@ class TestWorksheet:
             qualifying_children=2,
         ))
         assert r.step3a_child_credit == 4000      # 2 * 2000 (TY2025 CTC)
-        assert r.standard_deduction == 15000      # TY2025 single
+        assert r.standard_deduction == 15750      # TY2025 single (OBBBA)
+
+    def test_2025_std_deduction_matches_1040_config(self):
+        # Single source of truth: the W-4P + 1040 standard deductions must agree
+        # (both cite Rev. Proc. 2024-40 + OBBBA). Catches future drift.
+        from app.tax.engines.configs_1040 import standard_deduction_for
+        for fs_w4p, fs_1040 in (("MFJ_OR_QSS", "mfj"), ("SINGLE_OR_MFS", "single"),
+                                ("HEAD_OF_HOUSEHOLD", "hoh")):
+            r = compute_w4p_worksheet(W4PWorksheetInput(
+                tax_year=2025, filing_status=W4PFilingStatus[fs_w4p],
+            ))
+            assert r.standard_deduction * 100 == standard_deduction_for(2025, fs_1040)
 
     def test_over_threshold_zeroes_step3(self):
         r = compute_w4p_worksheet(W4PWorksheetInput(
