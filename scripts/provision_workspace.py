@@ -69,6 +69,7 @@ async def create_workspace_record(
     slug: str,
     hipaa_protected: bool = False,
     isolation_tier: str = "shared",
+    uc_org_id: str | None = None,
 ) -> str:
     schema = schema_for_workspace(str(workspace_id))
     subgraph = f"workspace_{str(workspace_id).replace('-', '_')}"
@@ -78,21 +79,25 @@ async def create_workspace_record(
         await conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
         await conn.execute(
             text(
+                # uc_org_id (migration 0012) is the UC platform org a workspace
+                # meters inference under. COALESCE on conflict so re-provisioning
+                # without an org never NULLs out an already-bridged workspace.
                 """
                 INSERT INTO public.workspace (
                     id, slug, display_name, postgres_schema,
                     falkordb_subgraph, garage_bucket,
-                    hipaa_protected, isolation_tier, status
+                    hipaa_protected, isolation_tier, uc_org_id, status
                 )
                 VALUES (
                     :id, :slug, :display_name, :schema,
                     :subgraph, :bucket,
-                    :hipaa, :tier, 'provisioning'
+                    :hipaa, :tier, :uc_org_id, 'provisioning'
                 )
                 ON CONFLICT (id) DO UPDATE
                 SET display_name = EXCLUDED.display_name,
                     hipaa_protected = EXCLUDED.hipaa_protected,
-                    isolation_tier = EXCLUDED.isolation_tier
+                    isolation_tier = EXCLUDED.isolation_tier,
+                    uc_org_id = COALESCE(EXCLUDED.uc_org_id, public.workspace.uc_org_id)
                 """
             ),
             {
@@ -104,6 +109,7 @@ async def create_workspace_record(
                 "bucket": bucket,
                 "hipaa": hipaa_protected,
                 "tier": isolation_tier,
+                "uc_org_id": uc_org_id,
             },
         )
     return schema
@@ -209,6 +215,7 @@ async def provision_workspace(
     hipaa_protected: bool = False,
     isolation_tier: str = "shared",
     entities: list[tuple[str, str]] | None = None,
+    uc_org_id: str | None = None,
 ) -> tuple[str, list[uuid.UUID]]:
     """End-to-end workspace provisioning. Returns (schema_name, [entity_ids]).
 
@@ -224,7 +231,8 @@ async def provision_workspace(
         engine = _admin_engine()
     slug = slug or slugify(display_name)
     schema = await create_workspace_record(
-        engine, workspace_id, display_name, slug, hipaa_protected, isolation_tier
+        engine, workspace_id, display_name, slug, hipaa_protected, isolation_tier,
+        uc_org_id=uc_org_id,
     )
     await asyncio.to_thread(run_alembic_upgrade, schema)
     if ensure_workspace_subgraph is not None:
@@ -301,6 +309,12 @@ async def _cli_main() -> None:
         default=[],
         help="Entity to create: 'Display Name:kind' (e.g. 'Magic Unicorn Inc:c_corp'). Repeatable.",
     )
+    parser.add_argument(
+        "--uc-org-id",
+        help="UC platform org (org_<uuid>) this workspace meters inference under. "
+        "Sets workspace.uc_org_id so the gateway/virtual-key path bills the right "
+        "customer (see docs/INFERENCE-AND-BILLING.md).",
+    )
     args = parser.parse_args()
 
     if args.workspace_id == "new":
@@ -324,10 +338,13 @@ async def _cli_main() -> None:
         hipaa_protected=args.hipaa,
         isolation_tier=args.tier,
         entities=entities,
+        uc_org_id=args.uc_org_id,
     )
     print(f"provisioned workspace {wid} ({args.display_name})")
     print(f"  schema: {schema}")
     print(f"  tier:   {args.tier}")
+    if args.uc_org_id:
+        print(f"  uc_org: {args.uc_org_id}")
     if entity_ids:
         print(f"  entities: {len(entity_ids)}")
         for eid, (display, kind) in zip(entity_ids, entities):
