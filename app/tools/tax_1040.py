@@ -11,15 +11,12 @@ and ``tax_fill_w4p`` (pension withholding). Role floor: accountant.
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
-
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace, current_auth
-from app.tax.compute_1040 import compute_1040
+from app.tax.work_product_service import build_1040_computed, insert_work_product
 from app.workspace_session import workspace_session
 
 
@@ -67,63 +64,45 @@ async def tax_compute_1040(
     """
     ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")  # noqa: F841
 
-    def _ln(v: Any) -> dict[str, Any]:
-        return {"value": v, "source_ref": income_source}
-
-    income = {
-        "wages": _ln(wages),
-        "taxable_interest": _ln(taxable_interest),
-        "ordinary_dividends": _ln(ordinary_dividends),
-        "qualified_dividends": _ln(qualified_dividends),
-        "ira_taxable": _ln(ira_taxable),
-        "pensions_taxable": _ln(pensions_taxable),
-        "social_security_taxable": _ln(social_security_taxable),
-        "capital_gain_loss": _ln(capital_gain_loss),
-        "schedule_1_income": _ln(other_income),
-        "adjustments": _ln(adjustments),
-        "itemized_deduction": _ln(itemized_deduction),
-        "qbi_deduction": _ln(qbi_deduction),
-        "nonrefundable_credits": _ln(nonrefundable_credits),
-        "withholding": _ln(withholding),
-        "estimated_payments": _ln(estimated_payments),
-        "filing_status": {"value": filing_status, "source_ref": "user_entered"},
-    }
-
-    out = compute_1040(tax_year, filing_status, income)  # raises on bad year/status
+    built = build_1040_computed(
+        tax_year,
+        filing_status,
+        {
+            "wages": wages,
+            "taxable_interest": taxable_interest,
+            "ordinary_dividends": ordinary_dividends,
+            "qualified_dividends": qualified_dividends,
+            "ira_taxable": ira_taxable,
+            "pensions_taxable": pensions_taxable,
+            "social_security_taxable": social_security_taxable,
+            "capital_gain_loss": capital_gain_loss,
+            "other_income": other_income,
+            "adjustments": adjustments,
+            "itemized_deduction": itemized_deduction,
+            "qbi_deduction": qbi_deduction,
+            "nonrefundable_credits": nonrefundable_credits,
+            "withholding": withholding,
+            "estimated_payments": estimated_payments,
+        },
+        income_source=income_source,
+    )  # raises on bad year/status
 
     auth = current_auth()
     creator = (auth.agent_id or auth.uc_uid) if auth else None
-    title = f"Form 1040 {tax_year} ({filing_status.upper()})"
 
     async with workspace_session(SessionLocal, workspace_id) as session:
-        row = (
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO work_product (
-                        workspace_id, entity_id, kind, tax_year, title, status,
-                        inputs, provenance, created_by_uc_uid
-                    ) VALUES (
-                        :wid, :eid, '1040', :ty, :title, 'draft',
-                        CAST(:inputs AS jsonb), CAST(:prov AS jsonb), :creator
-                    )
-                    RETURNING CAST(id AS text) AS id
-                    """
-                ),
-                {
-                    "wid": str(workspace_id),
-                    "eid": str(entity_id),
-                    "ty": tax_year,
-                    "title": title,
-                    "inputs": json.dumps(out["inputs"]),
-                    "prov": json.dumps(out["provenance"]),
-                    "creator": creator,
-                },
-            )
-        ).mappings().first()
-
-    wp_id = row["id"]
-    c = out["provenance"]["computed"]
+        wp_id = await insert_work_product(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            kind="1040",
+            tax_year=tax_year,
+            title=built["title"],
+            inputs=built["inputs"],
+            provenance=built["provenance"],
+            creator=creator,
+        )
+    c = built["computed"]
     return {
         "ok": True,
         "work_product_id": wp_id,
@@ -135,7 +114,7 @@ async def tax_compute_1040(
             f"/work-products/{wp_id}/document.pdf"
         ),
         "computed": c,
-        "assumptions": out["provenance"]["assumptions"],
+        "assumptions": built["assumptions"],
         "_draft_notice": (
             f"DRAFT — computed Form 1040 for {tax_year}: AGI ${c['agi']}, taxable "
             f"income ${c['taxable_income']}, total tax ${c['total_tax']}, "

@@ -47,6 +47,7 @@ from app.api.sentinel import router as sentinel_router
 from app.api.submission import router as submission_router
 from app.api.engagement import router as engagement_router
 from app.api.work_products import router as work_products_router
+from app.api.forms_catalog import router as forms_catalog_router
 from app.api.esign import router as esign_router
 from app.api.efile import router as efile_router
 from app.api.onboarding import router as onboarding_router
@@ -169,6 +170,7 @@ app.include_router(sentinel_router)
 app.include_router(submission_router)
 app.include_router(engagement_router)
 app.include_router(work_products_router)
+app.include_router(forms_catalog_router)
 app.include_router(esign_router)
 app.include_router(efile_router)
 app.include_router(personal_access_tokens_router)

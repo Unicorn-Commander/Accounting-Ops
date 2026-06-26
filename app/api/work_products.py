@@ -43,6 +43,13 @@ from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
 from app.engagement.policy import get_or_create_policy
 from app.exports.form_prefill import WatermarkMode
+from app.exports.form_registry import get_spec
+from app.tax.work_product_service import (
+    build_1040_computed,
+    build_w4p_computed,
+    insert_work_product,
+    normalize_provenance_fields,
+)
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
 
@@ -208,6 +215,163 @@ async def get_work_product_pdf(
     if row["status"] == "draft":
         headers["X-Draft-Notice"] = "DRAFT — review required before signing"
     return Response(content=pdf_bytes, media_type=content_type, headers=headers)
+
+
+# ---------------------------------------------------------------------------
+# Create — the deterministic REST path the browser uses to prepare a form.
+#
+# Mirrors the MCP tools (tax_compute_1040 / tax_fill_w4p / tax_prepare_filing)
+# via the SAME shared service, so the browser path and the agent path build +
+# store work products identically (one anti-fabrication guard, one INSERT). No
+# LLM is in this loop: computed forms run the deterministic engine; fill/letter
+# forms store the provenance-tagged figures the preparer supplied.
+# ---------------------------------------------------------------------------
+
+
+class Compute1040Body(BaseModel):
+    filing_status: str
+    wages: float = 0
+    taxable_interest: float = 0
+    ordinary_dividends: float = 0
+    qualified_dividends: float = 0
+    ira_taxable: float = 0
+    pensions_taxable: float = 0
+    social_security_taxable: float = 0
+    capital_gain_loss: float = 0
+    other_income: float = 0
+    adjustments: float = 0
+    itemized_deduction: float = 0
+    qbi_deduction: float = 0
+    nonrefundable_credits: float = 0
+    withholding: float = 0
+    estimated_payments: float = 0
+    income_source: str = "client documents"
+
+
+class ComputeW4pBody(BaseModel):
+    filing_status: str
+    qualifying_children: int = 0
+    other_dependents: int = 0
+    other_credits_dollars: int = 0
+    estimated_annual_income: int | None = None
+    estimated_itemized_deductions: int = 0
+    estimated_adjustments: int = 0
+    other_income_4a: int | None = None
+    extra_withholding_per_period: int | None = None
+    first_name_mi: str | None = None
+    last_name: str | None = None
+    address: str | None = None
+    city_state_zip: str | None = None
+    elect_no_withholding: bool = False
+    source_extraction_id: str | None = None
+
+
+class CreateWorkProductBody(BaseModel):
+    kind: str
+    tax_year: int | None = None
+    title: str | None = None
+    # Exactly one of the following selects the build path; for fill/letter forms
+    # send ``fields``. For computed forms send the matching compute block.
+    compute_1040: Compute1040Body | None = None
+    compute_w4p: ComputeW4pBody | None = None
+    fields: dict[str, Any] | None = None
+
+
+@router.post(
+    "/api/workspaces/{workspace_id}/entities/{entity_id}/work-products",
+    status_code=201,
+)
+async def create_work_product(
+    workspace_id: UUID,
+    entity_id: UUID,
+    body: CreateWorkProductBody,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict[str, Any]:
+    """Prepare a DRAFT work product (the browser's deterministic create path)."""
+    require_role(workspace, "accountant")
+    assert_entity_in_scope(workspace, entity_id)
+
+    kind = (body.kind or "").strip().lower()
+    spec = get_spec(kind)
+    if spec is None:
+        raise HTTPException(status_code=400, detail=f"Unknown form kind {body.kind!r}.")
+    creator = workspace.user_uc_uid
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        # --- Computed Form 1040 -------------------------------------------------
+        if body.compute_1040 is not None:
+            if kind != "1040":
+                raise HTTPException(status_code=400, detail="compute_1040 is only valid for kind '1040'.")
+            if not body.tax_year:
+                raise HTTPException(status_code=400, detail="tax_year is required for a computed 1040.")
+            amounts = body.compute_1040.model_dump(exclude={"filing_status", "income_source"})
+            try:
+                built = build_1040_computed(
+                    body.tax_year, body.compute_1040.filing_status, amounts,
+                    income_source=body.compute_1040.income_source,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e))
+            wp_id = await insert_work_product(
+                session, workspace_id=workspace.workspace_id, entity_id=entity_id,
+                kind="1040", tax_year=body.tax_year, title=body.title or built["title"],
+                inputs=built["inputs"], provenance=built["provenance"], creator=creator,
+            )
+            extra = {"computed": built["computed"]}
+
+        # --- Computed Form W-4P -------------------------------------------------
+        elif body.compute_w4p is not None:
+            if kind != "w-4p":
+                raise HTTPException(status_code=400, detail="compute_w4p is only valid for kind 'w-4p'.")
+            if not body.tax_year:
+                raise HTTPException(status_code=400, detail="tax_year is required for a computed W-4P.")
+            try:
+                built = await build_w4p_computed(
+                    session, entity_id=entity_id, tax_year=body.tax_year,
+                    **body.compute_w4p.model_dump(),
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e))
+            wp_id = await insert_work_product(
+                session, workspace_id=workspace.workspace_id, entity_id=entity_id,
+                kind="w-4p", tax_year=body.tax_year, title=body.title or built["title"],
+                inputs=built["inputs"], provenance=built["provenance"],
+                source_extraction_id=built["source_extraction_id"], creator=creator,
+            )
+            extra = {"summary": built["summary"]}
+
+        # --- Fill / letter forms (provenance-tagged figures) --------------------
+        else:
+            try:
+                inputs = normalize_provenance_fields(body.fields)
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e))
+            title = (body.title or f"{kind.upper()} {body.tax_year or ''}").strip()
+            provenance = {"form": kind, "tax_year": body.tax_year, "prepared_via": "rest_create"}
+            wp_id = await insert_work_product(
+                session, workspace_id=workspace.workspace_id, entity_id=entity_id,
+                kind=kind, tax_year=body.tax_year, title=title,
+                inputs=inputs, provenance=provenance, creator=creator,
+            )
+            extra = {"field_count": len(inputs)}
+
+    _log.info(
+        "work_product.create wp=%s kind=%s ws=%s entity=%s by=%s",
+        wp_id, kind, workspace.workspace_id, entity_id, workspace.user_uc_uid,
+    )
+    return {
+        "ok": True,
+        "work_product_id": wp_id,
+        "id": wp_id,
+        "kind": kind,
+        "tax_year": body.tax_year,
+        "status": "draft",
+        "download_path": (
+            f"/api/workspaces/{workspace_id}/entities/{entity_id}"
+            f"/work-products/{wp_id}/document.pdf"
+        ),
+        **extra,
+    }
 
 
 # ---------------------------------------------------------------------------

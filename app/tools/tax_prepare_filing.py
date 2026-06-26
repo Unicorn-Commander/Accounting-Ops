@@ -14,14 +14,15 @@ Write tool — requires accountant role (creates a work_product row).
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
-
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace, current_auth
+from app.tax.work_product_service import (
+    insert_work_product,
+    normalize_provenance_fields,
+)
 from app.workspace_session import workspace_session
 
 # w-4p has its own richer, 1099-R-aware tool (tax_fill_w4p).
@@ -69,25 +70,7 @@ async def tax_prepare_filing(
 
     # Normalize + validate provenance (mirrors the render-time guard so a bad
     # work product can never be stored, not just refused at render).
-    inputs: dict[str, Any] = {}
-    for key, rec in (fields or {}).items():
-        if not isinstance(rec, dict):
-            raise ValueError(
-                f"field {key!r} must be an object {{value, source_ref, origin?}}"
-            )
-        value = rec.get("value")
-        if value is None or str(value).strip() == "":
-            continue  # conservative blank-fill — omit blanks
-        if not rec.get("source_ref"):
-            raise ValueError(
-                f"field {key!r} has a value but no source_ref — never fabricate a "
-                "figure; tag every value with where it came from"
-            )
-        inputs[key] = {
-            "value": str(value),
-            "source_ref": str(rec["source_ref"]),
-            "origin": str(rec.get("origin") or "user_entered"),
-        }
+    inputs = normalize_provenance_fields(fields)
 
     auth = current_auth()
     creator = (auth.agent_id or auth.uc_uid) if auth else None
@@ -95,34 +78,17 @@ async def tax_prepare_filing(
     provenance = {"form": kind, "tax_year": tax_year, "prepared_via": "tax_prepare_filing"}
 
     async with workspace_session(SessionLocal, workspace_id) as session:
-        row = (
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO work_product (
-                        workspace_id, entity_id, kind, tax_year, title, status,
-                        inputs, provenance, created_by_uc_uid
-                    ) VALUES (
-                        :wid, :eid, :kind, :ty, :title, 'draft',
-                        CAST(:inputs AS jsonb), CAST(:prov AS jsonb), :creator
-                    )
-                    RETURNING CAST(id AS text) AS id
-                    """
-                ),
-                {
-                    "wid": str(workspace_id),
-                    "eid": str(entity_id),
-                    "kind": kind,
-                    "ty": tax_year,
-                    "title": title,
-                    "inputs": json.dumps(inputs),
-                    "prov": json.dumps(provenance),
-                    "creator": creator,
-                },
-            )
-        ).mappings().first()
-
-    wp_id = row["id"]
+        wp_id = await insert_work_product(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            kind=kind,
+            tax_year=tax_year,
+            title=title,
+            inputs=inputs,
+            provenance=provenance,
+            creator=creator,
+        )
     download_path = (
         f"/api/workspaces/{workspace_id}/entities/{entity_id}"
         f"/work-products/{wp_id}/document.pdf"
