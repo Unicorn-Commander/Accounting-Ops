@@ -64,6 +64,15 @@ def _default_model() -> str:
     return os.environ.get("CHAT_DEFAULT_MODEL", _OPENROUTER_DEFAULT_MODEL)
 
 
+def _is_hard_persona(persona) -> bool:
+    """True for the deep-reasoning personas (CFO + tax specialists/researchers).
+
+    Keyed on the persona ``tier`` ("strategic" | "specialist" = hard;
+    "operational" = routine, e.g. setup / product-guide). Tolerant of a missing
+    tier / None persona → not hard (routine)."""
+    return getattr(persona, "tier", None) in ("strategic", "specialist")
+
+
 def _gateway_model_for(persona, is_consult: bool) -> str:
     """Gateway alias for this turn: consults stay on the cheap Sonnet tier; else
     the persona's alias (CFO → opus); Sonnet fallback."""
@@ -97,6 +106,13 @@ async def resolve_chat_inference(
     # router (404) or silently ignored.
     local_available = bool(settings.chat_local_base_url)
     wants_cloud = bool(requested_model) and requested_model != settings.chat_local_model
+    # Persona auto-escalation: when enabled, a "hard" persona (CFO + tax
+    # specialists/researchers, tier strategic|specialist) escalates to cloud even
+    # without an explicit model — routine/operational personas stay local. The
+    # cloud tiers below then pick the right model per backend (the persona's
+    # gateway alias on the gateway, the OpenRouter default on a BYOK-direct key).
+    if settings.chat_escalate_hard_personas and _is_hard_persona(persona):
+        wants_cloud = True
 
     # ---- 0) INSTANCE-LOCAL FAST PATH -------------------------------------
     # A local-default box answers routine turns locally even when the workspace

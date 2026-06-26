@@ -167,6 +167,16 @@ class Settings(BaseModel):
     # closes the OpenRouter fall-through for every turn. Default False ⇒ behavior
     # is unchanged (per-workspace opt-in only).
     chat_local_default: bool = False
+    # AUTO-ESCALATE the hard personas (CFO + tax specialists/researchers — every
+    # persona whose tier is "strategic" or "specialist") to the cloud tiers even
+    # on a routine turn, while routine/"operational" personas (setup, product
+    # guide) stay on free local qwen. Delivers "local qwen for routine, frontier
+    # cloud for the hard reasoning" with no UI. Only has an effect when a local
+    # tier would otherwise be chosen (local-first). Default False ⇒ no escalation.
+    # NB: escalated turns use the workspace's BYOK key when present, else the
+    # platform/gateway key — so store the workspace's BYOK BEFORE enabling this,
+    # or the hard turns bill the platform key.
+    chat_escalate_hard_personas: bool = False
 
     # ---- UC Ops-Center (platform billing/entitlement control plane) ----
     # Ops-Center owns subscribe/pay (Stripe) + org identity + per-app entitlement
@@ -258,6 +268,10 @@ def get_settings() -> Settings:
         ),
         chat_local_api_key=os.getenv("AO_CHAT_LOCAL_API_KEY", ""),
         chat_local_default=os.getenv("AO_CHAT_LOCAL_DEFAULT", "")
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
+        chat_escalate_hard_personas=os.getenv("AO_CHAT_ESCALATE_HARD_PERSONAS", "")
         .strip()
         .lower()
         in ("1", "true", "yes", "on"),

@@ -395,6 +395,74 @@ async def test_explicit_local_model_is_not_an_escalation(monkeypatch):
     assert r.source == "local"
 
 
+# -------------------- PERSONA AUTO-ESCALATION (hard personas → cloud) -------
+
+
+@pytest.mark.asyncio
+async def test_hard_persona_stays_local_when_escalation_flag_off(monkeypatch):
+    # The flag is off by default ⇒ even the CFO routine turn stays local (the
+    # behavior we deploy first, before Shafen's key is in).
+    _flag_off(monkeypatch)
+    _instance_local(monkeypatch)
+    import app.security.workspace_llm_keys as wk
+
+    monkeypatch.setattr(wk, "get_byok", AsyncMock(return_value=None))
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "local"
+
+
+@pytest.mark.asyncio
+async def test_hard_persona_escalates_to_byok_when_flag_on(monkeypatch):
+    # Flag on: CFO (strategic) escalates to cloud on a routine turn → BYOK key.
+    _flag_off(monkeypatch)
+    _instance_local(monkeypatch)
+    monkeypatch.setenv("AO_CHAT_ESCALATE_HARD_PERSONAS", "1")
+    _clear_settings()
+    import app.security.workspace_llm_keys as wk
+
+    monkeypatch.setattr(
+        wk, "get_byok",
+        AsyncMock(return_value=("sk-cust", "openrouter", "https://openrouter.ai/api/v1")),
+    )
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "byok"
+    assert r.api_key == "sk-cust"
+
+
+@pytest.mark.asyncio
+async def test_operational_persona_stays_local_when_flag_on(monkeypatch):
+    # Flag on, but an "operational" persona (product-guide) is routine ⇒ local.
+    _flag_off(monkeypatch)
+    _instance_local(monkeypatch)
+    monkeypatch.setenv("AO_CHAT_ESCALATE_HARD_PERSONAS", "1")
+    _clear_settings()
+    import app.security.workspace_llm_keys as wk
+
+    byok = AsyncMock(return_value=("sk-cust", "openrouter", "https://openrouter.ai/api/v1"))
+    monkeypatch.setattr(wk, "get_byok", byok)
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("product-guide"))
+    assert r.source == "local"
+    byok.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_specialist_persona_escalates_when_flag_on(monkeypatch):
+    # A specialist-tier tax persona also escalates (no BYOK here ⇒ gateway).
+    _flag_off(monkeypatch)
+    _instance_local(monkeypatch)
+    monkeypatch.setenv("AO_CHAT_ESCALATE_HARD_PERSONAS", "1")
+    monkeypatch.setenv("AO_ROUTE_CHAT_THROUGH_GATEWAY", "1")
+    monkeypatch.setenv("LLM_PLATFORM_VIRTUAL_KEY", "sk-platform")
+    _clear_settings()
+    import app.security.workspace_llm_keys as wk
+
+    monkeypatch.setattr(wk, "get_byok", AsyncMock(return_value=None))
+    r = await resolve_chat_inference(
+        workspace_id="w1", persona=get_persona("form-1120-preparer")
+    )
+    assert r.source == "platform_virtual"
+
+
 # -------------------- PERSONA MODEL MAP --------------------
 
 
