@@ -64,6 +64,7 @@ from app.tools.specialist_runs import (
     start_specialist_run,
 )
 from app.tools.specialty_rules import add_specialty_rule, query_specialty_rules
+from app.tools.subscriptions import detect_subscriptions_tool
 from app.tools.tax_draft_memo import draft_memo
 from app.tools.tax_w4p import tax_fill_w4p
 from app.tools.tax_prepare_filing import tax_prepare_filing
@@ -96,6 +97,7 @@ __all__ = [
     "create_invoice_from_draft",
     "create_workspace",
     "decide_approval",
+    "detect_subscriptions_tool",
     "draft_memo",
     "tax_fill_w4p",
     "tax_prepare_filing",

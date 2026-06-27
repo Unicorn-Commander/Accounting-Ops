@@ -33,7 +33,11 @@ from typing import Any
 from pypdf import PdfReader, PdfWriter
 
 # Reuse the IRS draft-watermark code path
-from app.exports.form_prefill import _build_watermark_overlay
+from app.exports.form_prefill import (
+    WatermarkMode,
+    _apply_watermark,
+    _build_watermark_overlay,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -514,3 +518,137 @@ def generate_sc1120v_pdf(
     merged = _merge_overlay(source_bytes, overlay_bytes)
     watermarked = _apply_watermark_to_static_pdf(merged)
     return watermarked
+
+
+# ---------------------------------------------------------------------------
+# Registry-uniform renderer
+# ---------------------------------------------------------------------------
+# These keys are stamped as left-aligned header text (drawString). Everything
+# else in ``inputs`` is treated as a right-aligned dollar/line field
+# (drawRightString) and matched against SC1120_PAGE1_LINE_COORDS.
+_SC1120_HEADER_KEYS: tuple[str, ...] = tuple(SC1120_PAGE1_HEADER_COORDS.keys())
+
+
+def _present_inputs(inputs: dict) -> dict[str, str]:
+    """Reduce the provenance ``inputs`` map to ``{key: display_string}``.
+
+    ``inputs`` is the provenance-validated map
+    ``{field_key: {"value": str, "source_ref": str, "origin": str}}`` (validated
+    upstream). Renders ONLY keys with a present, non-blank ``value`` — figures
+    are never invented, derived, or back-filled. Provenance (``source_ref`` /
+    ``origin``) is checked upstream; here we only need the display string.
+    """
+    out: dict[str, str] = {}
+    if not inputs:
+        return out
+    for key, rec in inputs.items():
+        if not isinstance(rec, dict):
+            continue
+        value = rec.get("value")
+        if value in (None, ""):
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        out[key] = text
+    return out
+
+
+def _build_sc1120_overlay_from_values(values: dict[str, str]) -> bytes:
+    """Build an 8-page Letter overlay stamping ``values`` onto SC1120 page 1.
+
+    Header keys (``SC1120_PAGE1_HEADER_COORDS``) draw left-aligned; every other
+    key is matched against ``SC1120_PAGE1_LINE_COORDS`` and drawn right-aligned
+    at the dollar column. Keys with no coordinate are skipped. Only the values
+    present in ``values`` are stamped — conservative blank-fill, never a 0 or a
+    guess. Pages 2-8 are emitted blank to match the source page count.
+    """
+    try:
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.colors import black
+    except ImportError as exc:
+        raise RuntimeError(
+            "reportlab is required for SC1120 overlay. pip install reportlab"
+        ) from exc
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(LETTER_W, LETTER_H))
+    c.setFillColor(black)
+
+    # ---- Page 1: header text (left-aligned) ----
+    c.setFont("Helvetica", 9)
+    for key in _SC1120_HEADER_KEYS:
+        text = values.get(key)
+        if not text:
+            continue
+        x, y = SC1120_PAGE1_HEADER_COORDS[key]
+        c.drawString(x, y, text[:80])
+
+    # ---- Page 1: dollar/line amounts (right-aligned at the dollar column) ----
+    c.setFont("Helvetica", 10)
+    for key, text in values.items():
+        if key in SC1120_PAGE1_HEADER_COORDS:
+            continue
+        coord = SC1120_PAGE1_LINE_COORDS.get(key)
+        if not coord:
+            continue  # no coordinate for this key — skip (never guess a spot)
+        x, y = coord
+        c.drawRightString(x, y, text)
+
+    c.showPage()
+
+    # ---- Pages 2-8 blank (match the 8-page source for safe page merging) ----
+    for _ in range(7):
+        c.showPage()
+
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
+
+def render_sc1120(
+    tax_year: int | None,
+    watermark_mode: WatermarkMode,
+    inputs: dict,
+) -> tuple[bytes, str]:
+    """Render a filled SC1120 (SC C-Corporation Income Tax Return) PDF.
+
+    Registry-uniform renderer (see ``app/exports/form_registry.py``):
+    ``render_sc1120(tax_year, watermark_mode, inputs) -> (pdf_bytes, content_type)``.
+
+    ``inputs`` is the provenance-validated map
+    ``{field_key: {"value": str, "source_ref": str, "origin": str}}``. Only
+    present, non-blank values are stamped — figures are never invented, derived,
+    or back-filled, and a key with no coordinate is skipped. Header keys
+    (``SC1120_PAGE1_HEADER_COORDS``: fein, corp_name, mailing_address,
+    city_state_zip, the period-end dates, total_gross_receipts) draw
+    left-aligned; the line keys (``SC1120_PAGE1_LINE_COORDS``: "1".."19",
+    "14a".., etc.) draw right-aligned at the dollar column.
+
+    The strategy follows this module's docstring exactly: open the static
+    SC1120 PDF (it is NOT an AcroForm), build a one-page reportlab overlay that
+    stamps each value at its known coordinate, merge it onto page 1, keep the
+    other pages, then apply the ``watermark_mode`` overlay (DRAFT /
+    SELF_CERTIFIED / NONE) shared with the IRS pipeline.
+
+    ``tax_year`` is accepted for interface symmetry; the SC1120 face is
+    year-stable, so the caller is expected to pass the period-end dates as
+    inputs (``income_tax_period_end`` / ``license_fee_period_end``) rather than
+    have them synthesized here.
+
+    Returns ``(pdf_bytes, "application/pdf")``. Raises ``FileNotFoundError`` if
+    the source PDF is absent — run ``scripts/download_scdor_forms.sh``.
+    """
+    if not SC1120_SOURCE_PDF.exists():
+        raise FileNotFoundError(
+            f"SC1120 source PDF not found at {SC1120_SOURCE_PDF}. "
+            "Run scripts/download_scdor_forms.sh to fetch it."
+        )
+
+    values = _present_inputs(inputs)
+
+    source_bytes = SC1120_SOURCE_PDF.read_bytes()
+    overlay_bytes = _build_sc1120_overlay_from_values(values)
+    merged = _merge_overlay(source_bytes, overlay_bytes)
+    watermarked = _apply_watermark(merged, watermark_mode)
+    return watermarked, "application/pdf"

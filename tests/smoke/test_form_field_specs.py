@@ -32,6 +32,9 @@ _RENDERERS: dict[str, tuple[str | None, str]] = {
     "ca-540": ("ca_540_field_map", "ca_540_fill.py"),
     "st-3": (None, "st3_fill.py"),
     "cp504": (None, "cp504_letter.py"),
+    "1120": ("form_1120_field_map", "form_1120_fill.py"),
+    "sc1120": (None, "sc_form_prefill.py"),
+    "scdor-notice": (None, "scdor_letter.py"),
 }
 
 

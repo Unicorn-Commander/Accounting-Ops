@@ -199,6 +199,26 @@ _GUIDE_READ_TOOLS: tuple[str, ...] = (
     "get_period_journal",
 )
 
+# Extra reporting reads + the work-product CREATION tools that make the
+# Accountant / Bookkeeper a professional-substitute: it doesn't just read the
+# books, it PRODUCES the finished (DRAFT) filing. _READ_TOOLS already covers
+# P&L / runway / journal / transactions / 1120-data / 1099 / rules; this tuple
+# adds the remaining reports (trial balance, balance sheet, tax-status) and the
+# tax work-product creators (tax_compute_1040 / tax_prepare_filing / tax_fill_w4p
+# — the same trio the Personal 1040 Specialist uses, minus the queue read).
+# add_specialty_rule lets it record an agreed treatment so the books stay
+# consistent. All names verified against mcp_server.py's registered tools.
+_ACCOUNTANT_TOOLS: tuple[str, ...] = (
+    "get_trial_balance",
+    "get_balance_sheet",
+    "get_tax_status",
+    "detect_subscriptions",
+    "tax_compute_1040",
+    "tax_prepare_filing",
+    "tax_fill_w4p",
+    "add_specialty_rule",
+)
+
 
 # Builder helper — keeps the per-persona definitions readable.
 def _persona(
@@ -301,6 +321,22 @@ PERSONAS: tuple[Persona, ...] = (
         tier="strategic",
     ),
     # ----- Specialist tier — focused expertise ------------------------------
+    # Accountant / Bookkeeper: the owner's day-to-day AI accountant — a
+    # professional substitute that keeps the books, pulls financials, and
+    # produces finished (DRAFT) tax filings + notice responses. Reuses
+    # _READ_TOOLS (P&L/runway/journal/txns/1120-data/1099/rules) + the queue
+    # draft tools, PLUS _ACCOUNTANT_TOOLS (extra reports + the work-product
+    # creators so it actually PRODUCES filings). All tool names verified against
+    # mcp_server.py; the runner intersects with the live server regardless.
+    _persona(
+        "accountant-bookkeeper",
+        "Accountant / Bookkeeper",
+        "Keeps your books and prepares your tax filings & notice responses — finished and ready to sign.",
+        "tax_specialists/accountant_bookkeeper",
+        tools=_READ_TOOLS + _QUEUE_DRAFT_TOOLS + _ACCOUNTANT_TOOLS,
+        needs_tax_year=True,
+        tier="specialist",
+    ),
     # Tax Research: conversational, read-only RAG over the curated
     # tax_knowledge_document index. Explains "what does the latest tax law say
     # about X" with citations; takes NO tax position and has NO write tools

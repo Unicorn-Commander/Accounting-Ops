@@ -115,6 +115,16 @@ FORM_REGISTRY: dict[str, FormSpec] = {
     "ca-540": FormSpec(kind="ca-540", title="California Form 540 — Resident Income Tax Return",
         jurisdiction="CA", mode="fill", module="app.exports.ca_540_fill",
         func="render_ca_540", goes_to="the California Franchise Tax Board", category="state"),
+    # --- Business entity + state corporate + notices (added 2026-06-26) -------
+    "1120": FormSpec(kind="1120", title="Form 1120 — U.S. Corporation Income Tax Return",
+        jurisdiction="federal", mode="fill", module="app.exports.form_1120_fill",
+        func="render_1120", goes_to="the IRS", category="business"),
+    "sc1120": FormSpec(kind="sc1120", title="SC1120 — South Carolina C Corporation Income Tax Return",
+        jurisdiction="SC", mode="fill", module="app.exports.sc_form_prefill",
+        func="render_sc1120", goes_to="the SC Department of Revenue", category="state"),
+    "scdor-notice": FormSpec(kind="scdor-notice", title="SC DOR Notice Response Letter",
+        jurisdiction="SC", mode="letter", module="app.exports.scdor_letter",
+        func="render_scdor_response", goes_to="the SC Department of Revenue", category="notice"),
 }
 
 

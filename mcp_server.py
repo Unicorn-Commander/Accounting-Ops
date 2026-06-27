@@ -16,6 +16,7 @@ from app.tools import (
     create_invoice_from_draft,
     create_workspace,
     decide_approval,
+    detect_subscriptions_tool,
     draft_memo,
     tax_fill_w4p,
     tax_prepare_filing,
@@ -154,6 +155,10 @@ def build_server():
     server.tool()(get_cash_flow)
     server.tool()(get_trial_balance)
     server.tool()(get_1099_nec_report)
+    # Subscription monitor — read-only recurring-charge detection over the
+    # posted journal. Registered as "detect_subscriptions" (the function is
+    # named *_tool to distinguish the DB wrapper from the pure detector).
+    server.tool(name="detect_subscriptions")(detect_subscriptions_tool)
 
     # =====================================================================
     # Chart of accounts (entity-scoped)
