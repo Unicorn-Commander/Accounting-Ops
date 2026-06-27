@@ -68,6 +68,7 @@ ALL_CHECK_TYPES: tuple[str, ...] = (
     "officer_comp",
     "nol_carryforward",
     "qsbs_holding",
+    "subscription_monitor",
     # Monthly
     "cash_runway",
     "yoy_diff",
@@ -90,6 +91,7 @@ CHECK_CADENCE: dict[str, str] = {
     "officer_comp":          "weekly",
     "nol_carryforward":      "weekly",
     "qsbs_holding":          "weekly",
+    "subscription_monitor":  "weekly",
     "cash_runway":           "monthly",
     "yoy_diff":              "monthly",
     "connector_health":      "monthly",
