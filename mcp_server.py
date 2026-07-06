@@ -275,7 +275,9 @@ def build_server():
 
 async def main() -> None:
     server = build_server()
-    await server.run_async()
+    # FastMCP has no run_async(); the stdio entrypoint is run_stdio_async()
+    # (siblings: run_sse_async / run_streamable_http_async).
+    await server.run_stdio_async()
 
 
 if __name__ == "__main__":
