@@ -1161,12 +1161,12 @@ async def _main_async(args: argparse.Namespace) -> int:
             try:
                 # Bootstrap transaction: set the schema + GUC at session scope.
                 from sqlalchemy import text as _sql
-                from app.workspace_session import schema_for_workspace
-                ws_schema = schema_for_workspace(workspace_id)
+                from app.workspace_session import SHARED_SCHEMA
                 async with session.begin():
-                    # SET (no LOCAL) = session-scoped; survives commits.
+                    # Shared-schema model: constant search_path; the GUC below is
+                    # the isolation key. SET (no LOCAL) = session-scoped; survives commits.
                     await session.execute(
-                        _sql(f'SET search_path = "{ws_schema}", public')
+                        _sql(f'SET search_path = "{SHARED_SCHEMA}", public')
                     )
                     # set_config(name, value, is_local=false) = session-scoped.
                     await session.execute(
