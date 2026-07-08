@@ -13,8 +13,8 @@ Usage — docker exec pattern (production)::
       -e ACCTOPS_SERVICE_TOKEN="$TOKEN" \\
       accounting_ops-app-1 \\
       python /app/agents/cpa_team/tax_resolver/run_cpa_resolver.py \\
-        --workspace-id 77753ea5-efe9-5539-a846-6b20ddc841b9 \\
-        --entity-id    1ab938df-43f2-567a-8566-800f8a14a466 \\
+        --workspace-id 00000000-0000-0000-0000-000000000000 \\
+        --entity-id    11111111-1111-1111-1111-111111111111 \\
         --tax-year     2023 \\
         --acctops-base-url http://localhost:8000 \\
         --output       /drafts/cpa-resolution-report-2023.md \\

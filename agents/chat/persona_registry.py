@@ -49,7 +49,7 @@ _AGENTS_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 _CHAT_MODE_PREAMBLE = """\
 You are operating in INTERACTIVE CHAT MODE inside the Accounting-Ops web app.
-Aaron (or another workspace member) is chatting with you directly through a
+the owner (or another workspace member) is chatting with you directly through a
 Claude.ai-style interface.
 
 Behavior in this mode:

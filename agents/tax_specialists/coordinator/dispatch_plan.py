@@ -9,7 +9,7 @@ Usage (as a module)::
     from agents.tax_specialists.coordinator.dispatch_plan import build_dispatch_plan
 
     plan = build_dispatch_plan(
-        user_request="prepare 2023 returns for Magic Unicorn Inc",
+        user_request="prepare 2023 returns for Acme Inc",
         entity_id="aabbccdd-1234-5678-9abc-000000000001",
         tax_year=2023,
         workspace_id="550e8400-e29b-41d4-a716-446655440000",

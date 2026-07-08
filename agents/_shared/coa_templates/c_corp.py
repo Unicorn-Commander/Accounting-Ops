@@ -1,6 +1,6 @@
 """C-Corporation chart-of-accounts template (Form 1120 filer).
 
-Modeled on the production Magic Unicorn LLC C-Corp catalog
+Modeled on the production Acme LLC C-Corp catalog
 (``agents/_shared/coa_catalogs/mu_inc_c_corp.md``) which has 76 accounts.
 This module exposes the generic 46-account system baseline + selected
 entity-helpful refinements (R&D split, meals §274 split, payment processor
