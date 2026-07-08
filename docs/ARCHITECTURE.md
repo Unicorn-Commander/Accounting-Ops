@@ -1,271 +1,146 @@
 # Architecture
 
-How Accounting-Ops works at runtime, what data flows where, and where
-the trust boundaries are.
+Accounting-Ops is an **agent-first** financial-operations platform: autonomous agents do the
+bookkeeping work, and the application is the observation, approval, and chat surface over an
+append-only ledger. This document describes the Community Edition runtime — everything here runs
+on your own hardware with no external dependency.
 
 ## Runtime topology
 
 ```
-                       ┌──────────────────────────────────────┐
-                       │  Browser (Aaron / future users)      │
-                       │  Keycloak SSO → NextAuth.js session  │
-                       └──────────────────────────────────────┘
-                                       │ https
-                                       ▼
-            ┌────────────────────────────────────────────────┐
-            │  Traefik on midboy1 :443                       │
-            │  accounting-ops.magicunicorn.dev               │
-            │  - / and /journal/* /reports/* /etc → web      │
-            │  - /api/{nextauth} → web                       │
-            │  - /api, /mcp, /a2a, /.well-known → app         │
-            └────────────────────────────────────────────────┘
-                    │                       │
-                    ▼                       ▼
-        ┌─────────────────┐         ┌──────────────────────┐
-        │  web (Next 15)  │         │  app (FastAPI)       │
-        │  :3000          │ ←──→    │  :8000               │
-        │  Server pages   │  HTTP   │  REST + MCP + A2A    │
-        │  Client comps   │         │  Keycloak JWT auth   │
-        └─────────────────┘         │  Service-token auth  │
-                                    └──────────┬───────────┘
-                                               │
-                       ┌───────────────────────┼───────────────────────┐
-                       ▼                       ▼                       ▼
-              ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-              │ Postgres 16      │  │ Garage S3        │  │ Sidecar services │
-              │ per-workspace    │  │ receipt PDFs +   │  │ on the same      │
-              │ schemas          │  │ CPA bundles      │  │ docker network   │
-              └──────────────────┘  └──────────────────┘  └──────────────────┘
-                                                                  │
-                       ┌──────────────────────────────────────────┤
-                       ▼                          ▼               ▼
-              ┌────────────────┐  ┌────────────────┐  ┌──────────────────┐
-              │ receipt-worker │  │ receipt-recon  │  │ cpa-export       │
-              │ :8091          │  │ :8092          │  │ :8093            │
-              │ IMAP→VLM→Garage│  │ score matches  │  │ CSV/IIF/QBO/PDF  │
-              └────────────────┘  └────────────────┘  └──────────────────┘
-                       ▼
-              ┌────────────────────┐
-              │ Qwen3-VL-8B        │
-              │ host.docker.intl   │
-              │ midboy1:8087/v1    │
-              └────────────────────┘
-
-              ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-              │ simplefin-mcp    │  │ ebay-finances-mcp│  │ imap-mcp         │
-              │ FastMCP stdio    │  │ FastMCP streaming│  │ FastMCP stdio    │
-              └──────────────────┘  └──────────────────┘  └──────────────────┘
-                       │                      │                     │
-                       ▼                      ▼                     ▼
-                  beta-bridge          api.ebay.com           IMAPS server
-                  .simplefin.org       (OAuth refresh)        (Stalwart)
-```
-
-External federation peers (Tailscale-meshed):
-- `bigboy` — GPU host, secondary Qwen, FalkorDB for graph memory
-- `lilguy1` — DR for Postgres + Garage (planned, not wired yet)
-- `centerdeep` — OTel + Loki + Prometheus stack
-
-## Data flow: a transaction landing in the journal
-
-```
-1. SimpleFIN poll (or eBay Fulfillment fetch)
+You + external agents (Claude / Codex / any MCP client)
         │
-        ▼ canonical txn JSON
-2. /api/workspaces/{wid}/recent-transactions
-        │
-        ▼ joined with account_entity_mapping + categorization
-        │   (user overrides → vendor rules → Uncategorized)
-3. UI: /transactions, /dashboard, /reconciliation-queue
-        │
-        ▼ user clicks Confirm (or auto-post for tier-L matches)
-4. POST /api/workspaces/{wid}/journal-entries
-        │
-        ▼ materiality gate (L: auto, M: confirm, H: block)
-        ▼ resolve_accounts_for_txn() → (debit_canonical, credit_canonical)
-        ▼ idempotency check on (entity_id, source, source_external_id)
-        ▼ get_last_chain_hash(entity_id) → prev_hash
-        ▼ compute_hash(prev_hash, payload) → this_hash
-        ▼ INSERT INTO journal_entry (...) inside SAVEPOINT
-        ▼ INSERT INTO posting_log (outcome=posted, ...)
-5. UI: /journal, /journal/[id], /reports recompute
+        ▼
+┌───────────────────┐        ┌──────────────────────────────┐
+│  web (Next.js 15) │  HTTP  │        app (FastAPI)         │
+│  local-auth login │ ─────► │  REST + /mcp + /a2a surfaces │
+└───────────────────┘        └──────────────┬───────────────┘
+                                             │
+        ┌────────────────────────────────────┼───────────────────────────────┐
+        ▼                    ▼                ▼                 ▼              ▼
+  ┌───────────┐      ┌──────────────┐   ┌──────────┐   ┌───────────────┐  ┌──────────┐
+  │ Postgres  │      │   Garage     │   │  Ollama  │   │  Infinity     │  │ FalkorDB │
+  │ per-ws    │      │  S3 blobs    │   │  BYO LLM │   │  embeddings   │  │  graph   │
+  │ schemas + │      │ receipts/doc │   │ (OpenAI- │   │  (optional)   │  │(optional)│
+  │ hash ledg.│      │              │   │  compat) │   │               │  │          │
+  └───────────┘      └──────────────┘   └──────────┘   └───────────────┘  └──────────┘
 ```
 
-## Per-workspace schema layout
+- **web** — Next.js 15 (App Router). In Community mode it authenticates with a NextAuth
+  **Credentials** provider against a single env-configured local admin (`AO_AUTH_MODE=local`).
+- **app** — FastAPI. Exposes the same operations three ways: a REST API for the web app, an
+  **MCP** surface (`/mcp`) for agent clients, and an **A2A** surface (`/a2a`) for agent-to-agent
+  calls. There is no shadow API — the UI uses the same endpoints agents do.
+- **Postgres** — the system of record. One schema per workspace (isolation boundary); the journal
+  is an append-only, per-entity SHA-256 hash chain.
+- **Garage** — S3-compatible object storage for receipts and documents.
+- **Ollama** — the default bring-your-own-model target (OpenAI-compatible). Swappable for vLLM,
+  a remote Ollama, an on-prem gateway, or a hosted API via `LLM_ENDPOINT_URL` / `LLM_MODEL`.
+- **Infinity / FalkorDB** — optional. The embeddings index (Tax-Knowledge RAG) and a best-effort
+  agent-memory graph. Both degrade gracefully: the app runs fully without them.
+
+## The posting pipeline
 
 ```
-accounting_ops_<workspace_uuid_underscored>
-├── entity                        — Magic Unicorn Inc, etc.
-├── account_entity_mapping        — connector account → entity
-├── chart_of_account              — per-entity COA, 46 default accounts
-├── journal_entry                 — append-only ledger with hash chain
-├── posting_log                   — every post attempt (success or refused)
-├── category_override             — user-trained category rules
-├── receipt                       — receipt metadata
-├── recon_link                    — receipt ↔ journal_entry links
-├── counterparty / vendor         — payee normalization
-├── compliance_profile / rule     — per-entity compliance
-├── activity_event                — agent activity feed
-├── decision_audit                — agent decision trail
-├── approval_queue                — items awaiting human approval
-├── event_log                     — event-sourced base events
-├── connector_state               — last-sync watermarks
-├── agent_session                 — agent-of-agent sessions
-└── fx_rate                       — multi-currency normalization (unused v1)
+source txn ──► categorize ──► materiality gate ──► [auto-post | review queue | hard-block]
+ (bank/CSV/     Tier 1: rules    small→auto            │
+  connector)    Tier 2: model    mid→confirm           ▼
+                (optional)       large→block      journal_entry appended to the hash chain
+                                 no receipt→block  (double-entry, per-entity)
 ```
 
-Shared public schema:
-```
-public
-├── workspace                     — workspace registry
-├── workspace_membership          — uc_uid ↔ workspace role
-├── user_account                  — uc_uid registry
-├── tenant_credentials            — encrypted credential blobs (AES-256-GCM)
-├── credential_access_log         — audit of credential reads
-├── worker_extractions            — receipt-worker output
-├── worker_runs                   — receipt-worker poll log
-├── worker_dedup_index            — content + fingerprint hash index
-├── worker_reconcile_runs         — reconciler poll log
-└── receipt_transaction_link      — matched receipts (deterministic scorer)
-```
+1. **Ingest.** Transactions arrive from a bank/CSV import or a connector. Ingest stays on your
+   machine.
+2. **Categorize — deterministic first.**
+   - *Tier 1* is `app/categorization/vendor_rules.py`, a deterministic vendor-rule engine. Fast,
+     auditable, **no model call**, and it handles the bulk of recurring transactions.
+   - *Tier 2* is an optional model fallback for whatever Tier 1 leaves `Uncategorized`. Tier-2
+     results are **always queued for review**, never auto-posted. The categorizer runs end-to-end
+     with **no model at all**.
+3. **Materiality gate** (at posting time):
+   - small auto-categorized items **auto-post**;
+   - mid-size items queue for a human **Confirm**;
+   - large items **hard-block** pending an explicit confirmation + memo;
+   - travel/meals **block** without a matching receipt.
+4. **Post.** An approved transaction becomes a `journal_entry` row appended to the per-entity hash
+   chain (double-entry). Reversals create *new* entries — nothing is ever overwritten.
 
-## Hash chain spec
+## The hash chain
 
-Per-entity SHA-256 chain. Each entry computes:
-
-```
-prev_hash = (most recent entry for this entity).this_hash  (32 zero bytes if genesis)
-
-canonical_payload = effective_date || \x1f
-                 || amount_cents     || \x1f
-                 || debit_account    || \x1f
-                 || credit_account   || \x1f
-                 || source           || \x1f
-                 || source_external_id || \x1f
-                 || payee            || \x1f
-                 || description      || \x1f
-                 || posted_at
-
-this_hash = sha256(prev_hash || canonical_payload)
-```
-
-`\x1f` is ASCII Unit Separator — used as a delimiter so a payee that
-happens to contain the separator value can't forge a different
-canonical payload.
-
-The DB enforces uniqueness on `(entity_id, this_hash)` so concurrent
-posts can't fork the chain — losers retry with the fresh prev_hash.
-
-`verify_chain(entity_id)` walks the entries in (effective_date,
-posted_at, id) order, recomputes each hash, and returns the list of
-tampered positions.
-
-## Materiality gate
-
-`app/journal/materiality.py`:
+Each journal entry commits to its predecessor:
 
 ```
-def evaluate(amount_cents, category, category_status, entity_mapped,
-             sign_matched, has_receipt_link, user_confirmed):
-
-    tier = "L" if abs < 7500 else "M" if abs < 100000 else "H"
-
-    # IRS §274(d) override (non-negotiable)
-    if category in {Travel·Lodging, Travel·Transport, Meals}:
-        if not has_receipt_link:
-            return MaterialityVerdict(tier, "block_274d", ...)
-
-    if user_confirmed:
-        return MaterialityVerdict(tier, "auto_post", ...)
-
-    if tier == "H":
-        return MaterialityVerdict("H", "block_high_value", ...)
-
-    if tier == "M":
-        return MaterialityVerdict("M", "queue_for_confirm", ...)
-
-    # Tier L: auto only if categorization is fully trustable
-    if category_status == "auto" AND entity_mapped AND sign_matched
-       AND category != "Uncategorized":
-        return MaterialityVerdict("L", "auto_post", ...)
-
-    return MaterialityVerdict("L", "queue_for_confirm", ...)
+this_hash = sha256( prev_hash || canonical_payload(entry) )
 ```
 
-## Categorization tiers
+- `canonical_payload` is a stable, canonical serialization of the entry (amounts, accounts,
+  entity, timestamps, provenance).
+- The chain is **per entity** within a workspace schema.
+- `verify_chain` walks the chain from genesis and reports the first index whose recomputed hash
+  disagrees with the stored hash — i.e. the exact point of any tampering.
 
-1. **Tier 0: user overrides** (`category_override` table, populated by Reject button)
-2. **Tier 1: vendor rules** (~50 substring patterns → category mapping)
-3. **Tier 2: LLM** (stubbed; would call local Qwen 3.6 with GBNF constrained to canonical categories)
-4. **Fallback: Uncategorized** (surfaces in /reconciliation-queue)
+Because reversals are additive, the ledger is **append-only**: history is immutable and every
+current balance is the deterministic result of replaying the chain.
 
-A tier-1 vendor rule produces `(category, kind)` where kind ∈ {revenue,
-expense, transfer}. The engine checks if the txn sign matches the
-expected kind; mismatch → `sign_matched=false`, which the materiality
-gate uses to refuse auto-post.
+## Provenance
 
-## Auth + tenancy
-
-Two auth paths land at the same `WorkspaceContext`:
+Every posted figure is explainable. The provenance chain links, in order:
 
 ```
-Path A — User session (browser):
-  Keycloak login → NextAuth.js session → forwards access_token to app
-  → app/auth.py validates JWT against Keycloak JWKS
-  → uc_uid extracted from claims
-  → resolve_workspace() looks up workspace_membership row
-  → WorkspaceContext(uc_uid, workspace_id, role, entity_scope)
-
-Path B — Service token (long-running worker):
-  Worker sends `Authorization: Bearer <random-token>`
-  → app/auth.py constant-time compares against ACCTOPS_SERVICE_TOKENS
-  → impersonates the configured uc_uid
-  → synthesizes AuthContext, same downstream behavior
-  → resolve_workspace() still requires the impersonated user to have a
-     workspace_membership row (no privilege escalation)
+report line ──► journal entries ──► source transaction ──► agent decision ──► sha256 verified
 ```
 
-`workspace_session(workspace_id)` opens a single transaction and sets
-`SET LOCAL search_path = accounting_ops_<wid>, public` so every query in
-that request scope automatically lands in the right schema. The schema
-boundary is what makes cross-workspace leakage a SQL impossibility.
+A missing or unverifiable source is treated as an **error** (HTTP 422), not something the system
+guesses around. If a fact about the business can't be explained, it can't be posted. See
+[PROFESSIONAL-SUBSTITUTE.md](PROFESSIONAL-SUBSTITUTE.md) for the design stance behind this.
 
-## Encrypted credentials at rest
+## Multi-tenancy — `Workspace > Entity > User`
 
-`public.tenant_credentials` stores connector secrets (SimpleFIN access
-URLs, eBay refresh tokens, future IMAP creds):
+- **Workspace** — the isolation boundary. Each workspace is a dedicated Postgres schema; a
+  workspace-scoped session pins every query to that schema.
+- **Entity** — a legal entity within a workspace (an LLC, an S-corp, a personal 1040). Entities are
+  row-scoped within the workspace schema, so consolidated and per-entity views come from the same
+  ledger.
+- **User** — the auth subject (`uc_uid`). In Community/local mode this is your single admin; RBAC
+  still resolves through the normal membership checks.
 
-```
-ciphertext = AES-256-GCM(
-    plaintext,
-    key   = HKDF-SHA256(master_key, info="acctops:tenant-dek:v1:" || workspace_uuid),
-    nonce = random 96-bit,
-    aad   = workspace_uuid || credential_id
-)
-```
+Provisioning a workspace (`scripts/provision_workspace.py`) creates the schema, runs tenant
+migrations, and seeds a chart of accounts.
 
-The master key lives in Docker secrets at
-`/run/secrets/accounting_ops_master_key`, chmod 600, mounted read-only
-into the app container. Losing the master key orphans all ciphertext.
+## Security model
 
-See `docs/PHASE-1-6-ENCRYPTED-CREDENTIALS.md` for the threat model and
-rotation flow.
+- **Least privilege.** The runtime database role is `NOSUPERUSER` and does not own its objects, so
+  the append-only guarantee is enforced by the schema, not merely by application code.
+- **Encrypted credentials.** Connector credentials are encrypted at rest with a local master key
+  (`secrets/accounting_ops_master_key`, an untracked Docker secret). Back it up out-of-band —
+  losing it orphans every stored credential.
+- **No telemetry by default.** The OpenTelemetry endpoint defaults to none and there is no
+  analytics SDK. Nothing about your books leaves the host unless you configure an egress yourself.
 
-## Idempotency
+## Editions & the enterprise seam
 
-Three independent idempotency layers:
+Community mode is a runtime gate driven by two env flags:
 
-1. **Journal posting**: UNIQUE `(entity_id, source, source_external_id)` —
-   the same SimpleFIN or eBay transaction can't post twice
-2. **Hash chain**: UNIQUE `(entity_id, this_hash)` — concurrent posts
-   can't fork the chain
-3. **Receipt extraction**: `worker_dedup_index` on content_hash +
-   fingerprint_hash — same PDF arriving twice via IMAP is detected as
-   a soft duplicate
+| Flag | Community | Enterprise (default) |
+|---|---|---|
+| `AO_EDITION` | `community` | `enterprise` |
+| `AO_AUTH_MODE` | `local` | `keycloak` |
 
-## Observability (planned, not wired)
+With `AO_EDITION=community`, the enterprise routers (multi-client CPA console, cross-app
+federation, hosted-gateway key minting) are **not imported or mounted**, and the enterprise nav is
+hidden. The community app has no runtime dependency on any of them. Enterprise modules are shipped
+separately under a commercial license and are not part of this repository.
 
-OTel traces emitted by the FastAPI middleware in `app/otel.py`. Target
-collector is centerdeep's Prometheus/Loki/Tempo stack at
-`https://obs.magicunicorn.dev`. See `docs/AGENT-ACTIVITY-SPEC.md` for
-the audit-span schema.
+## Where things live
+
+| Path | What |
+|---|---|
+| `app/main.py` | FastAPI app; router mounting; edition gate |
+| `app/categorization/` | Tier-1 vendor rules + Tier-2 model fallback |
+| `app/journal/` | double-entry posting, hash chain, `verify_chain` |
+| `app/connectors/`, `app/clients/` | ingest + connector clients |
+| `app/tax/`, `app/exports/` | tax knowledge/forms + CPA exports |
+| `agents/` | sentinel, cpa_team, tax_specialists, tax_research, chat |
+| `migrations/public/`, `migrations/tenant/` | schema migrations |
+| `scripts/` | bootstrap, provisioning, seeding |
+| `web/app/` | Next.js routes (dashboard, journal, reports, taxes, …) |
