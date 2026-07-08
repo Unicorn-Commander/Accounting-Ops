@@ -203,7 +203,7 @@ export function StripeStatusCard({
                     </a>{" "}
                     pointing at{" "}
                     <code className="rounded bg-elevated px-1 font-mono text-[10px]">
-                      https://accounting-ops.magicunicorn.dev/api/connectors/stripe/webhook
+                      https://accounting-ops.example.com/api/connectors/stripe/webhook
                     </code>
                     , then paste the signing secret here:
                   </p>

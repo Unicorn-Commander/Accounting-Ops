@@ -649,7 +649,7 @@ function SecretRevealView({
         {
           mcpServers: {
             "accounting-ops": {
-              url: "https://accounting-ops.magicunicorn.dev/mcp",
+              url: "https://accounting-ops.example.com/mcp",
               transport: "streamable_http",
               headers: {
                 Authorization: `Bearer ${created.secret}`

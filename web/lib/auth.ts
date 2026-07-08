@@ -34,7 +34,7 @@ const isLocalAuth = authMode === "local";
 
 const issuer =
   process.env.KEYCLOAK_REALM_URL ??
-  "https://auth.unicorncommander.ai/realms/uchub";
+  "https://keycloak.example.com/realms/uchub";
 const clientId = process.env.KEYCLOAK_CLIENT_ID ?? "accounting-ops-app";
 const clientSecret = process.env.KEYCLOAK_CLIENT_SECRET ?? "";
 

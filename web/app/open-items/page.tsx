@@ -1,4 +1,4 @@
-// /open-items — Aaron's daily action surface.
+// /open-items — the owner's daily action surface.
 //
 // Audit issue C1: This route used to render a Sentinel findings dashboard.
 // The richer seven-section OpenItemsView (Time-sensitive / Documents /
@@ -98,8 +98,8 @@ export default async function OpenItemsPage({
             </p>
             <p className="mt-2 text-[11px] text-ink-tertiary">
               If the issue persists, contact{" "}
-              <a href="mailto:aaron@magicunicorn.tech" className="underline">
-                aaron@magicunicorn.tech
+              <a href="mailto:support@example.com" className="underline">
+                support@example.com
               </a>
               .
             </p>

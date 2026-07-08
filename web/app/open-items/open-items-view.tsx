@@ -4,9 +4,9 @@
 //
 // Renders six sections:
 //   1. Time-sensitive       (red / orange treatment)
-//   2. Documents Aaron needs to provide
-//   3. Decisions awaiting Aaron
-//   4. Items waiting on Mosin (CPA) — read-only
+//   2. Documents the owner needs to provide
+//   3. Decisions awaiting the owner
+//   4. Items waiting on the CPA — read-only
 //   5. Items waiting on attorney    — read-only
 //   6. Resolved this week           — rollup of wins
 //
@@ -459,7 +459,7 @@ function DecisionsSection({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  // Transient 5-second undo toast — appears after Aaron accepts an AI
+  // Transient 5-second undo toast — appears after the owner accepts an AI
   // recommendation and offers a 5-second window to revert before the
   // refresh hides it. The mechanism: post a new "rejected"-marker for
   // the decision, which the latest-wins aggregator picks up.
@@ -514,7 +514,7 @@ function DecisionsSection({
 
   // Auto-dismiss the toast after its window passes.
   // (Effect lives at the top of the component so the toast clears even
-  // when Aaron walks away.)
+  // when the owner walks away.)
   useEffect(() => {
     if (!toast) return;
     const wait = Math.max(0, toast.expiresAt - Date.now());

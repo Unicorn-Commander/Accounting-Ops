@@ -140,7 +140,7 @@ export default async function LoginPage({
               <p className="text-xs text-ink-tertiary">
                 No account?{" "}
                 <a
-                  href="mailto:aaron@magicunicorn.tech?subject=Accounting-Ops dev preview access"
+                  href="mailto:support@example.com?subject=Accounting-Ops dev preview access"
                   className="text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
                 >
                   Request dev-preview access.

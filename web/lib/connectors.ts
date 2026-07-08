@@ -19,7 +19,7 @@ export type Connector = {
   signup_url?: string;
   signup_label?: string;
   doc_url?: string;
-  available: boolean; // true if Aaron has built + deployed this MCP
+  available: boolean; // true if the operator has built + deployed this MCP
 };
 
 export const CONNECTORS: Connector[] = [

@@ -22,7 +22,7 @@ type ToastState = {
   message: string;
   kind: ToastKind;
   onUndo?: () => void;
-  /** server-issued timestamp (ms epoch) used by Aaron's 30-sec undo window */
+  /** server-issued timestamp (ms epoch) used by the 30-sec undo window */
   issuedAt: number;
 };
 
