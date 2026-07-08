@@ -20,7 +20,13 @@ from typing import Any
 
 from app.db import SessionLocal
 from app.security.credentials import get_credential_plaintext, store_credential
-from app.security.litellm_admin import DEFAULT_ALLOWED_MODELS, mint_virtual_key
+
+# NOTE (Community Edition carve-out): the virtual-key MINT half of this module
+# (get_or_mint_virtual_key / resolve_billing_customer_id) is an ENTERPRISE seam
+# — it reaches the UC LiteLLM gateway admin API + app.platform.org_resolver. The
+# ``litellm_admin`` import is deferred INTO get_or_mint_virtual_key so the
+# community-safe ``get_byok`` read never drags in the enterprise gateway module
+# at import time. Do NOT hoist this back to module scope.
 
 _log = logging.getLogger("acctops.workspace_llm_keys")
 
@@ -98,6 +104,7 @@ async def get_or_mint_virtual_key(
     # platform virtual key), return quietly so the resolver falls back to the
     # platform key — no per-turn mint attempt and no per-turn warning.
     from app.config import get_settings
+    from app.security.litellm_admin import DEFAULT_ALLOWED_MODELS, mint_virtual_key
 
     if not get_settings().llm_gateway_admin_key:
         return None

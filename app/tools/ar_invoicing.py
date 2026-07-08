@@ -37,7 +37,11 @@ from app.ar import (
     upsert_ar_customer as _upsert_customer,
     void_invoice as _void_invoice,
 )
-from app.ar.entitlement import assert_entitled_for_invoice
+# NOTE (Community Edition carve-out): app.ar.entitlement is the enterprise
+# cross-app (PO-originated) entitlement gate. It is a no-op for the standalone
+# path (external_source is None). The import is deferred into the invoice-create
+# path and only invoked when external_source is set, so community boot never
+# hard-imports the entitlement module and standalone invoicing is unaffected.
 from app.ar.invoicing import InvoiceError
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace, current_auth
@@ -164,11 +168,18 @@ async def create_invoice_from_draft(
     # Entitlement gate for the cross-app (PO-originated) path. Standalone is a
     # no-op inside assert_entitled_for_invoice. EntitlementError subclasses
     # PermissionError so the MCP channel returns a clean denial.
-    auth = current_auth()
-    claims = auth.claims if auth is not None else None
-    assert_entitled_for_invoice(
-        claims, external_source=external_source, workspace_id=wid
-    )
+    # Enterprise-only cross-app entitlement gate (no-op for standalone). Skipped
+    # + never imported in Community Edition, which has no cross-app subscription.
+    from app.config import get_settings as _get_settings
+
+    if not _get_settings().is_community:
+        from app.ar.entitlement import assert_entitled_for_invoice
+
+        auth = current_auth()
+        claims = auth.claims if auth is not None else None
+        assert_entitled_for_invoice(
+            claims, external_source=external_source, workspace_id=wid
+        )
 
     try:
         async with workspace_session(SessionLocal, wid) as session:
