@@ -19,6 +19,8 @@ export default async function LoginPage({
   const callbackUrl = params.callbackUrl ?? "/start";
   const error = params.error;
   const reason = params.reason;
+  // Community self-host: local email+password login instead of uchub SSO.
+  const isLocalAuth = (process.env.AO_AUTH_MODE ?? "keycloak").toLowerCase() === "local";
 
   return (
     <main className="grid min-h-screen place-items-center bg-canvas px-6">
@@ -40,9 +42,15 @@ export default async function LoginPage({
             Sign in to continue
           </h1>
           <p className="mt-2 text-sm text-ink-secondary leading-relaxed">
-            Authentication runs through the Unicorn Commander identity provider
-            (Keycloak <code className="font-mono text-xs">uchub</code> realm).
-            Same login as Brigade, Crisis-Ops, Project-Ops.
+            {isLocalAuth ? (
+              <>Sign in with your self-host administrator credentials.</>
+            ) : (
+              <>
+                Authentication runs through the Unicorn Commander identity provider
+                (Keycloak <code className="font-mono text-xs">uchub</code> realm).
+                Same login as Brigade, Crisis-Ops, Project-Ops.
+              </>
+            )}
           </p>
 
           {reason === "session_expired" && (
@@ -61,34 +69,85 @@ export default async function LoginPage({
             </div>
           )}
 
-          <form
-            action={async () => {
-              "use server";
-              await signIn("keycloak", { redirectTo: callbackUrl });
-            }}
-            className="mt-6"
-          >
-            <button
-              type="submit"
-              className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-brand-500 px-4 py-2.5 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600 transition"
+          {isLocalAuth ? (
+            <form
+              action={async (formData: FormData) => {
+                "use server";
+                await signIn("credentials", {
+                  email: String(formData.get("email") ?? ""),
+                  password: String(formData.get("password") ?? ""),
+                  redirectTo: callbackUrl
+                });
+              }}
+              className="mt-6 space-y-3"
             >
-              <Lock size={14} />
-              Sign in with Unicorn Commander
-              <ArrowRight size={14} />
-            </button>
-          </form>
-
-          <div className="mt-6 border-t border-subtle pt-5">
-            <p className="text-xs text-ink-tertiary">
-              No account?{" "}
-              <a
-                href="mailto:aaron@magicunicorn.tech?subject=Accounting-Ops dev preview access"
-                className="text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
+              <div>
+                <label htmlFor="email" className="mb-1 block text-xs font-medium text-ink-secondary">
+                  Email
+                </label>
+                <input
+                  id="email"
+                  name="email"
+                  type="email"
+                  autoComplete="username"
+                  required
+                  className="w-full rounded-md border border-default bg-canvas px-3 py-2 text-sm text-ink-primary outline-none focus:border-brand-500"
+                />
+              </div>
+              <div>
+                <label htmlFor="password" className="mb-1 block text-xs font-medium text-ink-secondary">
+                  Password
+                </label>
+                <input
+                  id="password"
+                  name="password"
+                  type="password"
+                  autoComplete="current-password"
+                  required
+                  className="w-full rounded-md border border-default bg-canvas px-3 py-2 text-sm text-ink-primary outline-none focus:border-brand-500"
+                />
+              </div>
+              <button
+                type="submit"
+                className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-brand-500 px-4 py-2.5 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600 transition"
               >
-                Request dev-preview access.
-              </a>
-            </p>
-          </div>
+                <Lock size={14} />
+                Sign in
+                <ArrowRight size={14} />
+              </button>
+            </form>
+          ) : (
+            <form
+              action={async () => {
+                "use server";
+                await signIn("keycloak", { redirectTo: callbackUrl });
+              }}
+              className="mt-6"
+            >
+              <button
+                type="submit"
+                className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-brand-500 px-4 py-2.5 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600 transition"
+              >
+                <Lock size={14} />
+                Sign in with Unicorn Commander
+                <ArrowRight size={14} />
+              </button>
+            </form>
+          )}
+
+          {!isLocalAuth && (
+            <div className="mt-6 border-t border-subtle pt-5">
+              <p className="text-xs text-ink-tertiary">
+                No account?{" "}
+                <a
+                  href="mailto:aaron@magicunicorn.tech?subject=Accounting-Ops dev preview access"
+                  className="text-ink-secondary underline-offset-2 hover:text-ink-primary hover:underline"
+                >
+                  Request dev-preview access.
+                </a>
+              </p>
+            </div>
+          )}
         </div>
 
         <p className="mt-6 text-center text-[11px] text-ink-tertiary">
