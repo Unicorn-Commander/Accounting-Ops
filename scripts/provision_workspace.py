@@ -166,16 +166,17 @@ async def create_entity(
     entity INSERT passes regardless of which role runs it.
     """
     slug = slugify(display_name)
+    schema = schema_for_workspace(workspace_id)
     async with workspace_session(_admin_sessionmaker(), workspace_id) as session:
         result = await session.execute(
             text(
-                """
+                f"""
                 INSERT INTO entity (
                     id, workspace_id, slug, display_name, legal_name, kind,
                     country_code, functional_currency, hipaa_protected, status
                 )
                 VALUES (
-                    :id, :workspace_id, :slug, :display_name, :legal_name, CAST(:kind AS entity_type),
+                    :id, :workspace_id, :slug, :display_name, :legal_name, CAST(:kind AS "{schema}".entity_type),
                     :country, :currency, :hipaa, 'active'
                 )
                 ON CONFLICT (slug) DO UPDATE

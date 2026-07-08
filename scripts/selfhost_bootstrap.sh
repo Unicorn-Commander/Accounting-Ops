@@ -69,10 +69,18 @@ fi
 # 2. secrets
 # ---------------------------------------------------------------------------
 gen_if_blank POSTGRES_PASSWORD
+gen_if_blank APP_DB_PASSWORD
 gen_if_blank GARAGE_RPC_SECRET
 gen_if_blank GARAGE_ADMIN_TOKEN
 gen_if_blank NEXTAUTH_SECRET
 gen_if_blank AO_LOCAL_AUTH_SECRET
+
+POSTGRES_PASSWORD_VALUE="$(get_env POSTGRES_PASSWORD)"
+APP_DB_PASSWORD_VALUE="$(get_env APP_DB_PASSWORD)"
+POSTGRES_DB_VALUE="$(get_env POSTGRES_DB)"; [ -z "$POSTGRES_DB_VALUE" ] && POSTGRES_DB_VALUE="accounting_ops"
+POSTGRES_USER_VALUE="$(get_env POSTGRES_USER)"; [ -z "$POSTGRES_USER_VALUE" ] && POSTGRES_USER_VALUE="accounting_ops"
+set_env DATABASE_URL "postgresql+asyncpg://accounting_ops_app:${APP_DB_PASSWORD_VALUE}@postgres:5432/${POSTGRES_DB_VALUE}"
+set_env ADMIN_DATABASE_URL "postgresql+asyncpg://${POSTGRES_USER_VALUE}:${POSTGRES_PASSWORD_VALUE}@postgres:5432/${POSTGRES_DB_VALUE}"
 
 # ---------------------------------------------------------------------------
 # 3. edition + auth mode
@@ -124,6 +132,11 @@ log "app health: ${status:-unknown}"
 # ---------------------------------------------------------------------------
 log "running public-schema migrations..."
 "${COMPOSE[@]}" exec -T app alembic -c alembic-public.ini upgrade head
+
+log "setting runtime database role password..."
+printf "ALTER ROLE accounting_ops_app PASSWORD '%s';\n" "$APP_DB_PASSWORD_VALUE" \
+  | "${COMPOSE[@]}" exec -T postgres psql \
+      -U "$POSTGRES_USER_VALUE" -d "$POSTGRES_DB_VALUE" -v ON_ERROR_STOP=1 >/dev/null
 
 WORKSPACE_ID="$(get_env DEFAULT_WORKSPACE_ID)"
 if [ -z "$WORKSPACE_ID" ]; then

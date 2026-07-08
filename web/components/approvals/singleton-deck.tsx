@@ -41,7 +41,7 @@ import {
   formatUsdPrecise,
   confidenceLabel,
   flagLabel
-} from "@/lib/approval-clusters";
+} from "@/lib/approval-cluster-format";
 
 // -----------------------------------------------------------------------
 // Confidence accent

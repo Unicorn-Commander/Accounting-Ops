@@ -36,6 +36,7 @@ WORKSPACES = [
 
 
 async def main() -> None:
+    failed = False
     for ws in WORKSPACES:
         workspace_id = uuid.uuid5(
             uuid.NAMESPACE_DNS, f"accounting-ops:{ws['slug']}"
@@ -52,7 +53,10 @@ async def main() -> None:
             for eid, (display, kind) in zip(entity_ids, ws["entities"]):
                 print(f"    entity: {display:<24} ({kind}) -> {eid}")
         except Exception as exc:
+            failed = True
             print(f"  {ws['slug']:<20} FAILED: {exc}", file=sys.stderr)
+    if failed:
+        raise SystemExit(1)
     print("seeded generic local workspaces")
 
 

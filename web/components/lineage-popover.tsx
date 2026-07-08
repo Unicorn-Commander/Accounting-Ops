@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Shield, Bot, Undo2, FileCheck2 } from "lucide-react";
-import { formatUSD } from "@/lib/cash-position";
+import { formatUSD } from "@/lib/cash-format";
 
 // What number is being traced. Mirrors the backend /lineage `metric` param.
 export type LineageTarget = {

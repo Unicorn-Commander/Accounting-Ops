@@ -8,7 +8,7 @@ appreciate responsible disclosure.
 **Please do not report security vulnerabilities through public GitHub issues,
 pull requests, or discussions.**
 
-Instead, report privately by email to **security@magicunicorn.tech**. If you
+Instead, report privately by email to **security@example.com**. If you
 prefer encrypted mail, ask for a public key in your first message.
 
 Please include, as best you can:

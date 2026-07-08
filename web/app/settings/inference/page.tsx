@@ -25,7 +25,7 @@ export default async function InferenceSettingsPage() {
       <PageShell>
         <SectionHeader
           title="Inference & billing"
-          subtitle="Choose how Accounting-Ops pays for AI. Use Unicorn Commander credits, or bring your own provider key and let the provider bill you directly."
+          subtitle="Choose how Accounting-Ops pays for AI. Use platform credits, or bring your own provider key and let the provider bill you directly."
         />
 
         {!workspace ? (

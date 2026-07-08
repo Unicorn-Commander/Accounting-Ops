@@ -67,7 +67,7 @@ CATEGORY_TO_ACCOUNT: dict[str, str] = {
     "Owner Distribution": "3020",
     "Contractor · 1099-NEC": "6300",
     "COGS · Inventory": "5010",
-    "Loan from Jason Allen": "2400",  # related-party note payable (generic)
+    "Loan from Related Party": "2400",  # related-party note payable (generic)
     "Vehicle · Repairs": "6620",  # business-use vehicle (see COA note re: accountable plan + substantiation)
 }
 

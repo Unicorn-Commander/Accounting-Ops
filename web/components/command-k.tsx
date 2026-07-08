@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Search, Sparkles } from "lucide-react";
 import { useChatStream } from "@/components/chat/use-chat-stream";
-import { formatUSD } from "@/lib/cash-position";
+import { formatUSD } from "@/lib/cash-format";
 import type { CfoBriefResponse } from "@/lib/cfo-brief";
 
 const GOTO_ITEMS = [

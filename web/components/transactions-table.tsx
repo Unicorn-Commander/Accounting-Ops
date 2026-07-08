@@ -9,7 +9,7 @@ import {
   MaterialityBadge,
   StatusChip
 } from "@/components/primitives";
-import { formatUSD } from "@/lib/cash-position";
+import { formatUSD } from "@/lib/cash-format";
 import { tryParseDollars } from "@/lib/money";
 import { shortDate, type LiveTransaction } from "@/lib/transactions";
 import { cn } from "@/lib/cn";

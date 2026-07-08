@@ -11,7 +11,7 @@ import {
 import { CheckCircle2 } from "lucide-react";
 import { getActiveContext } from "@/lib/active-context";
 import { getAccountMappings } from "@/lib/account-mappings";
-import { formatUSD } from "@/lib/cash-position";
+import { formatUSD } from "@/lib/cash-format";
 import { getRecentTransactions, type LiveTransaction } from "@/lib/transactions";
 import { QueueColumnClient } from "@/components/queue-column";
 
@@ -158,5 +158,4 @@ export default async function ReconciliationQueuePage() {
     </AppShell>
   );
 }
-
 

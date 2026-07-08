@@ -301,12 +301,12 @@ class TestBuildPrefillContext:
     def test_entity_name_set(self):
         ctx = build_prefill_context(
             tax_year=2024,
-            entity_display_name="Unicorn Commander LLC",
+            entity_display_name="Example Holdings LLC",
             ein="12-3456789",
             queue_items=[],
             cpa_package=None,
         )
-        assert ctx.entity_display_name == "Unicorn Commander LLC"
+        assert ctx.entity_display_name == "Example Holdings LLC"
         assert ctx.ein == "12-3456789"
 
     def test_officer_comp_from_queue(self):

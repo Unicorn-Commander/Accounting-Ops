@@ -42,7 +42,7 @@ import {
   formatUsdPrecise,
   confidenceLabel,
   flagLabel
-} from "@/lib/approval-clusters";
+} from "@/lib/approval-cluster-format";
 
 // -----------------------------------------------------------------------
 // Confidence pill (color-coded outline that wraps the whole card)
