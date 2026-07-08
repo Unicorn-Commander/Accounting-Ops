@@ -992,7 +992,7 @@ export function OpenItemsView({
           title="Waiting on attorney"
           count={data.counts.waiting_on_attorney}
           tone="brand"
-          subtitle="LLC formation, registered-agent work, Fabrikam structuring."
+          subtitle="LLC formation, registered-agent work, entity structuring."
         />
         <WaitingList
           rows={data.waiting_on_attorney}

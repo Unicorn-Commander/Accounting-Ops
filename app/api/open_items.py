@@ -111,7 +111,7 @@ def _bucket_for_item(row: dict[str, Any]) -> str:
         return "decision"
 
     # 3. Attorney-territory keywords
-    attorney_keywords = ("attorney", "fabrikam", "llc formation", "registered agent")
+    attorney_keywords = ("attorney", "llc formation", "registered agent")
     fr_lower = form_ref.lower()
     if any(kw in fr_lower for kw in attorney_keywords):
         return "attorney"
