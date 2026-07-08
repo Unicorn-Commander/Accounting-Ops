@@ -33,6 +33,8 @@ export type NavItem = {
   hue: string;
   /** Hide from non-admin roles (enforced server-side too). */
   adminOnly?: boolean;
+  /** Enterprise-edition only — hidden in Community Edition (route not mounted). */
+  enterpriseOnly?: boolean;
 };
 
 export type NavSection = {
@@ -40,6 +42,8 @@ export type NavSection = {
   items: NavItem[];
   /** Whole section is admin-only. */
   adminOnly?: boolean;
+  /** Whole section is enterprise-edition only. */
+  enterpriseOnly?: boolean;
   /** Collapsible default state. Secondary sections start collapsed. */
   defaultOpen?: boolean;
 };
@@ -87,8 +91,10 @@ export const NAV_SECTIONS: NavSection[] = [
     defaultOpen: false,
     items: [
       { label: "Members", href: "/settings/members", icon: Users, hue: "250 80% 72%" },
-      { label: "Clients", href: "/clients", icon: Users, hue: "250 75% 65%" },
-      { label: "Work inbox", href: "/clients/inbox", icon: Inbox, hue: "0 70% 60%" },
+      // Multi-client CPA console — enterprise only (web/app/clients/** + the
+      // clients/work_inbox routers are not mounted in Community Edition).
+      { label: "Clients", href: "/clients", icon: Users, hue: "250 75% 65%", enterpriseOnly: true },
+      { label: "Work inbox", href: "/clients/inbox", icon: Inbox, hue: "0 70% 60%", enterpriseOnly: true },
     ],
   },
   {
@@ -115,9 +121,23 @@ export const MOBILE_TABS: NavItem[] = [
   { label: "Chat", href: "/chat", icon: MessageSquare, hue: "188 90% 56%" },
 ];
 
-/** Filter sections + items by role; drop sections left empty. */
-export function visibleSections(canAdmin: boolean): NavSection[] {
+/**
+ * Filter sections + items by role and edition; drop sections left empty.
+ * In Community Edition (`isCommunity`), enterprise-only sections/items are
+ * hidden — their routes are not mounted server-side either.
+ */
+export function visibleSections(
+  canAdmin: boolean,
+  isCommunity = false
+): NavSection[] {
   return NAV_SECTIONS.filter((s) => !s.adminOnly || canAdmin)
-    .map((s) => ({ ...s, items: s.items.filter((i) => !i.adminOnly || canAdmin) }))
+    .filter((s) => !(isCommunity && s.enterpriseOnly))
+    .map((s) => ({
+      ...s,
+      items: s.items.filter(
+        (i) =>
+          (!i.adminOnly || canAdmin) && !(isCommunity && i.enterpriseOnly)
+      )
+    }))
     .filter((s) => s.items.length > 0);
 }

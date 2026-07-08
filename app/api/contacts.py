@@ -30,12 +30,13 @@ from app.contacts import (
     parse_contacts,
     upsert_counterparty,
 )
-from app.contacts.contact_ops_client import (
-    ContactOpsError,
-    ContactOpsNotConfigured,
-    fetch_contact_rows,
-    is_configured as contact_ops_configured,
-)
+# NOTE (Community Edition carve-out): the local contacts CRUD + file-parse
+# routes below are community. Only the Contact-Ops FEDERATION seam (the
+# /sync-contact-ops route + the sources probe) reaches app.contacts.contact_ops_client,
+# an enterprise module. That import is deferred into those two handlers and
+# short-circuited in community mode so this router mounts + works with the
+# federation seam off.
+from app.config import get_settings
 from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
@@ -141,7 +142,14 @@ async def contact_sources(
     """Which import sources are available. Lets the UI show/hide the
     'Sync from Contact-Ops' button without guessing."""
     require_role(workspace, "viewer")
-    return {"file": True, "contact_ops": contact_ops_configured()}
+    contact_ops_available = False
+    if not get_settings().is_community:
+        from app.contacts.contact_ops_client import (
+            is_configured as contact_ops_configured,
+        )
+
+        contact_ops_available = contact_ops_configured()
+    return {"file": True, "contact_ops": contact_ops_available}
 
 
 @router.post("/api/workspaces/{workspace_id}/counterparties/sync-contact-ops")
@@ -158,6 +166,17 @@ async def sync_from_contact_ops(
     federation isn't wired up yet, so the UI degrades gracefully.
     """
     require_role(workspace, "accountant")
+    if get_settings().is_community:
+        raise HTTPException(
+            status_code=503,
+            detail="Contact-Ops sync is an enterprise feature (not available in Community Edition)",
+        )
+    from app.contacts.contact_ops_client import (
+        ContactOpsError,
+        ContactOpsNotConfigured,
+        fetch_contact_rows,
+    )
+
     if credentials is None or not credentials.credentials:
         raise HTTPException(status_code=401, detail="missing bearer token")
     try:

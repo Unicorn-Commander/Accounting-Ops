@@ -32,7 +32,10 @@ from app.ar import (
     record_payment,
     void_invoice,
 )
-from app.ar.entitlement import EntitlementError, assert_entitled_for_invoice
+# NOTE (Community Edition carve-out): app.ar.entitlement is the enterprise
+# cross-app entitlement gate (no-op for standalone). Deferred into the create
+# path behind an edition check so community boot never hard-imports it.
+from app.config import get_settings
 from app.ar.invoicing import InvoiceError
 from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
@@ -241,16 +244,23 @@ async def create_invoice(
     # (bind_http_caller sets it for tools routes, but the journal-style routes
     # don't — so we read it defensively and fall back to None, which the gate
     # treats as "no entitlement claim present").
-    from app.mcp_auth import current_auth
+    # Enterprise-only cross-app entitlement gate. Community Edition has no
+    # cross-app subscription concept (no Brigade federation), so the gate is
+    # skipped and its module never imported.
+    if not get_settings().is_community:
+        from app.ar.entitlement import EntitlementError, assert_entitled_for_invoice
+        from app.mcp_auth import current_auth
 
-    auth = current_auth()
-    claims = auth.claims if auth is not None else None
-    try:
-        assert_entitled_for_invoice(
-            claims, external_source=body.external_source, workspace_id=workspace_id
-        )
-    except EntitlementError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        auth = current_auth()
+        claims = auth.claims if auth is not None else None
+        try:
+            assert_entitled_for_invoice(
+                claims, external_source=body.external_source, workspace_id=workspace_id
+            )
+        except EntitlementError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
+            ) from exc
 
     line_items = [li.model_dump(exclude_none=False) for li in body.line_items]
     # Normalize revenue_account_id UUID → str for the service layer.

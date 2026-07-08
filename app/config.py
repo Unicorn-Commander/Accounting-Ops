@@ -7,6 +7,34 @@ from pydantic import BaseModel
 class Settings(BaseModel):
     app_name: str = "Accounting-Ops"
     public_base_url: str = "https://accounting.magicunicorn.dev"
+
+    # ---- Open-core edition + self-host auth (Community Edition carve-out) ----
+    # ``edition`` gates the enterprise/suite-federation surface. DEFAULT
+    # "enterprise" preserves today's behavior byte-for-byte (all routers
+    # mounted, Brigade/Contact-Ops/platform seams live). A self-hoster sets
+    # AO_EDITION=community, which: (1) does NOT mount the enterprise routers
+    # (clients, work_inbox, discovery, brigade-jwt test, /.well-known/mcps.json),
+    # (2) turns the entangled federation/brigade/entitlement/LLM-mint seams into
+    # local no-ops, (3) hides the enterprise nav in the web app. No community
+    # code path hard-imports an enterprise-only module at load.
+    edition: str = "enterprise"  # env AO_EDITION: community | enterprise
+    # ``auth_mode`` selects the login backend. DEFAULT "keycloak" preserves the
+    # uchub SSO dependency exactly as today. A self-hoster sets AO_AUTH_MODE=local
+    # to log in with a single env-configured admin (no Keycloak/uchub required):
+    # the web NextAuth Credentials provider mints a locally-signed HS256 bearer
+    # that app/auth.py validates in the local-token branch. Keycloak/PAT/service
+    # tokens keep working; the two modes coexist behind the flag.
+    auth_mode: str = "keycloak"  # env AO_AUTH_MODE: local | keycloak
+    # Local-auth admin identity + signing secret (only consulted when
+    # auth_mode == "local"). ``local_auth_secret`` is the HS256 shared secret the
+    # web signs the local bearer with and the backend validates it against —
+    # env-only, never in code. Blank in local mode ⇒ local login is refused
+    # (fail closed). ``local_admin_uc_uid`` is the canonical user id the local
+    # token carries; it MUST match the uc_uid on the admin's workspace_membership
+    # row (created by scripts/provision_workspace.py) so RBAC resolves unchanged.
+    local_auth_secret: str = ""      # env AO_LOCAL_AUTH_SECRET
+    local_admin_uc_uid: str = "admin"  # env AO_LOCAL_ADMIN_UC_UID
+    local_admin_email: str = ""       # env AO_LOCAL_ADMIN_EMAIL (informational)
     # Runtime DB URL. In production this is the LEAST-PRIVILEGE role
     # (accounting_ops_app): SELECT/INSERT broadly, UPDATE only on mutable
     # tables, NO ownership, NO ability to ALTER/DISABLE triggers, TRUNCATE,
@@ -168,6 +196,16 @@ class Settings(BaseModel):
     #   ACCTOPS_TRUSTED_M2M_CALLERS=tax-planning-ops
     trusted_m2m_callers: frozenset[str] = frozenset()
 
+    @property
+    def is_community(self) -> bool:
+        """True when running the open-core Community Edition (AO_EDITION=community)."""
+        return self.edition.strip().lower() == "community"
+
+    @property
+    def is_local_auth(self) -> bool:
+        """True when self-host local login is active (AO_AUTH_MODE=local)."""
+        return self.auth_mode.strip().lower() == "local"
+
 
 def get_admin_database_url() -> str:
     """DB URL for DDL/owner operations (migrations + provisioning).
@@ -188,6 +226,13 @@ def get_settings() -> Settings:
     keycloak_client_id = os.getenv("KEYCLOAK_CLIENT_ID", defaults.keycloak_client_id)
     return Settings(
         public_base_url=os.getenv("PUBLIC_BASE_URL", defaults.public_base_url),
+        edition=os.getenv("AO_EDITION", defaults.edition),
+        auth_mode=os.getenv("AO_AUTH_MODE", defaults.auth_mode),
+        local_auth_secret=os.getenv("AO_LOCAL_AUTH_SECRET", defaults.local_auth_secret),
+        local_admin_uc_uid=os.getenv(
+            "AO_LOCAL_ADMIN_UC_UID", defaults.local_admin_uc_uid
+        ),
+        local_admin_email=os.getenv("AO_LOCAL_ADMIN_EMAIL", defaults.local_admin_email),
         database_url=os.getenv("DATABASE_URL", defaults.database_url),
         admin_database_url=os.getenv("ADMIN_DATABASE_URL"),
         keycloak_realm_url=os.getenv("KEYCLOAK_REALM_URL", defaults.keycloak_realm_url),

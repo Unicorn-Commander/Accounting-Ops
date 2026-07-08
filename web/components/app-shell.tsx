@@ -22,6 +22,9 @@ export async function AppShell({
   const canAdmin = ctx?.activeWorkspace
     ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
     : false;
+  // Community Edition hides the enterprise (multi-client CPA) nav; the matching
+  // routers are also unmounted server-side (see app/main.py).
+  const isCommunity = (process.env.AO_EDITION ?? "enterprise").toLowerCase() === "community";
 
   const cookieStore = await cookies();
   const collapsed = cookieStore.get("aops_sidebar_collapsed")?.value === "1";
@@ -46,6 +49,7 @@ export async function AppShell({
           canAdmin={canAdmin}
           initialCollapsed={collapsed}
           workspaceName={ctx?.activeWorkspace?.display_name ?? "Workspace"}
+          isCommunity={isCommunity}
         />
         <main className="min-w-0 flex-1 pb-24">
           {ctx?.activeWorkspace && (
@@ -68,7 +72,7 @@ export async function AppShell({
         />
       )}
       <GlobalToast />
-      {ctx?.activeWorkspace && <BottomNav canAdmin={canAdmin} />}
+      {ctx?.activeWorkspace && <BottomNav canAdmin={canAdmin} isCommunity={isCommunity} />}
     </>
   );
 }
