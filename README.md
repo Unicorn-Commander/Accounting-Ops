@@ -1,220 +1,246 @@
-# Accounting-Ops
+# Accounting-Ops — the first open-source autonomous AI accountant
 
-Agent-first, MCP-first financial operations platform for Magic Unicorn
-Unconventional Technology & Stuff Inc. Brigade agents (when wired in) do
-categorization, reconciliation, compliance monitoring, CPA bundle prep,
-and payment proposals; the web app is the observation + approval + chat
-surface.
+**Your books. Your machine. Your rules.**
 
-**Anchor**: *Your books. Your machine. Your rules.*
+Accounting-Ops is an agent-first, self-hostable bookkeeping and tax-prep
+platform. Autonomous agents categorize transactions, reconcile receipts,
+maintain an append-only general ledger, draft financial statements, and
+assemble tax-form packages — while you stay in control through an observation,
+approval, and chat surface. It runs entirely on **your** hardware with **your**
+models. No cloud account required, no telemetry by default.
 
-**Production (customer SaaS)**: https://accounting-ops.unicorncommander.ai (host: centerdeep)
-**Dogfood / internal**: https://accounting-ops.magicunicorn.dev (host: midboy1)
-**Self-service onboarding**: new users land on `/welcome` → provision their own workspace → Setup Assistant (entity → chart of accounts → connect bank)
-**Project-Ops record**: P-00050
-**Standup runbook**: `docs/PROD-RING-RUNBOOK.md`
+> ⚠️ **Not tax, legal, or accounting advice.** Accounting-Ops is software, not a
+> licensed professional, and using it creates no professional relationship. You
+> alone are responsible for anything you file, sign, or pay — verify every figure
+> against your own records and consult a qualified CPA/EA/attorney for anything
+> with legal or financial consequence. See **[DISCLAIMER.md](DISCLAIMER.md)**.
+
+Licensed under the **[GNU AGPL-3.0](LICENSE)**.
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[SECURITY.md](SECURITY.md)** ·
+**[docs/PROFESSIONAL-SUBSTITUTE.md](docs/PROFESSIONAL-SUBSTITUTE.md)**.
 
 ---
 
-## What's Live
+## What it does
 
 | Surface | What it does |
 |---|---|
-| `/dashboard` | Cash position (BofA + USAA via SimpleFIN), YTD Revenue/Expenses/Net Income KPIs from the journal, recent live transactions |
-| `/transactions` | Unified canonical stream: SimpleFIN bank transactions + eBay orders, with categorization + entity badges + materiality |
-| `/reconciliation-queue` | 3-column human-in-the-loop (Needs Review / Uncategorized / Auto-categorized). Confirm posts to journal; Reject trains a category override |
-| `/journal` | Paginated journal with filters, per-entity summary cards with verify-chain button, click-through to entry detail |
-| `/journal/[id]` | Full entry view: double-entry, source provenance, reasoning trace, hash chain context, reversal lineage |
-| `/journal/new` | Manual entry form (cash, owner contributions, reclasses, year-end adjustments) |
-| `/reports` | Inline P&L / Balance Sheet / Cash Flow with period chips; auto-classified operating/investing/financing |
-| `/cpa-export` | CSV / IIF / QBO XML / PDF P&L / Balance Sheet / Cash Flow downloads |
-| `/connectors` | SimpleFIN claim, account-to-entity mapping |
+| `/dashboard` | Cash position + YTD Revenue / Expenses / Net Income from the journal, recent transactions |
+| `/transactions` | Unified transaction stream with categorization, entity badges, and materiality |
+| `/reconciliation-queue` | Human-in-the-loop review: Confirm posts to the journal; Reject trains a category override |
+| `/journal` + `/journal/[id]` | Paginated journal with per-entity verify-chain, double-entry detail, provenance, reversal lineage |
+| `/reports` | P&L / Balance Sheet / Cash Flow with period chips (rendered in-app, no external service) |
+| `/cpa-export` | CSV / IIF / QBO XML / PDF exports (optional sidecar) |
+| `/chat` | Chat with the accountant agent over your ledger (bring your own model) |
+| `/taxes` | Tax-knowledge Q&A + draft tax-form packages (labeled **draft / do not file**) |
 
-## Architecture
+### Append-only journal with a hash chain
 
-```
-External agents (Claude / Codex / Brigade peers)
-        |
-        v
- accounting-ops.magicunicorn.dev (Traefik on midboy1)
-        |
-        +-- web (Next.js 15)  --+
-        +-- app (FastAPI)      |
-                |              v
-                |       cpa-export :8093  (read-only journal exports)
-                |       receipt-reconciler :8092 (matches receipts → txns)
-                |       receipt-worker :8091    (IMAP → Qwen3-VL → Garage)
-                |       ebay-finances-mcp :8000 (FastMCP, eBay Sell APIs)
-                |       imap-mcp :8000          (read-only IMAP)
-                |       simplefin-mcp :8000     (BofA + USAA aggregator)
-                |
-                v
-        Postgres 16 (per-workspace schemas)
-          - public:                    workspace, user_account, membership,
-                                        tenant_credentials (AES-256-GCM),
-                                        worker_extractions, worker_runs,
-                                        receipt_transaction_link
-          - accounting_ops_{wid}:      entity, journal_entry, chart_of_account,
-                                        account_entity_mapping, category_override,
-                                        posting_log, ...
-        Garage (S3-compatible blob storage)
-          - accounting-ops-receipts-{wid}: receipt PDFs by content hash
-        Keycloak uchub realm (OIDC + service tokens)
-```
-
-## Append-Only Journal with Hash Chain
-
-Every posted transaction becomes a `journal_entry` row tied into a
-per-entity SHA-256 hash chain. Reversals create *new* entries (never
-overwrite). `verify_chain` walks the chain and reports tampered indexes.
+Every posted transaction becomes a `journal_entry` row in a per-entity SHA-256
+hash chain. Reversals create *new* entries (never overwrite). `verify_chain`
+walks the chain and reports any tampered index.
 
 ```
 prev_hash || canonical_payload(entry) -> sha256 = this_hash
 ```
 
-Materiality gate at posting time:
-- **< $75** → auto-post when categorization is `auto` AND entity is mapped AND sign matches
-- **$75-$1,000** → queue for human Confirm on `/reconciliation-queue`
-- **> $1,000** → hard block, requires explicit user_confirmed=true with memo
-- **IRS §274(d)** → travel/meals always block without a matching receipt
+Materiality gate at posting time: small auto-categorized items auto-post;
+mid-size items queue for human Confirm; large items hard-block pending an
+explicit confirmation + memo; travel/meals block without a matching receipt.
 
-## Connectors
+### Categorization is deterministic first
 
-| Source | Status | What it gives us |
-|---|---|---|
-| SimpleFIN (BofA, USAA) | ✅ Live | All bank transactions + balances |
-| eBay Sell Fulfillment | ✅ Live | Order-level revenue (gross sales) |
-| eBay Sell Finances | ⏳ Application Growth Check pending (ticket 260522-000033) | Payout-level reconciliation when approved |
-| IMAP Receipts (Stalwart) | 🔌 Awaits accounting@magicunicorn.dev setup | Receipt OCR → match against transactions |
-| Listing-Ops bridge | 🗂 Documented, deprioritized | Alternate path to eBay orders via the existing Listing-Ops integration |
+Tier 1 is a **deterministic vendor-rule engine** (`app/categorization/vendor_rules.py`)
+— fast, auditable, **no model call**, and it covers the bulk of recurring
+transactions. A model is only consulted as an optional Tier-2 fallback for
+transactions the rules leave `Uncategorized`, and those are always queued for
+review rather than auto-posted. **You can run the whole categorizer with no
+model at all.**
 
-## Categorization Engine
+---
 
-Two-tier (Tier 2 LLM is stubbed for v1):
+## Quickstart (self-host)
 
-1. **User overrides** → `category_override` table, populated by Reject button
-2. **Vendor rules** → ~50 patterns covering Stripe, Anthropic, AWS, Hostinger,
-   Postmark, Mercury, eBay, etc.
-3. **Fallback** → `Uncategorized`, surfaces on `/reconciliation-queue`
+**Prerequisites:** Docker + Docker Compose v2, and (for the bootstrap helper)
+Python 3.12 and `openssl` on the host. No GPU required — a CPU-only Ollama works,
+just slower.
 
-Sign-mismatch detection: if a vendor rule expects revenue but the txn is
-negative (or vice versa), the suggestion gets flagged for review even at
-tier L.
+### One command
 
-## Local Development
+```bash
+git clone <this-repo> accounting-ops && cd accounting-ops
+make selfhost
+```
 
-Prerequisites: Python 3.12, Docker Compose v2, Node 22.
+`make selfhost` (→ `scripts/selfhost_bootstrap.sh`) is idempotent and will:
+
+1. create `.env` from `.env.example`,
+2. generate strong secrets (Postgres, Garage, NextAuth) and the
+   `AO_LOCAL_AUTH_SECRET`,
+3. set `AO_EDITION=community` + `AO_AUTH_MODE=local`,
+4. prompt you for a local admin password and store its scrypt hash
+   (via `scripts/gen_local_admin_hash.py`),
+5. generate the credential master key (`secrets/accounting_ops_master_key`),
+6. build + start the stack (`docker-compose.selfhost.yml`): **postgres +
+   garage + ollama + app + web**,
+7. run migrations, provision one workspace + entity, grant your admin the
+   owner role, and seed a chart of accounts.
+
+Then open **http://localhost:3000**, log in with your admin email + password,
+and you're in.
+
+Pull a vision model so the agent can categorize and read receipts:
+
+```bash
+docker compose -f docker-compose.selfhost.yml exec ollama ollama pull qwen2.5vl:7b
+```
+
+Add a manual journal entry (or import a bank CSV), open **/reports**, and render
+a P&L — all with **no external fleet dependency**.
+
+### Manual (what the bootstrap does under the hood)
 
 ```bash
 cp .env.example .env
-# Fill POSTGRES_PASSWORD, GARAGE_RPC_SECRET, GARAGE_ADMIN_TOKEN,
-# NEXTAUTH_SECRET, Keycloak secrets. Also any RECEIPT_WORKER_*,
-# RECEIPT_RECONCILER_*, CPA_EXPORT_*, ACCTOPS_SERVICE_TOKENS
-# values you want set.
-docker compose up -d postgres garage
-docker exec accounting_ops-app-1 sh -c \
-  "cd /app && alembic -c alembic-public.ini upgrade head"
-python scripts/seed_local.py
-docker compose up app web
+
+# 1. Secrets — a long random value in each. AO_LOCAL_AUTH_SECRET must be the
+#    SAME value the web and backend share.
+#      POSTGRES_PASSWORD, GARAGE_RPC_SECRET, GARAGE_ADMIN_TOKEN,
+#      NEXTAUTH_SECRET, AO_LOCAL_AUTH_SECRET
+
+# 2. Edition + auth mode (already set for community in .env.example if you copy it)
+#      AO_EDITION=community
+#      AO_AUTH_MODE=local
+#      AO_LOCAL_ADMIN_EMAIL=you@example.com
+#      AO_LOCAL_ADMIN_UC_UID=admin
+
+# 3. Admin password hash
+python scripts/gen_local_admin_hash.py     # paste output into AO_LOCAL_ADMIN_PASSWORD_HASH
+
+# 4. Credential master key
+python -m scripts.bootstrap_master_key --path secrets/accounting_ops_master_key
+
+# 5. Up
+docker compose -f docker-compose.selfhost.yml up -d --build
+
+# 6. Migrate + provision (run inside the app container)
+WID=$(python -c 'import uuid;print(uuid.uuid4())')
+docker compose -f docker-compose.selfhost.yml exec -T app alembic -c alembic-public.ini upgrade head
+docker compose -f docker-compose.selfhost.yml exec -T app python -m scripts.provision_workspace "$WID" "My Company" --entity "My Company:llc"
+docker compose -f docker-compose.selfhost.yml exec -T app python -m scripts.grant_workspace_admin "$WID" admin --role owner
+docker compose -f docker-compose.selfhost.yml exec -T app python -m scripts.seed_default_coa "$WID" my-company
+# then set DEFAULT_WORKSPACE_ID + TENANT_ID to $WID in .env and restart app + web
 ```
 
-Web shell: `http://localhost:3000`. API health: `http://localhost:8000/healthz`.
+### Bring your own model
 
-## Compose Profiles
+The bundled **Ollama** service (`http://ollama:11434/v1`) is the default target
+for the categorizer and receipt OCR — set `LLM_ENDPOINT_URL` / `LLM_MODEL` in
+`.env` to point anywhere OpenAI-compatible (a remote Ollama, vLLM, a gateway, or
+a hosted API). Choose a **vision** model for receipt reading.
 
-| Profile | Services | When |
-|---|---|---|
-| (default) | `postgres`, `garage`, `app`, `web` | Daily use |
-| `connectors` | `simplefin-mcp`, `ebay-finances-mcp`, `imap-mcp` | When testing external connector code |
-| `receipts` | `receipt-worker`, `receipt-reconciler` | When IMAP creds + Garage bucket are configured |
-| `exports` | `cpa-export` | CPA download service |
+### Optional services (compose profiles)
 
-## Sibling Repos
-
-Service code that lives in its own repo, used by this stack:
-
-- `accounting-ops-receipt-worker` — IMAP → Qwen3-VL → Garage extraction worker
-- `accounting-ops-reconciler` — receipt ↔ transaction matcher (deterministic 7-rule scorer)
-- `accounting-ops-cpa-export` — CSV/IIF/QBO/PDF export service
-- `accounting-ops-ebay-finances-mcp` — FastMCP wrapper over eBay Sell APIs
-- `accounting-ops-simplefin-mcp` — SimpleFIN aggregator MCP
-- `accounting-ops-imap-mcp` — IMAP read-only MCP
-
-All wired into `docker-compose.yml` via `../<repo-name>/` build contexts.
-
-## Service Tokens
-
-Long-running internal workers (reconciler, cpa-export) authenticate via
-`ACCTOPS_SERVICE_TOKENS` — a JSON map keyed by token, value `{uc_uid,
-agent_id}`. The bearer token is constant-time-compared in `app/auth.py`
-and impersonates the configured uc_uid for RBAC.
+| Profile | Service | What it adds | Degrades gracefully? |
+|---|---|---|---|
+| `embeddings` | Infinity | embedding backend for the Tax-Knowledge RAG index | Yes — app runs fine without it |
+| `graph` | FalkorDB | best-effort agent-memory projection | Yes — a no-op if absent |
 
 ```bash
-# Mint a token (32+ chars), then add to /home/muut/Accounting-Ops/.env:
-ACCTOPS_SERVICE_TOKENS={"<token>":{"uc_uid":"aaron","agent_id":"my-worker"}}
+docker compose -f docker-compose.selfhost.yml --profile embeddings --profile graph up -d
 ```
 
-## Multi-Tenancy Model
+### Demo data (optional)
+
+```bash
+make demo    # seeds two generic sample workspaces (no PII)
+```
+
+---
+
+## Editions
+
+Accounting-Ops is **open-core**. The Community Edition is the full self-hostable
+product; a couple of multi-tenant/suite surfaces are held for the Enterprise
+Edition and are simply not mounted when `AO_EDITION=community`.
+
+| | Community (this repo, AGPL) | Enterprise |
+|---|---|---|
+| Ledger, categorization, reports, CPA export | ✅ | ✅ |
+| Agents (categorize / reconcile / CFO / tax specialists) | ✅ | ✅ |
+| Auth | **Local single-admin** (`AO_AUTH_MODE=local`) | Keycloak / OIDC SSO |
+| Bring-your-own models | ✅ (Ollama by default) | ✅ + shared gateway |
+| Multi-client CPA console / cross-client work inbox | — | ✅ |
+| Suite federation (Brigade, Contact-Ops, cross-app entitlement) | — | ✅ |
+
+### What the Community Edition does **not** do
+
+To keep the free, self-hostable edition safe to run, these are **off and clearly
+labeled** (see [DISCLAIMER.md](DISCLAIMER.md)):
+
+- **No electronic filing.** It generates tax packages *for your own records*; it
+  does **not** transmit to the IRS (MeF), a **state portal**, or any authority.
+  Generated tax documents are watermarked **draft / "do not file."**
+- **No tax payments.** No **EFTPS** connection; it never moves money.
+- **No e-signature** submission of filings.
+- **No trades, transfers, or payments** are executed on your behalf.
+
+The tax-submission tracker only *records* that you sent a filing (paper /
+portal / e-file) — it does not send anything.
+
+---
+
+## Architecture
+
+```
+You + external agents (Claude / Codex / MCP clients)
+        |
+        v
+   web (Next.js 15)  --->  app (FastAPI)  --->  Postgres (per-workspace schemas,
+        (local-auth Credentials provider)          append-only hash-chained ledger)
+                                |
+                                +--> Garage (S3-compatible blob storage: receipts/docs)
+                                +--> Ollama (bring-your-own model, OpenAI-compatible)
+                                +--> [optional] Infinity embeddings · FalkorDB graph
+```
+
+- **MCP-first / agent-first.** The FastAPI app exposes an MCP surface (`/mcp`) and
+  A2A surface (`/a2a`) so agents operate the ledger the same way the UI does — no
+  wrappers, no shadow API.
+- **Deterministic where it matters.** Categorization Tier 1 and the double-entry
+  posting engine are rule-based and model-free; models are an optional assist.
+
+## Multi-tenancy model
 
 `Workspace > Entity > User`:
 
-- **Workspace** is the schema boundary — a Postgres schema per workspace (`accounting_ops_<wid>`)
-- **Entity** is a row predicate within a workspace — Magic Unicorn Inc, Aaron Personal, Majiks JV, Brightwater Labs
-- **User** is the auth subject (`uc_uid` from Keycloak)
+- **Workspace** — the isolation boundary (a Postgres schema per workspace).
+- **Entity** — a legal entity within a workspace (e.g. your LLC, an S-corp, a
+  personal 1040). Row-scoped within the workspace schema.
+- **User** — the auth subject (`uc_uid`). In Community/local mode this is your
+  single admin.
 
-See `docs/WORKSPACE-ENTITY-USER-MODEL.md` for details.
+See docs/WORKSPACE-ENTITY-USER-MODEL.md.
 
 ## Documentation
 
-- `docs/ARCHITECTURE.md` — runtime architecture, data flows, hash chain spec
-- `docs/USER-GUIDE.md` — per-page walkthrough
-- `docs/OPERATIONS.md` — deploy, monitor, restore
-- `docs/PHASE-2-RECEIPT-WORKER-BOOTSTRAP.md` — receipt-worker setup
-- `docs/PHASE-2-RECEIPT-VLM-PIPELINE.md` — Tier 1/2/3 VLM design
-- `docs/PHASE-1-6-ENCRYPTED-CREDENTIALS.md` — credential storage spec
-- `docs/STALWART-IMAP-BOOTSTRAP.md` — mailbox setup for receipts
-- `docs/WORKSPACE-ENTITY-USER-MODEL.md` — tenancy model
-- `docs/AGENT-ACTIVITY-SPEC.md` — agent observation surface
-- `docs/DESIGN-BRIEF.md` — original product brief
+- [docs/PROFESSIONAL-SUBSTITUTE.md](docs/PROFESSIONAL-SUBSTITUTE.md) — the design stance: an autonomous professional-substitute you supervise
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — runtime architecture, data flows, hash-chain spec
+- [docs/USER-GUIDE.md](docs/USER-GUIDE.md) — per-page walkthrough
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) — operate, monitor, restore
+- docs/WORKSPACE-ENTITY-USER-MODEL.md — tenancy model
+- [COMMUNITY_MANIFEST.md](COMMUNITY_MANIFEST.md) — which paths ship in Community vs Enterprise
+- DEPLOY.md — advanced deployment (reverse proxy, least-privilege DB roles, backups)
 
-## Deploy
+## Security & your data
 
-```bash
-# From this directory on aaronstransky's Mac:
-rsync -a --delete --exclude='.git' --exclude='__pycache__' --exclude='web/node_modules' \
-  --exclude='web/.next' --exclude='.env' --exclude='secrets/' \
-  ./ midboy1:/home/muut/Accounting-Ops/
+- Connector credentials are encrypted at rest with a local master key
+  (`secrets/accounting_ops_master_key`). **Back it up out-of-band** — losing it
+  orphans all encrypted credentials.
+- No telemetry by default. Report vulnerabilities per [SECURITY.md](SECURITY.md).
 
-# On midboy1:
-cd /home/muut/Accounting-Ops
-docker compose build app web
-docker compose up -d app web
-```
+---
 
-Tenant migrations run via:
-```bash
-docker exec accounting_ops-app-1 sh -c "cd /app && alembic -c alembic-tenant.ini \
-  -x tenant=accounting_ops_<workspace-uuid-underscored> upgrade head"
-```
-
-## Status (2026-05-22)
-
-✅ **Production-live**. Daily usable for BofA + USAA + eBay orders + manual entries. Reports, CPA export, journal hash chain all working. Reject + override loop completes the human-in-the-loop categorization.
-
-⏳ **Pending external** (no code work needed when they unblock):
-- eBay Application Growth Check (ticket 260522-000033) — switches eBay from orders to payout-level data
-- Stalwart mailbox creation — starts the receipt OCR pipeline (5-min hands-on, see `docs/STALWART-IMAP-BOOTSTRAP.md`)
-
-🗂 **Roadmap**:
-- Bulk-confirm + keyboard shortcuts on `/reconciliation-queue`
-- COA editor UI (currently seeded only)
-- Brigade agents wired to ledger for autonomous categorization/reconciliation
-- Multi-currency support (FX rate table exists but not consumed yet)
-- 1099-NEC year-end reporting
-- Listing-Ops bridge as alternate eBay path
-
-## Vendor Skills
-
-Anthropic financial-services scaffolding is vendored read-only at
-`vendor/anthropic-financial-services/`. Reference only — we don't modify
-or extend their prompts in this repo.
+*Accounting-Ops is not a CPA, EA, tax preparer, attorney, or fiduciary. It is a
+tool that helps you do that work, and you are responsible for what you do with
+it. See [DISCLAIMER.md](DISCLAIMER.md).*
