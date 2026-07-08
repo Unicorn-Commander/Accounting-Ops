@@ -198,7 +198,7 @@ async def test_charge_routes_to_revenue_after_first_run_guard():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     bt = _bt("txn_charge_1", "charge", amount=999, fee=0, source_id="ch_abc12345")
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "posted", result.reason
     # Verify journal entry insert
@@ -223,7 +223,7 @@ async def test_charge_with_fee_emits_sidecar_fee_entry():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     bt = _bt("txn_charge_w_fee", "charge", amount=5000, fee=175)  # $50 charge, $1.75 fee
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "posted", result.reason
     assert result.fee_journal_entry_id is not None
@@ -244,7 +244,7 @@ async def test_refund_reverses_charge_routing():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     bt = _bt("txn_refund_1", "refund", amount=-500, fee=0)
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "posted"
     entry = session.posted_entries[0]
@@ -257,7 +257,7 @@ async def test_stripe_fee_routes_to_processor_fees():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     bt = _bt("txn_fee_1", "stripe_fee", amount=-250)
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "posted"
     entry = session.posted_entries[0]
@@ -270,7 +270,7 @@ async def test_payout_routes_to_cash_default_account():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     bt = _bt("txn_payout_1", "payout", amount=-5000, source_id="po_abc12345")
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "posted", result.reason
     entry = session.posted_entries[0]
@@ -283,7 +283,7 @@ async def test_unknown_type_blocked():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     bt = _bt("txn_x_1", "weird_new_type_2099", amount=100)
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "blocked_unknown_type"
     assert not session.posted_entries
@@ -295,7 +295,7 @@ async def test_application_fee_flagged_for_cpa():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     bt = _bt("txn_appfee_1", "application_fee", amount=200)
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "flagged_for_cpa"
     assert result.approval_id is not None
@@ -308,7 +308,7 @@ async def test_adjustment_flagged_for_cpa():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     bt = _bt("txn_adj_1", "adjustment", amount=-50)
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "flagged_for_cpa"
 
@@ -318,7 +318,7 @@ async def test_missing_coa_blocked():
     session = _StubSession(accounts={}, existing_posts=31)
     bt = _bt("txn_nocoa", "charge", amount=999)
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "blocked_unknown_account"
     assert not session.posted_entries
@@ -329,7 +329,7 @@ async def test_zero_amount_non_payout_skipped():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     bt = _bt("txn_zero", "charge", amount=0)
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "skipped_zero_amount"
 
@@ -340,7 +340,7 @@ async def test_idempotent_hit_returns_blocked_idempotent():
     session.idempotent_hit = True
     bt = _bt("txn_dup_1", "charge", amount=999)
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "blocked_idempotent"
     assert result.journal_entry_id is not None
@@ -352,7 +352,7 @@ async def test_first_run_guard_queues_first_30():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
     bt = _bt("txn_first_run", "charge", amount=999)
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "queued_first_run"
     assert result.approval_id is not None
@@ -373,7 +373,7 @@ async def test_first_run_exactly_at_threshold_posts():
     )
     bt = _bt("txn_at_limit", "charge", amount=999)
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "posted"
 
@@ -388,7 +388,7 @@ async def test_pii_not_in_payee_or_description():
     bt["billing_details"] = {"email": "secret@example.com", "name": "John Doe"}
     bt["metadata"] = {"customer_email": "leaked@example.com", "card_last4": "4242"}
     result = await stripe_mapper.map_and_post_balance_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "posted"
     entry = session.posted_entries[0]

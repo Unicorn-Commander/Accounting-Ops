@@ -97,8 +97,8 @@ async def test_endpoint_admin_scope_passes(app_under_test):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
-    assert body["claims"]["sub"] == "aaron"
-    assert body["resolved_user"] == "aaron"
+    assert body["claims"]["sub"] == "jane"
+    assert body["resolved_user"] == "jane"
 
 
 async def test_endpoint_uc_uid_allowlist(app_under_test, monkeypatch):
@@ -124,7 +124,7 @@ async def test_endpoint_invalid_brigade_jwt_returns_400(app_under_test):
     """A garbage JWT body -> 400 (not 500)."""
     _override_auth(
         app_under_test,
-        AuthContext(uc_uid="aaron", agent_id=None, scopes=("admin",), claims={}),
+        AuthContext(uc_uid="jane", agent_id=None, scopes=("admin",), claims={}),
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app_under_test), base_url="http://test"
@@ -144,7 +144,7 @@ async def test_endpoint_wrong_audience_returns_400(app_under_test):
     """
     _override_auth(
         app_under_test,
-        AuthContext(uc_uid="aaron", agent_id=None, scopes=("admin",), claims={}),
+        AuthContext(uc_uid="jane", agent_id=None, scopes=("admin",), claims={}),
     )
     token = _mint_ed25519(_ED_PRIV, _base_claims(aud="other-app"))
     async with httpx.AsyncClient(

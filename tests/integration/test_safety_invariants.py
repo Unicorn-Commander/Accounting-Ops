@@ -171,7 +171,7 @@ async def test_high_value_entry_with_confirm_and_memo_posts(
         "amount_cents": -150000,
         "description": "Big vendor invoice",
         "payee": "Anthropic",
-        "memo": "Confirmed annual Claude Enterprise prepayment — approved by Aaron",
+        "memo": "Confirmed annual Claude Enterprise prepayment — approved by the owner",
         "category": "SaaS · AI",
         "category_status": "auto",
         "sign_matched": True,

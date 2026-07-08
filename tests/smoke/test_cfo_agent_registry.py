@@ -149,7 +149,7 @@ def test_cfo_system_prompt_loads():
         workspace_id="00000000-0000-0000-0000-000000000001",
         entity_id="00000000-0000-0000-0000-000000000002",
         tax_year=2026,
-        user_uc_uid="aaron",
+        user_uc_uid="jane",
     )
     assert len(sp) > 500, "system_prompt should be non-trivial"
     assert "CFO Agent" in sp

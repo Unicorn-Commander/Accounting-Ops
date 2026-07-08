@@ -30,7 +30,7 @@ ISSUER = "https://auth.unicorncommander.ai/realms/uchub"
 # This app's own client id == default accepted audience.
 APP_AUD = "accounting-ops-app"
 # A different uchub client (e.g. an agent / Brigade) minting the token.
-AGENT_CLIENT = "majiks-brigade"
+AGENT_CLIENT = "example-brigade"
 KID = "test-signing-kid"
 
 
@@ -80,7 +80,7 @@ def _base_claims(**overrides) -> dict:
     claims = {
         "iss": ISSUER,
         "sub": "user-123",
-        "uc_uid": "aaron",
+        "uc_uid": "jane",
         "azp": AGENT_CLIENT,  # minted by an agent client, NOT the app itself
         "iat": now,
         "exp": now + 300,
@@ -116,7 +116,7 @@ def _serve_jwks(monkeypatch):
 async def test_aud_string_equal_accepted():
     token = _mint(_PRIVATE_PEM, _base_claims(aud=APP_AUD))
     ctx = await authenticate_token(token)
-    assert ctx.uc_uid == "aaron"
+    assert ctx.uc_uid == "jane"
 
 
 async def test_aud_list_including_app_accepted():
@@ -124,7 +124,7 @@ async def test_aud_list_including_app_accepted():
     this is the H3 unblock: azp is a different client, but aud carries us."""
     token = _mint(_PRIVATE_PEM, _base_claims(aud=["account", APP_AUD]))
     ctx = await authenticate_token(token)
-    assert ctx.uc_uid == "aaron"
+    assert ctx.uc_uid == "jane"
 
 
 async def test_resource_access_key_accepted():
@@ -137,7 +137,7 @@ async def test_resource_access_key_accepted():
         ),
     )
     ctx = await authenticate_token(token)
-    assert ctx.uc_uid == "aaron"
+    assert ctx.uc_uid == "jane"
 
 
 async def test_act_claim_sets_agent_id():
@@ -147,7 +147,7 @@ async def test_act_claim_sets_agent_id():
         _base_claims(aud=APP_AUD, act={"sub": "receipt-reconciler"}),
     )
     ctx = await authenticate_token(token)
-    assert ctx.uc_uid == "aaron"
+    assert ctx.uc_uid == "jane"
     assert ctx.agent_id == "receipt-reconciler"
 
 
@@ -160,7 +160,7 @@ async def test_configurable_accepted_audience(monkeypatch):
 
     good = _mint(_PRIVATE_PEM, _base_claims(aud="accounting-ops-resource"))
     ctx = await authenticate_token(good)
-    assert ctx.uc_uid == "aaron"
+    assert ctx.uc_uid == "jane"
 
     # The app's OWN default client id no longer suffices once the knob is set.
     bad = _mint(_PRIVATE_PEM, _base_claims(aud=APP_AUD))
