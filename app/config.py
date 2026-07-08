@@ -6,7 +6,8 @@ from pydantic import BaseModel
 
 class Settings(BaseModel):
     app_name: str = "Accounting-Ops"
-    public_base_url: str = "https://accounting.magicunicorn.dev"
+    # Generic self-host default. Deployments override via PUBLIC_BASE_URL.
+    public_base_url: str = "http://localhost:3000"
 
     # ---- Open-core edition + self-host auth (Community Edition carve-out) ----
     # ``edition`` gates the enterprise/suite-federation surface. DEFAULT
@@ -40,7 +41,7 @@ class Settings(BaseModel):
     # tables, NO ownership, NO ability to ALTER/DISABLE triggers, TRUNCATE,
     # or UPDATE/DELETE the append-only ledger tables. See migrations
     # tenant/0005 + public/0003 and DEPLOY.md "DB roles".
-    database_url: str = "postgresql+asyncpg://accounting_ops:accounting_ops@localhost/accounting_ops"
+    database_url: str = "postgresql+asyncpg://accounting_ops:changeme@localhost/accounting_ops"
     # DDL/owner DB URL used ONLY by migrations + workspace provisioning
     # (CREATE SCHEMA, alembic upgrade). This is the table-OWNING role
     # (accounting_ops). Falls back to database_url when unset so a
@@ -48,7 +49,9 @@ class Settings(BaseModel):
     # dev) keeps working unchanged.
     admin_database_url: str | None = None
 
-    keycloak_realm_url: str = "https://auth.unicorncommander.ai/realms/uchub"
+    # Enterprise/keycloak-mode default. Community self-host uses AO_AUTH_MODE=local
+    # and never consults this. Enterprise deployments override via KEYCLOAK_REALM_URL.
+    keycloak_realm_url: str = "https://sso.example.com/realms/accounting-ops"
     keycloak_client_id: str = "accounting-ops-app"
     keycloak_client_secret: str | None = None
     # OAuth resource-server audience this app validates incoming bearer tokens
@@ -67,12 +70,12 @@ class Settings(BaseModel):
     # keycloak_client_id/secret. Sync is DISABLED (endpoint returns a clear
     # 503) until a client secret + audience are present — go-live is gated on
     # the uchub client registration + tenant alignment, not on this code.
-    contact_ops_mcp_url: str = "https://mcp.contacts.magicunicorn.dev/mcp"
+    contact_ops_mcp_url: str = "https://contact-ops.example.com/mcp"
     contact_ops_audience: str = "contact-ops-mcp"
     contact_ops_client_id: str | None = None
     contact_ops_client_secret: str | None = None
 
-    falkordb_host: str = "192.168.10.10"
+    falkordb_host: str = "falkordb"  # docker DNS; override via FALKORDB_HOST
     falkordb_port: int = 6379
     falkordb_password: str = ""  # set via FALKORDB_PASSWORD; "" = connect without AUTH
     garage_s3_endpoint: str = "http://garage:3900"
@@ -93,8 +96,11 @@ class Settings(BaseModel):
     otel_exporter_otlp_endpoint: str | None = None
     otel_service_name: str = "accounting-ops"
 
-    qwen_local_url: str = "http://midboy1:8000/v1"
-    qwen_vlm_url: str = "http://midboy1:8087/v1"
+    # Generic BYO-model defaults point at the bundled `ollama` service
+    # (docker-compose.selfhost.yml). Deployments with their own inference fleet
+    # override via QWEN_LOCAL_URL / QWEN_VLM_URL.
+    qwen_local_url: str = "http://ollama:11434/v1"
+    qwen_vlm_url: str = "http://ollama:11434/v1"
     # Default workspace+entity for single-tenant test deployments; production
     # always resolves these per-request from JWT/path.
     default_workspace_id: str | None = None
@@ -106,22 +112,20 @@ class Settings(BaseModel):
     # Two deployment modes (both env-overridable via LLM_ENDPOINT_URL / LLM_MODEL /
     # LLM_API_KEY):
     #
-    #   STANDALONE (default) — direct to the local llama.cpp / vLLM server:
-    #     LLM_ENDPOINT_URL = http://100.121.80.175:8088/v1   (midboy1)
-    #     LLM_MODEL        = Qwen3.6-35B-A3B-Vision-p40      (P40 backend — image-safe)
-    #     LLM_API_KEY      = (blank — no auth on local server)
+    #   SELF-HOST (default) — the bundled `ollama` service (BYO-model). Pull a
+    #     vision model first, e.g. `ollama pull qwen2.5vl:7b`:
+    #     LLM_ENDPOINT_URL = http://ollama:11434/v1
+    #     LLM_MODEL        = qwen2.5vl:7b
+    #     LLM_API_KEY      = (blank — no auth on the local server)
     #
-    #   SUITE / GATEWAY — through the UC LiteLLM gateway (load-balances P40+3090,
-    #     no-think default, per-org metering):
+    #   EXTERNAL GATEWAY — through any OpenAI-compatible gateway / hosted API:
     #     LLM_ENDPOINT_URL = http://<gateway-host>:4000/v1
-    #     LLM_MODEL        = qwen3.6-vision
+    #     LLM_MODEL        = <model-id>
     #     LLM_API_KEY      = <virtual-key>
     #
-    # ⚠️  Do NOT default to "Qwen3.6-35B-A3B-Vision" (the RTX-6000 alias): it
-    # OOM-crashes on image input and returns 502. The P40 alias below is the safe
-    # standalone default for receipt OCR. Override via LLM_MODEL for the gateway.
-    llm_endpoint_url: str = "http://100.121.80.175:8088/v1"
-    llm_model: str = "Qwen3.6-35B-A3B-Vision-p40"
+    # The categorizer sends a receipt image, so choose a VISION-capable model.
+    llm_endpoint_url: str = "http://ollama:11434/v1"
+    llm_model: str = "qwen2.5vl:7b"
     llm_api_key: str = ""          # blank = local/no-auth; set in env for cloud
     llm_timeout_s: int = 30
 
@@ -129,17 +133,11 @@ class Settings(BaseModel):
     # URL of the bbox-oracle service.  POST {url}/ocr with multipart field "file"
     # (PNG/JPG) → {"text": "...", "lines": [{"text", "bbox", "score"}, ...]}.
     #
-    # Two deployment modes (both env-overridable via OCR_BBOX_SERVICE_URL):
-    #
-    #   STANDALONE (default) — direct to the live bbox-oracle on bigboy:
-    #     OCR_BBOX_SERVICE_URL = http://100.126.207.157:8097
-    #
-    #   SUITE / GATEWAY — point at whatever host exposes the oracle internally.
-    #     OCR_BBOX_SERVICE_URL = http://ocr-oracle.internal:8097
-    #
-    # Set to an empty string ("") to disable the cross-check tier entirely; the
-    # VLM-only result is returned without the geometric reconcile pass.
-    ocr_bbox_service_url: str = "http://100.126.207.157:8097"
+    # The cross-check is OPTIONAL. DEFAULT is empty ("") = disabled: the VLM-only
+    # result is returned without the geometric reconcile pass, so self-host works
+    # out of the box with no extra service. Deployments that run a bbox-oracle set
+    # OCR_BBOX_SERVICE_URL to its base URL (e.g. http://ocr-oracle:8097).
+    ocr_bbox_service_url: str = ""
 
     # ---- CPA Export service ----
     # URL of the accounting-ops-cpa-export sidecar. Defaults to the docker DNS
@@ -157,13 +155,13 @@ class Settings(BaseModel):
     # keys + Lago metering) ONLY when route_chat_through_gateway is enabled.
     # DEFAULT OFF ⇒ the chat path behaves exactly as today (OpenRouter-direct).
     # See docs/INFERENCE-AND-BILLING.md + agents/chat/inference_config.py.
-    llm_gateway_base_url: str = "https://llm.unicorncommander.ai"
+    llm_gateway_base_url: str = "http://litellm:4000"
     # SCOPED admin key (NOT the gateway master) used only to mint per-workspace
     # virtual keys. Blank ⇒ minting disabled (the platform key / OpenRouter
     # fallback still work).
     llm_gateway_admin_key: str = ""
-    # The deployment's own gateway virtual key (e.g. the internal magicunicorn.dev
-    # ring). Used when a workspace has no BYOK + no per-workspace virtual key.
+    # The deployment's own gateway virtual key. Used when a workspace has no
+    # BYOK + no per-workspace virtual key.
     # Blank ⇒ no platform key (fall through to OpenRouter).
     llm_platform_virtual_key: str = ""
     # MASTER feature flag. False ⇒ chat path is OpenRouter-direct (today's
@@ -176,10 +174,10 @@ class Settings(BaseModel):
     # (org_features/tier_features). AO READS entitlement + links out for plan
     # management; it NEVER duplicates billing or mutates Lago/Stripe. See
     # docs/INFERENCE-AND-BILLING.md.
-    ops_center_base_url: str = "https://unicorncommander.ai"
+    ops_center_base_url: str = "https://platform.example.com"
     # Deep-link target where a user manages their plan / billing (Ops-Center
-    # portal — Stripe lives there, behind the shared uchub SSO session).
-    ops_center_billing_url: str = "https://unicorncommander.ai/billing"
+    # portal — Stripe lives there, behind the shared SSO session).
+    ops_center_billing_url: str = "https://platform.example.com/billing"
 
     # ---- Server-to-server (M2M) trusted callers ----
     # Space-separated list of Keycloak client IDs (azp claim values) that are
