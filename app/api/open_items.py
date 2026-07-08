@@ -24,13 +24,13 @@ Routing rules from form_reference + submitter_id + content topic:
   * submitter_id LIKE '%loader%' -> usually INFORMATIONAL (corrections,
     captured facts) — bucket as "context" unless prefixed CRITICAL.
   * submitter_id == 'tax-1120-preparer' or LIKE '*specialist%' ->
-    typically routed to Mosin (CPA-review territory).
+    typically routed to the CPA (CPA-review territory).
   * form_reference starts with 'CRITICAL: ' -> Section 1 (time-sensitive).
   * form_reference starts with 'Decision: ' or 'Strategy — ' (specific
     enumerated strategies) -> Section 3 (the owner decides).
   * form_reference contains 'Attorney' or 'LLC formation' ->
     Section 5.
-  * else -> Section 4 (waiting on Mosin).
+  * else -> Section 4 (waiting on the CPA).
 
 The default list of "documents to physically go pull" lives in
 ``_DEFAULT_DOCUMENT_CHECKLIST`` below. In the Community Edition this ships
@@ -94,7 +94,7 @@ _DEFAULT_DECISION_CHECKLIST: list[dict[str, Any]] = []
 def _bucket_for_item(row: dict[str, Any]) -> str:
     """Map a tax_review_queue row to one of:
 
-      "time_sensitive" | "decision" | "mosin" | "attorney" | "info"
+      "time_sensitive" | "decision" | "cpa" | "attorney" | "info"
 
     Implements the rules documented at the top of this module.
     """
@@ -120,18 +120,18 @@ def _bucket_for_item(row: dict[str, Any]) -> str:
     #    flagged_position (which always merit human-eye on the queue).
     if "loader" in submitter:
         if item_type == "flagged_position":
-            return "mosin"
+            return "cpa"
         return "info"
 
-    # 5. Specialist-sourced items typically need Mosin's review
+    # 5. Specialist-sourced items typically need the CPA's review
     if "specialist" in submitter or "preparer" in submitter or "drafter" in submitter:
-        return "mosin"
+        return "cpa"
 
     if "narrative-generator" in submitter or "resolver" in submitter:
-        return "mosin"
+        return "cpa"
 
     # 6. Default fallback
-    return "mosin"
+    return "cpa"
 
 
 def _summarize_content(content: Any) -> str:
@@ -166,7 +166,7 @@ class OpenItemsResponse(BaseModel):
     time_sensitive: list[dict[str, Any]]
     documents: list[dict[str, Any]]
     decisions: list[dict[str, Any]]
-    waiting_on_mosin: list[dict[str, Any]]
+    waiting_on_cpa: list[dict[str, Any]]
     waiting_on_attorney: list[dict[str, Any]]
     resolved_this_week: list[dict[str, Any]]
     # Tax submissions in flight (paper/MyDORWAY/efile records from
@@ -413,7 +413,7 @@ async def get_open_items(
     sections: dict[str, list[dict[str, Any]]] = {
         "time_sensitive": [],
         "decision": [],
-        "mosin": [],
+        "cpa": [],
         "attorney": [],
         "info": [],
     }
@@ -572,7 +572,7 @@ async def get_open_items(
         "documents_received": received_count,
         "decisions_pending": len(decisions_out) - decisions_decided,
         "decisions_decided": decisions_decided,
-        "waiting_on_mosin": len(sections["mosin"]),
+        "waiting_on_cpa": len(sections["cpa"]),
         "waiting_on_attorney": len(sections["attorney"]),
         "informational": len(sections["info"]),
         "resolved_this_week": len(resolved_out),
@@ -599,7 +599,7 @@ async def get_open_items(
         time_sensitive=sections["time_sensitive"],
         documents=documents_out,
         decisions=decisions_out,
-        waiting_on_mosin=sections["mosin"],
+        waiting_on_cpa=sections["cpa"],
         waiting_on_attorney=sections["attorney"],
         resolved_this_week=resolved_out,
         submissions_in_flight=submissions_out,

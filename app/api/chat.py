@@ -991,7 +991,7 @@ async def save_chat_message_as_memo(
         #   * "send", "provide", "upload", "pull",
         #     "obtain", "need to get"               -> Documents (informational)
         #   * "critical", "urgent", "deadline"      -> Time-sensitive
-        #   * else                                   -> Mosin review (default)
+        #   * else                                   -> CPA review (default)
         lower = memo_text.lower()
         if any(w in lower for w in ("critical", "urgent", "deadline", "immediately")):
             bucket = "time_sensitive"

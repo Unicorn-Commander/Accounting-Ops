@@ -75,7 +75,7 @@ export type OpenItemsResponse = {
     documents_received: number;
     decisions_pending: number;
     decisions_decided: number;
-    waiting_on_mosin: number;
+    waiting_on_cpa: number;
     waiting_on_attorney: number;
     informational: number;
     resolved_this_week: number;
@@ -84,7 +84,7 @@ export type OpenItemsResponse = {
   time_sensitive: QueueRow[];
   documents: DocChecklistItem[];
   decisions: DecisionItem[];
-  waiting_on_mosin: QueueRow[];
+  waiting_on_cpa: QueueRow[];
   waiting_on_attorney: QueueRow[];
   resolved_this_week: ResolvedRow[];
 };

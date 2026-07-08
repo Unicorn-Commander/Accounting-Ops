@@ -11,7 +11,7 @@ The eBay Finances API returns five primary transaction types:
   * PAYOUT                — eBay sweeps the available balance to the seller's
                             bank account (this is the bank deposit the operator sees)
 
-Account routing (uses MU Inc's extended COA, see scripts/extend_coa_mu_inc.sql
+Account routing (uses the entity's extended COA, see scripts/extend_coa_mu_inc.sql
 and the c_corp template):
 
   Type              Debit                                  Credit

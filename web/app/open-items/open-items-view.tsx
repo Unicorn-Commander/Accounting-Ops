@@ -865,7 +865,7 @@ export function OpenItemsView({
 }) {
   const allClear =
     data.counts.action_required === 0 &&
-    data.counts.waiting_on_mosin === 0 &&
+    data.counts.waiting_on_cpa === 0 &&
     data.counts.waiting_on_attorney === 0;
 
   return (
@@ -919,7 +919,7 @@ export function OpenItemsView({
               </h2>
               <p className="mt-1 text-sm text-ink-secondary">
                 No time-sensitive items, no documents pending, no decisions
-                queued, and nothing waiting on Mosin or the attorney. Enjoy
+                queued, and nothing waiting on the CPA or the attorney. Enjoy
                 the rare quiet.
               </p>
             </div>
@@ -969,18 +969,18 @@ export function OpenItemsView({
         />
       </section>
 
-      {/* Section 4 — Waiting on Mosin */}
-      <section id="mosin">
+      {/* Section 4 — Waiting on the CPA */}
+      <section id="cpa">
         <SectionHeading
           icon={<Hourglass size={15} />}
-          title="Waiting on Mosin (CPA)"
-          count={data.counts.waiting_on_mosin}
+          title="Waiting on the CPA"
+          count={data.counts.waiting_on_cpa}
           tone="agent"
           subtitle="Informational — nothing for you to do, but here's what your CPA sees."
         />
         <WaitingList
-          rows={data.waiting_on_mosin}
-          emptyMsg="Nothing currently waiting on Mosin."
+          rows={data.waiting_on_cpa}
+          emptyMsg="Nothing currently waiting on the CPA."
           tone="agent"
         />
       </section>

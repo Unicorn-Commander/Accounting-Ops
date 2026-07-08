@@ -39,7 +39,7 @@ class MailingLabelData:
     to_office_key: str | None = None
     to_office_custom: dict[str, str] | None = None
 
-    # Return address (defaults to MU Inc)
+    # Return address (defaults to the generic placeholder)
     return_address: dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_RETURN_ADDRESS)
     )

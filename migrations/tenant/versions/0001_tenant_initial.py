@@ -341,7 +341,7 @@ def upgrade() -> None:
 
     # =========================================================================
     # compliance_profile / compliance_rule — ENTITY-SCOPED.
-    # FERS rule attaches to Aaron personal, not to MU Inc.
+    # E.g. a personal compliance rule attaches to a personal entity, not the corp.
     # =========================================================================
     op.create_table(
         "compliance_profile",
@@ -432,7 +432,7 @@ def upgrade() -> None:
 
     # =========================================================================
     # connector_state — ENTITY-SCOPED.
-    # E.g. "Aaron's BofA business" connection lives on MU Inc entity.
+    # E.g. a "business bank" connection lives on the business entity.
     # =========================================================================
     op.create_table(
         "connector_state",
@@ -449,7 +449,7 @@ def upgrade() -> None:
             "connector_instance_name",
             sa.String(length=256),
             nullable=False,
-            comment="Human label, e.g. 'Aaron BofA Business', 'Aaron USAA Personal'",
+            comment="Human label, e.g. 'Business Checking', 'Personal Checking'",
         ),
         sa.Column(
             "state",

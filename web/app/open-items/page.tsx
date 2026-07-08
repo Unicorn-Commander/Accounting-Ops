@@ -2,7 +2,7 @@
 //
 // Audit issue C1: This route used to render a Sentinel findings dashboard.
 // The richer seven-section OpenItemsView (Time-sensitive / Documents /
-// Decisions / Waiting on Mosin / Waiting on attorney / Resolved / Recent AI
+// Decisions / Waiting on the CPA / Waiting on attorney / Resolved / Recent AI
 // Activity) is now the default. The Sentinel summary is demoted to a
 // collapsible secondary block at the bottom that drills into /agent-activity
 // for full detail.
