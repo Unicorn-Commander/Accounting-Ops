@@ -9,15 +9,15 @@ The eBay Finances API returns five primary transaction types:
                             holds, etc. (anything that's not directly tied to
                             a sale order)
   * PAYOUT                — eBay sweeps the available balance to the seller's
-                            bank account (this is the BoA deposit Aaron sees)
+                            bank account (this is the bank deposit the operator sees)
 
 Account routing (uses MU Inc's extended COA, see scripts/extend_coa_mu_inc.sql
 and the c_corp template):
 
   Type              Debit                                  Credit
   ----              -----                                  ------
-  SALE              1220 eBay Payouts Receivable           4150 eBay/SkyBehind Resale Revenue
-  REFUND            4150 eBay/SkyBehind Resale Revenue     1220 eBay Payouts Receivable
+  SALE              1220 eBay Payouts Receivable           4150 eBay Resale Revenue
+  REFUND            4150 eBay Resale Revenue               1220 eBay Payouts Receivable
   FEE               5520 Payment Processor Fees            1220 eBay Payouts Receivable
   NON_SALE_CHARGE   5520 Payment Processor Fees (default)  1220 eBay Payouts Receivable
   PAYOUT            1010 Cash · BoA Primary                1220 eBay Payouts Receivable
@@ -56,14 +56,14 @@ _log = logging.getLogger("acctops.ebay_mapper")
 # them; the c_corp template also includes 1220 / 4150 / 5520 by default.
 # ----------------------------------------------------------------------------
 ACCT_PAYOUTS_RECEIVABLE = "1220"  # eBay Payouts Receivable
-ACCT_EBAY_REVENUE = "4150"  # eBay / SkyBehind Resale Revenue
+ACCT_EBAY_REVENUE = "4150"  # eBay Resale Revenue
 ACCT_PROCESSOR_FEES = "5520"  # Payment Processor Fees
 ACCT_CASH_PRIMARY_DEFAULT = "1010"  # Cash · Primary Checking (BoA via SimpleFIN)
 
 EbayTxnType = Literal["SALE", "REFUND", "FEE", "NON_SALE_CHARGE", "PAYOUT", "CREDIT", "DISPUTE", "SHIPPING_LABEL", "TRANSFER"]
 
 # Safety: first N mapped journal entries per (workspace, entity) go to
-# approval queue regardless of materiality — Aaron reviews them by hand
+# approval queue regardless of materiality — the operator reviews them by hand
 # before we trust the mapping for auto-posting.
 FIRST_RUN_REVIEW_LIMIT = 30
 
@@ -208,7 +208,7 @@ async def _resolve_cash_for_payout(
     """Pick (account_number, canonical_form) of the cash account a PAYOUT lands in.
 
     Prefers a COA account that is linked to ``external_account_id`` (i.e.
-    Aaron's BoA via SimpleFIN). Falls back to the default 1010 entry if no
+    the operator's bank via SimpleFIN). Falls back to the default 1010 entry if no
     linked account exists.
     """
     if external_account_id:
@@ -412,13 +412,13 @@ async def map_and_post_transaction(
                 reason=(
                     f"Missing COA accounts: need {ACCT_PAYOUTS_RECEIVABLE} "
                     f"(eBay Payouts Receivable) and {ACCT_EBAY_REVENUE} "
-                    "(eBay/SkyBehind Resale Revenue). Re-run "
+                    "(eBay Resale Revenue). Re-run "
                     "scripts/extend_coa_mu_inc.sql or the COA seeder."
                 ),
             )
         debit_canonical = payouts_receivable_canonical
         credit_canonical = revenue_canonical
-        category = "Revenue · eBay/SkyBehind"
+        category = "Revenue · eBay Resale"
     elif ebay_type == "REFUND":
         if not (payouts_receivable_canonical and revenue_canonical):
             return MapResult(
@@ -429,7 +429,7 @@ async def map_and_post_transaction(
             )
         debit_canonical = revenue_canonical
         credit_canonical = payouts_receivable_canonical
-        category = "Revenue · eBay/SkyBehind (REFUND)"
+        category = "Revenue · eBay Resale (REFUND)"
     elif ebay_type in ("FEE", "NON_SALE_CHARGE", "DISPUTE", "SHIPPING_LABEL"):
         if not (fees_canonical and payouts_receivable_canonical):
             return MapResult(
@@ -542,7 +542,7 @@ async def map_and_post_transaction(
 
     # ---- 5. First-run review guard ----
     # The first 30 eBay transactions for this entity ALWAYS queue regardless
-    # of materiality. Aaron eyeballs them and approves; after that we trust
+    # of materiality. The operator eyeballs them and approves; after that we trust
     # the mapper.
     existing_ebay_count = await _count_existing_ebay_posts(session, entity_id=entity_id)
     if existing_ebay_count < FIRST_RUN_REVIEW_LIMIT:

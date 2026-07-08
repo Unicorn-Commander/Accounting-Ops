@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 # Same address book as the cover sheet
 from app.exports.cover_sheet import (
-    DEFAULT_MU_INC_RETURN_ADDRESS,
+    DEFAULT_RETURN_ADDRESS,
     TAX_OFFICE_ADDRESSES,
 )
 
@@ -41,7 +41,7 @@ class MailingLabelData:
 
     # Return address (defaults to MU Inc)
     return_address: dict[str, str] = field(
-        default_factory=lambda: dict(DEFAULT_MU_INC_RETURN_ADDRESS)
+        default_factory=lambda: dict(DEFAULT_RETURN_ADDRESS)
     )
 
     # Tracking number (optional). If present, encoded as QR for phone lookup.
@@ -50,7 +50,7 @@ class MailingLabelData:
     # Marking on the label face — defaults to "CERTIFIED MAIL"
     service_marking: str = "CERTIFIED MAIL\nRETURN RECEIPT REQUESTED"
 
-    # Optional reference (e.g. "MU Inc EIN 00-0000000 — TY 2023 SC1120")
+    # Optional reference (e.g. "Acme Inc EIN 12-3456789 — TY 2023 SC1120")
     sender_reference: str | None = None
 
 

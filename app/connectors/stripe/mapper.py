@@ -14,7 +14,7 @@ on the merchant's account. The ``type`` field discriminates what happened:
   * application_fee*      — Connect-platform-fee variants (flag for CPA review)
   * other                 — flag for CPA review
 
-Account routing (uses MU Inc's COA; per-entity revenue account configurable):
+Account routing (uses the entity's COA; per-entity revenue account configurable):
 
   Type              Debit                                  Credit
   ----              -----                                  ------
@@ -87,7 +87,7 @@ StripeTxnType = Literal[
 ]
 
 # Safety: first N mapped journal entries per (workspace, entity) go to
-# approval queue regardless of materiality — Aaron reviews them by hand
+# approval queue regardless of materiality — the operator reviews them by hand
 # before we trust the mapping for auto-posting.
 FIRST_RUN_REVIEW_LIMIT = 30
 
@@ -210,7 +210,7 @@ async def _resolve_cash_for_payout(
     """Pick (account_number, canonical_form) of the cash account a payout lands in.
 
     Prefers a COA account that is linked to ``external_account_id`` (i.e. the
-    Stripe payout destination's bank-account id mapped to Aaron's BoA via
+    Stripe payout destination's bank-account id mapped to the operator's bank via
     SimpleFIN). Falls back to the default 1010 entry if no linked account.
     """
     if external_account_id:

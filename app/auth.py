@@ -205,7 +205,7 @@ def _load_service_tokens() -> dict[str, dict[str, Any]]:
 
         {
           "<token>": {
-            "uc_uid": "aaron",
+            "uc_uid": "jane",
             "agent_id": "receipt-reconciler",
             # H2 scope fields (REQUIRED in production — at least one must be set):
             "workspace_ids": ["<wid>", "<wid>"],   // None = all workspaces the user is in

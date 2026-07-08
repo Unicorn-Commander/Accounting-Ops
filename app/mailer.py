@@ -48,7 +48,7 @@ def _recipient_domain(addr: str | None) -> str:
     s = str(addr).strip()
     if "@" not in s:
         return "<malformed>"
-    # rsplit so display-name email like 'Aaron <aaron@x.com>' stays robust.
+    # rsplit so display-name email like 'Jane <jane@example.com>' stays robust.
     return s.rsplit("@", 1)[-1].rstrip(">").lower() or "<malformed>"
 
 

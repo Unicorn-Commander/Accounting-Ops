@@ -28,7 +28,7 @@ PHASE-2-CATEGORIZATION.md:
   Infrastructure · VPS       — Hostinger / DigitalOcean / Linode
   Infrastructure · CDN       — Cloudflare / AWS / Fastly
   Infrastructure · Network   — Cisco Meraki / Tailscale / Verizon (telecom)
-  Contractor · 1099-NEC      — Named contractors (Aaron will add)
+  Contractor · 1099-NEC      — Named contractors (operator will add)
   Inter-entity transfer      — Mercury internal ACH between owned accts
   Banking · Fees             — Wire fees, ACH returns, NSF, overdraft, monthly account fees
   Banking · Interest         — Interest payments

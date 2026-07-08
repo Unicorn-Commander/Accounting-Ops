@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate DRAFT pre-filled tax submission PDFs for MU Inc, all open years.
+"""Generate DRAFT pre-filled tax submission PDFs for the configured entity, all open years.
 
 Produces 8 PDFs (4 years × 2 forms) plus cover sheets + mailing labels in
 drafts/forms/. Every PDF is DRAFT-watermarked and bears a "do not file" banner.
@@ -11,7 +11,7 @@ Usage:
     python scripts/generate_submission_drafts.py
     python scripts/generate_submission_drafts.py --years 2023        # one year
     python scripts/generate_submission_drafts.py --years 2022,2023   # multi
-    python scripts/generate_submission_drafts.py --entity fabrikam     # different entity
+    python scripts/generate_submission_drafts.py --entity example    # a specific entity
 
 Data sources:
 - For the MVP run on local dev, we use synthetic data (federal taxable income
@@ -34,7 +34,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.exports.cover_sheet import (  # noqa: E402
     CoverSheetData,
-    DEFAULT_MU_INC_RETURN_ADDRESS,
+    DEFAULT_RETURN_ADDRESS,
     generate_cover_sheet_pdf,
 )
 from app.exports.form_prefill import generate_form_pdf  # noqa: E402
@@ -48,16 +48,17 @@ from app.exports.sc_form_prefill import (  # noqa: E402
 )
 
 # ---------------------------------------------------------------------------
-# Hard-coded MU Inc entity data (the only entity this script supports today;
-# other entities should be added explicitly to ENTITY_FIXTURES).
+# Example entity fixtures. These are generic placeholders for the Community
+# Edition — override the EIN via the ENTITY_EIN env var or add real
+# entities explicitly to ENTITY_FIXTURES. No real entity data ships here.
 # ---------------------------------------------------------------------------
 
 ENTITY_FIXTURES: dict[str, dict] = {
-    "mu_inc": {
-        "display_name": "Magic Unicorn Unconventional Technology & Stuff Inc.",
-        "ein": "00-0000000",
-        "mailing_address": "39 Paddlecreek Avenue",
-        "city_state_zip": "Charleston, SC 29412",
+    "example": {
+        "display_name": "Example Corp Inc.",
+        "ein": os.getenv("ENTITY_EIN", "12-3456789"),
+        "mailing_address": "123 Example Street",
+        "city_state_zip": "Anytown, ST 00000",
     },
 }
 
@@ -65,12 +66,12 @@ ENTITY_FIXTURES: dict[str, dict] = {
 # unavailable). The numbers come from the books-reconstruction work captured in
 # drafts/books-reconciliation-2026-05-30.md.
 SYNTHETIC_PACKAGES: dict[tuple[str, int], dict] = {
-    ("mu_inc", 2022): {
+    ("example", 2022): {
         "income": {"lines": []},
         "deductions": {"lines": []},
         "taxable_income_before_nol_cents": 0,  # No activity TY 2022
     },
-    ("mu_inc", 2023): {
+    ("example", 2023): {
         "income": {"lines": [
             {"line": "1a", "amount_cents": 0},
             {"line": "11", "amount_cents": 0},
@@ -81,7 +82,7 @@ SYNTHETIC_PACKAGES: dict[tuple[str, int], dict] = {
         ]},
         "taxable_income_before_nol_cents": -367079,
     },
-    ("mu_inc", 2024): {
+    ("example", 2024): {
         "income": {"lines": [
             {"line": "1a", "amount_cents": 0},
             {"line": "11", "amount_cents": 0},
@@ -89,7 +90,7 @@ SYNTHETIC_PACKAGES: dict[tuple[str, int], dict] = {
         "deductions": {"lines": []},
         "taxable_income_before_nol_cents": 0,  # Placeholder; CPA fills
     },
-    ("mu_inc", 2025): {
+    ("example", 2025): {
         "income": {"lines": []},
         "deductions": {"lines": []},
         "taxable_income_before_nol_cents": 0,  # Placeholder; CPA fills
@@ -139,8 +140,8 @@ def generate_for_entity_year(
 
     # 2. SC1120-V (payment voucher)
     try:
-        # License fee is the statutory minimum $25 for MU Inc (no capital
-        # stock balance); a year with positive SC tax would add it on top.
+        # License fee is the statutory minimum $25 for a corp with no capital
+        # stock balance; a year with positive SC tax would add it on top.
         # For this MVP, we always tender $25 = 2500 cents.
         v_pdf = generate_sc1120v_pdf(
             tax_year=tax_year,
@@ -198,13 +199,13 @@ def generate_for_entity_year(
             f"SC1120 (TY {tax_year}, CPA-signed)",
             "SC1120-V payment voucher ($25.00 license fee)",
             "Check for $25.00, payable to South Carolina Department of Revenue",
-            "Form SC2848 Power of Attorney designating Mosin Qureshi, CPA"
+            "Form SC2848 Power of Attorney designating the entity's CPA"
             if tax_year == 2023 else f"Form SC2848 POA (if not already on file)",
-            "Reasonable-cause cure letter (signed by Mosin Qureshi, CPA)"
+            "Reasonable-cause cure letter (signed by the entity's CPA)"
             if tax_year == 2023 else None,
         ],
         notes=(
-            "Tracking number to be added by Aaron after USPS Certified Mail "
+            "Tracking number to be added by the operator after USPS Certified Mail "
             "purchase. Record the tracking number via the "
             "/open-items Submissions surface when assigned."
         ),
@@ -221,9 +222,9 @@ def generate_for_entity_year(
     sc_label = generate_mailing_label_pdf(MailingLabelData(
         to_office_key="scdor_corporate",
         sender_reference=(
-            f"MU Inc EIN {fixture['ein']} — TY {tax_year} SC1120 cure"
+            f"{fixture['display_name']} EIN {fixture['ein']} — TY {tax_year} SC1120 cure"
         ),
-        tracking_number=None,  # Aaron writes the tracking number in after USPS
+        tracking_number=None,  # the operator writes the tracking number in after USPS
     ))
     label_path = output_dir / f"{entity_slug}-{tax_year}-SCDOR-mailing-label.pdf"
     label_path.write_bytes(sc_label)
@@ -247,7 +248,7 @@ def generate_for_entity_year(
             "Statement of Officer Information",
             "Reasonable-cause explanation (if pre-emptive FTF mitigation)",
         ],
-        notes="Tracking number to be added by Aaron after USPS Certified Mail purchase.",
+        notes="Tracking number to be added by the operator after USPS Certified Mail purchase.",
     ))
     irs_cs_path = output_dir / f"{entity_slug}-{tax_year}-IRS-cover-sheet.pdf"
     irs_cs_path.write_bytes(irs_cs)
@@ -261,7 +262,7 @@ def generate_for_entity_year(
     irs_label = generate_mailing_label_pdf(MailingLabelData(
         to_office_key="irs_1120_sc_nopayment",
         sender_reference=(
-            f"MU Inc EIN {fixture['ein']} — TY {tax_year} Form 1120"
+            f"{fixture['display_name']} EIN {fixture['ein']} — TY {tax_year} Form 1120"
         ),
         tracking_number=None,
     ))
@@ -283,8 +284,8 @@ def main() -> int:
         help="Comma-separated tax years to generate (default: 2022,2023,2024,2025)",
     )
     p.add_argument(
-        "--entity", default="mu_inc",
-        help="Entity key (must be in ENTITY_FIXTURES). Default: mu_inc",
+        "--entity", default="example",
+        help="Entity key (must be in ENTITY_FIXTURES). Default: example",
     )
     p.add_argument(
         "--output-dir", default=None,
@@ -325,7 +326,7 @@ def main() -> int:
     print(f"Generated {total_artifacts} artifacts, {total_bytes:,} bytes total.")
     print()
     print("NOTE: All artifacts carry a DRAFT watermark. None are file-ready.")
-    print("      Pass to Mosin Qureshi, CPA for review, completion, and signature.")
+    print("      Pass to a licensed CPA for review, completion, and signature.")
     return 0
 
 

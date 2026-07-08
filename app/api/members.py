@@ -21,7 +21,7 @@ Authorization rules (strictly enforced; mirror the permissions matrix doc):
     client_owner / platform_admin). The cpa role NEVER reaches these endpoints —
     a CPA cannot grant themselves more privilege in a customer workspace.
   * An invite for role ``platform_admin`` is REJECTED. Platform roles are
-    managed out-of-band by Aaron + Shafen at the database level.
+    managed out-of-band by platform admins at the database level.
   * An invite for role ``admin`` / ``owner`` / ``client_owner`` requires the
     inviter to ALSO be at owner-or-platform_admin level (clients invite their
     CPA, but only an owner can grant admin/owner privilege).

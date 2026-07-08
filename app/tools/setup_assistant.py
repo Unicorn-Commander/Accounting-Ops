@@ -9,7 +9,7 @@ power the conversational provisioning flow:
                                intake; the UI listens for this tool call to
                                redirect from /setup -> /dashboard.
   - ``create_workspace``     — provision a brand-new workspace. Admin-only.
-                               Used when Aaron (or any admin) is setting up a
+                               Used when an admin is setting up a
                                second/third workspace via chat.
 
 These are intentionally small, focused tools. The heavy lifting
@@ -208,7 +208,7 @@ async def create_workspace(
     INSERT under the admin DB role. Provisioning takes 5-15 seconds.
 
     Args:
-        display_name: Human-readable name (e.g. "Aaron + Shafen Shared").
+        display_name: Human-readable name (e.g. "Acme Shared Workspace").
         slug: Optional URL slug. Auto-derived from display_name.
         hipaa_protected: Mark this workspace as HIPAA-isolated.
         isolation_tier: One of "shared" | "premium" | "enterprise".

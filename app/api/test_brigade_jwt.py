@@ -18,6 +18,7 @@ Why a dedicated endpoint and not just "send a Brigade JWT to /api/me":
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -37,17 +38,21 @@ def _require_admin_scope(auth: AuthContext) -> None:
     """The test endpoint is admin-only.
 
     We can't lean on workspace_membership here (this endpoint is workspace-less),
-    so we use the realm-level ``admin`` scope, which the uchub realm grants to
-    the two admin users (aaron, shafen) — same gate used by other admin paths.
-    Service tokens (whose scopes are ``("service",)``) are also accepted —
+    so we use the realm-level ``admin`` scope — the same gate used by other admin
+    paths. Service tokens (whose scopes are ``("service",)``) are also accepted —
     they're internal infrastructure callers.
     """
     if "admin" in auth.scopes or "service" in auth.scopes:
         return
-    # Last-resort allowlist: the realm-level uc_uids that should always be
-    # able to run this. Hardcoded to two operators on purpose — this is a
-    # diagnostic endpoint, not a customer surface.
-    if auth.uc_uid in {"aaron", "shafen"}:
+    # Optional last-resort allowlist: a comma-separated list of realm-level
+    # uc_uids in ACCTOPS_ADMIN_UC_UIDS that should always be able to run this
+    # diagnostic endpoint. Empty by default (no personal identifiers shipped).
+    _allowlist = {
+        u.strip()
+        for u in os.getenv("ACCTOPS_ADMIN_UC_UIDS", "").split(",")
+        if u.strip()
+    }
+    if auth.uc_uid in _allowlist:
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,

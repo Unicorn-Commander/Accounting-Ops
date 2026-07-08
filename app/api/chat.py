@@ -987,7 +987,7 @@ async def save_chat_message_as_memo(
         # tax_review_queue entry.
         #
         # Heuristic on the memo text (lowercase substring match):
-        #   * "decide", "deduct currently", "elect" -> Decisions awaiting Aaron
+        #   * "decide", "deduct currently", "elect" -> Decisions awaiting the owner
         #   * "send", "provide", "upload", "pull",
         #     "obtain", "need to get"               -> Documents (informational)
         #   * "critical", "urgent", "deadline"      -> Time-sensitive

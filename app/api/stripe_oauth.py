@@ -1,7 +1,7 @@
 """Stripe connector endpoints.
 
-NO OAuth flow — Aaron OWNS the Stripe account under MU Inc EIN (00-0000000)
-so a restricted API key with READ permissions on charges/refunds/payouts/
+NO OAuth flow — the operator owns the Stripe account directly under their own
+business entity, so a restricted API key with READ permissions on charges/refunds/payouts/
 balance_transactions/account is sufficient. We're not Stripe Connect, not a
 platform-with-sub-merchants — we're the merchant's own bookkeeper.
 
@@ -9,13 +9,13 @@ WHY NOT CONNECT
 ~~~~~~~~~~~~~~~
 Stripe Connect Standard is for platforms that sub-onboard merchants (Substack,
 Shopify, etc.). Connect adds a platform fee, requires platform-merchant
-agreement, and complicates webhooks. None of that applies here — Aaron has a
-single Stripe account in his own name and we just want to read it. Restricted
-API key avoids all of that.
+agreement, and complicates webhooks. None of that applies here — the operator
+has a single Stripe account in their own name and we just want to read it.
+Restricted API key avoids all of that.
 
 WHY READ-ONLY
 ~~~~~~~~~~~~~
-Aaron creates the restricted key in the Stripe dashboard at
+The operator creates the restricted key in the Stripe dashboard at
 https://dashboard.stripe.com/apikeys with permissions:
 
   * charges                 Read
@@ -25,8 +25,8 @@ https://dashboard.stripe.com/apikeys with permissions:
   * account                 Read
   * webhook_endpoints       Read (optional, for "Test webhook" feature)
 
-NO write permissions. Ever. If Aaron's key leaks, the worst an attacker can
-do is read his Stripe account history — they cannot move money, create
+NO write permissions. Ever. If the key leaks, the worst an attacker can
+do is read the Stripe account history — they cannot move money, create
 charges, or change customer data.
 
 Endpoints:
@@ -296,9 +296,9 @@ async def stripe_set_webhook_secret(
 ) -> dict[str, Any]:
     """Attach the Stripe webhook signing secret (whsec_...) to the credential.
 
-    Aaron creates the webhook endpoint in Stripe dashboard
+    The operator creates the webhook endpoint in Stripe dashboard
     (dashboard.stripe.com/webhooks → Add endpoint), points it at
-    https://accounting-ops.magicunicorn.dev/api/connectors/stripe/webhook,
+    https://<your-host>/api/connectors/stripe/webhook,
     selects the events we handle (charge.succeeded, charge.refunded,
     payout.created, payout.paid, payout.failed), and pastes the resulting
     signing secret here.
