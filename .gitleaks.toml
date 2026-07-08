@@ -1,0 +1,22 @@
+# Gitleaks configuration for Accounting-Ops Community Edition.
+# Extends the default ruleset and allowlists known-safe test fixtures and
+# variable references that the generic detectors flag as false positives.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic test fixtures and non-secret variable references"
+regexes = [
+  # Obvious fake Stripe keys in unit-test fixtures (not real credentials).
+  '''rk_live_TESTAPIKEYABCD1234''',
+  '''rk_live_VERYSECRETKEY12345''',
+  '''rk_test_ABCDEFGH1234''',
+  # Placeholder token string used to assert scope-rejection behavior.
+  '''h2-legacy-no-scope-''',
+  # Reads a secret from settings into a local variable — not a hardcoded value.
+  '''self\._s\.garage_s3_secret_key''',
+]
+paths = [
+  '''tests/smoke/test_stripe_client_unit\.py''',
+  '''tests/integration/test_h2_service_token_scope\.py''',
+]

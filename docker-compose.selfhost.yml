@@ -1,0 +1,257 @@
+# =============================================================================
+# Accounting-Ops — Community Edition self-host stack
+# =============================================================================
+# Your books. Your machine. Your rules.
+#
+# A fleet-free, single-command stack: Postgres + Garage (object storage) +
+# Ollama (bundled BYO model) + the FastAPI backend + the Next.js web app.
+# Runs in Community Edition (AO_EDITION=community) with local single-admin
+# auth (AO_AUTH_MODE=local) — NO Keycloak, NO external inference fleet.
+#
+#   Bootstrap (recommended):   make selfhost      (or: scripts/selfhost_bootstrap.sh)
+#   Manual:                    cp .env.example .env  &&  docker compose \
+#                                  -f docker-compose.selfhost.yml up -d
+#
+# Optional add-ons (compose profiles):
+#   --profile embeddings   Infinity embedding server (Tax Knowledge RAG)
+#   --profile graph        FalkorDB agent-memory projection (best-effort)
+# Both degrade gracefully — the app boots and works fine without them.
+# =============================================================================
+
+services:
+  postgres:
+    # pgvector bundles the vector extension required by migration 0005
+    # (tax-knowledge RAG index). Drop-in replacement for postgres:16.
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-accounting_ops}
+      POSTGRES_USER: ${POSTGRES_USER:-accounting_ops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${SELFHOST_BIND_IP:-127.0.0.1}:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - accounting_ops
+
+  garage:
+    image: dxflrs/garage:v1.0.1
+    restart: unless-stopped
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?Set GARAGE_RPC_SECRET in .env}
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN:?Set GARAGE_ADMIN_TOKEN in .env}
+    command: ["/garage", "server"]
+    volumes:
+      - garage_data:/var/lib/garage
+      - ./garage.toml:/etc/garage.toml:ro
+    ports:
+      - "${SELFHOST_BIND_IP:-127.0.0.1}:3900:3900"
+      - "${SELFHOST_BIND_IP:-127.0.0.1}:3903:3903"
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks:
+      - accounting_ops
+
+  # --------------------------------------------------------------------------
+  # Ollama — the DEFAULT bring-your-own-model target for categorization and
+  # receipt OCR. First run: pull a VISION-capable model, e.g.
+  #   docker compose -f docker-compose.selfhost.yml exec ollama ollama pull qwen2.5vl:7b
+  # For GPU acceleration, uncomment the `deploy.resources` block below (requires
+  # the NVIDIA Container Toolkit). CPU works too — just slower.
+  # --------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "${SELFHOST_BIND_IP:-127.0.0.1}:11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    # Uncomment for NVIDIA GPU acceleration:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    networks:
+      - accounting_ops
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # ---- Community Edition + local self-host auth --------------------
+      AO_EDITION: community
+      AO_AUTH_MODE: local
+      AO_LOCAL_AUTH_SECRET: ${AO_LOCAL_AUTH_SECRET:?Set AO_LOCAL_AUTH_SECRET in .env (see make selfhost)}
+      AO_LOCAL_ADMIN_UC_UID: ${AO_LOCAL_ADMIN_UC_UID:-admin}
+      AO_LOCAL_ADMIN_EMAIL: ${AO_LOCAL_ADMIN_EMAIL:-admin@example.com}
+      # Backend validates the local bearer's audience against this (must match
+      # the web token's audience — both default to accounting-ops-app).
+      ACCEPTED_AUDIENCE: ${ACCEPTED_AUDIENCE:-accounting-ops-app}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-accounting-ops-app}
+      # ---- Single-role Postgres (owner). Simplest for self-host; the app,
+      # migrations and provisioning all use it. (The least-privilege split is
+      # an advanced/enterprise hardening step — see DEPLOY.md "DB roles".) ----
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://accounting_ops:${POSTGRES_PASSWORD}@postgres:5432/accounting_ops}
+      ADMIN_DATABASE_URL: ${ADMIN_DATABASE_URL:-postgresql+asyncpg://accounting_ops:${POSTGRES_PASSWORD}@postgres:5432/accounting_ops}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+      # ---- Object storage ---------------------------------------------------
+      GARAGE_S3_ENDPOINT: ${GARAGE_S3_ENDPOINT:-http://garage:3900}
+      # Blank = document uploads return a clear 503 (never a silent drop). To
+      # enable uploads, mint a Garage key + bucket and set these in .env.
+      GARAGE_S3_ACCESS_KEY: ${GARAGE_S3_ACCESS_KEY:-}
+      GARAGE_S3_SECRET_KEY: ${GARAGE_S3_SECRET_KEY:-}
+      GARAGE_S3_REGION: ${GARAGE_S3_REGION:-garage}
+      ACCTOPS_MASTER_KEY_PATH: /run/secrets/accounting_ops_master_key
+      # ---- BYO model (Ollama). Pull a vision model before categorizing. -----
+      LLM_ENDPOINT_URL: ${LLM_ENDPOINT_URL:-http://ollama:11434/v1}
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5vl:7b}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      # Optional embedding backend (profile: embeddings). Default points at the
+      # bundled Infinity service; harmless if that profile is not started.
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://infinity:7997}
+      EMBED_MODEL: ${EMBED_MODEL:-BAAI/bge-large-en-v1.5}
+      # Optional OCR cross-check — blank = disabled (VLM-only).
+      OCR_BBOX_SERVICE_URL: ${OCR_BBOX_SERVICE_URL:-}
+      # Optional agent-memory projection (profile: graph). Best-effort no-op.
+      FALKORDB_HOST: ${FALKORDB_HOST:-falkordb}
+      FALKORDB_PORT: ${FALKORDB_PORT:-6379}
+    secrets:
+      - accounting_ops_master_key
+    volumes:
+      - tax_specialist_drafts:/drafts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      garage:
+        condition: service_healthy
+    ports:
+      - "${SELFHOST_BIND_IP:-127.0.0.1}:${APP_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - accounting_ops
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # ---- Community Edition + local self-host auth (web reads these) ----
+      AO_EDITION: community
+      AO_AUTH_MODE: local
+      AO_LOCAL_AUTH_SECRET: ${AO_LOCAL_AUTH_SECRET:?Set AO_LOCAL_AUTH_SECRET in .env (see make selfhost)}
+      AO_LOCAL_ADMIN_UC_UID: ${AO_LOCAL_ADMIN_UC_UID:-admin}
+      AO_LOCAL_ADMIN_EMAIL: ${AO_LOCAL_ADMIN_EMAIL:-admin@example.com}
+      AO_LOCAL_ADMIN_PASSWORD_HASH: ${AO_LOCAL_ADMIN_PASSWORD_HASH:?Set AO_LOCAL_ADMIN_PASSWORD_HASH in .env (run scripts/gen_local_admin_hash.py)}
+      ACCEPTED_AUDIENCE: ${ACCEPTED_AUDIENCE:-accounting-ops-app}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-accounting-ops-app}
+      NEXT_PUBLIC_API_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env}
+      # Server-side fetches hit the app container directly over the compose network.
+      INTERNAL_API_BASE_URL: ${INTERNAL_API_BASE_URL:-http://app:8000}
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${SELFHOST_BIND_IP:-127.0.0.1}:${WEB_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - accounting_ops
+
+  # ----------- Optional: self-hosted embedding server (profile: embeddings) --
+  # Powers the Tax Knowledge RAG index. The app degrades gracefully without it.
+  infinity:
+    image: michaelfeil/infinity:latest
+    restart: unless-stopped
+    profiles: ["embeddings"]
+    command:
+      - v2
+      - --model-id=BAAI/bge-large-en-v1.5
+      - --port=7997
+      - --batch-size=32
+      - --device=${INFINITY_DEVICE:-cpu}
+    environment:
+      HF_HOME: /models
+    volumes:
+      - infinity_models:/models
+    ports:
+      - "${SELFHOST_BIND_IP:-127.0.0.1}:${INFINITY_PORT:-7997}:7997"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7997/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks:
+      - accounting_ops
+
+  # ----------- Optional: FalkorDB agent-memory projection (profile: graph) ---
+  # A best-effort, asynchronous projection of the authoritative Postgres state.
+  # Its absence is a no-op — writes to Postgres never block on it.
+  falkordb:
+    image: falkordb/falkordb:latest
+    restart: unless-stopped
+    profiles: ["graph"]
+    volumes:
+      - falkordb_data:/data
+    ports:
+      - "${SELFHOST_BIND_IP:-127.0.0.1}:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks:
+      - accounting_ops
+
+volumes:
+  postgres_data:
+  garage_data:
+  ollama_models:
+  tax_specialist_drafts:
+  infinity_models:
+  falkordb_data:
+
+secrets:
+  # Master encryption key for stored connector credentials. Generated once by
+  # the bootstrap (make selfhost) via scripts/bootstrap_master_key.py. Back it
+  # up out-of-band — losing it orphans all encrypted credential ciphertext.
+  accounting_ops_master_key:
+    file: ./secrets/accounting_ops_master_key
+
+networks:
+  accounting_ops:
+    driver: bridge

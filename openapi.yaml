@@ -1,0 +1,271 @@
+openapi: 3.1.0
+info:
+  title: Accounting-Ops API
+  version: 0.1.0
+  description: Contract for Accounting-Ops FastAPI, MCP discovery, A2A Agent Card, and Phase 1 tool endpoints.
+servers:
+  - url: https://accounting-ops.example.com
+security:
+  - keycloakOAuth: [accounting:read]
+components:
+  securitySchemes:
+    keycloakOAuth:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://keycloak.example.com/realms/your-realm/protocol/openid-connect/auth
+          tokenUrl: https://keycloak.example.com/realms/your-realm/protocol/openid-connect/token
+          scopes:
+            accounting:read: Read tenant accounting records.
+            accounting:write: Propose tenant accounting actions.
+  schemas:
+    Error:
+      type: object
+      properties:
+        detail: {type: string}
+    Health:
+      type: object
+      properties:
+        status: {type: string, example: ok}
+        service: {type: string, example: accounting-ops}
+    ToolPhase1:
+      type: object
+      properties:
+        detail: {type: string, example: Phase 1}
+    Transaction:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        tenant_id: {type: string, format: uuid}
+        amount: {type: string, example: "123.4500"}
+        currency_code: {type: string, minLength: 3, maxLength: 3, example: USD}
+        usd_equivalent_at_event_time: {type: string, example: "123.4500"}
+        fx_source: {type: string, nullable: true, example: stripe}
+        posted_at: {type: string, format: date-time}
+        decision_verdict: {type: string, enum: [Approve, Reject, NeedsReview]}
+    CategorizeRequest:
+      type: object
+      required: [category, reasoning]
+      properties:
+        category: {type: string}
+        reasoning: {type: string}
+    LinkReceiptRequest:
+      type: object
+      required: [receipt_id, tx_id]
+      properties:
+        receipt_id: {type: string, format: uuid}
+        tx_id: {type: string, format: uuid}
+    SpecialtyRuleRequest:
+      type: object
+      required: [kind, params, reasoning]
+      properties:
+        kind: {type: string, example: material_amount_approval}
+        params: {type: object}
+        reasoning: {type: string}
+    PaymentProposalRequest:
+      type: object
+      required: [amount, recipient, reasoning]
+      properties:
+        amount: {type: string, example: "250.0000"}
+        recipient: {type: object}
+        reasoning: {type: string}
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      security: []
+      summary: Liveness probe.
+      responses:
+        "200":
+          description: Service is alive.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Health"}
+  /readyz:
+    get:
+      tags: [system]
+      security: []
+      summary: Readiness probe.
+      responses:
+        "200":
+          description: Service is ready.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Health"}
+  /.well-known/mcp.json:
+    get:
+      tags: [discovery]
+      security: []
+      summary: MCP discovery metadata with Keycloak OAuth endpoints.
+      responses:
+        "200": {description: MCP discovery document.}
+  /api/me:
+    get:
+      tags: [auth]
+      summary: Return authenticated uc_uid and acting agent identity.
+      responses:
+        "200": {description: Authenticated identity.}
+        "401": {description: Invalid token, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /api/tenants/{tenant_id}/transactions:
+    get:
+      tags: [tools]
+      summary: list_transactions tool contract.
+      parameters:
+        - in: path
+          name: tenant_id
+          required: true
+          schema: {type: string, format: uuid}
+        - in: query
+          name: filter
+          schema: {type: string}
+      responses:
+        "501": {description: Phase 1 implementation stub.}
+  /api/tenants/{tenant_id}/transactions/{id}:
+    get:
+      tags: [tools]
+      summary: get_transaction tool contract.
+      parameters:
+        - in: path
+          name: tenant_id
+          required: true
+          schema: {type: string, format: uuid}
+        - in: path
+          name: id
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "501": {description: Phase 1 implementation stub.}
+  /api/tenants/{tenant_id}/transactions/{id}/categorize:
+    post:
+      tags: [tools]
+      summary: categorize_transaction tool contract; queues over materiality.
+      security:
+        - keycloakOAuth: [accounting:write]
+      parameters:
+        - in: path
+          name: tenant_id
+          required: true
+          schema: {type: string, format: uuid}
+        - in: path
+          name: id
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CategorizeRequest"}
+      responses:
+        "501": {description: Phase 1 implementation stub.}
+  /api/tenants/{tenant_id}/receipts/link:
+    post:
+      tags: [tools]
+      summary: link_receipt_to_transaction tool contract.
+      security:
+        - keycloakOAuth: [accounting:write]
+      parameters:
+        - in: path
+          name: tenant_id
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LinkReceiptRequest"}
+      responses:
+        "501": {description: Phase 1 implementation stub.}
+  /api/tenants/{tenant_id}/specialty-rules:
+    get:
+      tags: [tools]
+      summary: query_specialty_rules tool contract.
+      parameters:
+        - in: path
+          name: tenant_id
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "501": {description: Phase 1 implementation stub.}
+    post:
+      tags: [tools]
+      summary: add_specialty_rule tool contract; always queues for approval.
+      security:
+        - keycloakOAuth: [accounting:write]
+      parameters:
+        - in: path
+          name: tenant_id
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SpecialtyRuleRequest"}
+      responses:
+        "501": {description: Phase 1 implementation stub.}
+  /api/tenants/{tenant_id}/p-and-l:
+    get:
+      tags: [tools]
+      summary: get_p_and_l tool contract.
+      parameters:
+        - in: path
+          name: tenant_id
+          required: true
+          schema: {type: string, format: uuid}
+        - in: query
+          name: entity_id
+          required: true
+          schema: {type: string, format: uuid}
+        - in: query
+          name: period
+          required: true
+          schema: {type: string, example: "2026-05"}
+      responses:
+        "501": {description: Phase 1 implementation stub.}
+  /api/tenants/{tenant_id}/runway:
+    post:
+      tags: [tools]
+      summary: get_runway tool contract.
+      parameters:
+        - in: path
+          name: tenant_id
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "501": {description: Phase 1 implementation stub.}
+  /api/tenants/{tenant_id}/payments/propose:
+    post:
+      tags: [tools]
+      summary: propose_payment tool contract; human approval gates Stripe ACP execution.
+      security:
+        - keycloakOAuth: [accounting:write]
+      parameters:
+        - in: path
+          name: tenant_id
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PaymentProposalRequest"}
+      responses:
+        "501": {description: Phase 1 implementation stub.}
+  /a2a/agent-card.json:
+    get:
+      tags: [a2a]
+      summary: A2A Agent Card.
+      responses:
+        "200": {description: Agent Card.}
+  /a2a:
+    post:
+      tags: [a2a]
+      summary: JSON-RPC 2.0 A2A endpoint.
+      responses:
+        "200": {description: JSON-RPC response.}
+  /a2a/stream:
+    get:
+      tags: [a2a]
+      summary: SSE streaming endpoint.
+      responses:
+        "200": {description: text/event-stream response.}

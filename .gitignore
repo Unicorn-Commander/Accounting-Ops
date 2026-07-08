@@ -1,0 +1,44 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+node_modules/
+.next/
+out/
+dist/
+coverage/
+*.log
+.DS_Store
+postgres_data/
+garage_data/
+vendor/anthropic-financial-services/
+
+# Secrets (master key etc.) — never commit
+secrets/
+.env.integration
+
+# Design prototypes — ground-truth spec for the Living Ledger redesign
+web/_design/
+
+# Local agent hand-off prompts (not part of the app)
+agent-prompts/
+.claude/
+
+# IRS form PDFs — downloaded by scripts/download_irs_forms.sh.
+# These are public-domain government documents but too large for git.
+# Each developer/server must run the download script after checkout.
+data/irs_forms/*.pdf
+
+# SCDOR form PDFs — downloaded by scripts/download_scdor_forms.sh.
+# Same posture as IRS forms (public-domain, fetched on demand).
+data/scdor_forms/*.pdf
+
+# Generated DRAFT prefilled forms — built on demand by
+# scripts/generate_submission_drafts.py.  Each one carries a DRAFT watermark
+# and must not be checked in (changes per-run + carries entity data).
+drafts/forms/*.pdf

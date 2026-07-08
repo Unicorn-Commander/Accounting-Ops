@@ -1,0 +1,380 @@
+import Link from "next/link";
+import { Hash, Shield } from "lucide-react";
+import { AppShell } from "@/components/app-shell";
+import { EntitySelector } from "@/components/entity-selector";
+import {
+  Card,
+  EmptyState,
+  MaterialityBadge,
+  PageShell,
+  SectionHeader,
+  StatusChip
+} from "@/components/primitives";
+import { getActiveContext } from "@/lib/active-context";
+import {
+  formatAmount,
+  getJournalEntries,
+  shortHash,
+  type JournalEntry
+} from "@/lib/journal";
+import { shortDate } from "@/lib/transactions";
+import { VerifyChainButton } from "@/components/verify-chain-button";
+import { cn } from "@/lib/cn";
+
+type SearchParams = {
+  period?: string;
+  start?: string;
+  end?: string;
+  category?: string;
+  account?: string;
+  status?: string;
+  q?: string;
+};
+
+export default async function JournalPage(props: {
+  searchParams: Promise<SearchParams>;
+}) {
+  const sp = await props.searchParams;
+  const ctx = await getActiveContext();
+  const workspace = ctx.activeWorkspace;
+  const entityFilter =
+    ctx.activeEntity?.id && !ctx.isConsolidated ? ctx.activeEntity.id : undefined;
+  const canConsolidate = ctx.activeWorkspace
+    ? ["owner", "admin"].includes(ctx.activeWorkspace.role)
+    : false;
+
+  const data = workspace
+    ? await getJournalEntries(workspace.id, {
+        entityId: entityFilter,
+        startDate: sp.start,
+        endDate: sp.end,
+        category: sp.category,
+        account: sp.account,
+        statusFilter: sp.status,
+        search: sp.q,
+        limit: 200
+      })
+    : null;
+
+  const entries: JournalEntry[] = data?.entries ?? [];
+  const total = data?.total ?? 0;
+  const categories = data?.categories ?? [];
+
+  // Aggregate by entity for the summary strip
+  const entityTotals = new Map<
+    string,
+    { name: string; entityId: string | null; count: number; sum: number }
+  >();
+  for (const e of entries) {
+    const k = e.entity_display_name ?? "—";
+    const cur = entityTotals.get(k) ?? {
+      name: k,
+      entityId: e.entity_id,
+      count: 0,
+      sum: 0
+    };
+    cur.count += 1;
+    cur.sum += parseFloat(e.amount);
+    entityTotals.set(k, cur);
+  }
+
+  return (
+    <AppShell>
+      <PageShell>
+        <SectionHeader
+          title="Journal"
+          subtitle={
+            workspace
+              ? `${total} ${total === 1 ? "entry" : "entries"} · hash-chained, append-only`
+              : "Sign in to view journal."
+          }
+          action={
+            <EntitySelector
+              entities={ctx.entities}
+              activeEntityId={ctx.isConsolidated ? "consolidated" : ctx.activeEntity?.id}
+              canConsolidate={canConsolidate}
+              size="sm"
+            />
+          }
+        />
+
+        {/* Summary strip */}
+        {entityTotals.size > 0 && workspace && (
+          <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-4">
+            {Array.from(entityTotals.values()).map((t) => (
+              <Card key={t.name}>
+                <div className="flex items-start justify-between">
+                  <p className="text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
+                    {t.name}
+                  </p>
+                  {t.entityId && (
+                    <VerifyChainButton workspaceId={workspace.id} entityId={t.entityId} />
+                  )}
+                </div>
+                <p className="mt-1 font-mono text-sm text-ink-primary tabular-nums">
+                  {formatAmount(t.sum)}
+                </p>
+                <p className="mt-0.5 text-[11px] text-ink-tertiary">
+                  {t.count} {t.count === 1 ? "entry" : "entries"}
+                </p>
+              </Card>
+            ))}
+          </div>
+        )}
+
+        <div className="mb-4 flex justify-end">
+          <Link
+            href="/journal/new"
+            className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
+          >
+            + Manual entry
+          </Link>
+        </div>
+
+        <Card padded={false}>
+          <form
+            method="GET"
+            action="/journal"
+            className="flex flex-wrap items-center gap-2 border-b border-subtle px-5 py-3"
+          >
+            <input
+              type="search"
+              name="q"
+              defaultValue={sp.q ?? ""}
+              placeholder="Search payee, description, account…"
+              aria-label="Search journal entries"
+              className="min-w-[240px] flex-1 rounded-md border border-default bg-canvas px-3 py-1.5 text-sm focus:border-brand-500 focus:outline-none"
+            />
+            <label className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-ink-tertiary">
+              From
+              <input
+                type="date"
+                name="start"
+                defaultValue={sp.start ?? ""}
+                aria-label="From date"
+                className="rounded-md border border-default bg-surface px-2 py-1.5 text-xs"
+              />
+            </label>
+            <label className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-ink-tertiary">
+              To
+              <input
+                type="date"
+                name="end"
+                defaultValue={sp.end ?? ""}
+                aria-label="To date"
+                className="rounded-md border border-default bg-surface px-2 py-1.5 text-xs"
+              />
+            </label>
+            <select
+              name="category"
+              defaultValue={sp.category ?? ""}
+              aria-label="Filter by category"
+              className="rounded-md border border-default bg-surface px-3 py-1.5 text-xs"
+            >
+              <option value="">Category: all ({categories.length})</option>
+              {categories.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+            <select
+              name="status"
+              defaultValue={sp.status ?? ""}
+              aria-label="Filter by status"
+              className="rounded-md border border-default bg-surface px-3 py-1.5 text-xs"
+            >
+              <option value="">Status: all</option>
+              <option value="posted">Posted</option>
+              <option value="reversed">Reversed</option>
+            </select>
+            {sp.account ? (
+              <>
+                {/* Preserve the drill-down account filter across form submits */}
+                <input type="hidden" name="account" value={sp.account} />
+                <span
+                  className="inline-flex items-center gap-1.5 rounded-md border border-brand-500/40 bg-brand-500/10 px-2 py-1 text-[10px] font-medium text-brand-300"
+                  title={`Drill-down: showing entries that hit ${sp.account}`}
+                >
+                  account: <code className="font-mono">{sp.account}</code>
+                </span>
+              </>
+            ) : null}
+            <button
+              type="submit"
+              className="rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
+            >
+              Apply
+            </button>
+            {(sp.q || sp.start || sp.end || sp.category || sp.account || sp.status) && (
+              <Link
+                href="/journal"
+                className="rounded-md border border-default bg-surface px-3 py-1.5 text-xs text-ink-tertiary hover:bg-elevated"
+              >
+                Clear
+              </Link>
+            )}
+          </form>
+
+          {entries.length === 0 ? (
+            // H9: differentiate "no filter match" vs "no entries posted yet".
+            // Filter detection mirrors the form fields above.
+            (() => {
+              const filtersApplied = Boolean(
+                sp.q || sp.start || sp.end || sp.category || sp.status
+              );
+              const noEntriesAtAll = total === 0 && !filtersApplied;
+              return (
+                <div className="px-6 py-10">
+                  <EmptyState
+                    variant={
+                      noEntriesAtAll
+                        ? "no-data"
+                        : filtersApplied
+                          ? "filtered-empty"
+                          : "no-data"
+                    }
+                    title={
+                      noEntriesAtAll
+                        ? "No journal entries posted yet."
+                        : "No journal entries match these filters."
+                    }
+                    description={
+                      noEntriesAtAll ? (
+                        <>
+                          <p>
+                            Once you approve a transaction or post a manual
+                            entry, the hash-chained ledger lives here.
+                          </p>
+                          <p className="mt-2">
+                            New here? The quickest start is to{" "}
+                            <Link
+                              href="/connectors"
+                              className="text-brand-300 underline hover:text-brand-200"
+                            >
+                              connect your bank
+                            </Link>{" "}
+                            or{" "}
+                            <Link
+                              href="/documents"
+                              className="text-brand-300 underline hover:text-brand-200"
+                            >
+                              drop in a few documents
+                            </Link>{" "}
+                            — your transactions flow in, get categorized, and land
+                            here once approved. A manual entry is for one-off
+                            adjustments.
+                          </p>
+                        </>
+                      ) : (
+                        "Try clearing a filter or widening the date range above."
+                      )
+                    }
+                    primaryAction={
+                      noEntriesAtAll ? (
+                        <Link
+                          href="/reconciliation-queue"
+                          className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
+                        >
+                          Open reconciliation queue
+                        </Link>
+                      ) : (
+                        <Link
+                          href="/journal"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
+                        >
+                          Clear filters
+                        </Link>
+                      )
+                    }
+                    secondaryAction={
+                      noEntriesAtAll ? (
+                        <Link
+                          href="/journal/new"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-default bg-surface px-3 py-1.5 text-xs font-medium text-ink-secondary hover:bg-elevated"
+                        >
+                          + Manual entry
+                        </Link>
+                      ) : undefined
+                    }
+                    className="border-0 bg-transparent"
+                  />
+                </div>
+              );
+            })()
+          ) : (
+            <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-sm">
+              <thead className="sticky top-0 z-10 bg-surface text-[10px] uppercase tracking-wider text-ink-tertiary">
+                <tr className="border-b border-subtle">
+                  <th className="px-5 py-2.5 text-left font-medium">Date</th>
+                  <th className="px-2 py-2.5 text-left font-medium">Entity</th>
+                  <th className="px-2 py-2.5 text-left font-medium">DR / CR</th>
+                  <th className="px-2 py-2.5 text-left font-medium">Description</th>
+                  <th className="px-2 py-2.5 text-center font-medium">M</th>
+                  <th className="px-2 py-2.5 text-left font-medium" title="Hash chain (truncated)">
+                    Hash
+                  </th>
+                  <th className="px-5 py-2.5 text-right font-medium">Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map((e) => (
+                  <tr
+                    key={e.id}
+                    className={cn(
+                      "cursor-pointer border-b border-subtle/60 last:border-b-0 hover:bg-white/[0.02] focus-within:bg-white/[0.03]",
+                      e.status === "reversed" && "opacity-50 line-through"
+                    )}
+                  >
+                    <td className="whitespace-nowrap px-5 py-3 font-mono text-xs text-ink-tertiary">
+                      <Link href={`/journal/${e.id}`} className="hover:text-ink-primary">
+                        {shortDate(e.effective_date)}
+                      </Link>
+                    </td>
+                    <td className="px-2 py-3">
+                      {e.entity_display_name && (
+                        <span className="inline-flex items-center rounded-full bg-brand-500/10 px-2 py-0.5 text-[10px] font-medium text-brand-300">
+                          {e.entity_display_name}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-2 py-3 text-[11px] font-mono">
+                      <div className="text-debit">{e.debit_account}</div>
+                      <div className="text-credit">{e.credit_account}</div>
+                    </td>
+                    <td className="px-2 py-3">
+                      <div className="max-w-[260px] truncate font-medium" title={e.description ?? ""}>
+                        {e.payee ?? e.description ?? "—"}
+                      </div>
+                      <div className="max-w-[260px] truncate text-[10px] text-ink-tertiary">
+                        {e.category} · {e.source ?? "manual"}
+                      </div>
+                    </td>
+                    <td className="px-2 py-3 text-center">
+                      {e.materiality_tier && (
+                        <MaterialityBadge level={e.materiality_tier} />
+                      )}
+                    </td>
+                    <td className="px-2 py-3 font-mono text-[10px] text-ink-tertiary" title={e.this_hash_hex}>
+                      <Hash size={10} className="mr-1 inline" />
+                      {shortHash(e.this_hash_hex)}
+                    </td>
+                    <td className="px-5 py-3 text-right font-mono tabular-nums text-ink-primary">
+                      {formatAmount(e.amount)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></div>
+          )}
+        </Card>
+
+        <p className="mt-4 flex items-center gap-2 text-[11px] text-ink-tertiary">
+          <Shield size={11} />
+          Every entry is part of a per-entity SHA-256 hash chain. Mutations create
+          reversing entries — the chain is never rewritten.
+        </p>
+      </PageShell>
+    </AppShell>
+  );
+}

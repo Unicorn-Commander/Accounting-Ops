@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Unit / smoke tier — no docker needed. Always-green baseline + lint + collect.
+  # ---------------------------------------------------------------------------
+  unit:
+    runs-on: docker
+    container:
+      image: python:3.12-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install package + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff lint (test + CI surface — blocking)
+        run: ruff check tests scripts
+
+      - name: Ruff lint (app — informational, non-blocking)
+        # The app/ package carries some pre-existing lint debt (unused imports,
+        # import ordering) owned by the feature tracks. Surface it without
+        # gating CI so this test foundation stays green on day one.
+        run: ruff check app || true
+
+      - name: Smoke tests
+        run: pytest tests/smoke -v
+
+      - name: Collect integration tests (syntax + import check)
+        # Proves the integration tests are importable/collectable even though
+        # they won't run here (no stack) — they self-skip on collection.
+        run: pytest -m integration --collect-only -q tests/integration
+
+  # ---------------------------------------------------------------------------
+  # Integration tier — builds the images and runs the real pipeline against a
+  # live postgres + garage + app stack stood up with docker compose.
+  #
+  # Requires the Forgejo runner to expose a Docker daemon. Two supported setups
+  # (see docs/admin/actions/docker-access):
+  #   * DinD: the runner config sets DOCKER_HOST to the dind service.
+  #   * socket mount: container.docker_host = 'automount'.
+  # The published test ports (app 58000 / pg 55432, see docker-compose.itest.yml)
+  # are reached over 127.0.0.1 — this assumes the job container shares the
+  # daemon's loopback (true for socket-mount and for DinD that shares the
+  # network namespace). If your runner isolates them, point ACCTOPS_TEST_BASE_URL
+  # / ACCTOPS_TEST_DSN at the dind host instead.
+  # ---------------------------------------------------------------------------
+  integration:
+    runs-on: docker
+    # Use a docker-capable image. The CLI + compose plugin are installed in the
+    # first step if the base image doesn't ship them.
+    container:
+      image: docker:27-cli
+    steps:
+      - name: Install toolchain (git, python, compose plugin)
+        run: |
+          apk add --no-cache git python3 py3-pip make docker-cli-compose bash
+          python3 --version
+          docker version
+          docker compose version
+
+      - uses: actions/checkout@v4
+
+      - name: Wait for Docker daemon
+        run: |
+          for i in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then echo "docker up"; break; fi
+            echo "waiting for docker daemon ($i)"; sleep 2
+          done
+          docker info >/dev/null
+
+      - name: Install python deps (host side, for pytest)
+        run: |
+          python3 -m pip install --break-system-packages --upgrade pip
+          python3 -m pip install --break-system-packages -e ".[dev]"
+
+      - name: Stand up stack + provision
+        run: python3 scripts/integration_env.py up
+
+      - name: Run integration + safety-invariant tests
+        run: |
+          eval "$(python3 scripts/integration_env.py env)"
+          export ACCTOPS_TEST_BASE_URL ACCTOPS_TEST_DSN ACCTOPS_TEST_TOKEN ACCTOPS_TEST_UC_UID POSTGRES_PASSWORD
+          pytest -m integration tests/integration -v
+
+      - name: Dump app logs on failure
+        if: failure()
+        run: |
+          docker compose -p acctops_itest -f docker-compose.yml -f docker-compose.itest.yml \
+            --env-file .env.integration logs app postgres garage || true
+
+      - name: Tear down
+        if: always()
+        run: python3 scripts/integration_env.py down || true

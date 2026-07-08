@@ -1,0 +1,865 @@
+"""Open-items aggregator: one polished JSON payload for the
+/open-items dashboard.
+
+The web dashboard lives at /open-items and is the "open items for the
+workspace" page. Rather than have the React layer pull from many endpoints
+and do the sorting/bucketing client-side, this endpoint does the work:
+
+  Section 1 — Time-sensitive (red/orange)
+  Section 2 — Documents the workspace owner needs to provide (checklist
+              augmented with completion state stored in tax_review_queue)
+  Section 3 — Decisions awaiting the owner (with recommendation + accept/reject)
+  Section 4 — Items waiting on the CPA
+  Section 5 — Items waiting on attorney
+  Section 6 — Resolved this week (rollup of recent wins)
+
+Source of truth for sections 1, 3, 4, 5 is the ``tax_review_queue`` table
+in the workspace tenant schema. Section 2 is a static catalogue with
+"completion" tracked via memo rows of item_type='memo' with
+form_reference starting with 'DOC_RECEIVED: '. Section 6 is
+``tax_review_queue.resolved_at >= now() - 7 days``.
+
+Routing rules from form_reference + submitter_id + content topic:
+
+  * submitter_id LIKE '%loader%' -> usually INFORMATIONAL (corrections,
+    captured facts) — bucket as "context" unless prefixed CRITICAL.
+  * submitter_id == 'tax-1120-preparer' or LIKE '*specialist%' ->
+    typically routed to the CPA (CPA-review territory).
+  * form_reference starts with 'CRITICAL: ' -> Section 1 (time-sensitive).
+  * form_reference starts with 'Decision: ' or 'Strategy — ' (specific
+    enumerated strategies) -> Section 3 (the owner decides).
+  * form_reference contains 'Attorney' or 'LLC formation' ->
+    Section 5.
+  * else -> Section 4 (waiting on the CPA).
+
+The default list of "documents to physically go pull" lives in
+``_DEFAULT_DOCUMENT_CHECKLIST`` below. In the Community Edition this ships
+empty and is meant to be configured per-workspace; bumping this list is the
+only edit needed to add a static doc-checklist item.
+
+Read floor: viewer. Entity-scope enforced.
+"""
+from __future__ import annotations
+
+import datetime as dt
+from typing import Any
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
+from sqlalchemy import text
+
+from app.authz import assert_entity_in_scope
+from app.db import SessionLocal
+from app.tenancy import WorkspaceContext, require_role, resolve_workspace
+from app.workspace_session import workspace_session
+
+router = APIRouter(tags=["open-items"])
+
+
+# ---------------------------------------------------------------------------
+# Static catalogues
+# ---------------------------------------------------------------------------
+
+# Default list of documents the workspace owner must physically pull from the
+# source system. Each item maps to a deep-link where the doc lives; "needed_for"
+# is human-readable downstream context; "tax_years" tags which years it unblocks.
+#
+# Completion is tracked by writing a memo row to tax_review_queue with
+# form_reference = f"DOC_RECEIVED: {key}" — that way the same table holds
+# both state (received timestamp + reviewer) and audit trail.
+#
+# COMMUNITY EDITION: this ships EMPTY so no operator's personal tax documents
+# are baked into the source. It is meant to be configured per-workspace (see the
+# TODO at the aggregator below). The endpoints remain fully functional with an
+# empty catalogue — they simply return no static document items.
+_DEFAULT_DOCUMENT_CHECKLIST: list[dict[str, Any]] = []
+
+
+# Default decisions awaiting the owner — questions where the engine has a
+# recommendation but needs the owner's go/no-go. Each row creates a clickable
+# card; "Accept recommendation" / "Different choice" persist as memos to
+# tax_review_queue.
+#
+# COMMUNITY EDITION: this ships EMPTY (see note above) so no operator's personal
+# tax decisions ship in the source. Meant to be workspace-configured.
+_DEFAULT_DECISION_CHECKLIST: list[dict[str, Any]] = []
+
+
+# ---------------------------------------------------------------------------
+# Section bucketing logic
+# ---------------------------------------------------------------------------
+
+
+def _bucket_for_item(row: dict[str, Any]) -> str:
+    """Map a tax_review_queue row to one of:
+
+      "time_sensitive" | "decision" | "cpa" | "attorney" | "info"
+
+    Implements the rules documented at the top of this module.
+    """
+    form_ref = (row.get("form_reference") or "").strip()
+    submitter = (row.get("submitter_id") or "").lower()
+    item_type = (row.get("item_type") or "").lower()
+
+    # 1. Explicit critical / time-sensitive — always wins
+    if form_ref.startswith("CRITICAL"):
+        return "time_sensitive"
+
+    # 2. Decision tag prefix wins next
+    if form_ref.startswith("Decision:") or form_ref.startswith("Decision "):
+        return "decision"
+
+    # 3. Attorney-territory keywords
+    attorney_keywords = ("attorney", "llc formation", "registered agent")
+    fr_lower = form_ref.lower()
+    if any(kw in fr_lower for kw in attorney_keywords):
+        return "attorney"
+
+    # 4. Loader-sourced items default to informational unless they were
+    #    flagged_position (which always merit human-eye on the queue).
+    if "loader" in submitter:
+        if item_type == "flagged_position":
+            return "cpa"
+        return "info"
+
+    # 5. Specialist-sourced items typically need the CPA's review
+    if "specialist" in submitter or "preparer" in submitter or "drafter" in submitter:
+        return "cpa"
+
+    if "narrative-generator" in submitter or "resolver" in submitter:
+        return "cpa"
+
+    # 6. Default fallback
+    return "cpa"
+
+
+def _summarize_content(content: Any) -> str:
+    """Extract a one-line summary from a queue item's content jsonb."""
+    if isinstance(content, dict):
+        # 1120 preparer memos carry "text" + "topic"
+        text_blob = content.get("text") or content.get("summary") or ""
+        if text_blob:
+            # First non-blank line, strip leading markdown chrome
+            for line in str(text_blob).splitlines():
+                s = line.strip().lstrip("#").strip()
+                if s and not s.startswith("---"):
+                    return s[:240]
+        topic = content.get("topic")
+        if topic:
+            return str(topic)[:240]
+    if content:
+        return str(content)[:240]
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Endpoint
+# ---------------------------------------------------------------------------
+
+
+class OpenItemsResponse(BaseModel):
+    workspace_id: str
+    entity_id: str | None  # None == consolidated across entities
+    as_of: str
+    counts: dict[str, int]
+    time_sensitive: list[dict[str, Any]]
+    documents: list[dict[str, Any]]
+    decisions: list[dict[str, Any]]
+    waiting_on_cpa: list[dict[str, Any]]
+    waiting_on_attorney: list[dict[str, Any]]
+    resolved_this_week: list[dict[str, Any]]
+    # Tax submissions in flight (paper/MyDORWAY/efile records from
+    # tax_filing_submission). Sourced from app/api/tax_filing_submissions.py.
+    submissions_in_flight: list[dict[str, Any]] = []
+    # eBay payouts that don't yet have a matching BoA deposit (sourced from
+    # connector_state.state['reconciliation']['unmatched_payouts']). Surfaces
+    # on the dashboard so the owner sees the gap.
+    ebay_unmatched_payouts: list[dict[str, Any]] = []
+
+
+@router.get("/api/workspaces/{workspace_id}/open-items")
+async def get_open_items(
+    workspace_id: UUID,
+    entity_id: UUID | None = None,
+    tax_year: int | None = Query(default=None),
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> OpenItemsResponse:
+    """Return the aggregated open-items dashboard payload.
+
+    Filters:
+      * entity_id (optional): restrict to a single entity. If omitted,
+        spans all entities the caller has access to.
+      * tax_year (optional): restrict to one tax year. If omitted, spans
+        all years in the queue.
+    """
+    require_role(workspace, "viewer")
+    scope_restriction = assert_entity_in_scope(workspace, entity_id)
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        where = ["1=1"]
+        params: dict[str, Any] = {}
+
+        if entity_id:
+            where.append("trq.entity_id = :eid")
+            params["eid"] = str(entity_id)
+
+        if scope_restriction is not None:
+            where.append("trq.entity_id = ANY(:entity_scope)")
+            params["entity_scope"] = [str(e) for e in scope_restriction]
+
+        if tax_year:
+            where.append("trq.tax_year = :tax_year")
+            params["tax_year"] = tax_year
+
+        where_sql = " AND ".join(where)
+
+        # Pull every pending item once; bucket in Python.
+        pending_rows = (
+            await session.execute(
+                text(
+                    f"""
+                    SELECT
+                        trq.id::text,
+                        trq.entity_id::text,
+                        e.display_name AS entity_display_name,
+                        e.slug AS entity_slug,
+                        trq.tax_year,
+                        trq.item_type,
+                        trq.form_reference,
+                        trq.content,
+                        trq.confidence,
+                        trq.status,
+                        trq.submitter_kind,
+                        trq.submitter_id,
+                        trq.created_at
+                    FROM tax_review_queue trq
+                    LEFT JOIN entity e ON e.id = trq.entity_id
+                    WHERE {where_sql} AND trq.status = 'pending'
+                      AND (trq.form_reference IS NULL
+                           OR (trq.form_reference NOT LIKE 'DOC_RECEIVED:%'
+                               AND trq.form_reference NOT LIKE 'DECISION_RESOLVED:%'))
+                    ORDER BY
+                        CASE WHEN trq.form_reference LIKE 'CRITICAL%' THEN 0 ELSE 1 END,
+                        CASE trq.confidence
+                            WHEN 'high' THEN 0
+                            WHEN 'medium' THEN 1
+                            WHEN 'low' THEN 2
+                            ELSE 3
+                        END,
+                        trq.created_at DESC
+                    LIMIT 500
+                    """
+                ),
+                params,
+            )
+        ).mappings().all()
+
+        resolved_recent = (
+            await session.execute(
+                text(
+                    f"""
+                    SELECT
+                        trq.id::text,
+                        trq.entity_id::text,
+                        e.display_name AS entity_display_name,
+                        e.slug AS entity_slug,
+                        trq.tax_year,
+                        trq.item_type,
+                        trq.form_reference,
+                        trq.content,
+                        trq.status,
+                        trq.submitter_id,
+                        trq.reviewer_uc_uid,
+                        trq.resolution_notes,
+                        trq.resolved_at
+                    FROM tax_review_queue trq
+                    LEFT JOIN entity e ON e.id = trq.entity_id
+                    WHERE {where_sql}
+                      AND trq.status IN ('resolved', 'reviewed', 'rejected')
+                      AND trq.resolved_at >= now() - interval '7 days'
+                      AND (trq.form_reference IS NULL
+                           OR (trq.form_reference NOT LIKE 'DOC_RECEIVED:%'
+                               AND trq.form_reference NOT LIKE 'DECISION_RESOLVED:%'))
+                    ORDER BY trq.resolved_at DESC
+                    LIMIT 50
+                    """
+                ),
+                params,
+            )
+        ).mappings().all()
+
+        # DOC_RECEIVED markers — to mark Section 2 checklist items as
+        # completed. Spans all years since the marker is global. We treat
+        # the LATEST row per (doc_key) as authoritative — that lets users
+        # toggle receipt on/off by inserting a new marker (rather than
+        # DELETE which the least-privilege accounting_ops_app role lacks).
+        # status='resolved'  -> received   ; status='rejected' -> un-received.
+        doc_markers = (
+            await session.execute(
+                text(
+                    """
+                    SELECT DISTINCT ON (doc_key)
+                        doc_key,
+                        created_at AS received_at,
+                        reviewer_uc_uid AS marked_by,
+                        status
+                    FROM (
+                        SELECT
+                            substring(form_reference from 'DOC_RECEIVED: (.*)$') AS doc_key,
+                            created_at,
+                            reviewer_uc_uid,
+                            status
+                        FROM tax_review_queue
+                        WHERE form_reference LIKE 'DOC_RECEIVED: %'
+                    ) latest
+                    ORDER BY doc_key, created_at DESC
+                    """
+                )
+            )
+        ).mappings().all()
+
+        # DECISION_RESOLVED markers — same latest-wins pattern.
+        decision_markers = (
+            await session.execute(
+                text(
+                    """
+                    SELECT DISTINCT ON (dec_key)
+                        dec_key,
+                        full_ref,
+                        notes,
+                        resolved_at,
+                        decided_by,
+                        status
+                    FROM (
+                        SELECT
+                            substring(form_reference from 'DECISION_RESOLVED: ([^|]+)') AS dec_key,
+                            form_reference AS full_ref,
+                            resolution_notes AS notes,
+                            created_at AS resolved_at,
+                            reviewer_uc_uid AS decided_by,
+                            status
+                        FROM tax_review_queue
+                        WHERE form_reference LIKE 'DECISION_RESOLVED: %'
+                    ) latest
+                    ORDER BY dec_key, resolved_at DESC
+                    """
+                )
+            )
+        ).mappings().all()
+
+        # Submissions in flight (open envelopes / uploads from
+        # tax_filing_submission). Same entity / year scoping as the queue
+        # query above. Gracefully degrades if the table doesn't yet exist
+        # (migration 0011 not applied) — return empty list rather than 500.
+        submissions_in_flight_rows: list[dict[str, Any]] = []
+        try:
+            tfs_where = ["tfs.status NOT IN ('closed')"]
+            tfs_params: dict[str, Any] = {}
+            if entity_id:
+                tfs_where.append("tfs.entity_id = :tfs_eid")
+                tfs_params["tfs_eid"] = str(entity_id)
+            if scope_restriction is not None:
+                tfs_where.append("tfs.entity_id = ANY(:tfs_scope)")
+                tfs_params["tfs_scope"] = [str(e) for e in scope_restriction]
+            if tax_year:
+                tfs_where.append("tfs.tax_year = :tfs_ty")
+                tfs_params["tfs_ty"] = tax_year
+            tfs_where_sql = " AND ".join(tfs_where)
+            submissions_in_flight_rows = (
+                (
+                    await session.execute(
+                        text(
+                            f"""
+                            SELECT
+                                tfs.id::text,
+                                tfs.entity_id::text,
+                                e.display_name AS entity_display_name,
+                                e.slug AS entity_slug,
+                                tfs.jurisdiction, tfs.tax_year,
+                                tfs.submission_title, tfs.forms_enclosed,
+                                tfs.filing_method, tfs.tracking_number,
+                                tfs.status,
+                                tfs.submitted_at, tfs.expected_response_by,
+                                tfs.last_tracking_status, tfs.delivered_at,
+                                tfs.acknowledged_at
+                            FROM tax_filing_submission tfs
+                            LEFT JOIN entity e ON e.id = tfs.entity_id
+                            WHERE {tfs_where_sql}
+                            ORDER BY
+                                CASE tfs.status
+                                    WHEN 'awaiting_followup' THEN 0
+                                    WHEN 'in_transit'        THEN 1
+                                    WHEN 'submitted'         THEN 2
+                                    WHEN 'delivered'         THEN 3
+                                    WHEN 'acknowledged'      THEN 4
+                                    WHEN 'draft'             THEN 5
+                                    ELSE 6
+                                END,
+                                tfs.expected_response_by ASC NULLS LAST
+                            LIMIT 50
+                            """
+                        ),
+                        tfs_params,
+                    )
+                ).mappings().all()
+            )
+        except Exception:
+            # Table not present yet, or some other RLS / migration gap —
+            # surface as empty rather than failing the whole open-items load.
+            submissions_in_flight_rows = []
+
+    # ------- Bucketing -------
+    sections: dict[str, list[dict[str, Any]]] = {
+        "time_sensitive": [],
+        "decision": [],
+        "cpa": [],
+        "attorney": [],
+        "info": [],
+    }
+    for r in pending_rows:
+        row = dict(r)
+        bucket = _bucket_for_item(row)
+        row["summary"] = _summarize_content(row.get("content"))
+        # Drop the heavy content blob from the wire payload — viewers can
+        # fetch the full text via the existing GET .../tax-review-queue/{id}
+        # endpoint when they expand a card.
+        row["content"] = None
+        # Format dates as ISO strings (cleaner json)
+        if isinstance(row.get("created_at"), dt.datetime):
+            row["created_at"] = row["created_at"].isoformat()
+        sections[bucket].append(row)
+
+    # Documents catalogue with completion state merged in.
+    # Marker convention: status='resolved' => received, status='rejected' => un-received.
+    doc_state = {
+        (m["doc_key"] or ""): {
+            "received_at": (
+                m["received_at"].isoformat()
+                if isinstance(m["received_at"], dt.datetime)
+                else m["received_at"]
+            ),
+            "marked_by": m["marked_by"],
+            "is_received": m["status"] == "resolved",
+        }
+        for m in doc_markers
+    }
+    documents_out: list[dict[str, Any]] = []
+    received_count = 0
+    # _DEFAULT_DOCUMENT_CHECKLIST / _DEFAULT_DECISION_CHECKLIST are static
+    # catalogues shared by every workspace. In the Community Edition they ship
+    # EMPTY so no operator's personal tax items are baked into the source.
+    # TODO: replace with per-workspace document_request data so each tenant can
+    # configure its own checklist without editing module constants.
+    for doc in _DEFAULT_DOCUMENT_CHECKLIST:
+        # Tax-year filter: hide a doc only if it doesn't intersect the
+        # requested year. Show all years if no filter.
+        if tax_year is not None and tax_year not in doc.get("tax_years", []):
+            continue
+        d = dict(doc)
+        state = doc_state.get(doc["key"])
+        if state and state["is_received"]:
+            d["status"] = "received"
+            d["received_at"] = state["received_at"]
+            d["marked_by"] = state["marked_by"]
+            received_count += 1
+        else:
+            d["status"] = "pending"
+            d["received_at"] = None
+            d["marked_by"] = None
+        documents_out.append(d)
+
+    # Decisions catalogue with state merged in.
+    # Marker convention: status='resolved' => decided, status='rejected' => cleared.
+    dec_state = {
+        (m["dec_key"] or "").strip(): {
+            "full_ref": m["full_ref"],
+            "notes": m["notes"],
+            "resolved_at": (
+                m["resolved_at"].isoformat()
+                if isinstance(m["resolved_at"], dt.datetime)
+                else m["resolved_at"]
+            ),
+            "decided_by": m["decided_by"],
+            "is_active": m["status"] == "resolved",
+        }
+        for m in decision_markers
+    }
+    decisions_out: list[dict[str, Any]] = []
+    decisions_decided = 0
+    for dec in _DEFAULT_DECISION_CHECKLIST:
+        if tax_year is not None and tax_year not in dec.get("tax_years", []):
+            continue
+        d = dict(dec)
+        state = dec_state.get(dec["key"])
+        if state and state["is_active"]:
+            full_ref = state["full_ref"] or ""
+            # full_ref looks like "DECISION_RESOLVED: <key>|<verdict>"
+            verdict = "accept"
+            if "|" in full_ref:
+                verdict = full_ref.split("|", 1)[1].strip()
+            d["status"] = "resolved"
+            d["verdict"] = verdict
+            d["notes"] = state["notes"]
+            d["resolved_at"] = state["resolved_at"]
+            d["decided_by"] = state["decided_by"]
+            decisions_decided += 1
+        else:
+            d["status"] = "pending"
+            d["verdict"] = None
+            d["notes"] = None
+            d["resolved_at"] = None
+            d["decided_by"] = None
+        decisions_out.append(d)
+
+    # Resolved-this-week list with summary
+    resolved_out: list[dict[str, Any]] = []
+    for r in resolved_recent:
+        row = dict(r)
+        row["summary"] = _summarize_content(row.get("content"))
+        row["content"] = None
+        if isinstance(row.get("resolved_at"), dt.datetime):
+            row["resolved_at"] = row["resolved_at"].isoformat()
+        resolved_out.append(row)
+
+    # Submissions in flight — flatten datetimes for the wire
+    submissions_out: list[dict[str, Any]] = []
+    for r in submissions_in_flight_rows:
+        row = dict(r)
+        for k in ("submitted_at", "expected_response_by", "delivered_at",
+                  "acknowledged_at"):
+            if isinstance(row.get(k), dt.datetime):
+                row[k] = row[k].isoformat()
+        submissions_out.append(row)
+
+    awaiting_followup_count = sum(
+        1 for s in submissions_out if s.get("status") == "awaiting_followup"
+    )
+
+    # eBay unmatched payouts — sourced from connector_state.state
+    # ['reconciliation']['unmatched_payouts']. Read-only; the worker writes it
+    # on each sync pass.
+    ebay_unmatched_payouts: list[dict[str, Any]] = []
+    try:
+        async with workspace_session(SessionLocal, workspace.workspace_id) as ws:
+            recon_where = ["connector_name = 'ebay_finances'"]
+            recon_params: dict[str, Any] = {}
+            if entity_id:
+                recon_where.append("entity_id = :eid")
+                recon_params["eid"] = str(entity_id)
+            recon_sql = " AND ".join(recon_where)
+            recon_rows = (
+                await ws.execute(
+                    text(f"SELECT state FROM connector_state WHERE {recon_sql}"),
+                    recon_params,
+                )
+            ).mappings().all()
+            for r in recon_rows:
+                state = r["state"] or {}
+                if not isinstance(state, dict):
+                    continue
+                recon = state.get("reconciliation") or {}
+                for u in recon.get("unmatched_payouts", []) or []:
+                    ebay_unmatched_payouts.append(u)
+    except Exception:
+        # Best-effort: a missing connector_state row simply means no eBay
+        # connection. Never let the dashboard 500 on this.
+        pass
+
+    counts = {
+        "time_sensitive": len(sections["time_sensitive"]),
+        "documents_pending": len(documents_out) - received_count,
+        "documents_received": received_count,
+        "decisions_pending": len(decisions_out) - decisions_decided,
+        "decisions_decided": decisions_decided,
+        "waiting_on_cpa": len(sections["cpa"]),
+        "waiting_on_attorney": len(sections["attorney"]),
+        "informational": len(sections["info"]),
+        "resolved_this_week": len(resolved_out),
+        "submissions_in_flight": len(submissions_out),
+        "submissions_awaiting_followup": awaiting_followup_count,
+        "ebay_unmatched_payouts": len(ebay_unmatched_payouts),
+        # The headline number that drives the dashboard widget — only items
+        # that require the owner to act, not things waiting on someone else.
+        # Submissions awaiting follow-up count as action-required (the owner
+        # must call the taxing authority).
+        "action_required": (
+            len(sections["time_sensitive"])
+            + (len(documents_out) - received_count)
+            + (len(decisions_out) - decisions_decided)
+            + awaiting_followup_count
+        ),
+    }
+
+    return OpenItemsResponse(
+        workspace_id=str(workspace_id),
+        entity_id=str(entity_id) if entity_id else None,
+        as_of=dt.datetime.now(tz=dt.timezone.utc).isoformat(),
+        counts=counts,
+        time_sensitive=sections["time_sensitive"],
+        documents=documents_out,
+        decisions=decisions_out,
+        waiting_on_cpa=sections["cpa"],
+        waiting_on_attorney=sections["attorney"],
+        resolved_this_week=resolved_out,
+        submissions_in_flight=submissions_out,
+        ebay_unmatched_payouts=ebay_unmatched_payouts,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mark a document as received / un-received
+# ---------------------------------------------------------------------------
+
+
+class DocReceivedBody(BaseModel):
+    key: str
+    received: bool = True
+    note: str | None = None
+
+
+@router.post("/api/workspaces/{workspace_id}/open-items/document-received")
+async def mark_document_received(
+    workspace_id: UUID,
+    body: DocReceivedBody,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Toggle the 'received' state on a document checklist item.
+
+    Implementation: writes a memo row to tax_review_queue with
+    form_reference='DOC_RECEIVED: <key>' so the same audit infrastructure
+    that backs the rest of the queue covers this state too. Toggling off
+    deletes the marker rows.
+
+    Role floor: accountant — the workspace owner passes; a CPA accountant is
+    also OK so the CPA can confirm receipt if the document was forwarded directly.
+    """
+    require_role(workspace, "accountant")
+    key = (body.key or "").strip()
+    if not key:
+        return {"ok": False, "error": "key is required"}
+
+    # Use the first entity_id in scope as a placeholder — the marker row
+    # isn't entity-specific, but the table requires entity_id NOT NULL.
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        # Pick any entity we can see (first alphabetically by display name).
+        ent_row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id::text
+                    FROM entity
+                    ORDER BY display_name
+                    LIMIT 1
+                    """
+                )
+            )
+        ).first()
+        if not ent_row:
+            return {"ok": False, "error": "no entity available"}
+        ent_id = ent_row[0]
+
+        # status='resolved' marks the doc as received; status='rejected' un-receives it.
+        # The aggregator picks the latest row per doc_key.
+        marker_status = "resolved" if body.received else "rejected"
+        await session.execute(
+            text(
+                """
+                INSERT INTO tax_review_queue (
+                    id, workspace_id, entity_id, tax_year,
+                    item_type, form_reference, content, confidence,
+                    status, submitter_kind, submitter_id,
+                    reviewer_uc_uid, resolution_notes,
+                    created_at, resolved_at
+                )
+                VALUES (
+                    gen_random_uuid(), :wid, :eid, 0,
+                    'memo', :form_ref,
+                    jsonb_build_object('doc_key', CAST(:key AS text),
+                                       'note', CAST(:note AS text),
+                                       'received', CAST(:received AS boolean)),
+                    'high', :marker_status, 'human', :uc_uid,
+                    :uc_uid, CAST(:note AS text), now(), now()
+                )
+                """
+            ),
+            {
+                "wid": str(workspace_id),
+                "eid": ent_id,
+                "form_ref": f"DOC_RECEIVED: {key}",
+                "key": key,
+                "note": body.note,
+                "received": body.received,
+                "marker_status": marker_status,
+                "uc_uid": workspace.user_uc_uid,
+            },
+        )
+
+    return {"ok": True, "key": key, "received": body.received}
+
+
+# ---------------------------------------------------------------------------
+# Resolve a decision (accept recommendation / different choice)
+# ---------------------------------------------------------------------------
+
+
+class DecisionBody(BaseModel):
+    key: str
+    verdict: str  # "accept" | "other"
+    notes: str | None = None
+
+
+@router.post("/api/workspaces/{workspace_id}/open-items/decision")
+async def record_decision(
+    workspace_id: UUID,
+    body: DecisionBody,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Persist the owner's verdict on a decision item.
+
+    Writes a memo row with form_reference='DECISION_RESOLVED: <key>|<verdict>'
+    so the same audit table covers it. The CPA can override later by
+    posting a new memo (rare).
+
+    Role floor: accountant (owner / admin / accountant all pass).
+    """
+    require_role(workspace, "accountant")
+    key = (body.key or "").strip()
+    verdict = (body.verdict or "accept").strip().lower()
+    if verdict not in ("accept", "other"):
+        return {"ok": False, "error": "verdict must be 'accept' or 'other'"}
+    if not key:
+        return {"ok": False, "error": "key is required"}
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        ent_row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id::text
+                    FROM entity
+                    ORDER BY display_name
+                    LIMIT 1
+                    """
+                )
+            )
+        ).first()
+        if not ent_row:
+            return {"ok": False, "error": "no entity available"}
+        ent_id = ent_row[0]
+
+        # Latest INSERT wins (no DELETE needed — runtime role can't DELETE).
+        # The aggregator SELECT DISTINCT ON (dec_key) … ORDER BY resolved_at DESC
+        # picks the freshest row, so re-deciding just inserts a new marker.
+        await session.execute(
+            text(
+                """
+                INSERT INTO tax_review_queue (
+                    id, workspace_id, entity_id, tax_year,
+                    item_type, form_reference, content, confidence,
+                    status, submitter_kind, submitter_id,
+                    reviewer_uc_uid, resolution_notes,
+                    created_at, resolved_at
+                )
+                VALUES (
+                    gen_random_uuid(), :wid, :eid, 0,
+                    'memo', :form_ref,
+                    jsonb_build_object('decision_key', CAST(:key AS text),
+                                       'verdict', CAST(:verdict AS text),
+                                       'notes', CAST(:notes AS text)),
+                    'high', 'resolved', 'human', :uc_uid,
+                    :uc_uid, CAST(:notes AS text), now(), now()
+                )
+                """
+            ),
+            {
+                "wid": str(workspace_id),
+                "eid": ent_id,
+                "form_ref": f"DECISION_RESOLVED: {key}|{verdict}",
+                "key": key,
+                "verdict": verdict,
+                "notes": body.notes,
+                "uc_uid": workspace.user_uc_uid,
+            },
+        )
+
+    return {"ok": True, "key": key, "verdict": verdict}
+
+
+# ---------------------------------------------------------------------------
+# GET /open-items/decision-history — per-decision audit trail
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/workspaces/{workspace_id}/open-items/decision-history")
+async def get_decision_history(
+    workspace_id: UUID,
+    key: str = Query(..., min_length=1, max_length=512),
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Return the full append-only history of a single decision key.
+
+    Each ``record_decision`` call inserts a new ``tax_review_queue`` row
+    with ``form_reference = 'DECISION_RESOLVED: <key>|<verdict>'``. The
+    aggregator's "latest INSERT wins" produces the current state; this
+    endpoint returns every row, oldest first, so the UI can show the
+    user a real audit trail (who decided, when, what changed, notes).
+
+    Read floor: viewer (every workspace member can see decision history).
+    """
+    require_role(workspace, "viewer")
+    key_clean = (key or "").strip()
+    if not key_clean:
+        return {"key": "", "history": []}
+
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT
+                        id::text                AS id,
+                        form_reference          AS form_reference,
+                        resolution_notes        AS notes,
+                        reviewer_uc_uid         AS decided_by,
+                        created_at              AS decided_at,
+                        content                 AS content
+                    FROM tax_review_queue
+                    WHERE form_reference = :exact_ref_accept
+                       OR form_reference = :exact_ref_other
+                    ORDER BY created_at ASC
+                    """
+                ),
+                {
+                    "exact_ref_accept": f"DECISION_RESOLVED: {key_clean}|accept",
+                    "exact_ref_other": f"DECISION_RESOLVED: {key_clean}|other",
+                },
+            )
+        ).mappings().all()
+
+    history: list[dict[str, Any]] = []
+    for r in rows:
+        ref = r["form_reference"] or ""
+        verdict = "accept"
+        if "|" in ref:
+            verdict = ref.split("|", 1)[1].strip() or "accept"
+        decided_at = r["decided_at"]
+        if isinstance(decided_at, dt.datetime):
+            decided_at_iso = decided_at.isoformat()
+        else:
+            decided_at_iso = str(decided_at)
+        history.append(
+            {
+                "id": r["id"],
+                "verdict": verdict,
+                "decided_by": r["decided_by"],
+                "decided_at": decided_at_iso,
+                "notes": r["notes"] or "",
+            }
+        )
+
+    return {
+        "key": key_clean,
+        "history": history,
+        "total": len(history),
+    }
