@@ -144,5 +144,5 @@ Known framework (verify):
 - [ ] Add FL.10 — FL controversy procedure (DOR administrative hearings, circuit court)
 - [ ] Add FL.11 — FL local surtaxes (some Florida counties impose discretionary sales surtax)
 
-**Assigned to:** CPA Mosin / NorthbridgeTax or equivalent FL-licensed tax counsel.
+**Assigned to:** CPA the CPA / NorthbridgeTax or equivalent FL-licensed tax counsel.
 **Priority:** P2 unless entity has significant FL operations or FL customer base approaching nexus threshold.

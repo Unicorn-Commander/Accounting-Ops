@@ -156,5 +156,5 @@ Known framework (verify):
 - [ ] Add NY.10 — NYC corporate tax (separate analysis — not covered in this state ruleset)
 - [ ] Add NY.11 — NY controversy and appeal procedure (Division of Tax Appeals, Tribunal, Appellate Division)
 
-**Assigned to:** CPA Mosin / NorthbridgeTax or equivalent NY-licensed tax counsel.
+**Assigned to:** CPA the CPA / NorthbridgeTax or equivalent NY-licensed tax counsel.
 **Priority:** P1 if entity has NY customers (possible sales tax nexus) or NY employees.

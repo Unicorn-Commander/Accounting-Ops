@@ -60,12 +60,12 @@ to the right specialists automatically based on your request.
 export ANTHROPIC_API_KEY="sk-ant-..."
 export ACCTOPS_SERVICE_TOKEN="<keycloak-service-token>"
 
-# Full federal + 1099 + SC trio for Magic Unicorn Inc 2023:
+# Full federal + 1099 + SC trio for Acme Inc 2023:
 uv run python agents/tax_specialists/coordinator/run_coordinator.py \
     --workspace-id 550e8400-e29b-41d4-a716-446655440000 \
     --entity-id    aabbccdd-1234-5678-9abc-000000000001 \
     --tax-year     2023 \
-    --request      "prepare 2023 returns for Magic Unicorn Inc" \
+    --request      "prepare 2023 returns for Acme Inc" \
     --output-dir   ./drafts/
 
 # Dry run — print dispatch plan without launching any specialist:
@@ -73,17 +73,17 @@ uv run python agents/tax_specialists/coordinator/run_coordinator.py \
     --workspace-id 550e8400-e29b-41d4-a716-446655440000 \
     --entity-id    aabbccdd-1234-5678-9abc-000000000001 \
     --tax-year     2023 \
-    --request      "prepare 2023 returns for Magic Unicorn Inc" \
+    --request      "prepare 2023 returns for Acme Inc" \
     --dry-run
 
-# With a self-hosted LLM backend (e.g. vLLM on midboy1):
+# With a self-hosted LLM backend (e.g. vLLM on <host>):
 uv run python agents/tax_specialists/coordinator/run_coordinator.py \
     --workspace-id 550e8400-e29b-41d4-a716-446655440000 \
     --entity-id    aabbccdd-1234-5678-9abc-000000000001 \
     --tax-year     2023 \
-    --request      "prepare 2023 returns for Magic Unicorn Inc" \
+    --request      "prepare 2023 returns for Acme Inc" \
     --backend      openai \
-    --llm-endpoint-url http://midboy1:8088/v1 \
+    --llm-endpoint-url http://<host>:8088/v1 \
     --output-dir   ./drafts/
 ```
 
@@ -161,7 +161,7 @@ curl -s \
   -d "client_id=accounting-ops-app" \
   -d "client_secret=<secret>" \
   -d "grant_type=client_credentials" \
-  "https://auth.unicorncommander.ai/realms/uchub/protocol/openid-connect/token" \
+  "https://auth.example.com/realms/uchub/protocol/openid-connect/token" \
   | jq -r .access_token
 ```
 

@@ -1,10 +1,10 @@
 # CFO Agent
 
-Strategic-finance synthesis layer for Magic Unicorn's Accounting-Ops. Lives in
+Strategic-finance synthesis layer for Acme's Accounting-Ops. Lives in
 the `/chat` surface as a top-tier persona, and federates to Brigade as a
 sub-agent when Brigade is online.
 
-**Aaron, Shafen — this agent is your CFO sounding board for cash, runway,
+**the owner, the admin — this agent is your CFO sounding board for cash, runway,
 unit economics, financing, and board narrative. It is NOT a licensed CFO,
 CPA, attorney, or 409A provider. It frames; you decide.**
 
@@ -18,7 +18,7 @@ The CFO Agent answers questions like:
 - "If we close a $500K seed at $4M post, what's the dilution?"
 - "Which year-end strategy moves materially affect TY2026 federal tax?"
 - "Draft the board-deck financials slide for Q3."
-- "How does Magic Unicorn's gross margin compare to Brightwater Labs'?"
+- "How does Acme's gross margin compare to Sample LLC'?"
 
 It does this by reading the same data the operational + specialist agents
 expose (P&L, runway, form-1120 working data, tax rules) and synthesizing it
@@ -85,7 +85,7 @@ This agent is both PRODUCER and CONSUMER of Brigade tools:
 - **Producer**: Brigade ingests `/.well-known/mcps.json` from Accounting-Ops
   and exposes the CFO Agent's synthesis tools (`account.*`) to other Brigade
   clients.
-- **Consumer**: when Brigade is live at `https://brigade.unicorncommander.ai`,
+- **Consumer**: when Brigade is live at `https://brigade.example.com`,
   the agent loads the aggregated cross-app catalog from
   `/.well-known/manifest.json` and the in-app `/chat` can call `project.*`,
   `meeting.*`, `contact.*` tools.
@@ -132,11 +132,11 @@ Up to now, the agents have been operational (Setup Assistant, Sentinel,
 Receipt Reconciler) or specialist (Form 1120 Preparer, SC State, etc.).
 Both are tactical: they DO things.
 
-The CFO Agent is the synthesis layer — it doesn't DO, it THINKS. When Aaron
+The CFO Agent is the synthesis layer — it doesn't DO, it THINKS. When the owner
 asks "should we raise now or push to Q4?", that question doesn't belong in
 any operational or specialist agent. It belongs at the CFO seat.
 
 This agent fills that seat. It will never replace a human CFO, but it
 removes 80% of the "let me think through this on paper" overhead so the
-human CFO (Aaron) can spend more time on the 20% that actually requires
+human CFO (the owner) can spend more time on the 20% that actually requires
 human judgment, relationships, and accountability.

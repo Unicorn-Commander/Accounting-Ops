@@ -185,7 +185,7 @@ analysis. If SC-only operations, document assumption and flag for CPA to confirm
 4. Unused SC R&D credit can be carried forward 10 years.
 
 **Strategy notes:**
-- For an AI/software company like Magic Unicorn Inc., the key federal §41 tests:
+- For an AI/software company like Acme Inc., the key federal §41 tests:
   (a) technological uncertainty test — must be developing new or improved technology;
   (b) process of experimentation test — systematic trial-and-error or hypothesis testing;
   (c) qualified purpose — new/improved functionality, performance, reliability, or quality;
@@ -225,7 +225,7 @@ Credit county designations at https://dor.sc.gov/tax-index/credits/job-tax-credi
 - Minimum job creation threshold may apply (check SCDOR for current minimum).
 - Non-refundable; can be carried forward.
 
-**Strategy note:** If Magic Unicorn Inc. or related entities plan to hire in SC, the
+**Strategy note:** If Acme Inc. or related entities plan to hire in SC, the
 county tier matters significantly. Hiring in Tier I counties can generate $8,500/year
 per new job for 5 years. This is a material incentive for workforce expansion planning.
 
@@ -350,7 +350,7 @@ reports or pay SC taxes may be subject to administrative dissolution by the SC S
 of State (SC Code §33-14-210). Reinstatement requires application with SC SOS under
 SC Code §33-14-220.
 
-**MU Inc. note:** As of the knowledge base, Magic Unicorn Unconventional Technology &
+**Acme Inc. note:** As of the knowledge base, Acme Unconventional Technology &
 Stuff Inc. has not filed SC1120 for TY 2023 (SCDOR notice issued 2025-06-16) or TY
 2024. Voluntary disclosure eligibility for TY 2023 is likely forfeited due to the SCDOR
 notice. CPA must confirm TY 2024 VDA eligibility with SCDOR before filing.
