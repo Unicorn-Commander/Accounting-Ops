@@ -101,11 +101,12 @@ async def test_endpoint_admin_scope_passes(app_under_test):
     assert body["resolved_user"] == "aaron"
 
 
-async def test_endpoint_aaron_uc_uid_allowlist(app_under_test):
-    """The two operator allowlist (aaron, shafen) bypasses the scope check."""
+async def test_endpoint_uc_uid_allowlist(app_under_test, monkeypatch):
+    """A uc_uid listed in ACCTOPS_ADMIN_UC_UIDS bypasses the scope check."""
+    monkeypatch.setenv("ACCTOPS_ADMIN_UC_UIDS", "opsadmin,otheradmin")
     _override_auth(
         app_under_test,
-        AuthContext(uc_uid="aaron", agent_id=None, scopes=("openid",), claims={}),
+        AuthContext(uc_uid="opsadmin", agent_id=None, scopes=("openid",), claims={}),
     )
     token = _mint_ed25519(_ED_PRIV, _base_claims())
     async with httpx.AsyncClient(
