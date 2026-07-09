@@ -1,8 +1,9 @@
 # Accounting-Ops Community Edition — publish checklist
 
 This directory is a **prepared-but-unpublished** open-core Community Edition
-snapshot. It is one clean squashed commit with **no git remote** — nothing has
-been pushed anywhere. The maintainer pushes the button.
+snapshot. It is one clean squashed history that now lives in **private** repos
+(Forgejo canonical + a GitHub push-mirror, both private) — nothing is public.
+The maintainer pushes the button.
 
 ## What this snapshot is
 - Built from the internal monorepo (`Accounting-Ops`, branch
@@ -42,12 +43,21 @@ been pushed anywhere. The maintainer pushes the button.
   (self-host uses `docker-compose.selfhost.yml`), `DEPLOY.md`, `CHANGELOG.md`,
   `COMMUNITY_MANIFEST.md`.
 
-## Remaining steps for the publish click (maintainer's call)
-1. Create a new **private** GitHub/Forgejo repo; push this `main`.
-2. Wire the two scanners as CI (config already present) + a DCO check.
-3. Flip the repo public when ready. **Launch line:** "the first open-source
-   autonomous AI accountant."
-4. Satellites: create public remotes for the 3 local-only MCP repos
-   (simplefin-mcp, ebay-finances-mcp, reconciler) — all 6 already carry AGPL LICENSE.
-5. Keep the Forgejo repo canonical and configure the private GitHub repo as a
-   push mirror; flip both public only when the maintainer gives the go.
+## Private prep — DONE (held for the public flip)
+- ✅ **Forgejo canonical** (private): `UnicornCommander/accounting-ops-community` — `main` pushed.
+- ✅ **GitHub mirror** (private): `Unicorn-Commander/accounting-ops-community` — `main` pushed
+  (parity), and a Forgejo **push-mirror** (`sync_on_commit`, 8h) keeps it in sync.
+- ✅ **CI committed** (`.github/workflows/ci.yml`): gitleaks + trufflehog + DCO sign-off gate.
+- ✅ **Satellites** (private, Forgejo canonical + GitHub mirror each):
+  `accounting-ops-{simplefin-mcp,ebay-finances-mcp,reconciler}` — all AGPL-licensed.
+
+## The only steps left (maintainer's call)
+1. **Flip public** — make the Forgejo + GitHub `accounting-ops-community` repos public
+   (the mirror keeps them in sync). **Launch line:** "the first open-source autonomous AI accountant."
+2. Before flipping the **satellites** public, human-eyeball their binary test fixtures for PII
+   (`ebay-finances-mcp/**/*_response.json`, any `.eml`/`.pdf` fixtures) and run the scanners on them.
+3. Recommended: swap the push-mirror credential (currently a broad personal PAT) for a
+   repo-scoped deploy token before/at publish.
+4. Optional: add the same CI workflow to the satellites; add an in-app persistent
+   "Draft — not tax advice" banner (the not-tax-advice posture already lives in
+   README + DISCLAIMER + PROFESSIONAL-SUBSTITUTE).

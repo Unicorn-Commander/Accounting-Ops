@@ -115,7 +115,8 @@ model at all.**
 ### One command
 
 ```bash
-git clone <this-repo> accounting-ops && cd accounting-ops
+git clone https://github.com/Unicorn-Commander/accounting-ops-community.git
+cd accounting-ops-community
 make selfhost
 ```
 
