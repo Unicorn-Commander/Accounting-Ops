@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { SiteHeader } from "@/components/site-header";
+import { DisclaimerBanner } from "@/components/disclaimer-banner";
 import { AppSidebar } from "@/components/app-sidebar";
 import { BottomNav } from "@/components/bottom-nav";
 import { ChatLauncher } from "@/components/chat/chat-launcher";
@@ -44,6 +45,7 @@ export async function AppShell({
   return (
     <>
       <SiteHeader variant="app" />
+      <DisclaimerBanner />
       <div className="flex">
         <AppSidebar
           canAdmin={canAdmin}
