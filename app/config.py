@@ -179,6 +179,19 @@ class Settings(BaseModel):
     # portal — Stripe lives there, behind the shared SSO session).
     ops_center_billing_url: str = "https://platform.example.com/billing"
 
+    # ---- Smart-inference credit/entitlement gate (hosted prod only) ----
+    # When ENABLED, AO's paid/cloud "smart" inference (CFO Agent, tax specialists,
+    # premium chat) requires the workspace to be entitled to Accounting-Ops OR to
+    # supply its own model key (BYOK). Deterministic accounting + local-model paths
+    # NEVER call the gate. DEFAULT OFF ⇒ the dogfood ring and community self-host
+    # are unaffected; the hosted prod ring sets AO_SMART_GATE_ENABLED=1. Community
+    # Edition (AO_EDITION=community) is always exempt regardless of this flag.
+    smart_gate_enabled: bool = False
+    # When True (default), a workspace that supplies its own model key (BYOK) is
+    # allowed through the gate WITHOUT credits/entitlement — it pays its own
+    # provider directly. Set False to require an entitlement even for BYOK.
+    smart_gate_byok_bypass: bool = True
+
     # ---- Server-to-server (M2M) trusted callers ----
     # Space-separated list of Keycloak client IDs (azp claim values) that are
     # permitted to call federation read endpoints without a workspace membership
@@ -279,6 +292,14 @@ def get_settings() -> Settings:
         ops_center_billing_url=os.getenv(
             "OPS_CENTER_BILLING_URL", defaults.ops_center_billing_url
         ),
+        smart_gate_enabled=os.getenv("AO_SMART_GATE_ENABLED", "")
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
+        smart_gate_byok_bypass=os.getenv("AO_SMART_GATE_BYOK_BYPASS", "1")
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
         trusted_m2m_callers=frozenset(
             c.strip()
             for c in os.getenv("ACCTOPS_TRUSTED_M2M_CALLERS", "").split()
