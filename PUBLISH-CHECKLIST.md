@@ -47,17 +47,20 @@ The maintainer pushes the button.
 - ✅ **Forgejo canonical** (private): `UnicornCommander/accounting-ops-community` — `main` pushed.
 - ✅ **GitHub mirror** (private): `Unicorn-Commander/accounting-ops-community` — `main` pushed
   (parity), and a Forgejo **push-mirror** (`sync_on_commit`, 8h) keeps it in sync.
-- ✅ **CI committed** (`.github/workflows/ci.yml`): gitleaks + trufflehog + DCO sign-off gate.
-- ✅ **Satellites** (private, Forgejo canonical + GitHub mirror each):
-  `accounting-ops-{simplefin-mcp,ebay-finances-mcp,reconciler}` — all AGPL-licensed.
+- ✅ **CI committed** (`.github/workflows/ci.yml`): gitleaks + trufflehog + DCO sign-off gate —
+  verified **GREEN on GitHub Actions**.
+- ✅ **App-wide disclaimer banner**: persistent "Draft — not tax advice · verify every figure"
+  strip on every authenticated page (`web/components/disclaimer-banner.tsx`, mounted in `app-shell`).
+- ✅ **Satellites** (private, Forgejo canonical + GitHub mirror each, **CI added**):
+  `accounting-ops-{simplefin-mcp,ebay-finances-mcp,reconciler}` — all AGPL, all scanner-clean
+  (gitleaks / trufflehog / PII), no binary fixtures needing manual review.
 
 ## The only steps left (maintainer's call)
-1. **Flip public** — make the Forgejo + GitHub `accounting-ops-community` repos public
-   (the mirror keeps them in sync). **Launch line:** "the first open-source autonomous AI accountant."
-2. Before flipping the **satellites** public, human-eyeball their binary test fixtures for PII
-   (`ebay-finances-mcp/**/*_response.json`, any `.eml`/`.pdf` fixtures) and run the scanners on them.
-3. Recommended: swap the push-mirror credential (currently a broad personal PAT) for a
-   repo-scoped deploy token before/at publish.
-4. Optional: add the same CI workflow to the satellites; add an in-app persistent
-   "Draft — not tax advice" banner (the not-tax-advice posture already lives in
-   README + DISCLAIMER + PROFESSIONAL-SUBSTITUTE).
+1. **Flip public** — make the Forgejo + GitHub `accounting-ops-community` repos (and, when ready,
+   the 3 satellites) public; the mirrors keep everything in sync.
+   **Launch line:** "the first open-source autonomous AI accountant."
+2. Recommended: swap the push-mirror credential (currently a broad personal PAT embedded in
+   Forgejo) for a repo-scoped deploy token before/at publish.
+3. Optional/future: add a build + lint CI job (current CI is secret-scan + DCO only); fully
+   de-brand the satellite examples/fixtures if desired (a few benign `Magic Unicorn Inc`
+   references remain — maintainer org, not PII).
