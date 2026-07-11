@@ -80,7 +80,9 @@ for YEAR in "${YEARS[@]}"; do
     echo "=== Tax Year $YEAR ==="
 
     # Form 1120
-    if [[ "$YEAR" == "2024" ]]; then
+    # NOTE(2026-07-10): irs-pdf/f1120.pdf is now the 2025 revision - the old
+    # YEAR==2024 shortcut silently saved the WRONG revision as f1120_2024.pdf.
+    if [[ "$YEAR" == "2025" ]]; then
         F1120_URL="https://www.irs.gov/pub/irs-pdf/f1120.pdf"
     else
         F1120_URL="https://www.irs.gov/pub/irs-prior/f1120--${YEAR}.pdf"
