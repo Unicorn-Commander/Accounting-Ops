@@ -25,6 +25,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Bot } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { openCreditGate, parsePaymentRequired, type CreditGate } from "@/lib/credit-gate";
+import { CreditGateInline } from "@/components/credit-gate-inline";
 import { Composer } from "./composer";
 import { MessageBubble } from "./message-bubble";
 import { PersonaPicker } from "./persona-picker";
@@ -89,6 +91,8 @@ export function EmbeddedChat({
   const [messages, setMessages] = useState<RenderedMessage[]>([]);
   const [loadingSession, setLoadingSession] = useState(false);
   const [pendingError, setPendingError] = useState<string | null>(null);
+  // Set when creating a session returns HTTP 402 (paid call, no credits/BYOK).
+  const [pendingGate, setPendingGate] = useState<CreditGate | null>(null);
   const [draft, setDraft] = useState("");
 
   const threadRef = useRef<HTMLDivElement>(null);
@@ -106,6 +110,7 @@ export function EmbeddedChat({
     async (sid: string) => {
       setLoadingSession(true);
       setPendingError(null);
+      setPendingGate(null);
       clearError();
       setMessages([]);
       try {
@@ -160,6 +165,7 @@ export function EmbeddedChat({
     // to an onClick that forwards a SyntheticEvent — never .trim() that.
     const text = (typeof textOverride === "string" ? textOverride : draft).trim();
     if (!text) return;
+    setPendingGate(null);
 
     // 1. Ensure a session exists (create lazily, bound to persona + entity + year).
     let targetSessionId = activeSessionId;
@@ -178,6 +184,12 @@ export function EmbeddedChat({
           }
         );
         if (!res.ok) {
+          const gate = await parsePaymentRequired(res);
+          if (gate) {
+            openCreditGate(gate);
+            setPendingGate(gate);
+            return;
+          }
           const detail = await res.text().catch(() => "");
           throw new Error(detail || `HTTP ${res.status}`);
         }
@@ -225,6 +237,9 @@ export function EmbeddedChat({
     return messages;
   }, [messages, stream.inflight]);
 
+  // A credit gate from either the session-create POST or the messages-POST.
+  const activeGate = stream.creditGate ?? pendingGate;
+
   return (
     <div className={cn("flex min-h-0 flex-col", className)}>
       {showPersonaPicker && (
@@ -269,10 +284,11 @@ export function EmbeddedChat({
             agentLabel={m.kind === "assistant" ? personaLabel : undefined}
           />
         ))}
-        {pendingError && (
+        {pendingError && !pendingGate && (
           <ErrorRow message={pendingError} onDismiss={() => setPendingError(null)} />
         )}
-        {stream.error && <ErrorRow message={stream.error} />}
+        {stream.error && !stream.creditGate && <ErrorRow message={stream.error} />}
+        {activeGate && <CreditGateInline gate={activeGate} />}
       </div>
 
       <Composer

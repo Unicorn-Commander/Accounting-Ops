@@ -6,6 +6,7 @@ import { BottomNav } from "@/components/bottom-nav";
 import { ChatLauncher } from "@/components/chat/chat-launcher";
 import { ContextBreadcrumb } from "@/components/context-breadcrumb";
 import { GlobalToast } from "@/components/global-toast";
+import { CreditGateModal } from "@/components/credit-gate-modal";
 import { getActiveContext } from "@/lib/active-context";
 import { fetchChatPersonas } from "@/lib/chat";
 import { auth } from "@/lib/auth";
@@ -74,6 +75,7 @@ export async function AppShell({
         />
       )}
       <GlobalToast />
+      <CreditGateModal />
       {ctx?.activeWorkspace && <BottomNav canAdmin={canAdmin} isCommunity={isCommunity} />}
     </>
   );

@@ -23,6 +23,7 @@ import {
   TrendingUp,
   Upload,
   Users,
+  Wallet,
 } from "lucide-react";
 
 export type NavItem = {
@@ -106,6 +107,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { label: "Sentinel", href: "/settings/sentinel", icon: ShieldCheck, hue: "157 55% 50%" },
       { label: "MCP Access Tokens", href: "/settings/pats", icon: Key, hue: "270 60% 60%" },
       { label: "Inference & billing", href: "/settings/inference", icon: CreditCard, hue: "157 60% 50%", adminOnly: true },
+      { label: "Billing & Credits", href: "/settings/billing", icon: Wallet, hue: "43 96% 56%", adminOnly: true },
       { label: "Period Close", href: "/admin/period-close", icon: ShieldCheck, hue: "18 85% 55%", adminOnly: true },
       { label: "Help", href: "/help", icon: HelpCircle, hue: "240 20% 60%" },
     ],

@@ -32,6 +32,7 @@ from app.api.category_overrides import router as category_overrides_router
 from app.api.contacts import router as contacts_router
 from app.api.credentials import router as credentials_router
 from app.api.documents import router as documents_router
+from app.api.billing import router as billing_router
 from app.api.inference_settings import router as inference_settings_router
 from app.api.invoices import router as invoices_router
 from app.api.journal import router as journal_router
@@ -154,6 +155,10 @@ app.include_router(personal_access_tokens_router)
 # BYOK inference settings (additive — status/store/remove a workspace's own LLM
 # key; the chat path reads it via workspace_llm_keys.get_byok, untouched here).
 app.include_router(inference_settings_router)
+# Billing & credits STATUS (read-only) — powers the web "Billing & Credits"
+# surface. Community-safe: enterprise entitlement bits are lazy-imported inside
+# the route, so it mounts in both editions (community shows BYOK-only status).
+app.include_router(billing_router)
 app.include_router(tools_router)
 app.include_router(consolidated_router)
 # chat router was already included earlier; do not double-register
@@ -186,6 +191,27 @@ if not settings.is_community:
     # Brigade JWT verifier test endpoint (admin-only; used by Brigade to confirm
     # our verifier is wired correctly before pushing real federated traffic).
     app.include_router(test_brigade_jwt_router)
+
+    # Smart-inference credit/entitlement gate → HTTP 402 with the upgrade CTA.
+    # The gate module (app.billing.inference_gate) is enterprise-hold + self-
+    # inerting; register its handler ONLY in the enterprise edition, lazy-importing
+    # the exception so app.billing never enters the community import graph.
+    # Registered against its own type so it takes precedence over any future broad
+    # PermissionError handler (SmartInferenceGateError subclasses PermissionError).
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+    from app.billing.inference_gate import SmartInferenceGateError
+
+    @app.exception_handler(SmartInferenceGateError)
+    async def _smart_inference_gate_402(_request: Request, exc: SmartInferenceGateError):
+        return JSONResponse(
+            status_code=exc.http_status,
+            content={
+                "detail": str(exc),
+                "upgrade_url": exc.upgrade_url,
+                "byok_available": exc.byok_available,
+            },
+        )
 
 
 @app.get("/healthz", tags=["system"])
