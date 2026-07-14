@@ -111,6 +111,9 @@ FORM_REGISTRY: dict[str, FormSpec] = {
     "4868": FormSpec(kind="4868", title="Form 4868 — Automatic Extension to File (individual)",
         jurisdiction="federal", mode="fill", module="app.exports.f4868_fill",
         func="render_4868", goes_to="the IRS", category="individual"),
+    "1125-e": FormSpec(kind="1125-e", title="Form 1125-E — Compensation of Officers",
+        jurisdiction="federal", mode="fill", module="app.exports.f1125e_fill",
+        func="render_1125e", goes_to="the IRS (attachment to Form 1120/1120-S)", category="business"),
     # State.
     "ca-540": FormSpec(kind="ca-540", title="California Form 540 — Resident Income Tax Return",
         jurisdiction="CA", mode="fill", module="app.exports.ca_540_fill",
