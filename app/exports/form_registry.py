@@ -125,6 +125,10 @@ FORM_REGISTRY: dict[str, FormSpec] = {
     "scdor-notice": FormSpec(kind="scdor-notice", title="SC DOR Notice Response Letter",
         jurisdiction="SC", mode="letter", module="app.exports.scdor_letter",
         func="render_scdor_response", goes_to="the SC Department of Revenue", category="notice"),
+    # --- Representation (added 2026-07-15) -----------------------------------
+    "8821": FormSpec(kind="8821", title="Form 8821 — Tax Information Authorization",
+        jurisdiction="federal", mode="fill", module="app.exports.f8821_fill",
+        func="render_8821", goes_to="the IRS", category="representation"),
 }
 
 
