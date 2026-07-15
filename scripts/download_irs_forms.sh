@@ -135,6 +135,15 @@ fi
 # Note: SC ST-3 is a SC Department of Revenue form, fetched separately into
 # data/sc_forms/ST-3.pdf from https://dor.sc.gov/sites/dor/files/forms/ST3.pdf
 
+# Form W-9 (Request for TIN)
+FW9_URL="https://www.irs.gov/pub/irs-pdf/fw9.pdf"
+FW9_DEST="$FORMS_DIR/fw9.pdf"
+if head_check "$FW9_URL"; then
+    download_form "$FW9_DEST" "$FW9_URL" "Form W-9 (current)"
+else
+    echo "  WARN  Form W-9 not available at $FW9_URL — skipping."
+fi
+
 echo ""
 echo "Done. Forms cached in: $FORMS_DIR"
 echo ""
