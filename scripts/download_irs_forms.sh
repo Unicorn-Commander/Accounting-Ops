@@ -135,6 +135,15 @@ fi
 # Note: SC ST-3 is a SC Department of Revenue form, fetched separately into
 # data/sc_forms/ST-3.pdf from https://dor.sc.gov/sites/dor/files/forms/ST3.pdf
 
+# Form 2848 (Power of Attorney)
+F2848_URL="https://www.irs.gov/pub/irs-pdf/f2848.pdf"
+F2848_DEST="$FORMS_DIR/f2848.pdf"
+if head_check "$F2848_URL"; then
+    download_form "$F2848_DEST" "$F2848_URL" "Form 2848 (current)"
+else
+    echo "  WARN  Form 2848 not available at $F2848_URL — skipping."
+fi
+
 echo ""
 echo "Done. Forms cached in: $FORMS_DIR"
 echo ""
