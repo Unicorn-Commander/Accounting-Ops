@@ -43,7 +43,7 @@ class F1120Mapping:
     line : str
         The 1120 line reference (e.g. "1a", "26", "30"). Lines with sub-parts
         use the lettered form matching the 2024 revision ("1a" = gross receipts,
-        "2" = returns/allowances, etc.).
+        "2" = cost of goods sold, etc.).
     label : str
         The IRS line label verbatim from the 2024 Form 1120 instructions,
         truncated for readability.
@@ -113,13 +113,23 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
     ),
 
     # ------------------------------------------------------------------
-    # COGS (line 2 is returns; line 3 is the gross-profit subtractor)
+    # COGS (line 2, supported by Form 1125-A)
     # ------------------------------------------------------------------
-    # NOTE: COGS accounts (5xxx) are not CATEGORY_TO_ACCOUNT keys today —
-    # they post via direct account resolution. They are included here so a
-    # future category can be added without breaking the coverage test.
-    # The mapping is defensible: COGS reduces gross receipts to gross profit
-    # on line 3. 1120 instructions p. 8–9.
+
+    "COGS · Inventory": F1120Mapping(
+        section="income",
+        line="2",
+        label="Cost of goods sold (Form 1125-A)",
+        confidence="high",
+        notes=(
+            "Inventory cost of goods sold is reported on Form 1120 line 2 and "
+            "computed on Form 1125-A. Although line 2 sits in the page-1 Income "
+            "section, it is a subtractive amount used to calculate gross profit "
+            "on line 3; it must not be treated as positive income or as a page-1 "
+            "operating deduction. CPA should reconcile beginning inventory, "
+            "purchases, and ending inventory to Form 1125-A."
+        ),
+    ),
 
     # ------------------------------------------------------------------
     # EXPENSES — Infrastructure
@@ -291,6 +301,22 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
             "Full deduction under §162. If vehicle use is involved, "
             "§179 / MACRS depreciation and the business-use percentage "
             "apply — CPA should separate vehicle from non-vehicle transport."
+        ),
+    ),
+
+    "Vehicle · Repairs": F1120Mapping(
+        section="deductions",
+        line="26",
+        label="Other deductions",
+        confidence="medium",
+        notes=(
+            "Ordinary repair and maintenance costs for a business-use vehicle. "
+            "Consistent with this module's convention for operating expenses, "
+            "report the deductible business-use portion on line 26 with an "
+            "attached statement labeled 'Vehicle repairs and maintenance'. "
+            "A CPA may reclassify the amount to line 14 (Repairs and maintenance). "
+            "Capital improvements, personal-use costs, and amounts reimbursable "
+            "under an accountable plan require separate treatment."
         ),
     ),
 
@@ -551,6 +577,21 @@ BALANCE_SHEET_1120: dict[str, ScheduleLMapping] = {
         ),
     ),
 
+    "liability_shareholder_loan": ScheduleLMapping(
+        line="19",
+        label="Loans from shareholders",
+        side="liabilities_equity",
+        confidence="high",
+        notes=(
+            "The 'Loan from Nate Ellison' category is a loan from a shareholder "
+            "recorded in COA 2400. Schedule L line 19 is the specific line for "
+            "loans from shareholders, regardless of whether a non-shareholder "
+            "note with the same maturity would otherwise use line 17 or 20. "
+            "CPA should confirm the debt is bona fide and reconcile its terms "
+            "and year-end balance; a capital contribution belongs on line 23."
+        ),
+    ),
+
     "liability_notes": ScheduleLMapping(
         line="20",
         label="Mortgages, notes, bonds payable in 1 year or more",
@@ -572,18 +613,16 @@ BALANCE_SHEET_1120: dict[str, ScheduleLMapping] = {
     # ------------------------------------------------------------------
 
     "equity_capital": ScheduleLMapping(
-        line="22a",
-        label="Capital stock — preferred stock",
+        line="23",
+        label="Additional paid-in capital",
         side="liabilities_equity",
         confidence="medium",
         notes=(
-            "Owner contributions / paid-in capital (COA 3010). "
-            "Schedule L line 22a (preferred) or 22b (common). "
-            "For a closely-held C-corp, contributed capital maps here. "
-            "CPA should verify par value vs additional paid-in capital "
-            "split if a formal cap table exists. "
-            "Note: line 23 is Additional paid-in capital — often the "
-            "more correct home for contributed capital above par."
+            "The 'Owner Contribution' category records a C-corporation "
+            "shareholder contribution in COA 3010. It is additional paid-in "
+            "capital on Schedule L line 23, not page-1 income. CPA should "
+            "reconcile the contribution to the cap table and separate any "
+            "stated par value to common or preferred stock on line 22b or 22a."
         ),
     ),
 
@@ -593,7 +632,8 @@ BALANCE_SHEET_1120: dict[str, ScheduleLMapping] = {
         side="liabilities_equity",
         confidence="low",
         notes=(
-            "Owner distributions (COA 3020). "
+            "The 'Owner Distribution' category records shareholder "
+            "distributions in COA 3020. "
             "Distributions reduce retained earnings but do NOT appear as a "
             "standalone line on Schedule L — they flow through the retained "
             "earnings reconciliation (line 25). CPA must prepare an equity "
@@ -616,6 +656,18 @@ BALANCE_SHEET_1120: dict[str, ScheduleLMapping] = {
         ),
     ),
 }
+
+
+# CATEGORY_TO_ACCOUNT keys that are balance-sheet activity, intentionally
+# excluded from the Form 1120 page-1 P&L package. Each category has an explicit
+# route to a Schedule L bucket above so exclusion can never become a silent drop.
+BALANCE_SHEET_CATEGORY_TO_KEY: dict[str, str] = {
+    "Owner Contribution": "equity_capital",
+    "Owner Distribution": "equity_distributions",
+    "Loan from Nate Ellison": "liability_shareholder_loan",
+}
+
+NON_1120_PL_CATEGORIES: frozenset[str] = frozenset(BALANCE_SHEET_CATEGORY_TO_KEY)
 
 
 # ---------------------------------------------------------------------------

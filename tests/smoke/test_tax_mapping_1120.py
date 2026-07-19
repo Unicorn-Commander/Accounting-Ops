@@ -2,8 +2,8 @@
 
 Three test groups:
 
-  1. Coverage assertion: every key in CATEGORY_TO_ACCOUNT has a mapping in
-     CATEGORY_TO_1120 (no silent drops).
+  1. Coverage assertion: every key in CATEGORY_TO_ACCOUNT has a page-1 mapping
+     or an explicit Schedule L route (no silent drops).
 
   2. Round-trip: synthetic P&L through build_1120_package(); the income-minus-
      deductions total equals expected net income.
@@ -25,7 +25,9 @@ import pytest
 from app.journal.posting import CATEGORY_TO_ACCOUNT
 from app.journal.tax_mapping_1120 import (
     BALANCE_SHEET_1120,
+    BALANCE_SHEET_CATEGORY_TO_KEY,
     CATEGORY_TO_1120,
+    NON_1120_PL_CATEGORIES,
     VALID_1120_LINES,
     VALID_SCHEDULE_L_LINES,
 )
@@ -101,23 +103,48 @@ def _make_je(
 # ---------------------------------------------------------------------------
 
 class TestCoverageComplete:
-    """Every CATEGORY_TO_ACCOUNT key must appear in CATEGORY_TO_1120.
+    """Every CATEGORY_TO_ACCOUNT key must have an explicit 1120 treatment.
 
     This is the most important test: if a new category is added to posting.py
-    without updating tax_mapping_1120.py, transactions in that category will
-    not be included in any 1120 line — a silent tax data loss.
+    without updating tax_mapping_1120.py, its transactions would be silently
+    dropped. Balance-sheet categories are covered only when they are explicitly
+    identified as non-P&L and routed to a valid Schedule L bucket.
     """
 
     def test_every_category_to_account_key_has_1120_mapping(self):
         missing = [
             cat for cat in CATEGORY_TO_ACCOUNT
             if cat not in CATEGORY_TO_1120
+            and cat not in NON_1120_PL_CATEGORIES
         ]
         assert missing == [], (
-            f"The following CATEGORY_TO_ACCOUNT keys have no CATEGORY_TO_1120 "
-            f"mapping and would be silently dropped from the 1120 package:\n"
+            f"The following CATEGORY_TO_ACCOUNT keys have neither a page-1 "
+            f"CATEGORY_TO_1120 mapping nor an explicit Schedule L route and "
+            f"would be silently dropped from the 1120 package:\n"
             + "\n".join(f"  - {c!r}" for c in missing)
         )
+
+    def test_non_pl_categories_are_explicitly_routed_to_schedule_l(self):
+        assert NON_1120_PL_CATEGORIES.isdisjoint(CATEGORY_TO_1120), (
+            "Balance-sheet categories must not also be mapped to Form 1120 "
+            "page-1 P&L lines"
+        )
+
+        expected_routes = {
+            "Owner Contribution": ("equity_capital", "23", "liabilities_equity"),
+            "Owner Distribution": (
+                "equity_distributions", "25", "liabilities_equity"
+            ),
+            "Loan from Nate Ellison": (
+                "liability_shareholder_loan", "19", "liabilities_equity"
+            ),
+        }
+        assert NON_1120_PL_CATEGORIES == frozenset(expected_routes)
+
+        for category, (bucket_key, line, side) in expected_routes.items():
+            assert BALANCE_SHEET_CATEGORY_TO_KEY[category] == bucket_key
+            mapping = BALANCE_SHEET_1120[bucket_key]
+            assert (mapping.line, mapping.side) == (line, side)
 
     def test_all_1120_mappings_have_required_fields(self):
         for cat, mapping in CATEGORY_TO_1120.items():
