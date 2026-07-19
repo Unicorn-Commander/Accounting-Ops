@@ -38,10 +38,11 @@ from app.config import Settings, get_settings
 
 _SERVICE = "s3"
 _ALGORITHM = "AWS4-HMAC-SHA256"
-# Default per-call timeout. Uploads are small (≤ document_upload_max_bytes) and
-# Garage is on the same docker network in production, so a tight ceiling is fine
-# and keeps a stuck object store from hanging the request worker.
-_DEFAULT_TIMEOUT_S = 20.0
+# Default per-call timeout. Uploads are bounded by document_upload_max_bytes and
+# Garage is on the same docker network in production, so a 60s ceiling comfortably
+# covers a max-size (100 MB) object while still keeping a stuck object store from
+# hanging the request worker indefinitely.
+_DEFAULT_TIMEOUT_S = 60.0
 
 
 class GarageNotConfigured(RuntimeError):
@@ -247,6 +248,49 @@ class GarageS3Client:
             etag=resp.headers.get("ETag"),
             size_bytes=len(body),
         )
+
+    # ------------------------------------------------------------------ #
+    async def get_object(
+        self,
+        *,
+        bucket: str,
+        object_key: str,
+        timeout_s: float = _DEFAULT_TIMEOUT_S,
+    ) -> bytes:
+        """Fetch a single object's bytes (GetObject), path-style + SigV4-signed.
+
+        The upload path never needs this — it holds the bytes in memory already.
+        It exists for reprocess/backfill paths (e.g. re-running the tax-doc
+        extractor over already-stored documents): those have only the
+        bucket/object_key and must read the bytes back. SigV4 for a bodyless GET
+        signs the empty-payload hash, which ``_signed_headers`` computes from the
+        empty ``payload``. Raises GarageNotConfigured / GarageUploadError.
+        """
+        if not self.is_configured():
+            raise GarageNotConfigured(
+                "Garage S3 credentials are not configured (GARAGE_S3_ACCESS_KEY / "
+                "GARAGE_S3_SECRET_KEY)."
+            )
+        signed = self._signed_headers(
+            method="GET",
+            object_key=object_key,
+            bucket=bucket,
+            payload=b"",
+        )
+        url = f"{self._endpoint()}/{bucket}/{_encode_key(object_key)}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout_s) as client:
+                resp = await client.get(url, headers=signed)
+        except httpx.HTTPError as exc:  # network/timeout — never leak internals
+            raise GarageUploadError(
+                f"Object store unreachable: {type(exc).__name__}"
+            ) from exc
+        if resp.status_code >= 400:
+            raise GarageUploadError(
+                f"Object store rejected fetch (HTTP {resp.status_code}).",
+                status_code=resp.status_code,
+            )
+        return resp.content
 
 
 __all__ = (

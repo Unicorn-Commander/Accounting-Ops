@@ -36,6 +36,9 @@ dependencies = [
   "pypdf>=4.3.0",
   "PyPDFForm>=1.4.0",
   "reportlab>=4.2.0",
+  # Rasterize scanned tax-document PDFs to page images for the vision VLM
+  # (app/categorization/tax_doc_vlm.py). pypdf can't render; pymupdf can.
+  "pymupdf>=1.24.0",
 ]
 
 [project.optional-dependencies]

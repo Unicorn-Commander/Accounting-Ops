@@ -149,6 +149,9 @@ _ALLOWED_TOOLS: list[str] = [
     "draft_memo",
     "flag_for_cpa_review",
     "get_current_rule",
+    "tax_fill_w4p",
+    "tax_prepare_filing",
+    "tax_compute_1040",
 ]
 
 # Maximum tool-call iterations in the OpenAI manual loop.

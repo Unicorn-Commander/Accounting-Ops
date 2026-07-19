@@ -64,6 +64,15 @@ def _default_model() -> str:
     return os.environ.get("CHAT_DEFAULT_MODEL", _OPENROUTER_DEFAULT_MODEL)
 
 
+def _is_hard_persona(persona) -> bool:
+    """True for the deep-reasoning personas (CFO + tax specialists/researchers).
+
+    Keyed on the persona ``tier`` ("strategic" | "specialist" = hard;
+    "operational" = routine, e.g. setup / product-guide). Tolerant of a missing
+    tier / None persona → not hard (routine)."""
+    return getattr(persona, "tier", None) in ("strategic", "specialist")
+
+
 def _gateway_model_for(persona, is_consult: bool) -> str:
     """Gateway alias for this turn: consults stay on the cheap Sonnet tier; else
     the persona's alias (CFO → opus); Sonnet fallback."""
@@ -88,7 +97,37 @@ async def resolve_chat_inference(
     default_model = _default_model()
     gw_model = _gateway_model_for(persona, is_consult)
 
-    # ---- 1) BYOK — highest precedence ------------------------------------
+    # Cloud-on-demand: a turn "wants cloud" when it explicitly names a model that
+    # is NOT the local one. On a local-default instance this is the ONLY thing
+    # that leaves local — routine turns (no model, or the local model) stay on the
+    # free local qwen; an explicit frontier model escalates to the cloud tiers
+    # (BYOK → gateway → OpenRouter). Also fixes a latent bug: without this, an
+    # explicit cloud model on a local-preferring workspace was sent to the local
+    # router (404) or silently ignored.
+    local_available = bool(settings.chat_local_base_url)
+    wants_cloud = bool(requested_model) and requested_model != settings.chat_local_model
+    # Persona auto-escalation: when enabled, a "hard" persona (CFO + tax
+    # specialists/researchers, tier strategic|specialist) escalates to cloud even
+    # without an explicit model — routine/operational personas stay local. The
+    # cloud tiers below then pick the right model per backend (the persona's
+    # gateway alias on the gateway, the OpenRouter default on a BYOK-direct key).
+    if settings.chat_escalate_hard_personas and _is_hard_persona(persona):
+        wants_cloud = True
+
+    # ---- 0) INSTANCE-LOCAL FAST PATH -------------------------------------
+    # A local-default box answers routine turns locally even when the workspace
+    # has a BYOK key: BYOK becomes the ON-DEMAND cloud target (tier 1 below), not
+    # the default. Gated entirely on chat_local_default, so a normal BYOK customer
+    # (flag off) is unaffected — BYOK still always wins for them.
+    if settings.chat_local_default and local_available and not wants_cloud:
+        return ResolvedInference(
+            settings.chat_local_base_url,
+            settings.chat_local_api_key or "local",
+            requested_model or settings.chat_local_model,
+            "local",
+        )
+
+    # ---- 1) BYOK — highest precedence (the on-demand cloud key) ----------
     byok = None
     try:
         from app.security.workspace_llm_keys import get_byok
@@ -111,6 +150,36 @@ async def resolve_chat_inference(
             )
         # Gateway off → honor their key against the OpenRouter base + today's model.
         return ResolvedInference(_openrouter_base(), key, requested_model or default_model, "byok")
+
+    # ---- 1.5) LOCAL-first — sovereign qwen --------------------------------
+    # After BYOK (a customer's explicit endpoint always wins) but ahead of the
+    # platform/OpenRouter tiers. Gated on a configured local endpoint AND either
+    # the INSTANCE-WIDE chat_local_default (a fully self-hosted, local-only box)
+    # OR the per-workspace EngagementPolicy.prefer_local_inference flag. With both
+    # off it is a no-op (preserves the default-safety invariant). When the
+    # instance default is on we skip the per-workspace DB read entirely — faster
+    # and robust even if the policy store is unavailable. Fail-safe: any error
+    # reading the flag falls through to the cloud tiers.
+    # (Skipped when wants_cloud: an explicit non-local model escalates past local
+    # to the cloud tiers — the instance fast path above already handled the
+    # chat_local_default + routine case.)
+    if local_available and not wants_cloud:
+        prefer_local = settings.chat_local_default
+        if not prefer_local:
+            try:
+                from app.engagement.policy import get_prefer_local
+
+                prefer_local = await get_prefer_local(workspace_id)
+            except Exception as e:  # noqa: BLE001 — fail-safe
+                _log.warning("prefer_local lookup failed (ws=%s): %s", workspace_id, e)
+                prefer_local = False
+        if prefer_local:
+            return ResolvedInference(
+                settings.chat_local_base_url,
+                settings.chat_local_api_key or "local",
+                requested_model or settings.chat_local_model,
+                "local",
+            )
 
     # ---- 2) platform / UC-credit virtual key (only when routing ON) ------
     if settings.route_chat_through_gateway:

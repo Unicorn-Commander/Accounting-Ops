@@ -64,7 +64,11 @@ from app.tools.specialist_runs import (
     start_specialist_run,
 )
 from app.tools.specialty_rules import add_specialty_rule, query_specialty_rules
+from app.tools.subscriptions import detect_subscriptions_tool
 from app.tools.tax_draft_memo import draft_memo
+from app.tools.tax_w4p import tax_fill_w4p
+from app.tools.tax_prepare_filing import tax_prepare_filing
+from app.tools.tax_1040 import tax_compute_1040
 from app.tools.tax_flag_for_cpa_review import flag_for_cpa_review
 from app.tools.tax_get_1099_payees import get_1099_payees
 from app.tools.tax_get_current_rule import get_current_rule
@@ -93,7 +97,11 @@ __all__ = [
     "create_invoice_from_draft",
     "create_workspace",
     "decide_approval",
+    "detect_subscriptions_tool",
     "draft_memo",
+    "tax_fill_w4p",
+    "tax_prepare_filing",
+    "tax_compute_1040",
     "finish_specialist_run",
     "flag_for_cpa_review",
     "get_1099_nec_report",

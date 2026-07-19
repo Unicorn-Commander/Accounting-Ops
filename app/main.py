@@ -35,6 +35,7 @@ from app.api.contacts import router as contacts_router
 from app.api.work_inbox import router as work_inbox_router
 from app.api.credentials import router as credentials_router
 from app.api.documents import router as documents_router
+from app.api.federation import router as federation_router
 from app.api.inference_settings import router as inference_settings_router
 from app.api.invoices import router as invoices_router
 from app.api.journal import router as journal_router
@@ -43,6 +44,12 @@ from app.api.metrics import router as metrics_router
 from app.api.personal_access_tokens import router as personal_access_tokens_router
 from app.api.reports import router as reports_router
 from app.api.sentinel import router as sentinel_router
+from app.api.submission import router as submission_router
+from app.api.engagement import router as engagement_router
+from app.api.work_products import router as work_products_router
+from app.api.forms_catalog import router as forms_catalog_router
+from app.api.esign import router as esign_router
+from app.api.efile import router as efile_router
 from app.api.onboarding import router as onboarding_router
 from app.api.setup import router as setup_router
 from app.api.test_brigade_jwt import router as test_brigade_jwt_router
@@ -149,6 +156,10 @@ app.include_router(tax_knowledge_router)
 app.include_router(open_items_router)
 app.include_router(ai_activity_router)
 app.include_router(reports_router)
+# Cross-app federation reads (M2M): Tax-Planning-Ops pulls document_extraction
+# over the shared-KC trusted-caller rail. Mirrors the P&L federation read; uses
+# resolve_workspace_for_federation (viewer floor, HIPAA-refused), no membership.
+app.include_router(federation_router)
 app.include_router(setup_router)
 app.include_router(cash_position_router)
 app.include_router(cash_history_router)
@@ -156,6 +167,12 @@ app.include_router(lineage_router)
 app.include_router(cfo_brief_router)
 app.include_router(transactions_router)
 app.include_router(sentinel_router)
+app.include_router(submission_router)
+app.include_router(engagement_router)
+app.include_router(work_products_router)
+app.include_router(forms_catalog_router)
+app.include_router(esign_router)
+app.include_router(efile_router)
 app.include_router(personal_access_tokens_router)
 # BYOK inference settings (additive — status/store/remove a workspace's own LLM
 # key; the chat path reads it via workspace_llm_keys.get_byok, untouched here).

@@ -185,6 +185,284 @@ async def test_failsafe_falls_through_on_exception(monkeypatch):
     assert r.source == "openrouter_default"  # never breaks live chat
 
 
+# -------------------- LOCAL-FIRST TIER --------------------
+
+
+def _local_on(monkeypatch, prefer: bool = True):
+    """Configure a local endpoint + stub the per-workspace prefer_local flag."""
+    monkeypatch.setenv("AO_CHAT_LOCAL_BASE_URL", "http://bigboy:8085/v1")
+    monkeypatch.setenv("AO_CHAT_LOCAL_MODEL", "Qwen3.6-35B-A3B")
+    monkeypatch.setenv("AO_CHAT_LOCAL_API_KEY", "sk-local")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    _clear_settings()
+    import app.engagement.policy as ep
+
+    monkeypatch.setattr(ep, "get_prefer_local", AsyncMock(return_value=prefer))
+
+
+@pytest.mark.asyncio
+async def test_local_tier_when_flag_on(monkeypatch):
+    _flag_off(monkeypatch)
+    _local_on(monkeypatch, prefer=True)
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "local"
+    assert r.base_url == "http://bigboy:8085/v1"
+    assert r.model == "Qwen3.6-35B-A3B"
+    assert r.api_key == "sk-local"
+
+
+@pytest.mark.asyncio
+async def test_local_off_falls_through_to_openrouter(monkeypatch):
+    _flag_off(monkeypatch)
+    _local_on(monkeypatch, prefer=False)  # endpoint configured but workspace opts out
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "openrouter_default"
+    assert r.base_url == _OR_URL
+
+
+@pytest.mark.asyncio
+async def test_local_honors_requested_local_model(monkeypatch):
+    # Requesting the local model is honored on the local tier (no escalation).
+    _flag_off(monkeypatch)
+    _local_on(monkeypatch, prefer=True)
+    r = await resolve_chat_inference(
+        workspace_id="w1",
+        persona=get_persona("cfo-agent"),
+        requested_model="Qwen3.6-35B-A3B",  # == AO_CHAT_LOCAL_MODEL set by _local_on
+    )
+    assert r.source == "local"
+    assert r.model == "Qwen3.6-35B-A3B"
+
+
+@pytest.mark.asyncio
+async def test_per_workspace_local_escalates_on_cloud_model(monkeypatch):
+    # A per-workspace local-preferring box also escalates an explicit non-local
+    # model to cloud instead of mis-sending a cloud id to the local router (the
+    # old behavior, which would 404 in practice).
+    _flag_off(monkeypatch)
+    _local_on(monkeypatch, prefer=True)
+    r = await resolve_chat_inference(
+        workspace_id="w1", persona=get_persona("cfo-agent"), requested_model="x/y"
+    )
+    assert r.source == "openrouter_default"  # escalated off local (no gateway here)
+
+
+@pytest.mark.asyncio
+async def test_byok_still_overrides_local(monkeypatch):
+    _flag_off(monkeypatch)
+    _local_on(monkeypatch, prefer=True)
+    import app.security.workspace_llm_keys as wk
+
+    monkeypatch.setattr(
+        wk, "get_byok",
+        AsyncMock(return_value=("sk-cust", "anthropic", "https://api.anthropic.com")),
+    )
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "byok"  # a customer's explicit endpoint wins over local-first
+
+
+@pytest.mark.asyncio
+async def test_local_failsafe_on_flag_error(monkeypatch):
+    _flag_off(monkeypatch)
+    monkeypatch.setenv("AO_CHAT_LOCAL_BASE_URL", "http://bigboy:8085/v1")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    _clear_settings()
+    import app.engagement.policy as ep
+
+    monkeypatch.setattr(ep, "get_prefer_local", AsyncMock(side_effect=RuntimeError("db down")))
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "openrouter_default"  # never breaks live chat
+
+
+@pytest.mark.asyncio
+async def test_instance_default_forces_local_without_per_workspace_flag(monkeypatch):
+    # AO_CHAT_LOCAL_DEFAULT=1 ⇒ every workspace is local-first even though the
+    # per-workspace flag is OFF (and without ever reading the policy store).
+    _flag_off(monkeypatch)
+    _local_on(monkeypatch, prefer=False)  # per-workspace flag explicitly OFF
+    monkeypatch.setenv("AO_CHAT_LOCAL_DEFAULT", "1")
+    _clear_settings()
+    import app.engagement.policy as ep
+
+    # The DB read must NOT be consulted when the instance default is on.
+    spy = AsyncMock(side_effect=AssertionError("get_prefer_local should be skipped"))
+    monkeypatch.setattr(ep, "get_prefer_local", spy)
+
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "local"
+    assert r.base_url == "http://bigboy:8085/v1"
+    spy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_instance_default_noop_without_local_endpoint(monkeypatch):
+    # The default is gated on a configured endpoint — on with no base_url ⇒ the
+    # resolver still behaves exactly as today (no accidental local routing).
+    _flag_off(monkeypatch)
+    monkeypatch.delenv("AO_CHAT_LOCAL_BASE_URL", raising=False)
+    monkeypatch.setenv("AO_CHAT_LOCAL_DEFAULT", "1")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    _clear_settings()
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "openrouter_default"
+
+
+# -------------------- CLOUD-ON-DEMAND ESCALATION (local-default box) --------
+
+
+def _instance_local(monkeypatch):
+    """Local endpoint + AO_CHAT_LOCAL_DEFAULT=1 (a self-hosted local-only box)."""
+    monkeypatch.setenv("AO_CHAT_LOCAL_BASE_URL", "http://bigboy:8085/v1")
+    monkeypatch.setenv("AO_CHAT_LOCAL_MODEL", "Qwen3.6-35B-A3B-p40")
+    monkeypatch.setenv("AO_CHAT_LOCAL_DEFAULT", "1")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    _clear_settings()
+
+
+@pytest.mark.asyncio
+async def test_routine_turn_stays_local_even_with_byok(monkeypatch):
+    # No explicit model ⇒ routine ⇒ local, EVEN when a BYOK key exists. BYOK is
+    # the on-demand cloud target here, not the default.
+    _flag_off(monkeypatch)
+    _instance_local(monkeypatch)
+    import app.security.workspace_llm_keys as wk
+
+    byok = AsyncMock(return_value=("sk-cust", "openrouter", "https://openrouter.ai/api/v1"))
+    monkeypatch.setattr(wk, "get_byok", byok)
+
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "local"
+    byok.assert_not_awaited()  # BYOK isn't even consulted on the routine fast path
+
+
+@pytest.mark.asyncio
+async def test_explicit_cloud_model_escalates_to_byok(monkeypatch):
+    # An explicit non-local (frontier) model ⇒ escalate to cloud ⇒ the workspace's
+    # BYOK key serves it. "Shafen pays his own cloud" for the hard task.
+    _flag_off(monkeypatch)
+    _instance_local(monkeypatch)
+    import app.security.workspace_llm_keys as wk
+
+    monkeypatch.setattr(
+        wk, "get_byok",
+        AsyncMock(return_value=("sk-cust", "openrouter", "https://openrouter.ai/api/v1")),
+    )
+    r = await resolve_chat_inference(
+        workspace_id="w1",
+        persona=get_persona("cfo-agent"),
+        requested_model="anthropic/claude-opus-4.5",
+    )
+    assert r.source == "byok"
+    assert r.base_url == "https://openrouter.ai/api/v1"
+    assert r.api_key == "sk-cust"
+    assert r.model == "anthropic/claude-opus-4.5"
+
+
+@pytest.mark.asyncio
+async def test_explicit_cloud_model_without_byok_uses_gateway(monkeypatch):
+    # Escalate with no BYOK ⇒ falls to the platform/gateway tier (still cloud),
+    # never silently back to local.
+    _flag_off(monkeypatch)
+    _instance_local(monkeypatch)
+    monkeypatch.setenv("AO_ROUTE_CHAT_THROUGH_GATEWAY", "1")
+    monkeypatch.setenv("LLM_PLATFORM_VIRTUAL_KEY", "sk-platform")
+    _clear_settings()
+    import app.security.workspace_llm_keys as wk
+
+    monkeypatch.setattr(wk, "get_byok", AsyncMock(return_value=None))
+    r = await resolve_chat_inference(
+        workspace_id="w1",
+        persona=get_persona("cfo-agent"),
+        requested_model="anthropic/claude-opus-4.5",
+    )
+    assert r.source == "platform_virtual"
+    assert r.model == "anthropic/claude-opus-4.5"
+
+
+@pytest.mark.asyncio
+async def test_explicit_local_model_is_not_an_escalation(monkeypatch):
+    # Explicitly naming the local model is NOT a cloud request ⇒ stays local.
+    _flag_off(monkeypatch)
+    _instance_local(monkeypatch)
+    import app.security.workspace_llm_keys as wk
+
+    monkeypatch.setattr(wk, "get_byok", AsyncMock(return_value=None))
+    r = await resolve_chat_inference(
+        workspace_id="w1",
+        persona=get_persona("cfo-agent"),
+        requested_model="Qwen3.6-35B-A3B-p40",
+    )
+    assert r.source == "local"
+
+
+# -------------------- PERSONA AUTO-ESCALATION (hard personas → cloud) -------
+
+
+@pytest.mark.asyncio
+async def test_hard_persona_stays_local_when_escalation_flag_off(monkeypatch):
+    # The flag is off by default ⇒ even the CFO routine turn stays local (the
+    # behavior we deploy first, before Shafen's key is in).
+    _flag_off(monkeypatch)
+    _instance_local(monkeypatch)
+    import app.security.workspace_llm_keys as wk
+
+    monkeypatch.setattr(wk, "get_byok", AsyncMock(return_value=None))
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "local"
+
+
+@pytest.mark.asyncio
+async def test_hard_persona_escalates_to_byok_when_flag_on(monkeypatch):
+    # Flag on: CFO (strategic) escalates to cloud on a routine turn → BYOK key.
+    _flag_off(monkeypatch)
+    _instance_local(monkeypatch)
+    monkeypatch.setenv("AO_CHAT_ESCALATE_HARD_PERSONAS", "1")
+    _clear_settings()
+    import app.security.workspace_llm_keys as wk
+
+    monkeypatch.setattr(
+        wk, "get_byok",
+        AsyncMock(return_value=("sk-cust", "openrouter", "https://openrouter.ai/api/v1")),
+    )
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("cfo-agent"))
+    assert r.source == "byok"
+    assert r.api_key == "sk-cust"
+
+
+@pytest.mark.asyncio
+async def test_operational_persona_stays_local_when_flag_on(monkeypatch):
+    # Flag on, but an "operational" persona (product-guide) is routine ⇒ local.
+    _flag_off(monkeypatch)
+    _instance_local(monkeypatch)
+    monkeypatch.setenv("AO_CHAT_ESCALATE_HARD_PERSONAS", "1")
+    _clear_settings()
+    import app.security.workspace_llm_keys as wk
+
+    byok = AsyncMock(return_value=("sk-cust", "openrouter", "https://openrouter.ai/api/v1"))
+    monkeypatch.setattr(wk, "get_byok", byok)
+    r = await resolve_chat_inference(workspace_id="w1", persona=get_persona("product-guide"))
+    assert r.source == "local"
+    byok.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_specialist_persona_escalates_when_flag_on(monkeypatch):
+    # A specialist-tier tax persona also escalates (no BYOK here ⇒ gateway).
+    _flag_off(monkeypatch)
+    _instance_local(monkeypatch)
+    monkeypatch.setenv("AO_CHAT_ESCALATE_HARD_PERSONAS", "1")
+    monkeypatch.setenv("AO_ROUTE_CHAT_THROUGH_GATEWAY", "1")
+    monkeypatch.setenv("LLM_PLATFORM_VIRTUAL_KEY", "sk-platform")
+    _clear_settings()
+    import app.security.workspace_llm_keys as wk
+
+    monkeypatch.setattr(wk, "get_byok", AsyncMock(return_value=None))
+    r = await resolve_chat_inference(
+        workspace_id="w1", persona=get_persona("form-1120-preparer")
+    )
+    assert r.source == "platform_virtual"
+
+
 # -------------------- PERSONA MODEL MAP --------------------
 
 

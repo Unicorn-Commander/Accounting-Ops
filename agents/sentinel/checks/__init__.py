@@ -33,6 +33,7 @@ from agents.sentinel.checks.recon_drift import run as run_recon_drift
 from agents.sentinel.checks.regulatory_updates import run as run_regulatory_updates
 from agents.sentinel.checks.sec_174_compliance import run as run_sec_174_compliance
 from agents.sentinel.checks.sec_195_election import run as run_sec_195_election
+from agents.sentinel.checks.subscription_monitor import run as run_subscription_monitor
 from agents.sentinel.checks.tax_credit_scan import run as run_tax_credit_scan
 from agents.sentinel.checks.uncategorized_txns import run as run_uncategorized_txns
 from agents.sentinel.checks.yoy_diff import run as run_yoy_diff
@@ -51,6 +52,7 @@ CHECK_REGISTRY = {
     "officer_comp":          run_officer_comp,
     "nol_carryforward":      run_nol_carryforward,
     "qsbs_holding":          run_qsbs_holding,
+    "subscription_monitor":  run_subscription_monitor,
     "cash_runway":           run_cash_runway,
     "yoy_diff":              run_yoy_diff,
     "connector_health":      run_connector_health,

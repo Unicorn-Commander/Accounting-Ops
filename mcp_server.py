@@ -16,7 +16,11 @@ from app.tools import (
     create_invoice_from_draft,
     create_workspace,
     decide_approval,
+    detect_subscriptions_tool,
     draft_memo,
+    tax_fill_w4p,
+    tax_prepare_filing,
+    tax_compute_1040,
     finish_specialist_run,
     flag_for_cpa_review,
     get_1099_nec_report,
@@ -151,6 +155,10 @@ def build_server():
     server.tool()(get_cash_flow)
     server.tool()(get_trial_balance)
     server.tool()(get_1099_nec_report)
+    # Subscription monitor — read-only recurring-charge detection over the
+    # posted journal. Registered as "detect_subscriptions" (the function is
+    # named *_tool to distinguish the DB wrapper from the pure detector).
+    server.tool(name="detect_subscriptions")(detect_subscriptions_tool)
 
     # =====================================================================
     # Chart of accounts (entity-scoped)
@@ -214,6 +222,9 @@ def build_server():
     server.tool()(get_1099_payees)
     server.tool()(draft_memo)
     server.tool()(flag_for_cpa_review)
+    server.tool()(tax_fill_w4p)
+    server.tool()(tax_prepare_filing)
+    server.tool()(tax_compute_1040)
 
     # =====================================================================
     # CPA Narrative + tax status dashboard
@@ -264,7 +275,9 @@ def build_server():
 
 async def main() -> None:
     server = build_server()
-    await server.run_async()
+    # FastMCP has no run_async(); the stdio entrypoint is run_stdio_async()
+    # (siblings: run_sse_async / run_streamable_http_async).
+    await server.run_stdio_async()
 
 
 if __name__ == "__main__":

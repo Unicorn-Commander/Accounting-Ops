@@ -47,7 +47,12 @@ from pathlib import Path
 from typing import Any
 
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import BooleanObject, NameObject
+from pypdf.generic import (
+    ArrayObject,
+    BooleanObject,
+    NameObject,
+    TextStringObject,
+)
 
 from app.exports.form_1120_field_map import (
     FORM_1120_FIELDS,
@@ -80,6 +85,12 @@ FORM_PATHS_2023: dict[str, Path] = {
 
 DRAFT_BANNER_TEXT = "DRAFT — CPA review required — do not file as-is"
 DRAFT_WATERMARK_TEXT = "DRAFT"
+# Softer banner used when a user with no tax professional has self-certified a
+# work product. It is honest about provenance without the alarming "do not file"
+# language, because a self-attested W-4P/return IS meant to be used.
+SELF_CERT_BANNER_TEXT = (
+    "Prepared via self-certification — review carefully before you sign and submit"
+)
 
 # Page size constants (IRS forms are US Letter: 8.5 × 11 in = 612 × 792 pt)
 LETTER_W = 612.0
@@ -91,6 +102,22 @@ class FormName(str, Enum):
     SCHEDULE_L = "1120-schedule-l"
     FORM_1125E = "1125-e"
     PACKAGE = "1120-package"
+    W4P = "w-4p"
+
+
+class WatermarkMode(str, Enum):
+    """Controls the overlay stamped on a generated work-product PDF.
+
+    DRAFT (default) preserves the original CPA-review-required behavior so the
+    1120 path is byte-for-byte unchanged. SELF_CERTIFIED is used once a user
+    with no available tax professional has self-attested a work product — it
+    drops the alarming diagonal "DRAFT" + "do not file" language in favor of an
+    honest, softer provenance banner. NONE leaves the PDF unstamped (e.g. a
+    licensed pro has finalized it).
+    """
+    DRAFT = "draft"
+    SELF_CERTIFIED = "self_certified"
+    NONE = "none"
 
 
 # ---------------------------------------------------------------------------
@@ -232,23 +259,26 @@ def _build_schedule_l_values_from_package(
 # Watermark overlay builder
 # ---------------------------------------------------------------------------
 
-def _build_watermark_overlay(num_pages: int) -> bytes:
-    """Build a multi-page PDF with DRAFT watermark + page-1 banner.
+def _build_watermark_overlay(
+    num_pages: int,
+    mode: WatermarkMode = WatermarkMode.DRAFT,
+) -> bytes:
+    """Build a multi-page overlay PDF whose stamping depends on ``mode``.
 
-    Uses reportlab to build a PDF of the same number of pages as the target.
-    Each page gets:
-      - Diagonal "DRAFT" text centred on the page (semi-transparent red).
-    Page 1 additionally gets:
-      - A solid yellow banner at the top reading DRAFT_BANNER_TEXT.
+    DRAFT (default, unchanged): every page gets a diagonal semi-transparent red
+    "DRAFT"; page 1 also gets a solid yellow DRAFT_BANNER_TEXT banner.
 
-    Returns bytes of the watermark PDF.
+    SELF_CERTIFIED: no diagonal "DRAFT". Page 1 gets a muted slate banner with
+    SELF_CERT_BANNER_TEXT — honest provenance without "do not file".
+
+    Returns bytes of the overlay PDF (same page count as the target).
     """
     try:
         from reportlab.pdfgen import canvas
         from reportlab.lib.colors import Color, HexColor
     except ImportError as exc:
         raise RuntimeError(
-            "reportlab is required for the DRAFT watermark overlay. "
+            "reportlab is required for the watermark overlay. "
             "Install with: pip install reportlab"
         ) from exc
 
@@ -258,9 +288,27 @@ def _build_watermark_overlay(num_pages: int) -> bytes:
     draft_red = Color(0.85, 0.1, 0.1, alpha=0.18)
     banner_yellow = HexColor("#FFC83D")
     banner_text_color = Color(0.3, 0.15, 0.0, alpha=1.0)
+    # Self-certified: a calm slate banner with light text.
+    selfcert_slate = HexColor("#475569")
+    selfcert_text_color = Color(1.0, 1.0, 1.0, alpha=1.0)
 
     for page_num in range(num_pages):
-        # Page 1 banner
+        if mode == WatermarkMode.SELF_CERTIFIED:
+            # Page-1 provenance banner only; no diagonal stamp.
+            if page_num == 0:
+                c.setFillColor(selfcert_slate)
+                c.rect(0, LETTER_H - 26, LETTER_W, 26, fill=1, stroke=0)
+                c.setFillColor(selfcert_text_color)
+                c.setFont("Helvetica-Bold", 8.5)
+                c.drawCentredString(
+                    LETTER_W / 2,
+                    LETTER_H - 17,
+                    SELF_CERT_BANNER_TEXT,
+                )
+            c.showPage()
+            continue
+
+        # DRAFT mode (default).
         if page_num == 0:
             c.setFillColor(banner_yellow)
             c.rect(0, LETTER_H - 28, LETTER_W, 28, fill=1, stroke=0)
@@ -342,16 +390,24 @@ def _fill_pdf_fields(
     return out.read()
 
 
-def _apply_watermark(source_pdf_bytes: bytes) -> bytes:
-    """Stamp the DRAFT overlay on every page of source_pdf_bytes.
+def _apply_watermark(
+    source_pdf_bytes: bytes,
+    mode: WatermarkMode = WatermarkMode.DRAFT,
+) -> bytes:
+    """Stamp the overlay selected by ``mode`` on every page of source_pdf_bytes.
 
     The overlay is built with reportlab and merged page-by-page using pypdf.
-    The form data (AcroForm fields) from source_pdf is preserved.
+    The form data (AcroForm fields) from source_pdf is preserved. ``mode``
+    defaults to DRAFT so existing callers (the 1120 path) are unchanged; NONE
+    returns the source untouched.
     """
+    if mode == WatermarkMode.NONE:
+        return source_pdf_bytes
+
     reader = PdfReader(io.BytesIO(source_pdf_bytes))
     num_pages = len(reader.pages)
 
-    watermark_bytes = _build_watermark_overlay(num_pages)
+    watermark_bytes = _build_watermark_overlay(num_pages, mode)
     wm_reader = PdfReader(io.BytesIO(watermark_bytes))
 
     writer = PdfWriter()
@@ -493,6 +549,336 @@ def _build_form_1125e(ctx: PrefillContext) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Form W-4P (individual pension/annuity withholding certificate)
+# ---------------------------------------------------------------------------
+# W-4P is an individual certificate given to the PAYER (not the IRS). Its data
+# shape is unlike the corporate 1120 (no queue_items / cpa_package), so it has a
+# dedicated fill path rather than reusing build_prefill_context. We fill ONLY
+# page-1 face fields (the certificate); the page-3/4 deductions worksheet is the
+# taxpayer's scratch work and is not part of what goes to the payer.
+
+
+@dataclass
+class W4PFill:
+    """Resolved page-1 W-4P certificate values, ready to stamp onto the form.
+
+    Each value is a plain display string (already provenance-checked upstream by
+    the caller). A value of None leaves that field blank — conservative
+    blank-fill, never guessed. ``filing_status`` is one of the
+    ``W4P_FILING_STATUS_FIELDS`` keys.
+    """
+
+    tax_year: int
+    first_name_mi: str | None = None
+    last_name: str | None = None
+    address: str | None = None
+    city_state_zip: str | None = None
+    ssn: str | None = None
+    filing_status: str | None = None
+    no_withholding: bool = False
+    step2a: str | None = None
+    step2b: str | None = None
+    step2c: str | None = None
+    step3a_child: str | None = None
+    step3b_other: str | None = None
+    step3c_credits: str | None = None
+    step3_total: str | None = None
+    step4a_income: str | None = None
+    step4b_deductions: str | None = None
+    step4c_extra: str | None = None
+
+
+def _w4p_form_path(tax_year: int) -> Path:
+    """Resolve the W-4P source PDF, preferring a year-specific file."""
+    candidates = [
+        IRS_FORMS_DIR / f"f-w4p_{tax_year}.pdf",
+        IRS_FORMS_DIR / "f-w4p.pdf",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return candidates[-1]
+
+
+def _set_acroform_values(writer: PdfWriter, field_values: dict[str, str]) -> int:
+    """Set AcroForm field values by walking the /Fields tree to terminal fields.
+
+    Matches by fully-qualified field name (parent /T chain joined by '.'). Text
+    fields get /V set and any cached /AP dropped (so /NeedAppearances regenerates
+    the visible text); button/checkbox fields get /V and /AS set to the on-state
+    NameObject (e.g. "1" -> /1). Returns the number of fields set. Unknown keys
+    are simply not matched (conservative — never invents a field).
+    """
+    try:
+        acroform = writer._root_object["/AcroForm"].get_object()
+        root_fields = acroform["/Fields"]
+    except (KeyError, AttributeError):
+        return 0
+
+    set_count = 0
+
+    def walk(ref: Any, prefix: str) -> None:
+        nonlocal set_count
+        field = ref.get_object()
+        partial = field.get("/T")
+        name = (
+            f"{prefix}.{partial}" if (prefix and partial is not None)
+            else (partial if partial is not None else prefix)
+        )
+        kids = field.get("/Kids")
+        kid_fields = []
+        if kids:
+            for k in kids:
+                if k.get_object().get("/T") is not None:
+                    kid_fields.append(k)
+
+        ft = field.get("/FT")
+        is_terminal = ft is not None and not kid_fields
+        if is_terminal and name in field_values:
+            value = str(field_values[name])
+            if ft == "/Btn":
+                on_state = NameObject("/" + value)
+                field[NameObject("/V")] = on_state
+                field[NameObject("/AS")] = on_state
+            else:
+                field[NameObject("/V")] = TextStringObject(value)
+                if "/AP" in field:
+                    del field[NameObject("/AP")]
+            set_count += 1
+
+        for k in kid_fields:
+            walk(k, name)
+
+    for fr in root_fields:
+        walk(fr, "")
+    return set_count
+
+
+def _annot_qualified_name(annot: Any) -> str | None:
+    """Build a widget annotation's fully-qualified field name from its /T chain."""
+    parts: list[str] = []
+    obj: Any = annot
+    for _ in range(24):  # guard against cycles
+        if obj is None:
+            break
+        t = obj.get("/T")
+        if t is not None:
+            parts.append(str(t))
+        parent = obj.get("/Parent")
+        obj = parent.get_object() if parent is not None else None
+    return ".".join(reversed(parts)) if parts else None
+
+
+def _build_value_overlay(reader: PdfReader, field_values: dict[str, str]) -> bytes:
+    """Build an overlay PDF that draws each field's value at its widget /Rect.
+
+    This BAKES the values into the page content so they are visible in EVERY
+    viewer/printer — not dependent on /NeedAppearances (which poppler and many
+    print paths ignore). Text fields draw left-aligned; checkboxes draw an 'X'.
+    """
+    from reportlab.lib.colors import black
+    from reportlab.pdfgen import canvas as rl_canvas
+
+    buf = io.BytesIO()
+    c = rl_canvas.Canvas(buf)
+    for page in reader.pages:
+        mb = page.mediabox
+        pw, ph = float(mb.width), float(mb.height)
+        c.setPageSize((pw, ph))
+        c.setFillColor(black)
+        annots = page.get("/Annots")
+        if annots:
+            for ref in annots:
+                ao = ref.get_object()
+                if ao.get("/Subtype") != "/Widget":
+                    continue
+                name = _annot_qualified_name(ao)
+                if not name or name not in field_values:
+                    continue
+                rect = ao.get("/Rect")
+                if rect is None:
+                    continue
+                x0, y0, x1, y1 = (float(v) for v in rect)
+                h = abs(y1 - y0)
+                ft = ao.get("/FT")
+                if ft is None and ao.get("/Parent") is not None:
+                    ft = ao["/Parent"].get_object().get("/FT")
+                value = str(field_values[name])
+                if ft == "/Btn":
+                    size = max(7.0, min(12.0, h * 0.8))
+                    c.setFont("Helvetica-Bold", size)
+                    c.drawCentredString((x0 + x1) / 2.0, min(y0, y1) + h * 0.22, "X")
+                else:
+                    size = max(7.0, min(10.0, h - 4.0))
+                    c.setFont("Helvetica", size)
+                    baseline = min(y0, y1) + max(2.0, (h - size) / 2.0)
+                    c.drawString(min(x0, x1) + 2.0, baseline, value)
+        c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
+
+def _flatten_widgets(writer: PdfWriter) -> None:
+    """Drop interactive form widgets + the AcroForm so only baked-in values show.
+
+    Without this, a forms-aware viewer would render an empty editable field on
+    top of the baked overlay value (or double-render under /NeedAppearances).
+    """
+    for page in writer.pages:
+        annots = page.get("/Annots")
+        if not annots:
+            continue
+        kept = [r for r in annots if r.get_object().get("/Subtype") != "/Widget"]
+        if kept:
+            page[NameObject("/Annots")] = ArrayObject(kept)
+        else:
+            del page[NameObject("/Annots")]
+    try:
+        if "/AcroForm" in writer._root_object:
+            del writer._root_object[NameObject("/AcroForm")]
+    except (KeyError, AttributeError):
+        pass
+
+
+def _render_acroform_pdf(
+    source_pdf_bytes: bytes,
+    field_values: dict[str, str],
+    watermark_mode: WatermarkMode,
+) -> bytes:
+    """Fill an AcroForm PDF with VISIBLE, flattened values + stamp the watermark.
+
+    Modern IRS forms (W-4P, 1040) are XFA hybrids whose values, set only via /V,
+    are invisible in any viewer that ignores /NeedAppearances (poppler, many
+    print paths). So we: (1) set /V on each terminal field (semantic value, via
+    the /Fields-tree walker — pypdf's page matcher misses XFA names), (2) BAKE
+    each value as a coordinate overlay at its widget /Rect so it renders
+    everywhere, (3) flatten (drop widgets + AcroForm) so nothing double-renders,
+    (4) stamp the status watermark. The result is a finished, print-ready,
+    sign-ready document — not a fragile fillable form.
+    """
+    writer = PdfWriter(clone_from=io.BytesIO(source_pdf_bytes))
+    _set_acroform_values(writer, field_values)
+    if "/XFA" in (writer._root_object.get("/AcroForm", {}) or {}):
+        try:
+            del writer._root_object["/AcroForm"].get_object()[NameObject("/XFA")]
+        except (KeyError, AttributeError):
+            pass
+
+    # Bake the values in as a visible overlay (reads widget rects from the
+    # cloned writer's pages).
+    value_overlay = PdfReader(io.BytesIO(_build_value_overlay(writer, field_values)))
+    for i, page in enumerate(writer.pages):
+        if i < len(value_overlay.pages):
+            page.merge_page(value_overlay.pages[i])
+
+    _flatten_widgets(writer)
+
+    if watermark_mode != WatermarkMode.NONE:
+        wm_reader = PdfReader(
+            io.BytesIO(_build_watermark_overlay(len(writer.pages), watermark_mode))
+        )
+        for i, page in enumerate(writer.pages):
+            if i < len(wm_reader.pages):
+                page.merge_page(wm_reader.pages[i])
+
+    out = io.BytesIO()
+    writer.write(out)
+    out.seek(0)
+    return out.read()
+
+
+def _build_w4p(fill: W4PFill, watermark_mode: WatermarkMode) -> bytes:
+    """Fill the page-1 W-4P certificate and stamp the selected watermark."""
+    from app.exports.w4p_field_map import (
+        W4P_FIELDS,
+        W4P_FILING_STATUS_FIELDS,
+        W4P_NO_WITHHOLDING_FIELD,
+    )
+
+    form_path = _w4p_form_path(fill.tax_year)
+    if not form_path.exists():
+        raise FileNotFoundError(
+            f"IRS Form W-4P PDF not found at {form_path}. "
+            "Run scripts/download_irs_forms.sh to fetch it."
+        )
+    source = form_path.read_bytes()
+
+    field_values: dict[str, str] = {}
+    text_values = {
+        "first_name_mi": fill.first_name_mi,
+        "last_name": fill.last_name,
+        "address": fill.address,
+        "city_state_zip": fill.city_state_zip,
+        "ssn": fill.ssn,
+        "step2a": fill.step2a,
+        "step2b": fill.step2b,
+        "step2c": fill.step2c,
+        "step3a_child": fill.step3a_child,
+        "step3b_other": fill.step3b_other,
+        "step3c_credits": fill.step3c_credits,
+        "step3_total": fill.step3_total,
+        "step4a_income": fill.step4a_income,
+        "step4b_deductions": fill.step4b_deductions,
+        "step4c_extra": fill.step4c_extra,
+    }
+    for key, value in text_values.items():
+        if value is not None and str(value) != "":
+            field_values[W4P_FIELDS[key]] = str(value)
+
+    if fill.filing_status and fill.filing_status in W4P_FILING_STATUS_FIELDS:
+        fname, on_state = W4P_FILING_STATUS_FIELDS[fill.filing_status]
+        field_values[fname] = on_state
+    if fill.no_withholding:
+        fname, on_state = W4P_NO_WITHHOLDING_FIELD
+        field_values[fname] = on_state
+
+    return _render_acroform_pdf(source, field_values, watermark_mode)
+
+
+def generate_w4p_pdf(
+    fill: W4PFill,
+    watermark_mode: WatermarkMode = WatermarkMode.DRAFT,
+) -> tuple[bytes, str]:
+    """Generate a filled page-1 W-4P certificate PDF.
+
+    Returns (pdf_bytes, "application/pdf"). ``watermark_mode`` reflects the
+    work-product status: DRAFT (default) for an un-attested draft,
+    SELF_CERTIFIED once a user with no professional has self-certified, or NONE
+    when a licensed pro has finalized it.
+    """
+    return _build_w4p(fill, watermark_mode), "application/pdf"
+
+
+# Keys read from a WorkProduct.inputs map onto W4PFill (registry-uniform path).
+_W4P_INPUT_KEYS = (
+    "first_name_mi", "last_name", "address", "city_state_zip", "ssn",
+    "filing_status", "step2a", "step2b", "step2c",
+    "step3a_child", "step3b_other", "step3c_credits", "step3_total",
+    "step4a_income", "step4b_deductions", "step4c_extra",
+)
+
+
+def render_w4p(
+    tax_year: int | None,
+    watermark_mode: WatermarkMode,
+    inputs: dict,
+) -> tuple[bytes, str]:
+    """Registry-uniform W-4P renderer: build a W4PFill from a WorkProduct.inputs
+    map ({key: {value, source_ref, origin}}) and render. Only present, non-blank
+    values are filled (conservative blank-fill)."""
+    kwargs: dict[str, str] = {}
+    for key in _W4P_INPUT_KEYS:
+        rec = inputs.get(key)
+        if rec and rec.get("value") not in (None, ""):
+            kwargs[key] = str(rec["value"])
+    nw = inputs.get("no_withholding") or {}
+    no_withholding = str(nw.get("value", "")).strip().lower() in ("true", "1", "yes")
+    fill = W4PFill(tax_year=tax_year or 2026, no_withholding=no_withholding, **kwargs)
+    return generate_w4p_pdf(fill, watermark_mode)
+
+
+# ---------------------------------------------------------------------------
 # Context builder — merges queue + cpa-export data
 # ---------------------------------------------------------------------------
 
@@ -605,6 +991,14 @@ def generate_form_pdf(
 
     elif fn == FormName.PACKAGE:
         return _build_package_zip(ctx), "application/zip"
+
+    elif fn == FormName.W4P:
+        # W-4P is an individual certificate with a different data shape; it does
+        # not use the corporate queue/cpa-export context.
+        raise ValueError(
+            "W-4P uses an individual data shape — call generate_w4p_pdf(fill, "
+            "watermark_mode) instead of generate_form_pdf()."
+        )
 
     else:
         raise ValueError(

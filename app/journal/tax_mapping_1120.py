@@ -70,6 +70,19 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
     # REVENUE
     # ------------------------------------------------------------------
 
+    "Revenue · Services": F1120Mapping(
+        section="income",
+        line="1a",
+        label="Gross receipts or sales",
+        confidence="high",
+        notes=(
+            "Service revenue is gross receipts from the corporation's principal "
+            "trade — the core of line 1a (Form 1120 instructions p. 8). This is "
+            "the operating revenue of a services C-corp; without it line 1a is "
+            "materially understated. Returns/allowances (if any) go on line 1b."
+        ),
+    ),
+
     "Revenue · Marketplace": F1120Mapping(
         section="income",
         line="1a",

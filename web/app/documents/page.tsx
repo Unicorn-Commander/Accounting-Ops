@@ -170,10 +170,18 @@ export default async function DocumentsPage() {
 }
 
 function DocRow({ doc }: { doc: UploadedDocument }) {
-  const isImage = doc.mime_type.startsWith("image/");
-  const isPdf = doc.mime_type === "application/pdf";
+  // Null-guard every field: a list row must never throw (and take down the
+  // whole documents segment) on a transient/incomplete record.
+  const mime = doc.mime_type ?? "";
+  const isImage = mime.startsWith("image/");
+  const isPdf = mime === "application/pdf";
   const Icon = isImage ? ImageIcon : isPdf ? FileText : Receipt;
-  const kindLabel = isImage ? "Receipt" : isPdf ? "PDF" : doc.mime_type.includes("csv") ? "CSV" : "Doc";
+  const kindLabel = isImage ? "Receipt" : isPdf ? "PDF" : mime.includes("csv") ? "CSV" : "Doc";
+  // A recognized tax form (1099-R, W-2, SSA-1099, …) gets its form type + year
+  // surfaced; 'other'/null falls back to the generic kind. 'failed' = the OCR
+  // ran but couldn't read it.
+  const isTaxDoc = !!doc.doc_type && doc.doc_type !== "other";
+  const extractionFailed = doc.extraction_status === "failed";
 
   return (
     <tr className="border-b border-subtle/60 last:border-b-0 hover:bg-white/[0.02]">
@@ -182,12 +190,27 @@ function DocRow({ doc }: { doc: UploadedDocument }) {
           <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-elevated text-ink-tertiary">
             <Icon size={13} />
           </span>
-          <span className="font-mono text-[11px] text-ink-tertiary" title={doc.content_hash}>
-            {doc.content_hash.slice(0, 12)}…
+          <span className="font-mono text-[11px] text-ink-tertiary" title={doc.content_hash ?? ""}>
+            {(doc.content_hash ?? "").slice(0, 12)}…
           </span>
         </div>
       </td>
-      <td className="px-2 py-3 text-xs text-ink-secondary">{kindLabel}</td>
+      <td className="px-2 py-3 text-xs">
+        {isTaxDoc ? (
+          <span className="font-medium text-brand-400">
+            {doc.doc_type}
+            {doc.tax_year ? (
+              <span className="text-ink-tertiary"> · {doc.tax_year}</span>
+            ) : null}
+          </span>
+        ) : extractionFailed ? (
+          <span className="text-ink-tertiary" title="Couldn't read this document automatically">
+            {kindLabel} <span className="text-pending">· unread</span>
+          </span>
+        ) : (
+          <span className="text-ink-secondary">{kindLabel}</span>
+        )}
+      </td>
       <td className="px-2 py-3 font-mono text-xs tabular-nums text-ink-secondary">
         {doc.amount ? `${doc.currency_code ?? ""} ${doc.amount}`.trim() : "—"}
       </td>
@@ -195,10 +218,12 @@ function DocRow({ doc }: { doc: UploadedDocument }) {
         <ReviewStatusChip status={doc.review_status} />
       </td>
       <td className="px-5 py-3 text-right font-mono text-[11px] text-ink-tertiary">
-        {new Date(doc.created_at).toLocaleDateString("en-US", {
-          month: "short",
-          day: "numeric",
-        })}
+        {doc.created_at
+          ? new Date(doc.created_at).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+            })
+          : "—"}
       </td>
     </tr>
   );

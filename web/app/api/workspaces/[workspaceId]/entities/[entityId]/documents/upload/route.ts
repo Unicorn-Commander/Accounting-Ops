@@ -15,10 +15,10 @@ const INTERNAL_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL ??
   "http://app:8000";
 
-// Cap mirrored from the backend default (25 MB) — reject early at the edge so a
+// Cap mirrored from the backend default (100 MB) — reject early at the edge so a
 // giant body never streams all the way to the API. Override via env to match a
-// raised DOCUMENT_UPLOAD_MAX_BYTES.
-const MAX_BYTES = Number(process.env.DOCUMENT_UPLOAD_MAX_BYTES ?? 25 * 1024 * 1024);
+// changed DOCUMENT_UPLOAD_MAX_BYTES.
+const MAX_BYTES = Number(process.env.DOCUMENT_UPLOAD_MAX_BYTES ?? 100 * 1024 * 1024);
 
 export async function POST(
   req: NextRequest,
@@ -41,7 +41,10 @@ export async function POST(
   // Read the raw bytes once so we can size-check, then forward as the body.
   // (Files here are bounded by MAX_BYTES; buffering is fine for this size.)
   const buf = await req.arrayBuffer();
-  if (buf.byteLength > MAX_BYTES) {
+  // Headroom over MAX_BYTES for the multipart envelope (boundary + part headers)
+  // so a file at exactly the file-size cap isn't rejected here for its wrapper;
+  // the backend re-checks the actual file part against the real cap.
+  if (buf.byteLength > MAX_BYTES + 1024 * 1024) {
     return NextResponse.json(
       { detail: `File exceeds the ${Math.floor(MAX_BYTES / (1024 * 1024))} MB limit.` },
       { status: 413 }

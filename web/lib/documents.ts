@@ -19,6 +19,11 @@ export type UploadedDocument = {
   created_at: string;
   object_key: string;
   review_status: string | null;
+  // Tax-document OCR result (PDFs run through the local vision VLM after upload).
+  // null until extraction completes; doc_type 'other' = not a recognized tax form.
+  doc_type: string | null;
+  tax_year: number | null;
+  extraction_status: string | null; // 'extracted' | 'failed' | null (not yet run)
 };
 
 export type DocumentList = {

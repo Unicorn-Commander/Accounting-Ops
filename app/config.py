@@ -58,9 +58,10 @@ class Settings(BaseModel):
     garage_s3_secret_key: str = ""
     garage_s3_region: str = "garage"
     # Hard ceiling on a single uploaded document (bytes). Defends the app + the
-    # object store from a giant-file DoS. 25 MB comfortably covers a multi-page
-    # PDF receipt or a high-res phone photo; CSV statements are far smaller.
-    document_upload_max_bytes: int = 25 * 1024 * 1024
+    # object store from a giant-file DoS. 100 MB covers large multi-page scanned
+    # tax documents / statement bundles as well as receipts and CSVs. Override via
+    # env DOCUMENT_UPLOAD_MAX_BYTES (the web edge proxy reads the same var).
+    document_upload_max_bytes: int = 100 * 1024 * 1024
 
     otel_exporter_otlp_endpoint: str | None = None
     otel_service_name: str = "accounting-ops"
@@ -79,8 +80,8 @@ class Settings(BaseModel):
     # LLM_API_KEY):
     #
     #   STANDALONE (default) — direct to the local llama.cpp / vLLM server:
-    #     LLM_ENDPOINT_URL = http://100.121.80.175:8088/v1   (midboy1)
-    #     LLM_MODEL        = Qwen3.6-35B-A3B-Vision-p40      (P40 backend — image-safe)
+    #     LLM_ENDPOINT_URL = http://100.66.42.57:8088/v1     (midboy2)
+    #     LLM_MODEL        = Qwen3.6-35B-A3B-Vision          (RTX-6000 + mmproj — image-capable)
     #     LLM_API_KEY      = (blank — no auth on local server)
     #
     #   SUITE / GATEWAY — through the UC LiteLLM gateway (load-balances P40+3090,
@@ -89,11 +90,16 @@ class Settings(BaseModel):
     #     LLM_MODEL        = qwen3.6-vision
     #     LLM_API_KEY      = <virtual-key>
     #
-    # ⚠️  Do NOT default to "Qwen3.6-35B-A3B-Vision" (the RTX-6000 alias): it
-    # OOM-crashes on image input and returns 502. The P40 alias below is the safe
-    # standalone default for receipt OCR. Override via LLM_MODEL for the gateway.
-    llm_endpoint_url: str = "http://100.121.80.175:8088/v1"
-    llm_model: str = "Qwen3.6-35B-A3B-Vision-p40"
+    # NOTE (2026-06-23 GPU reshuffle): the vision model now lives on the RTX 6000
+    # on midboy2 (100.66.42.57:8088), served as "Qwen3.6-35B-A3B-Vision" WITH the
+    # multimodal projector — VERIFIED image-capable (a 1275x1650 page render
+    # classifies correctly from inside the app container). This SUPERSEDES the old
+    # warning that this alias OOM'd on images (true only of the pre-reshuffle
+    # RTX-6000 config). The sibling "Qwen3.6-35B-A3B-p40" on the same port is the
+    # P40 TEXT model (no vision) — do NOT use it for image/PDF OCR. Production sets
+    # the values above via .env.
+    llm_endpoint_url: str = "http://100.66.42.57:8088/v1"
+    llm_model: str = "Qwen3.6-35B-A3B-Vision"
     llm_api_key: str = ""          # blank = local/no-auth; set in env for cloud
     llm_timeout_s: int = 30
 
@@ -142,6 +148,35 @@ class Settings(BaseModel):
     # behavior, byte-identical). True ⇒ route frontier inference through the
     # gateway per the resolver precedence (BYOK > platform/UC-credit > OpenRouter).
     route_chat_through_gateway: bool = False
+
+    # ---- LOCAL-first chat tier (sovereign qwen) ----
+    # Highest-precedence inference target (after a workspace's own BYOK) when a
+    # workspace opts in via EngagementPolicy.prefer_local_inference. Points at the
+    # bigboy unicorn-llama-router (an OpenAI-compatible endpoint). Blank base_url
+    # ⇒ the local tier is unavailable and the resolver behaves exactly as today.
+    # NB: deliberately NOT the categorizer's LLM_* / qwen_local_url settings — the
+    # chat path is kept separate from the receipt-VLM path on purpose.
+    chat_local_base_url: str = ""
+    chat_local_model: str = "Qwen3.6-35B-A3B"
+    chat_local_api_key: str = ""
+    # INSTANCE-WIDE default for the local tier. When True (and chat_local_base_url
+    # is set) every workspace defaults to local-first WITHOUT needing the
+    # per-workspace EngagementPolicy.prefer_local_inference flag — the one-knob
+    # setting for a fully self-hosted, local-only instance. Because the local tier
+    # sits ahead of the gateway + OpenRouter branches, this also permanently
+    # closes the OpenRouter fall-through for every turn. Default False ⇒ behavior
+    # is unchanged (per-workspace opt-in only).
+    chat_local_default: bool = False
+    # AUTO-ESCALATE the hard personas (CFO + tax specialists/researchers — every
+    # persona whose tier is "strategic" or "specialist") to the cloud tiers even
+    # on a routine turn, while routine/"operational" personas (setup, product
+    # guide) stay on free local qwen. Delivers "local qwen for routine, frontier
+    # cloud for the hard reasoning" with no UI. Only has an effect when a local
+    # tier would otherwise be chosen (local-first). Default False ⇒ no escalation.
+    # NB: escalated turns use the workspace's BYOK key when present, else the
+    # platform/gateway key — so store the workspace's BYOK BEFORE enabling this,
+    # or the hard turns bill the platform key.
+    chat_escalate_hard_personas: bool = False
 
     # ---- UC Ops-Center (platform billing/entitlement control plane) ----
     # Ops-Center owns subscribe/pay (Stripe) + org identity + per-app entitlement
@@ -227,6 +262,19 @@ def get_settings() -> Settings:
         ),
         llm_gateway_admin_key=os.getenv("LLM_GATEWAY_ADMIN_KEY", ""),
         llm_platform_virtual_key=os.getenv("LLM_PLATFORM_VIRTUAL_KEY", ""),
+        chat_local_base_url=os.getenv("AO_CHAT_LOCAL_BASE_URL", ""),
+        chat_local_model=os.getenv(
+            "AO_CHAT_LOCAL_MODEL", defaults.chat_local_model
+        ),
+        chat_local_api_key=os.getenv("AO_CHAT_LOCAL_API_KEY", ""),
+        chat_local_default=os.getenv("AO_CHAT_LOCAL_DEFAULT", "")
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
+        chat_escalate_hard_personas=os.getenv("AO_CHAT_ESCALATE_HARD_PERSONAS", "")
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
         route_chat_through_gateway=os.getenv(
             "AO_ROUTE_CHAT_THROUGH_GATEWAY", ""
         ).strip().lower() in ("1", "true", "yes", "on"),

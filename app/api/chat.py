@@ -693,7 +693,11 @@ async def send_chat_message(
             "openrouter_api_key": _resolved.api_key,
             "consult_model": (
                 GATEWAY_MODEL_SONNET
-                if _resolved.source != "openrouter_default"
+                # Gateway-routed sources use the cheap Sonnet alias for consults.
+                # 'openrouter_default' and 'local' are NOT gateway aliases — the
+                # local qwen server would 404 the gateway alias — so leave the
+                # consult model unset and let it use the resolved inference.
+                if _resolved.source not in ("openrouter_default", "local")
                 else None
             ),
         }

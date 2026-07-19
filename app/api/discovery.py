@@ -146,6 +146,15 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     # draft_memo and flag_for_cpa_review write tax_review_queue / memo rows.
     "draft_memo":                    {"min_role": "accountant", "read_only": False, "latency_ms": 800},
     "flag_for_cpa_review":           {"min_role": "accountant", "read_only": False, "latency_ms": 600},
+    # tax_fill_w4p prepares a finished W-4P work-product (reads a 1099-R + runs
+    # the deterministic worksheet, writes a work_product DRAFT row).
+    "tax_fill_w4p":                  {"min_role": "accountant", "read_only": False, "latency_ms": 1200},
+    # tax_prepare_filing creates a CP504 / ST-3 / 1040 work-product from
+    # provenance-bearing fields (writes a work_product DRAFT row).
+    "tax_prepare_filing":            {"min_role": "accountant", "read_only": False, "latency_ms": 900},
+    # tax_compute_1040 runs the deterministic engine over a client's income to
+    # produce a computed 1040 work-product (writes a work_product DRAFT row).
+    "tax_compute_1040":              {"min_role": "accountant", "read_only": False, "latency_ms": 1100},
 
     # ----- CPA Narrative + tax status dashboard ----------------------------
     "get_tax_narrative":             {"min_role": "viewer",     "read_only": True,  "latency_ms": 350},

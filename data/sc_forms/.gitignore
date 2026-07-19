@@ -1,0 +1,4 @@
+# SC form PDFs (e.g. ST-3) — same posture as data/irs_forms and
+# data/scdor_forms: public-domain SCDOR documents, fetched on demand, too large
+# for git. Each developer/server downloads them after checkout.
+*.pdf
