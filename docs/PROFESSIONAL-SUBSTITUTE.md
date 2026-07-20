@@ -97,6 +97,24 @@ not a to-do list. Three principles govern it:
 | Work-products API | `app/api/work_products.py` | List/detail, `GET …/document.pdf` (re-render + watermark-by-status + provenance guard + audit), `POST …/attest` (the bypassable self-attest gate). |
 | Last-mile UI | `web/app/taxes/w-4p/` | Preview + self-certify card (gated on policy) + download + plain-language "give to your payer, not the IRS" guidance. |
 | Dormant submission rail | `app/submission/rail.py`, `app/api/submission.py` | `SubmissionRail` protocol + adapters. Only `PAPER_PRINT` enabled; e-file/state/EFTPS/e-sign present but raise `FeatureDisabled` (3 gates + kill-switch; even gated, `execute` is a deliberate no-op-raise today). |
+| Depreciation engine + Form 4562 | `app/tax/engines/depreciation.py`, `app/tax/engines/configs_depreciation.py`, `app/tax/compute_4562.py`, `app/exports/f4562_field_map.py`, `app/exports/f4562_fill.py`, `FixedAsset` model + migration `0027` | The **second computed form**. Pure MACRS (GDS/ADS, half-year / mid-quarter / mid-month, the §168(d)(3) 40% trigger), §179 with the investment phase-out + taxable-income limit + carryforward, §168(k) bonus, §280F listed property. Year constants are cited to IRS Pub 946 and an unsupported year RAISES. Assets persist in `fixed_asset` because depreciation is multi-year state. |
+
+### Form 4562: two things that will bite a future maintainer
+
+1. **The Part III class rows MOVED in the 2025 revision.** A new "50-year
+   property" row at 19h pushed residential rental from 19h→19i and
+   nonresidential real from 19i→19j (Section C gained a 50-year row at 20e, and
+   line 23 split into 23a/23b). Reusing the 2024 map on the 2025 form files
+   residential rental depreciation in the 50-year row — a real number on the
+   wrong line, silently. The engine therefore keys Part III by **recovery
+   period**, `f4562_field_map` owns the per-revision row mapping, and an unmapped
+   year raises. `tests/unit/test_form_4562_render.py` asserts the shift on the
+   RENDERED PDF, not just the map.
+2. **§168(k) depends on the ACQUISITION date from TY2025**, not only the
+   placed-in-service date: OBBBA (P.L. 119-21) reinstated 100% for property
+   acquired after 2025-01-19, while earlier-acquired property placed in service
+   in 2025 stays at 40%. An asset with no `acquired_on` cannot be resolved and
+   the engine raises rather than picking one.
 | Local-first chat routing | `agents/chat/inference_config.py`, `app/config.py` | New tier after BYOK: sovereign local qwen (`AO_CHAT_LOCAL_*`) when `EngagementPolicy.prefer_local_inference` is on; cloud is the fallback. Default-safe (off ⇒ unchanged). |
 
 ## The bypassable gate, concretely
@@ -114,11 +132,15 @@ unrelated and untouched).
 
 ## Adding another form
 
-1. A deterministic worksheet in `app/tax/` (year-aware, raises on unsupported year, surfaces
-   assumptions) if the form needs computed lines.
+1. A deterministic worksheet/engine in `app/tax/` (year-aware, raises on unsupported year,
+   surfaces assumptions) if the form needs computed lines. Year constants belong in a separate
+   `configs_*.py` with a `SUPPORTED_TAX_YEARS` tuple and a citation for every figure.
 2. A field map + a `render_<kind>(tax_year, watermark_mode, inputs)` renderer in `app/exports/`,
    reusing `_render_acroform_pdf` (AcroForm) or `_apply_watermark` (generated letters).
-3. A dispatch branch in `app/api/work_products.py::_render_work_product`.
+   **Verify every AcroForm name against the actual PDF** — a name that does not exist fills
+   nothing and fails silently. See `tests/unit/test_form_4562_render.py` for the pattern.
+3. One `FormSpec` entry in `app/exports/form_registry.py`. (No dispatch branch is needed any
+   more — `app/api/work_products.py::_render_work_product` dispatches through the registry.)
 4. A creator tool in `app/tools/` (reads sources for provenance, writes a DRAFT `WorkProduct`),
    wired into `app/tools/__init__.py`, `mcp_server.py`, the persona allow-lists, and
    `app/api/discovery.py::_TOOL_METADATA`.

@@ -320,6 +320,32 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
         ),
     ),
 
+    "Depreciation": F1120Mapping(
+        section="deductions",
+        line="20",
+        label="Depreciation from Form 4562 not claimed on Form 1125-A or elsewhere on return",
+        confidence="high",
+        notes=(
+            "Book depreciation posted to COA 8030 'Depreciation Expense'. Form "
+            "1120 line 20 is the dedicated depreciation line and is the ONLY "
+            "correct home for it — before this mapping existed the 8030 account "
+            "fell through the unmapped-account catch-all to line 26 'Other "
+            "deductions', which is the wrong line (and left line 20 blank on "
+            "every C-corp return the platform produced).\n\n"
+            "IMPORTANT — book vs TAX depreciation. The amount that belongs on "
+            "line 20 is the TAX deduction computed on Form 4562 (MACRS + §179 + "
+            "§168(k)), NOT the book depreciation expense in the ledger. Those "
+            "differ for essentially every asset, and the difference is a "
+            "Schedule M-1 reconciling item. The authoritative figure is Form "
+            "4562 line 22, produced by app.tax.engines.depreciation; the ledger "
+            "balance in 8030 is only a fallback when no fixed-asset records "
+            "exist. See app/tax/compute_4562.py and docs/PROFESSIONAL-SUBSTITUTE.md.\n\n"
+            "Depreciation capitalized into inventory under §263A is claimed on "
+            "Form 1125-A (COGS) instead — line 20 is explicitly the depreciation "
+            "'not claimed on Form 1125-A or elsewhere on return'."
+        ),
+    ),
+
     "Meals": F1120Mapping(
         section="deductions",
         line="26",

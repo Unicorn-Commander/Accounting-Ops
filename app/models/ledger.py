@@ -448,6 +448,113 @@ class WorkProduct(EntityScopedMixin, Base):
     )
 
 
+class FixedAsset(EntityScopedMixin, Base):
+    """One depreciable fixed asset on an entity's books.
+
+    WHY THIS IS A TABLE AND NOT A CALLER-SUPPLIED LIST
+    -------------------------------------------------
+    Depreciation is inherently multi-year and stateful: an asset placed in
+    service in 2023 must still produce the right 2026 deduction, using the
+    convention and the §168(k) percentage that were fixed AT PLACEMENT — not the
+    2026 ones. If the asset list were supplied per-call, the 2026 return would
+    silently depend on the caller correctly re-typing 2023 facts, which is
+    exactly the fabrication risk the platform exists to eliminate (a mistyped
+    prior-year §179 or bonus figure produces a wrong basis with nothing to catch
+    it). Persisting the asset makes the basis history auditable, lets the
+    §179 carryforward chain year to year, and matches the product's thesis of
+    deriving the return FROM THE BOOKS.
+
+    The row is the ``source_ref`` anchor for every Form 4562 figure derived from
+    it, so a reviewer can trace a line on the form back to an asset record.
+    """
+
+    __table_args__ = (
+        Index("ix_fixed_asset_workspace", "workspace_id"),
+        Index("ix_fixed_asset_entity_placed", "entity_id", "placed_in_service"),
+        CheckConstraint("cost_cents >= 0", name="ck_fixed_asset_cost_nonneg"),
+        CheckConstraint(
+            "business_use_pct >= 0 AND business_use_pct <= 100",
+            name="ck_fixed_asset_business_use_pct",
+        ),
+        CheckConstraint(
+            "recovery_period_years > 0", name="ck_fixed_asset_recovery_positive"
+        ),
+        CheckConstraint(
+            "depreciation_system IN ('GDS','ADS')",
+            name="ck_fixed_asset_system",
+        ),
+        CheckConstraint(
+            "method IS NULL OR method IN ('200DB','150DB','S/L')",
+            name="ck_fixed_asset_method",
+        ),
+        CheckConstraint(
+            "convention IS NULL OR convention IN ('HY','MQ','MM')",
+            name="ck_fixed_asset_convention",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    description: Mapped[str] = mapped_column(String(300), nullable=False)
+    # Optional client-facing asset tag / serial.
+    asset_tag: Mapped[str | None] = mapped_column(String(64))
+    placed_in_service: Mapped[date] = mapped_column(Date, nullable=False)
+    # When the property was ACQUIRED (binding contract / purchase date). This is
+    # NOT redundant with placed_in_service: from TY2025 the §168(k) percentage
+    # turns on whether acquisition was after the OBBBA cutoff (2025-01-19), so a
+    # 2025 asset acquired in 2024 gets 40% while one acquired in March 2025 gets
+    # 100%. The engine REFUSES to guess when this is null.
+    acquired_on: Mapped[date | None] = mapped_column(Date)
+    cost_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # GDS/ADS recovery period in years (3, 5, 7, 10, 15, 20, 25, 27.5, 39, …).
+    recovery_period_years: Mapped[Decimal] = mapped_column(
+        Numeric(4, 1), nullable=False
+    )
+    depreciation_system: Mapped[str] = mapped_column(
+        String(3), nullable=False, server_default=text("'GDS'")
+    )
+    # NULL = derive from §168(b)/(d) (the normal case). Set only to record a
+    # taxpayer election (e.g. §168(b)(5) straight-line election) or the
+    # convention that actually applied in a prior placement year.
+    method: Mapped[str | None] = mapped_column(String(8))
+    convention: Mapped[str | None] = mapped_column(String(2))
+    # §280F qualified business/investment use percentage.
+    business_use_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), nullable=False, server_default=text("100")
+    )
+    is_listed_property: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # §179 elected in the placement year (0 = none elected).
+    section_179_elected_cents: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    # §168(k)(7) irrevocable election out of bonus.
+    bonus_elected_out: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # For assets placed in service BEFORE the engine's supported config window:
+    # the §179 / §168(k) amounts actually taken that year. The engine refuses to
+    # guess these, so they must be recorded when migrating historical books.
+    prior_section_179_cents: Mapped[int | None] = mapped_column(BigInteger)
+    prior_bonus_cents: Mapped[int | None] = mapped_column(BigInteger)
+    # Disposal (stops the schedule; gain/loss handled on Form 4797, not here).
+    disposed_on: Mapped[date | None] = mapped_column(Date)
+    disposal_proceeds_cents: Mapped[int | None] = mapped_column(BigInteger)
+    # Where this asset came from (an invoice, a journal entry, an intake) — the
+    # provenance anchor carried onto every Form 4562 figure derived from it.
+    source_ref: Mapped[str | None] = mapped_column(String(300))
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by_uc_uid: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class EngagementPolicy(WorkspaceScopedMixin, Base):
     """Per-workspace "is a professional available?" policy — the switch that makes
     the CPA-review gate OPTIONAL instead of a hard wall.
