@@ -25,6 +25,7 @@ import pytest
 from app.tax.engines.depreciation import (
     AssetInput,
     BonusRule,
+    ListedPropertyType,
     Convention,
     DepreciationConfig,
     DepreciationInputs,
@@ -162,24 +163,48 @@ def test_table_a6_residential_rental_mid_month_year_one(month: int) -> None:
     assert sum(got) == BASIS
 
 
-def test_nonresidential_real_39_year_mid_month_mechanics() -> None:
-    """39-year nonresidential real property, mid-month (§168(b)(3), §168(d)(2)).
+def test_nonresidential_real_39_year_uses_the_published_table_not_computation() -> None:
+    """Pub 946 Table A-7a: 39-year nonresidential real, mid-month.
 
-    Year 1 for a January placement is 11.5 months of service out of 12 at the
-    straight-line rate 1/39 = 2.5641%/yr -> 2.4573%. (See the report note: the
-    published Table A-7a year-1 January figure should be confirmed against
-    Pub 946 before this is relied on for a filed return; the MECHANICS asserted
-    here — mid-month straight line over 39 years — are what §168 requires.)
+    The published January year-1 figure is EXACTLY 2.461%. The IRS built the row
+    by rounding the monthly increment (1/12/39 -> 0.214%) and accumulating from
+    the December half-month (0.107 + 11 x 0.214 = 2.461), NOT from the exact
+    fraction 11.5/12/39, which gives 2.4573%. Computing it is a different — and
+    wrong — number, so the engine must read the table.
     """
     got = macrs_schedule(
         BASIS, Decimal("39"), Method.SL, Convention.MID_MONTH, date(2024, 1, 10)
     )
     year_one = Decimal(got[0]) * 100 / Decimal(BASIS)
-    expected = Decimal(1) / Decimal(39) * (Decimal("11.5") / Decimal(12)) * 100
-    assert abs(year_one - expected) <= Decimal("0.001")
-    # A full middle year is the plain straight-line rate.
-    assert abs(Decimal(got[1]) * 100 / Decimal(BASIS) - Decimal(100) / Decimal(39)) <= Decimal("0.001")
+    assert year_one == Decimal("2.461"), "must be the PUBLISHED Table A-7a value"
+    # And explicitly NOT the first-principles figure.
+    assert year_one != Decimal("2.4573")
+    assert Decimal(got[1]) * 100 / Decimal(BASIS) == Decimal("2.564")   # years 2-39
+    assert len(got) == 40
     assert sum(got) == BASIS
+
+
+def test_39_year_full_year_one_row_matches_table_a7a() -> None:
+    """Every month of Table A-7a year 1, exactly as published."""
+    published = ["2.461", "2.247", "2.033", "1.819", "1.605", "1.391",
+                 "1.177", "0.963", "0.749", "0.535", "0.321", "0.107"]
+    for month, want in enumerate(published, start=1):
+        got = macrs_schedule(
+            BASIS, Decimal("39"), Method.SL, Convention.MID_MONTH, date(2024, month, 10)
+        )
+        assert Decimal(got[0]) * 100 / Decimal(BASIS) == Decimal(want), (
+            f"39-year month {month}"
+        )
+        assert sum(got) == BASIS
+
+
+def test_unmapped_mid_month_class_raises_instead_of_computing() -> None:
+    """A mid-month class with no published table must NOT fall back to the
+    computed path — 31.5-year legacy nonresidential has no table on file."""
+    with pytest.raises(ValueError, match="no published Pub 946 mid-month"):
+        macrs_schedule(
+            BASIS, Decimal("31.5"), Method.SL, Convention.MID_MONTH, date(2024, 1, 10)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +496,9 @@ def test_listed_property_business_use_reduces_basis() -> None:
         tax_year=2024,
         assets=[
             _asset("van", 3, 50_000_00, "5",
-                   is_listed_property=True, business_use_pct=Decimal("60"))
+                   is_listed_property=True,
+                   listed_property_type=ListedPropertyType.HEAVY_VEHICLE,
+                   business_use_pct=Decimal("60"))
         ],
     )
     result = compute_depreciation(inputs, cfg(2024))
@@ -494,7 +521,9 @@ def test_listed_property_at_or_below_50_percent_forced_to_ads_straight_line() ->
         tax_year=2024,
         assets=[
             _asset("van", 3, 50_000_00, "5",
-                   is_listed_property=True, business_use_pct=Decimal("40"))
+                   is_listed_property=True,
+                   listed_property_type=ListedPropertyType.HEAVY_VEHICLE,
+                   business_use_pct=Decimal("40"))
         ],
     )
     result = compute_depreciation(inputs, cfg(2024, bonus="0.60"))
@@ -516,6 +545,7 @@ def test_listed_property_at_or_below_50_percent_cannot_elect_179() -> None:
         business_taxable_income_cents=1_000_000_00,
         assets=[
             _asset("van", 3, 50_000_00, "5", is_listed_property=True,
+                   listed_property_type=ListedPropertyType.HEAVY_VEHICLE,
                    business_use_pct=Decimal("40"), section_179_elected_cents=10_000_00)
         ],
     )
@@ -529,7 +559,9 @@ def test_listed_property_bonus_lands_on_line_25_not_line_14() -> None:
         tax_year=2024,
         assets=[
             _asset("car", 3, 40_000_00, "5",
-                   is_listed_property=True, business_use_pct=Decimal("100")),
+                   is_listed_property=True,
+                   listed_property_type=ListedPropertyType.HEAVY_VEHICLE,
+                   business_use_pct=Decimal("100")),
             _asset("lathe", 3, 40_000_00, "7"),
         ],
     )
@@ -578,7 +610,9 @@ def test_line_22_total_is_the_sum_of_its_components() -> None:
         assets=[
             _asset("m", 3, 100_000_00, "7", section_179_elected_cents=10_000_00),
             _asset("car", 3, 40_000_00, "5",
-                   is_listed_property=True, business_use_pct=Decimal("80")),
+                   is_listed_property=True,
+                   listed_property_type=ListedPropertyType.HEAVY_VEHICLE,
+                   business_use_pct=Decimal("80")),
         ],
     )
     result = compute_depreciation(inputs, cfg(2024, bonus="0.60"))

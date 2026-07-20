@@ -97,9 +97,9 @@ not a to-do list. Three principles govern it:
 | Work-products API | `app/api/work_products.py` | List/detail, `GET …/document.pdf` (re-render + watermark-by-status + provenance guard + audit), `POST …/attest` (the bypassable self-attest gate). |
 | Last-mile UI | `web/app/taxes/w-4p/` | Preview + self-certify card (gated on policy) + download + plain-language "give to your payer, not the IRS" guidance. |
 | Dormant submission rail | `app/submission/rail.py`, `app/api/submission.py` | `SubmissionRail` protocol + adapters. Only `PAPER_PRINT` enabled; e-file/state/EFTPS/e-sign present but raise `FeatureDisabled` (3 gates + kill-switch; even gated, `execute` is a deliberate no-op-raise today). |
-| Depreciation engine + Form 4562 | `app/tax/engines/depreciation.py`, `app/tax/engines/configs_depreciation.py`, `app/tax/compute_4562.py`, `app/exports/f4562_field_map.py`, `app/exports/f4562_fill.py`, `FixedAsset` model + migration `0027` | The **second computed form**. Pure MACRS (GDS/ADS, half-year / mid-quarter / mid-month, the §168(d)(3) 40% trigger), §179 with the investment phase-out + taxable-income limit + carryforward, §168(k) bonus, §280F listed property. Year constants are cited to IRS Pub 946 and an unsupported year RAISES. Assets persist in `fixed_asset` because depreciation is multi-year state. |
+| Depreciation engine + Form 4562 | `app/tax/engines/depreciation.py`, `app/tax/engines/configs_depreciation.py`, `app/tax/engines/macrs_tables.py`, `app/tax/compute_4562.py`, `app/exports/f4562_field_map.py`, `app/exports/f4562_fill.py`, `FixedAsset` model + migration `0027` | The **second computed form**. MACRS (GDS/ADS, half-year / mid-quarter / mid-month, the §168(d)(3) 40% trigger), §179 with the investment phase-out + taxable-income limit + carryforward, §168(k) bonus, §280F listed property **including the §280F(a) passenger-auto dollar caps**. Year constants are cited to IRS Pub 946 and an unsupported year RAISES. Assets persist in `fixed_asset` because depreciation is multi-year state. |
 
-### Form 4562: two things that will bite a future maintainer
+### Form 4562: four things that will bite a future maintainer
 
 1. **The Part III class rows MOVED in the 2025 revision.** A new "50-year
    property" row at 19h pushed residential rental from 19h→19i and
@@ -115,6 +115,20 @@ not a to-do list. Three principles govern it:
    acquired after 2025-01-19, while earlier-acquired property placed in service
    in 2025 stays at 40%. An asset with no `acquired_on` cannot be resolved and
    the engine raises rather than picking one.
+3. **Real property does NOT use the computed path — it reads the published
+   tables**, and computing it is wrong. The IRS built the mid-month rows by
+   rounding the monthly increment and accumulating, so a January 39-year
+   placement is the published **2.461%**, not the first-principles 2.4573%. The
+   mid-month classes look up `macrs_tables` (reconstructed from Pub 946
+   Appendix A and validated by "every month column sums to exactly 100.000%")
+   and RAISE for a class with no table on file. Personal property is still
+   computed — that route does reproduce Tables A-1 through A-5.
+4. **A listed asset must declare `listed_property_type`.** `passenger_auto`
+   (§280F(d)(5), GVW ≤ 6,000 lbs) is subject to the §280F(a) dollar caps;
+   `heavy_vehicle` is not. The engine refuses to infer it, because defaulting
+   the wrong way silently over-deducts a vehicle — an uncapped $90,000 car would
+   deduct $61,200 in year 1 instead of the statutory $20,400. Caps are on file
+   for placement years 2018-2025; a 2026 placement raises.
 | Local-first chat routing | `agents/chat/inference_config.py`, `app/config.py` | New tier after BYOK: sovereign local qwen (`AO_CHAT_LOCAL_*`) when `EngagementPolicy.prefer_local_inference` is on; cloud is the fallback. Default-safe (off ⇒ unchanged). |
 
 ## The bypassable gate, concretely

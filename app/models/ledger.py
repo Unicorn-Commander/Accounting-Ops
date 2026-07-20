@@ -491,6 +491,16 @@ class FixedAsset(EntityScopedMixin, Base):
             "convention IS NULL OR convention IN ('HY','MQ','MM')",
             name="ck_fixed_asset_convention",
         ),
+        CheckConstraint(
+            "listed_property_type IS NULL OR listed_property_type IN "
+            "('passenger_auto','heavy_vehicle','other_listed')",
+            name="ck_fixed_asset_listed_type",
+        ),
+        # A listed asset MUST declare its type — the §280F(a) caps depend on it.
+        CheckConstraint(
+            "NOT is_listed_property OR listed_property_type IS NOT NULL",
+            name="ck_fixed_asset_listed_type_required",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -526,6 +536,11 @@ class FixedAsset(EntityScopedMixin, Base):
     is_listed_property: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
+    # REQUIRED whenever is_listed_property: 'passenger_auto' (§280F(d)(5), GVW
+    # <= 6,000 lbs — subject to the §280F(a) dollar caps), 'heavy_vehicle'
+    # (>6,000 lbs, listed but uncapped), or 'other_listed'. The engine REFUSES to
+    # infer this, because defaulting it the wrong way over-deducts a vehicle.
+    listed_property_type: Mapped[str | None] = mapped_column(String(16))
     # §179 elected in the placement year (0 = none elected).
     section_179_elected_cents: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default=text("0")

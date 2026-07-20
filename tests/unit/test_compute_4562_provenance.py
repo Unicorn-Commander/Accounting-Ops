@@ -36,6 +36,7 @@ def sample_assets() -> list[dict]:
             "cost": 50_000,
             "recovery_period_years": "5",
             "is_listed_property": True,
+            "listed_property_type": "heavy_vehicle",
             "business_use_pct": 80,
             "source_ref": "fixed_asset:22222222-2222-2222-2222-222222222222",
         },

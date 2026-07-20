@@ -25,7 +25,7 @@ from app.exports.f4562_field_map import (
     DESCRIPTION_MAX_CHARS,
     revision_for_tax_year,
 )
-from app.tax.engines.configs_depreciation import config_for_year
+from app.tax.engines.configs_depreciation import config_for_year, passenger_auto_cap
 from app.tax.engines.depreciation import (
     AssetInput,
     Convention,
@@ -253,6 +253,7 @@ def compute_4562(
             system=raw.get("system", "GDS"),
             business_use_pct=Decimal(str(raw.get("business_use_pct", 100))),
             is_listed_property=bool(raw.get("is_listed_property", False)),
+            listed_property_type=raw.get("listed_property_type"),
             section_179_elected_cents=_dollars(raw.get("section_179_elected", 0)),
             bonus_elected_out=bool(raw.get("bonus_elected_out", False)),
             prior_section_179_cents=(
@@ -282,6 +283,7 @@ def compute_4562(
         ),
         config,
         config_for_year=config_for_year,
+        auto_cap_for=passenger_auto_cap,
     )
 
     inputs = build_4562_inputs(

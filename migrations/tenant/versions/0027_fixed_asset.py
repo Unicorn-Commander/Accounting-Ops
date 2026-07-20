@@ -174,6 +174,13 @@ def upgrade() -> None:
                 server_default=sa.text("false"),
             ),
             sa.Column(
+                "listed_property_type", sa.String(length=16), nullable=True,
+                comment="Required when is_listed_property: passenger_auto "
+                        "(§280F(d)(5), capped) | heavy_vehicle (>6,000 lbs, "
+                        "uncapped) | other_listed. Never inferred — defaulting "
+                        "it wrongly over-deducts a vehicle.",
+            ),
+            sa.Column(
                 "section_179_elected_cents", sa.BigInteger(), nullable=False,
                 server_default=sa.text("0"),
             ),
@@ -227,6 +234,15 @@ def upgrade() -> None:
             sa.CheckConstraint(
                 "convention IS NULL OR convention IN ('HY','MQ','MM')",
                 name="ck_fixed_asset_convention",
+            ),
+            sa.CheckConstraint(
+                "listed_property_type IS NULL OR listed_property_type IN "
+                "('passenger_auto','heavy_vehicle','other_listed')",
+                name="ck_fixed_asset_listed_type",
+            ),
+            sa.CheckConstraint(
+                "NOT is_listed_property OR listed_property_type IS NOT NULL",
+                name="ck_fixed_asset_listed_type_required",
             ),
             comment=(
                 "A depreciable fixed asset. Multi-year state: the convention and "

@@ -56,13 +56,25 @@ in service, so it cannot be expressed as one number per year:
                DELIBERATELY UNSUPPORTED — see the note on
                ``_LEGACY_RATE_UNVERIFIED`` below. The engine RAISES.
 
-DELIBERATELY NOT ENCODED HERE (the engine does not need them, and a wrong
-constant is worse than a missing one):
-  * §280F(a) passenger-automobile depreciation caps. These are year-specific,
-    are NOT monotonic across years, and lock to the vehicle's placed-in-service
-    year for its whole life. They are a separate limitation applied AFTER the
-    computation in this module. Not implemented — see the report.
+§280F(a) passenger-automobile depreciation caps — IRS Pub 946 ch. 5, table
+"Maximum Depreciation Deduction for Passenger Automobiles (Including Trucks and
+Vans) Acquired After September 27, 2017". Read from Pub 946 (2025), which covers
+vehicles placed in service BEFORE 2026. The cap locks to the vehicle's
+PLACED-IN-SERVICE year for the whole life of the vehicle and is NOT monotonic
+across years (2025 is lower than 2024). Post-TCJA there is ONE table covering
+passenger automobiles, trucks and vans — the separate truck/van table applies
+only to pre-9/28/2017 acquisitions and is not encoded.
+
+DELIBERATELY NOT ENCODED HERE (a wrong constant is worse than a missing one):
+  * §280F(a) caps for vehicles placed in service in 2026 — Pub 946 (2025)'s
+    table stops before 2026 and the governing Rev. Proc. was not verified. A
+    2026 placement RAISES. (A vehicle placed in service 2022-2025 still computes
+    correctly on a 2026 return, because it uses ITS placement year's row.)
   * §280F(c) lease inclusion amounts.
+  * "Deductions after the recovery period" — basis disallowed by the §280F(a)
+    cap is recoverable in later years subject to the 4th-and-later cap. The
+    engine tracks and reports the disallowed amount but does NOT extend the
+    schedule past the recovery period, so it never over-deducts.
   * Long-production-period property and certain aircraft, which get a one-year
     -deferred bonus percentage (80% in 2024, 60% in 2025). ``LONG_PRODUCTION``
     below records the rates but the engine does not classify property into that
@@ -143,8 +155,64 @@ LONG_PRODUCTION_PERIOD_RATES: dict[int, str] = {
     2025: "60% (Pub 946 (2025), What's New for 2025)",
 }
 
+# §280F(a) passenger-automobile caps, keyed by the vehicle's PLACED-IN-SERVICE
+# year (the row locks for the vehicle's whole life). Values in CENTS:
+#   (1st year WITH the §168(k) allowance,
+#    1st year WITHOUT it (elected out / not qualified property),
+#    2nd year, 3rd year, 4th-and-later years)
+# Source: IRS Pub 946 (2025) ch. 5, "Maximum Depreciation Deduction for
+# Passenger Automobiles (Including Trucks and Vans) Acquired After September 27,
+# 2017, and Placed in Service Before 2026" (+ its footnotes for the no-bonus
+# first-year figures). Cross-checked against Pub 946 (2024) and Pub 946 (2022).
+_AUTO_CAPS: dict[int, tuple[int, int, int, int, int]] = {
+    2018: (1_800_000, 1_000_000, 1_600_000, 960_000, 576_000),
+    2019: (1_810_000, 1_010_000, 1_610_000, 970_000, 576_000),
+    2020: (1_810_000, 1_010_000, 1_610_000, 970_000, 576_000),
+    2021: (1_820_000, 1_020_000, 1_640_000, 980_000, 586_000),
+    2022: (1_920_000, 1_120_000, 1_800_000, 1_080_000, 646_000),
+    2023: (2_020_000, 1_220_000, 1_950_000, 1_170_000, 696_000),
+    2024: (2_040_000, 1_240_000, 1_980_000, 1_190_000, 716_000),
+    2025: (2_020_000, 1_220_000, 1_960_000, 1_180_000, 706_000),
+}
+
+AUTO_CAP_SOURCE = (
+    "IRS Pub 946 (2025) ch. 5, Maximum Depreciation Deduction for Passenger "
+    "Automobiles (Including Trucks and Vans) Acquired After September 27, 2017"
+)
+
 # Years for which BOTH the §179 limits and a usable §168(k) rule are on file.
 SUPPORTED_TAX_YEARS_DEPRECIATION: tuple[int, ...] = (2022, 2023, 2024, 2025, 2026)
+
+# Placed-in-service years with a verified §280F(a) cap row.
+SUPPORTED_AUTO_CAP_YEARS: tuple[int, ...] = tuple(sorted(_AUTO_CAPS))
+
+
+def passenger_auto_cap(
+    placed_in_service_year: int, year_index: int, *, bonus_claimed: bool
+) -> int:
+    """§280F(a) cap in cents for one tax year of one passenger automobile.
+
+    ``year_index`` is 0-based from the placed-in-service year (0 = first year).
+    Raises for a placement year with no published cap row — never guesses, since
+    guessing here means OVER-DEDUCTING on a real return.
+    """
+    row = _AUTO_CAPS.get(placed_in_service_year)
+    if row is None:
+        raise ValueError(
+            f"No §280F(a) passenger-automobile cap on file for a vehicle placed "
+            f"in service in {placed_in_service_year} (published years: "
+            f"{SUPPORTED_AUTO_CAP_YEARS}). The cap locks to the placement year "
+            "and an uncapped figure would OVER-DEDUCT. Add the verified row from "
+            "the governing Rev. Proc. / Pub 946 before preparing this return."
+        )
+    first_with_bonus, first_no_bonus, second, third, later = row
+    if year_index <= 0:
+        return first_with_bonus if bonus_claimed else first_no_bonus
+    if year_index == 1:
+        return second
+    if year_index == 2:
+        return third
+    return later
 
 
 def config_for_year(year: int) -> DepreciationConfig:
@@ -182,9 +250,12 @@ def section_179_limits(year: int) -> tuple[int, int]:
 
 
 __all__ = [
+    "AUTO_CAP_SOURCE",
     "LONG_PRODUCTION_PERIOD_RATES",
     "OBBBA_ACQUISITION_CUTOFF",
+    "SUPPORTED_AUTO_CAP_YEARS",
     "SUPPORTED_TAX_YEARS_DEPRECIATION",
     "config_for_year",
+    "passenger_auto_cap",
     "section_179_limits",
 ]

@@ -16,28 +16,30 @@
 # NO I/O, NO LLM, no DB. Everything here is a pure function of its inputs.
 #
 # ---------------------------------------------------------------------------
-# Why this computes rather than embeds the IRS percentage tables
+# TWO ROUTES: computed for personal property, PUBLISHED TABLES for real property
 # ---------------------------------------------------------------------------
-# Pub 946 ch. 4 gives taxpayers two equivalent routes: use the Appendix A
-# percentage tables, or "figure your MACRS depreciation deduction without using
-# the tables". This engine implements the WITHOUT-TABLES method — the declining
-# balance computation with a switch to straight line — which is precisely the
-# algorithm the IRS used to GENERATE Appendix A.
+# Pub 946 ch. 4 offers two routes: the Appendix A percentage tables, or "figure
+# your MACRS depreciation deduction without using the tables". They are NOT
+# interchangeable for every class, so this engine uses each where it is correct.
 #
-# Rationale: one auditable algorithm instead of ~20 transcribed tables (every
-# transcribed digit is a place to silently introduce a wrong number on a real
-# return), and it generalizes to any recovery period / convention / short year.
+# PERSONAL PROPERTY (half-year / mid-quarter) — COMPUTED. The without-tables
+# method (declining balance switching to straight line) is precisely the
+# algorithm the IRS used to GENERATE Appendix A, so it reproduces the tables.
+# One auditable algorithm beats ~20 transcribed tables, and it generalizes to any
+# recovery period. VERIFIED in tests/unit/test_depreciation_engine.py against
+# Table A-1 (half-year) and Tables A-2..A-5 (mid-quarter, all four quarters —
+# these match to the CENT). Table A-1 rounds to two decimals and nudges
+# individual years so the column sums to 100.00%, so a single year can differ by
+# up to 0.01% of basis (7-year property year 5: table 8.93%, computed 8.9249%)
+# while the lifetime total is exactly the basis either way.
 #
-# VERIFIED: ``tests/unit/test_depreciation_engine.py`` asserts this algorithm
-# reproduces IRS Table A-1 (GDS half-year), Tables A-2..A-5 (mid-quarter, all
-# four quarters — these match to the CENT), and A-6 (mid-month residential).
-# The published tables round to 2 decimal places and then nudge individual years
-# so the column sums to exactly 100.00%; this engine instead carries full Decimal
-# precision and allocates the true remaining basis in the final year. Net effect:
-# a given year can differ from the published table by up to 0.01% OF BASIS (e.g.
-# 7-year property year 5: table 8.93%, computed 8.9249%), while the LIFETIME
-# total is exactly the depreciable basis in both routes. Both are permissible
-# under Pub 946; see ``PUB946_TABLE_ROUNDING_NOTE`` and the report note.
+# REAL PROPERTY (mid-month: 27.5 / 39 GDS, 30 / 40 ADS) — PUBLISHED TABLES, and
+# computing it would be WRONG. The IRS built those rows by rounding the MONTHLY
+# increment and then accumulating, not from the exact fraction: for 39-year
+# property the January year-1 figure is 0.107 + 11 x 0.214 = 2.461%, whereas the
+# exact 11.5/12/39 gives 2.4573%. Those are different numbers and 2.461% is the
+# published one. So the mid-month path looks up ``macrs_tables`` and RAISES for a
+# class with no table on file rather than silently falling back to computation.
 from __future__ import annotations
 
 from datetime import date
@@ -46,17 +48,22 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.tax.engines import macrs_tables
+
 CENT = Decimal("1")
 ZERO = Decimal("0")
 ONE = Decimal("1")
 HUNDRED = Decimal("100")
 
 PUB946_TABLE_ROUNDING_NOTE = (
-    "Depreciation is computed under the Pub 946 ch. 4 'without using the tables' "
-    "method (declining balance with a switch to straight line). A single year may "
-    "differ from the Appendix A percentage tables by up to 0.01% of basis because "
-    "the published tables are rounded to two decimals and force the column to sum "
-    "to 100.00%; the lifetime total is identical."
+    "Personal property is computed under the Pub 946 ch. 4 'without using the "
+    "tables' method (declining balance with a switch to straight line); a single "
+    "year may differ from the Appendix A tables by up to 0.01% of basis because "
+    "those tables are rounded to two decimals and forced to sum to 100.00%, while "
+    "the lifetime total is identical. Mid-month REAL property does NOT use that "
+    "route — it reads the published Appendix A percentages directly, because the "
+    "IRS derived those rows from a rounded monthly increment that first-principles "
+    "computation does not reproduce."
 )
 
 
@@ -86,6 +93,27 @@ class Method(str, Enum):
     DB_200 = "200DB"        # §168(b)(1)
     DB_150 = "150DB"        # §168(b)(2)
     SL = "S/L"              # §168(b)(3), §168(g)(2)(A)
+
+
+class ListedPropertyType(str, Enum):
+    """What KIND of §280F listed property this is.
+
+    This is required on every listed asset because it decides whether the
+    §280F(a) passenger-automobile dollar caps apply. Getting it wrong (or
+    defaulting it) OVER-DEDUCTS a vehicle, so the engine refuses to infer it.
+    """
+
+    # §280F(d)(5): a four-wheeled vehicle made primarily for use on public
+    # streets with unloaded GVW <= 6,000 lbs. CAPPED by §280F(a).
+    PASSENGER_AUTO = "passenger_auto"
+    # A vehicle EXCEPTED from §280F(d)(5) — most commonly GVW > 6,000 lbs. Still
+    # listed property (business-use substantiation applies) but NOT subject to
+    # the §280F(a) dollar caps. Note §179(b)(5) separately caps heavy SUVs; that
+    # SUV limit is not implemented here.
+    HEAVY_VEHICLE = "heavy_vehicle"
+    # Non-vehicle listed property (e.g. certain computers/peripherals in years
+    # they were listed, property used for entertainment). No §280F(a) caps.
+    OTHER_LISTED = "other_listed"
 
 
 # NOTE ON FORM ROWS
@@ -215,6 +243,9 @@ class AssetInput(BaseModel):
 
     # §280F listed property (autos, certain other vehicles/aircraft, …).
     is_listed_property: bool = False
+    # REQUIRED when ``is_listed_property`` — decides whether the §280F(a)
+    # passenger-auto dollar caps apply. Never defaulted (see the validator).
+    listed_property_type: ListedPropertyType | None = None
     # Qualified business/investment use percentage (0-100). Depreciable basis is
     # cost x this percentage (§280F(b) / Form 4562 Part V col (e)).
     business_use_pct: Decimal = HUNDRED
@@ -246,6 +277,20 @@ class AssetInput(BaseModel):
         if self.section_179_elected_cents < 0:
             raise ValueError(
                 f"asset {self.asset_id!r}: section_179_elected_cents must be >= 0"
+            )
+        if self.is_listed_property and self.listed_property_type is None:
+            raise ValueError(
+                f"asset {self.asset_id!r} is listed property but has no "
+                "listed_property_type. It must be one of "
+                f"{[t.value for t in ListedPropertyType]} — the §280F(a) dollar "
+                "caps apply to a passenger automobile and not to a heavy "
+                "vehicle, and defaulting the wrong way OVER-DEDUCTS. The engine "
+                "will not infer it."
+            )
+        if self.listed_property_type is not None and not self.is_listed_property:
+            raise ValueError(
+                f"asset {self.asset_id!r}: listed_property_type is set but "
+                "is_listed_property is False — that is contradictory."
             )
         return self
 
@@ -325,8 +370,14 @@ class AssetResult(BaseModel):
     current_year_macrs_cents: int
     # §179 + bonus + MACRS for this tax year.
     current_year_total_cents: int
+    # Amount the §280F(a) passenger-automobile cap disallowed this year. The
+    # basis is not lost — it is recoverable after the recovery period — but this
+    # engine does not extend the schedule that far, so a non-zero value here
+    # means a later-year deduction must be handled manually.
+    section_280f_disallowed_cents: int = 0
     is_first_year: bool
     is_listed_property: bool
+    listed_property_type: ListedPropertyType | None = None
     # Form 4562 row this asset reports on (e.g. "19b", "20a", "26").
     form_line: str
     schedule: list[AssetYear] = Field(default_factory=list)
@@ -490,6 +541,46 @@ def _first_year_service_fraction(
 # ---------------------------------------------------------------------------
 
 
+def _mid_month_table_schedule(
+    basis_cents: int,
+    recovery_period_years: Decimal,
+    placed_in_service: date,
+    *,
+    ads: bool = False,
+) -> list[int]:
+    """Schedule from the PUBLISHED Pub 946 Appendix A mid-month table.
+
+    Raises for a mid-month class with no table on file — the computed path is
+    NOT a valid substitute for real property (see ``macrs_tables``).
+    """
+    period = _period_key(recovery_period_years)
+    table = macrs_tables.table_for(period, ads=ads)
+    if table is None and not ads:
+        # A 27.5/39 asset explicitly flagged ADS still resolves through the ADS
+        # tables; otherwise try the ADS set before giving up.
+        table = macrs_tables.table_for(period, ads=True)
+    if table is None:
+        raise ValueError(
+            f"no published Pub 946 mid-month percentage table on file for a "
+            f"{period}-year real-property class. The IRS mid-month tables are "
+            "rounded in a way first-principles computation does not reproduce, "
+            "so this engine refuses to compute a substitute. Add the published "
+            "table (see app/tax/engines/macrs_tables.py) before using this class."
+        )
+    percentages = table[placed_in_service.month]
+
+    basis = Decimal(basis_cents)
+    out: list[int] = []
+    allocated = 0
+    for pct in percentages[:-1]:
+        amount = cents(basis * pct / HUNDRED)
+        out.append(amount)
+        allocated += amount
+    # Final year absorbs the residual so the schedule sums exactly to basis.
+    out.append(basis_cents - allocated)
+    return out
+
+
 def macrs_schedule(
     basis_cents: int,
     recovery_period_years: Decimal,
@@ -499,15 +590,31 @@ def macrs_schedule(
 ) -> list[int]:
     """Full-life MACRS deduction schedule, in cents, one entry per tax year.
 
-    Declining balance switching to straight line in the first year the SL amount
-    on the remaining basis over the remaining recovery period equals or exceeds
-    the DB amount (Pub 946 ch. 4). Reproduces IRS Pub 946 Appendix A.
+    TWO ROUTES, deliberately:
+
+    * **Mid-month real property** (27.5 / 39-year GDS, 30 / 40-year ADS) uses the
+      PUBLISHED Pub 946 Appendix A percentages. The IRS built those rows by
+      rounding the monthly increment and accumulating, so computing them from the
+      exact fraction yields a DIFFERENT (wrong) number — 2.4573% instead of the
+      published 2.461% for a January 39-year placement. See ``macrs_tables``.
+    * **Everything else** uses Pub 946 ch. 4's "without using the tables" method:
+      declining balance switching to straight line in the first year the SL
+      amount on the remaining basis over the remaining recovery period equals or
+      exceeds the DB amount. That reproduces Appendix A for personal property.
+
+    A mid-month class with NO published table on file RAISES rather than falling
+    back to the computed path, which would silently produce the wrong figure.
 
     The last entry absorbs any residual so the schedule sums EXACTLY to
     ``basis_cents`` (no basis is created or lost to rounding).
     """
     if basis_cents <= 0:
         return []
+
+    if convention is Convention.MID_MONTH:
+        return _mid_month_table_schedule(
+            basis_cents, recovery_period_years, placed_in_service
+        )
 
     n = Decimal(recovery_period_years)
     f1 = _first_year_service_fraction(convention, placed_in_service)
@@ -621,6 +728,7 @@ def compute_depreciation(
     config: DepreciationConfig,
     *,
     config_for_year: "ConfigResolver | None" = None,
+    auto_cap_for: "AutoCapResolver | None" = None,
 ) -> DepreciationResult:
     """Compute one tax year's depreciation + the Form 4562 line values.
 
@@ -630,6 +738,11 @@ def compute_depreciation(
     asset keeps its 2023 bonus rate on a 2026 return). When omitted, only assets
     placed in service in the current tax year can have bonus computed; a
     prior-year asset must then supply ``prior_bonus_cents``.
+
+    ``auto_cap_for(placed_in_service_year, year_index, bonus_claimed) -> cents``
+    supplies the §280F(a) passenger-automobile cap. It is REQUIRED whenever any
+    asset is a ``PASSENGER_AUTO``; without it the engine raises rather than
+    computing an uncapped (over-stated) vehicle deduction.
 
     Raises ValueError on an unsupported configuration rather than guessing.
     """
@@ -877,9 +990,50 @@ def compute_depreciation(
             (s.deduction_cents for s in schedule if s.year == inputs.tax_year), 0
         )
 
-        current_total = current_macrs + (
-            cents(s179) + cents(bonus) if first_year else 0
-        )
+        s179_c = cents(s179) if first_year else 0
+        bonus_c = cents(bonus) if first_year else 0
+        current_total = current_macrs + s179_c + bonus_c
+
+        # §280F(a): a passenger automobile's TOTAL deduction for the year
+        # (§179 + special allowance + MACRS) is capped, and the cap is itself
+        # reduced to the business-use percentage (§280F(a)(2)). Components are
+        # reduced MACRS-first so the taxpayer's explicit §179/§168(k) elections
+        # survive on their own form lines wherever possible.
+        capped_c = 0
+        if asset.listed_property_type is ListedPropertyType.PASSENGER_AUTO:
+            if auto_cap_for is None:
+                raise ValueError(
+                    f"asset {asset.asset_id!r} is a §280F(d)(5) passenger "
+                    "automobile but no §280F(a) cap resolver was supplied. "
+                    "Refusing to compute an uncapped vehicle deduction."
+                )
+            year_index = inputs.tax_year - asset.placed_in_service.year
+            raw_cap = auto_cap_for(
+                asset.placed_in_service.year, year_index, bonus_claimed=bonus_c > 0
+            )
+            cap = cents(Decimal(raw_cap) * business_use / HUNDRED)
+            if current_total > cap:
+                capped_c = current_total - cap
+                reduce = capped_c
+                take = min(reduce, current_macrs)
+                current_macrs -= take
+                reduce -= take
+                take = min(reduce, bonus_c)
+                bonus_c -= take
+                reduce -= take
+                s179_c -= min(reduce, s179_c)
+                current_total = cap
+                assumptions.append(
+                    f"asset {asset.asset_id}: §280F(a) passenger-automobile cap "
+                    f"limited the deduction to {cap} cents "
+                    f"({raw_cap} cents x {business_use}% business use); "
+                    f"{capped_c} cents was disallowed this year. Basis "
+                    "disallowed by the cap is recoverable AFTER the recovery "
+                    "period (Pub 946 ch. 5) — this engine does NOT extend the "
+                    "schedule past the recovery period, so that later deduction "
+                    "must be taken manually."
+                )
+
         asset_results.append(
             AssetResult(
                 asset_id=asset.asset_id,
@@ -894,13 +1048,15 @@ def compute_depreciation(
                 cost_cents=asset.cost_cents,
                 business_use_pct=business_use,
                 business_basis_cents=cents(business_basis),
-                section_179_cents=cents(s179) if first_year else 0,
-                bonus_cents=cents(bonus) if first_year else 0,
+                section_179_cents=s179_c,
+                bonus_cents=bonus_c,
                 macrs_basis_cents=cents(macrs_basis),
                 current_year_macrs_cents=current_macrs,
                 current_year_total_cents=current_total,
+                section_280f_disallowed_cents=capped_c,
                 is_first_year=first_year,
                 is_listed_property=asset.is_listed_property,
+                listed_property_type=asset.listed_property_type,
                 form_line=_form_line_for(asset, first_year, method, convention),
                 schedule=schedule,
             )
@@ -1122,8 +1278,9 @@ def _build_form_lines(
     )
 
 
-# Type alias for the optional prior-year config resolver.
+# Type aliases for the optional resolvers injected by configs_depreciation.
 ConfigResolver = "callable[[int], DepreciationConfig]"
+AutoCapResolver = "callable[[int, int, bool], int]"
 
 DepreciationInputs.model_rebuild()
 
@@ -1141,6 +1298,7 @@ __all__ = [
     "DepreciationSystem",
     "Form4562Lines",
     "ListedPropertyRow",
+    "ListedPropertyType",
     "MacrsClassRow",
     "Method",
     "PUB946_TABLE_ROUNDING_NOTE",
