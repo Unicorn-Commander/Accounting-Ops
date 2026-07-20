@@ -96,7 +96,13 @@ def _serve_jwks(monkeypatch):
 
     Both _fetch_jwks and the force-refresh variant are patched so the
     key-rotation fallback never reaches the network either.
+
+    KEYCLOAK_REALM_URL is pinned to ISSUER rather than inherited from the
+    shipped Settings default: that default is deployment-specific and differs
+    per edition (Community ships a neutral placeholder), so a test that relies
+    on it breaks the moment the default is genericized.
     """
+    monkeypatch.setenv("KEYCLOAK_REALM_URL", ISSUER)
     get_settings.cache_clear()
 
     async def _fake_jwks():

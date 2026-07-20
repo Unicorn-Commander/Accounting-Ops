@@ -86,6 +86,9 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     # ----- Reports (entity or consolidated) --------------------------------
     "get_p_and_l":                   {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
     "get_runway":                    {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
+    # Scans up to 120 months of posted journal + cadence-clusters it, so it is
+    # slower than a plain report read. READ-ONLY (nothing written or cancelled).
+    "detect_subscriptions":          {"min_role": "viewer",     "read_only": True,  "latency_ms": 900},
     # Consolidated cross-entity views require unrestricted entity_scope ⇒ admin.
     "get_consolidated_p_and_l":      {"min_role": "admin",      "read_only": True,  "latency_ms": 600},
     "get_balance_sheet":             {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},

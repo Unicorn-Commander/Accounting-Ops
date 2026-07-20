@@ -35,6 +35,7 @@ from tests.smoke.test_brigade_jwt import (
 # Keycloak test material: re-use the existing test_jwt_audience helpers.
 from tests.smoke.test_jwt_audience import (
     APP_AUD,
+    ISSUER as KC_ISSUER,
     _PRIVATE_PEM as KC_PRIV_PEM,
     _PUBLIC_JWK as KC_PUB_JWK,
     _base_claims as kc_base_claims,
@@ -44,7 +45,13 @@ from tests.smoke.test_jwt_audience import (
 
 @pytest.fixture(autouse=True)
 def _serve_both_jwks(monkeypatch):
-    """Serve BOTH the Keycloak JWKS and the Brigade JWKS, depending on caller."""
+    """Serve BOTH the Keycloak JWKS and the Brigade JWKS, depending on caller.
+
+    KEYCLOAK_REALM_URL is pinned to the issuer these tokens are minted with;
+    the shipped Settings default is deployment/edition-specific and must not
+    be what the Keycloak leg of this chain validates against.
+    """
+    monkeypatch.setenv("KEYCLOAK_REALM_URL", KC_ISSUER)
     get_settings.cache_clear()
     bj._reset_cache_for_tests()
 
