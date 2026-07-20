@@ -1,7 +1,7 @@
 """Stripe payout ↔ SimpleFIN BoA deposit reconciliation.
 
 Stripe's payout cycle settles a batched dollar amount to the merchant's bank
-account. SimpleFIN reports the same dollar amount arriving on Aaron's BoA
+account. SimpleFIN reports the same dollar amount arriving on the operator's bank
 business checking ~1-2 business days later. Auto-match them so:
 
   * the Stripe payout settlement journal entry has its corresponding bank-side

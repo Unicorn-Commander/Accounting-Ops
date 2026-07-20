@@ -12,7 +12,7 @@ alembic run — schema DDL is a one-time `alembic -x tenant=books upgrade head`.
 Usage:
     python -m scripts.provision_workspace <workspace_uuid|new> "Display Name" \\
         [--slug auto] [--hipaa] [--tier shared|premium|enterprise] \\
-        [--entity "Magic Unicorn Inc:c_corp" --entity "Aaron Personal:personal"]
+        [--entity "Acme Inc:c_corp" --entity "Jane Personal:personal"]
 """
 from __future__ import annotations
 
@@ -304,7 +304,7 @@ async def _cli_main() -> None:
         "--entity",
         action="append",
         default=[],
-        help="Entity to create: 'Display Name:kind' (e.g. 'Magic Unicorn Inc:c_corp'). Repeatable.",
+        help="Entity to create: 'Display Name:kind' (e.g. 'Acme Inc:c_corp'). Repeatable.",
     )
     args = parser.parse_args()
 

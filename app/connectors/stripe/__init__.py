@@ -24,19 +24,15 @@ End-to-end flow:
          application_fee / other → CPA review queue
 
 WHY NO STRIPE CONNECT:
-  Aaron OWNS the Stripe account directly under MU Inc EIN (00-0000000). He's
-  not a platform with sub-merchants — he's the merchant. So a restricted API
-  key with READ access to charges/refunds/payouts/balance_transactions/account
-  is sufficient. No OAuth, no Connect, no platform fee. Restricted keys can
-  be revoked from the Stripe dashboard if compromised.
+  The operator owns the Stripe account directly under their own business
+  entity. They're not a platform with sub-merchants — they're the merchant.
+  So a restricted API key with READ access to
+  charges/refunds/payouts/balance_transactions/account is sufficient. No OAuth,
+  no Connect, no platform fee. Restricted keys can be revoked from the Stripe
+  dashboard if compromised.
 
-Webhook URL (Aaron registers in Stripe dashboard):
-  https://accounting-ops.magicunicorn.dev/api/connectors/stripe/webhook
-
-  (Note: the hyphenated form is the only one with DNS today. eBay's RuName
-  was historically registered to accounting.magicunicorn.dev — non-hyphenated
-  — and would need Aaron to either add DNS for it or re-register. For Stripe
-  there's no prior registration, so use the resolving form.)
+Webhook URL (the operator registers this in the Stripe dashboard):
+  https://<your-host>/api/connectors/stripe/webhook
 """
 
 from app.connectors.stripe.client import (

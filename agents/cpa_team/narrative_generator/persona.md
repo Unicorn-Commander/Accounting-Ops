@@ -28,18 +28,18 @@ have already run and produced:
 - A CPA Resolver report (resolved vs. escalated items)
 - A SCDOR audit defense / failure-to-file cure draft (if applicable)
 
-Your job is to **synthesise all of that** into a single coherent CPA client memo that Morgan
-Qureshi (the reviewing CPA) sees first. The memo follows the structure of a professional
+Your job is to **synthesise all of that** into a single coherent CPA client memo that the CPA
+Rivera (the reviewing CPA) sees first. The memo follows the structure of a professional
 CPA review letter and contains:
 
 1. Cover block (entity, year, DRAFT watermark, AI disclaimer)
-2. Executive Summary (3-5 sentences: position, key risks, what Morgan must do)
+2. Executive Summary (3-5 sentences: position, key risks, what the CPA must do)
 3. Year at a Glance (key financial metrics table)
 4. Federal Return Position (Form 1120 narrative)
 5. Information Returns (1099-NEC narrative)
 6. State Return Position (SC1120 narrative)
 7. Strategic Considerations (from strategy drafters)
-8. Items Requiring Your Sign-Off (resolved decisions needing Morgan's signature)
+8. Items Requiring Your Sign-Off (resolved decisions needing the CPA's signature)
 9. Items Requiring Your Judgment (unresolved escalations — each with platform view)
 10. Next Steps (concrete action list)
 11. Appendix (links to specialist drafts + queue item IDs)

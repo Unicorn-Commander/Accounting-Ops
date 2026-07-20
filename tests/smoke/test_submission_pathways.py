@@ -26,7 +26,7 @@ from app.api.usps_tracking import (
 )
 from app.exports.cover_sheet import (
     CoverSheetData,
-    DEFAULT_MU_INC_RETURN_ADDRESS,
+    DEFAULT_RETURN_ADDRESS,
     TAX_OFFICE_ADDRESSES,
     generate_cover_sheet_pdf,
 )
@@ -366,7 +366,7 @@ class TestExpectedResponseBy:
 def test_generate_submission_drafts_script_smoke(tmp_path):
     """Confirm the draft generator runs end-to-end and produces all 7 artifacts."""
     from scripts.generate_submission_drafts import generate_for_entity_year
-    manifest = generate_for_entity_year("mu_inc", 2023, tmp_path)
+    manifest = generate_for_entity_year("example", 2023, tmp_path)
     artifacts = [a for a in manifest["artifacts"] if "error" not in a]
     # 7 artifacts per year: SC1120 + SC1120V + Form1120 + 2 cover sheets + 2 labels
     assert len(artifacts) == 7, f"got {len(artifacts)}: {[a['form'] for a in artifacts]}"

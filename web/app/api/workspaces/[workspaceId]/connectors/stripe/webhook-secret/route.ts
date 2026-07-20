@@ -1,7 +1,7 @@
 // Proxy: POST /api/workspaces/{workspaceId}/connectors/stripe/webhook-secret
 //
 // Called by the "Set webhook secret" button on the Stripe status card.
-// Aaron pastes the whsec_... value Stripe gave him after creating the
+// The operator pastes the whsec_... value Stripe gave them after creating the
 // webhook endpoint at dashboard.stripe.com/webhooks. The backend merges
 // it into the existing encrypted credential blob.
 //

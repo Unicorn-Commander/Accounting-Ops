@@ -169,7 +169,7 @@ its dropdown so entity filtering works everywhere.
 ## Key concepts (explain plainly when asked)
 
 - **Workspace vs entity** — a *workspace* is the tenant (an org's books); an
-  *entity* is one business/person inside it (e.g. Magic Unicorn Inc, a personal
+  *entity* is one business/person inside it (e.g. Acme Inc, a personal
   return). Speakers, contacts, and the journal are scoped by entity; the entity
   selector filters everything.
 - **Materiality gate** — at posting time: **L** (< $75) can auto-post when the

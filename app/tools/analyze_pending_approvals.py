@@ -5,7 +5,7 @@ each group with a confidence heuristic, writes one ``approval_recommendation``
 row per approval, and returns a cluster summary.
 
 This tool is READ + WRITE (writes recommendations) but NEVER calls the decide
-endpoint — it produces recommendations only.  Aaron retains the click.
+endpoint — it produces recommendations only.  The operator retains the click.
 
 Authorization floor: accountant (same as list_approvals).
 

@@ -2,7 +2,7 @@
 
 Before the fix, cash_position / transactions / account_mappings resolved the
 SimpleFIN access URL with a per-uc_uid env-var fallback that *also* fell back to
-a hard-coded SIMPLEFIN_ACCESS_URL_AARON. A workspace with no stored credential
+a hard-coded SIMPLEFIN_ACCESS_URL_OWNER. A workspace with no stored credential
 would therefore silently inherit whatever bank connection sat in the process
 environment — one customer's bank data leaking into another's workspace.
 
@@ -52,7 +52,7 @@ async def test_no_env_fallback_when_store_empty(module_name, monkeypatch):
     monkeypatch.setattr(mod, "SessionLocal", lambda: _FakeSession())
 
     # Plant exactly the env vars the old fallback would have read.
-    monkeypatch.setenv("SIMPLEFIN_ACCESS_URL_AARON", "https://leak:aaron@bridge/accounts")
+    monkeypatch.setenv("SIMPLEFIN_ACCESS_URL_OWNER", "https://leak:owner@bridge/accounts")
     monkeypatch.setenv("SIMPLEFIN_ACCESS_URL_TEST-SERVICE", "https://leak:ts@bridge/accounts")
     monkeypatch.setenv("SIMPLEFIN_ACCESS_URL_VICTIM", "https://leak:victim@bridge/accounts")
 

@@ -15,7 +15,13 @@ function isActive(pathname: string | null, href: string): boolean {
 // Phone-width bottom tab bar (4 destinations + More). Hidden at lg+ where the
 // sidebar takes over. Respects the iOS/Android safe-area inset and hides while
 // a text field is focused (the keyboard would otherwise float it mid-screen).
-export function BottomNav({ canAdmin = false }: { canAdmin?: boolean }) {
+export function BottomNav({
+  canAdmin = false,
+  isCommunity = false,
+}: {
+  canAdmin?: boolean;
+  isCommunity?: boolean;
+}) {
   const pathname = usePathname();
   const [moreOpen, setMoreOpen] = useState(false);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
@@ -108,7 +114,7 @@ export function BottomNav({ canAdmin = false }: { canAdmin?: boolean }) {
                 <X size={16} />
               </button>
             </div>
-            <SidebarMobileNav canAdmin={canAdmin} onNavigate={() => setMoreOpen(false)} />
+            <SidebarMobileNav canAdmin={canAdmin} isCommunity={isCommunity} onNavigate={() => setMoreOpen(false)} />
           </div>
         </div>
       )}

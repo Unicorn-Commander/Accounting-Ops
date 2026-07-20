@@ -106,14 +106,14 @@ def test_blob_round_trip_preserves_secret_fields():
     b = _blob(
         access_token="AT123",
         access_token_expires_at=12345,
-        ebay_user_handle="skybehind",
+        ebay_user_handle="examplereseller",
     )
     out = b.as_blob()
     assert out["refresh_token"] == "REFRESH"
     assert out["client_secret"] == "SECRET"
     assert out["access_token"] == "AT123"
     assert out["access_token_expires_at"] == 12345
-    assert out["ebay_user_handle"] == "skybehind"
+    assert out["ebay_user_handle"] == "examplereseller"
     assert out["environment"] == "production"
 
 

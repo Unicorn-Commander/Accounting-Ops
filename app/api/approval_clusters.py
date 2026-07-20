@@ -376,7 +376,7 @@ async def list_approval_clusters(
         key=lambda c: (conf_order.get(c["confidence"], 9), -c["count"])
     )
 
-    # Sort singletons: oldest first (Aaron clears them chronologically).
+    # Sort singletons: oldest first (the operator clears them chronologically).
     singletons_out.sort(key=lambda s: s.get("date") or s.get("approval_created_at") or "")
 
     # Cap singletons at SINGLETON_LIMIT — paginate later if we ever hit it.

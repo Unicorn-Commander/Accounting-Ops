@@ -71,17 +71,17 @@ async def test_brigade_jwt_passes_via_authenticate_token():
     Keycloak verifier fails first (kid not in KC JWKS), the chain falls through
     to Brigade, Brigade succeeds, ctx is returned.
     """
-    token = _mint_ed25519(_ED_PRIV, _base_claims(sub="aaron-from-brigade"))
+    token = _mint_ed25519(_ED_PRIV, _base_claims(sub="jane-from-brigade"))
     ctx = await auth.authenticate_token(token)
-    assert ctx.uc_uid == "aaron-from-brigade"
+    assert ctx.uc_uid == "jane-from-brigade"
 
 
 async def test_brigade_jwt_with_uc_uid_claim_prefers_it():
     """When Brigade carries an explicit uc_uid claim, prefer it over sub."""
-    claims = _base_claims(sub="brigade-internal-id", uc_uid="aaron")
+    claims = _base_claims(sub="brigade-internal-id", uc_uid="jane")
     token = _mint_ed25519(_ED_PRIV, claims)
     ctx = await auth.authenticate_token(token)
-    assert ctx.uc_uid == "aaron"
+    assert ctx.uc_uid == "jane"
 
 
 async def test_brigade_jwt_extracts_scope_list():
@@ -147,7 +147,7 @@ async def test_brigade_jwt_malformed_scopes_returns_empty_tuple():
     token = _mint_ed25519(_ED_PRIV, claims)
     ctx = await auth.authenticate_token(token)
     assert ctx.scopes == (), f"Malformed scopes should degrade to (), got {ctx.scopes!r}"
-    assert ctx.uc_uid == "aaron"  # auth still succeeded
+    assert ctx.uc_uid == "jane"  # auth still succeeded
 
 
 async def test_brigade_jwt_extracts_act_claim():
@@ -162,7 +162,7 @@ async def test_keycloak_token_still_works():
     """The existing Keycloak path is unchanged — a uchub token still passes."""
     token = kc_mint(KC_PRIV_PEM, kc_base_claims(aud=APP_AUD))
     ctx = await auth.authenticate_token(token)
-    assert ctx.uc_uid == "aaron"
+    assert ctx.uc_uid == "jane"
 
 
 async def test_brigade_aud_mismatch_falls_through_to_401():
@@ -234,11 +234,11 @@ async def test_brigade_email_sub_resolves_to_canonical_uc_uid(monkeypatch):
     carry the CANONICAL uc_uid, never the raw email."""
 
     async def _fake_lookup(email: str):
-        assert email == "aaron@magicunicorn.tech"
+        assert email == "jane@example.com"
         return "kc-opaque-sub-123"
 
     monkeypatch.setattr(auth, "_uc_uid_for_email", _fake_lookup)
-    token = _mint_ed25519(_ED_PRIV, _base_claims(sub="aaron@magicunicorn.tech"))
+    token = _mint_ed25519(_ED_PRIV, _base_claims(sub="jane@example.com"))
     ctx = await auth.authenticate_token(token)
     assert ctx.uc_uid == "kc-opaque-sub-123"
 

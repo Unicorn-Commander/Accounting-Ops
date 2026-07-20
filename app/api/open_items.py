@@ -1,15 +1,15 @@
 """Open-items aggregator: one polished JSON payload for the
 /open-items dashboard.
 
-The web dashboard lives at /open-items and is the "what's on Aaron's
-plate" page. Rather than have the React layer pull from many endpoints
+The web dashboard lives at /open-items and is the "open items for the
+workspace" page. Rather than have the React layer pull from many endpoints
 and do the sorting/bucketing client-side, this endpoint does the work:
 
   Section 1 — Time-sensitive (red/orange)
-  Section 2 — Documents Aaron needs to provide (hard-coded checklist
+  Section 2 — Documents the workspace owner needs to provide (checklist
               augmented with completion state stored in tax_review_queue)
-  Section 3 — Decisions awaiting Aaron (with recommendation + accept/reject)
-  Section 4 — Items waiting on Mosin (CPA)
+  Section 3 — Decisions awaiting the owner (with recommendation + accept/reject)
+  Section 4 — Items waiting on the CPA
   Section 5 — Items waiting on attorney
   Section 6 — Resolved this week (rollup of recent wins)
 
@@ -24,17 +24,18 @@ Routing rules from form_reference + submitter_id + content topic:
   * submitter_id LIKE '%loader%' -> usually INFORMATIONAL (corrections,
     captured facts) — bucket as "context" unless prefixed CRITICAL.
   * submitter_id == 'tax-1120-preparer' or LIKE '*specialist%' ->
-    typically routed to Mosin (CPA-review territory).
+    typically routed to the CPA (CPA-review territory).
   * form_reference starts with 'CRITICAL: ' -> Section 1 (time-sensitive).
   * form_reference starts with 'Decision: ' or 'Strategy — ' (specific
-    enumerated strategies) -> Section 3 (Aaron decides).
-  * form_reference contains 'Attorney' or 'Fabrikam' or 'LLC formation' ->
+    enumerated strategies) -> Section 3 (the owner decides).
+  * form_reference contains 'Attorney' or 'LLC formation' ->
     Section 5.
-  * else -> Section 4 (waiting on Mosin).
+  * else -> Section 4 (waiting on the CPA).
 
-The hard list of "things Aaron has to physically go pull" lives in
-``_AARON_DOCUMENT_CHECKLIST`` below — bumping this list is the only
-edit needed to add a new doc-checklist item.
+The default list of "documents to physically go pull" lives in
+``_DEFAULT_DOCUMENT_CHECKLIST`` below. In the Community Edition this ships
+empty and is meant to be configured per-workspace; bumping this list is the
+only edit needed to add a static doc-checklist item.
 
 Read floor: viewer. Entity-scope enforced.
 """
@@ -60,211 +61,29 @@ router = APIRouter(tags=["open-items"])
 # Static catalogues
 # ---------------------------------------------------------------------------
 
-# Hard list of documents Aaron must physically pull from the source system.
-# Each item maps to a deep-link where the doc lives. "needed_for" is human-
-# readable downstream context. "tax_years" tags which years it unblocks.
+# Default list of documents the workspace owner must physically pull from the
+# source system. Each item maps to a deep-link where the doc lives; "needed_for"
+# is human-readable downstream context; "tax_years" tags which years it unblocks.
 #
 # Completion is tracked by writing a memo row to tax_review_queue with
 # form_reference = f"DOC_RECEIVED: {key}" — that way the same table holds
-# both state (received timestamp + reviewer) and audit trail. No new table
-# needed for the v1 dashboard.
-_AARON_DOCUMENT_CHECKLIST: list[dict[str, Any]] = [
-    {
-        "key": "scdor_notice_2025_06_16",
-        "name": "SCDOR Notice (2025-06-16)",
-        "description": (
-            "Original SCDOR notice (mailed June 2025) — needed to draft "
-            "the reasonable-cause cure letter and respond before the "
-            "administrative-dissolution clock runs out."
-        ),
-        "where_to_get": "Physical mail / SCDOR MyDORWAY login",
-        "where_to_get_url": "https://mydorway.dor.sc.gov/",
-        "needed_for": "SC1120 reasonable-cause letter (P-00014)",
-        "tax_years": [2022, 2023, 2024],
-        "priority": "time_sensitive",
-    },
-    {
-        "key": "dfas_1099r_2022",
-        "name": "DFAS 1099-R — TY 2022",
-        "description": "Military retirement income reporting",
-        "where_to_get": "myPay (DFAS)",
-        "where_to_get_url": "https://mypay.dfas.mil/",
-        "needed_for": "Form 1040 Line 5b — Aaron Personal TY 2022",
-        "tax_years": [2022],
-        "priority": "high",
-    },
-    {
-        "key": "dfas_1099r_2023",
-        "name": "DFAS 1099-R — TY 2023",
-        "description": "Military retirement income reporting",
-        "where_to_get": "myPay (DFAS)",
-        "where_to_get_url": "https://mypay.dfas.mil/",
-        "needed_for": "Form 1040 Line 5b — Aaron Personal TY 2023",
-        "tax_years": [2023],
-        "priority": "high",
-    },
-    {
-        "key": "dfas_1099r_2024",
-        "name": "DFAS 1099-R — TY 2024",
-        "description": "Military retirement income reporting",
-        "where_to_get": "myPay (DFAS)",
-        "where_to_get_url": "https://mypay.dfas.mil/",
-        "needed_for": "Form 1040 Line 5b — Aaron Personal TY 2024",
-        "tax_years": [2024],
-        "priority": "high",
-    },
-    {
-        "key": "va_award_letter",
-        "name": "VA Award Letter",
-        "description": (
-            "Current VA disability rating letter. Establishes combat-zone "
-            "and disability-compensation exclusion under §112."
-        ),
-        "where_to_get": "VA.gov — Letters & Documents",
-        "where_to_get_url": "https://www.va.gov/records/download-va-letters/",
-        "needed_for": "Form 1040 — combat-zone §112 exclusion + SC §12-37-220 property tax memo",
-        "tax_years": [2022, 2023, 2024, 2025],
-        "priority": "high",
-    },
-    {
-        "key": "filing_status_confirm",
-        "name": "Filing Status — MFJ confirmation",
-        "description": (
-            "Confirm filing status (Married Filing Jointly assumed) for "
-            "all open personal tax years. Affects bracketing and "
-            "deduction-floor math throughout."
-        ),
-        "where_to_get": "Self-attestation",
-        "where_to_get_url": None,
-        "needed_for": "Form 1040 — all open personal years",
-        "tax_years": [2022, 2023, 2024, 2025],
-        "priority": "high",
-    },
-    {
-        "key": "crdp_crsc_election",
-        "name": "CRDP vs CRSC election status",
-        "description": (
-            "Which election is currently active? CRDP (concurrent receipt "
-            "of retirement & disability pay) or CRSC (combat-related "
-            "special compensation). Affects 1099-R Box 5 treatment."
-        ),
-        "where_to_get": "myPay > Concurrent Receipt Election",
-        "where_to_get_url": "https://mypay.dfas.mil/",
-        "needed_for": "Form 1040 Line 5b interpretation + reasonable-cause memo",
-        "tax_years": [2022, 2023, 2024, 2025],
-        "priority": "medium",
-    },
-    {
-        "key": "paypal_credit_2024",
-        "name": "PayPal Credit statements — TY 2024",
-        "description": (
-            "Statement year-end balances + interest paid (Schedule A or "
-            "business interest if charged to MU Inc accounts)."
-        ),
-        "where_to_get": "PayPal > Activity > Statements",
-        "where_to_get_url": "https://www.paypal.com/myaccount/transactions/statements",
-        "needed_for": "MU Inc Form 1120 interest deduction (TY 2024)",
-        "tax_years": [2024],
-        "priority": "medium",
-    },
-    {
-        "key": "bank_statements_2022_opening",
-        "name": "Bank statements — TY 2022 opening balances",
-        "description": (
-            "First-of-year balances for every MU Inc bank account. "
-            "Needed to build Schedule L starting balance sheet."
-        ),
-        "where_to_get": "Mercury, Chase, etc. (each FI's online portal)",
-        "where_to_get_url": None,
-        "needed_for": "MU Inc Form 1120 Schedule L (TY 2022)",
-        "tax_years": [2022],
-        "priority": "medium",
-    },
-    {
-        "key": "skybehind_structure",
-        "name": "SkyBehind eBay — vendor vs partner clarification",
-        "description": (
-            "Need David's written confirmation: is SkyBehind a vendor "
-            "Aaron resells for (1099-NEC territory) or a JV partner "
-            "(K-1 / 1065 territory)? Drives whether the entire eBay "
-            "P&L moves to MU Inc or stays personal Schedule C."
-        ),
-        "where_to_get": "Email / text David (SkyBehind owner)",
-        "where_to_get_url": None,
-        "needed_for": "SkyBehind eBay structure + Schedule C / Form 1120 routing",
-        "tax_years": [2023, 2024, 2025],
-        "priority": "medium",
-    },
-    {
-        "key": "ebay_account_transfer",
-        "name": "Move SkyBehind eBay account to MU Inc EIN",
-        "description": (
-            "Once structure is decided: physically re-title the eBay "
-            "seller account from Aaron's SSN to MU Inc's EIN to clean "
-            "up 1099-K reporting going forward."
-        ),
-        "where_to_get": "eBay Seller Hub > Account Settings",
-        "where_to_get_url": "https://www.ebay.com/sh/ovw",
-        "needed_for": "Clean 1099-K issuance for TY 2026+",
-        "tax_years": [2026],
-        "priority": "low",
-    },
-]
+# both state (received timestamp + reviewer) and audit trail.
+#
+# COMMUNITY EDITION: this ships EMPTY so no operator's personal tax documents
+# are baked into the source. It is meant to be configured per-workspace (see the
+# TODO at the aggregator below). The endpoints remain fully functional with an
+# empty catalogue — they simply return no static document items.
+_DEFAULT_DOCUMENT_CHECKLIST: list[dict[str, Any]] = []
 
 
-# Decisions awaiting Aaron — these are the questions where the engine has
-# a recommendation but needs Aaron's go/no-go. Each row creates a
-# clickable card; "Accept recommendation" / "Different choice" persist as
-# memos to tax_review_queue.
-_AARON_DECISION_CHECKLIST: list[dict[str, Any]] = [
-    {
-        "key": "sec195_treatment",
-        "question": (
-            "§195 startup-cost treatment: deduct currently or elect to "
-            "amortize over 180 months?"
-        ),
-        "recommendation": "Deduct currently — no §195 election.",
-        "rationale": (
-            "MU Inc's pre-revenue spending was modest and you had taxable "
-            "income to absorb the deduction in the year incurred. The "
-            "180-month amortization election only helps if you're starting "
-            "with a loss carryforward you can't use. Skip the election; "
-            "treat as ordinary §162 expense."
-        ),
-        "tax_years": [2022, 2023, 2024],
-        "form_reference_tag": "Decision: §195 startup costs",
-    },
-    {
-        "key": "sec41_credit_skip",
-        "question": (
-            "§41 R&D credit — claim for TY 2022-2024 or skip?"
-        ),
-        "recommendation": "Skip for TY 2022-2024; revisit for TY 2025+.",
-        "rationale": (
-            "The §41 four-part test documentation burden (process of "
-            "experimentation, technological uncertainty, etc.) outweighs "
-            "the credit value at MU Inc's spending level pre-product. "
-            "Once you have a customer-facing productized line in TY 2025+, "
-            "the credit becomes worth the contemporaneous documentation "
-            "discipline."
-        ),
-        "tax_years": [2022, 2023, 2024],
-        "form_reference_tag": "Decision: §41 R&D credit",
-    },
-    {
-        "key": "filing_status_mfj",
-        "question": "Confirm filing status — Married Filing Jointly?",
-        "recommendation": "Married Filing Jointly (MFJ).",
-        "rationale": (
-            "MFJ is almost always more favorable for a household with one "
-            "active W-2/self-employed earner plus one SSDI-only spouse. "
-            "Confirm so we can lock the bracket assumptions across all "
-            "open personal years."
-        ),
-        "tax_years": [2022, 2023, 2024, 2025],
-        "form_reference_tag": "Decision: Filing Status",
-    },
-]
+# Default decisions awaiting the owner — questions where the engine has a
+# recommendation but needs the owner's go/no-go. Each row creates a clickable
+# card; "Accept recommendation" / "Different choice" persist as memos to
+# tax_review_queue.
+#
+# COMMUNITY EDITION: this ships EMPTY (see note above) so no operator's personal
+# tax decisions ship in the source. Meant to be workspace-configured.
+_DEFAULT_DECISION_CHECKLIST: list[dict[str, Any]] = []
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +94,7 @@ _AARON_DECISION_CHECKLIST: list[dict[str, Any]] = [
 def _bucket_for_item(row: dict[str, Any]) -> str:
     """Map a tax_review_queue row to one of:
 
-      "time_sensitive" | "decision" | "mosin" | "attorney" | "info"
+      "time_sensitive" | "decision" | "cpa" | "attorney" | "info"
 
     Implements the rules documented at the top of this module.
     """
@@ -292,7 +111,7 @@ def _bucket_for_item(row: dict[str, Any]) -> str:
         return "decision"
 
     # 3. Attorney-territory keywords
-    attorney_keywords = ("attorney", "fabrikam", "llc formation", "registered agent")
+    attorney_keywords = ("attorney", "llc formation", "registered agent")
     fr_lower = form_ref.lower()
     if any(kw in fr_lower for kw in attorney_keywords):
         return "attorney"
@@ -301,18 +120,18 @@ def _bucket_for_item(row: dict[str, Any]) -> str:
     #    flagged_position (which always merit human-eye on the queue).
     if "loader" in submitter:
         if item_type == "flagged_position":
-            return "mosin"
+            return "cpa"
         return "info"
 
-    # 5. Specialist-sourced items typically need Mosin's review
+    # 5. Specialist-sourced items typically need the CPA's review
     if "specialist" in submitter or "preparer" in submitter or "drafter" in submitter:
-        return "mosin"
+        return "cpa"
 
     if "narrative-generator" in submitter or "resolver" in submitter:
-        return "mosin"
+        return "cpa"
 
     # 6. Default fallback
-    return "mosin"
+    return "cpa"
 
 
 def _summarize_content(content: Any) -> str:
@@ -347,7 +166,7 @@ class OpenItemsResponse(BaseModel):
     time_sensitive: list[dict[str, Any]]
     documents: list[dict[str, Any]]
     decisions: list[dict[str, Any]]
-    waiting_on_mosin: list[dict[str, Any]]
+    waiting_on_cpa: list[dict[str, Any]]
     waiting_on_attorney: list[dict[str, Any]]
     resolved_this_week: list[dict[str, Any]]
     # Tax submissions in flight (paper/MyDORWAY/efile records from
@@ -355,7 +174,7 @@ class OpenItemsResponse(BaseModel):
     submissions_in_flight: list[dict[str, Any]] = []
     # eBay payouts that don't yet have a matching BoA deposit (sourced from
     # connector_state.state['reconciliation']['unmatched_payouts']). Surfaces
-    # on the dashboard so Aaron sees the gap.
+    # on the dashboard so the owner sees the gap.
     ebay_unmatched_payouts: list[dict[str, Any]] = []
 
 
@@ -594,7 +413,7 @@ async def get_open_items(
     sections: dict[str, list[dict[str, Any]]] = {
         "time_sensitive": [],
         "decision": [],
-        "mosin": [],
+        "cpa": [],
         "attorney": [],
         "info": [],
     }
@@ -627,17 +446,12 @@ async def get_open_items(
     }
     documents_out: list[dict[str, Any]] = []
     received_count = 0
-    # _AARON_DOCUMENT_CHECKLIST / _AARON_DECISION_CHECKLIST are Aaron's personal
-    # items (DFAS/VA/military/§195 etc.) hardcoded here and not yet modeled
-    # per-workspace. Until they are, surface them ONLY in Aaron's own workspace —
-    # every other tenant (e.g. Shafen) must not see his PII or be asked for his
-    # documents. TODO: replace with per-workspace document_request data and drop
-    # these module constants entirely.
-    # Gate by the IMMUTABLE workspace UUID (Aaron's = DEFAULT_WORKSPACE_ID), not a
-    # slug: a slug can be renamed, and silently emptying Aaron's own "what's on my
-    # plate" dashboard would be a worse regression than the leak we're closing.
-    _own_checklist = str(workspace.workspace_id) == "77753ea5-efe9-5539-a846-6b20ddc841b9"
-    for doc in (_AARON_DOCUMENT_CHECKLIST if _own_checklist else []):
+    # _DEFAULT_DOCUMENT_CHECKLIST / _DEFAULT_DECISION_CHECKLIST are static
+    # catalogues shared by every workspace. In the Community Edition they ship
+    # EMPTY so no operator's personal tax items are baked into the source.
+    # TODO: replace with per-workspace document_request data so each tenant can
+    # configure its own checklist without editing module constants.
+    for doc in _DEFAULT_DOCUMENT_CHECKLIST:
         # Tax-year filter: hide a doc only if it doesn't intersect the
         # requested year. Show all years if no filter.
         if tax_year is not None and tax_year not in doc.get("tax_years", []):
@@ -673,7 +487,7 @@ async def get_open_items(
     }
     decisions_out: list[dict[str, Any]] = []
     decisions_decided = 0
-    for dec in (_AARON_DECISION_CHECKLIST if _own_checklist else []):
+    for dec in _DEFAULT_DECISION_CHECKLIST:
         if tax_year is not None and tax_year not in dec.get("tax_years", []):
             continue
         d = dict(dec)
@@ -758,7 +572,7 @@ async def get_open_items(
         "documents_received": received_count,
         "decisions_pending": len(decisions_out) - decisions_decided,
         "decisions_decided": decisions_decided,
-        "waiting_on_mosin": len(sections["mosin"]),
+        "waiting_on_cpa": len(sections["cpa"]),
         "waiting_on_attorney": len(sections["attorney"]),
         "informational": len(sections["info"]),
         "resolved_this_week": len(resolved_out),
@@ -766,9 +580,9 @@ async def get_open_items(
         "submissions_awaiting_followup": awaiting_followup_count,
         "ebay_unmatched_payouts": len(ebay_unmatched_payouts),
         # The headline number that drives the dashboard widget — only items
-        # that require AARON to act, not things waiting on someone else.
-        # Submissions awaiting follow-up count as action-required (Aaron must
-        # call the taxing authority).
+        # that require the owner to act, not things waiting on someone else.
+        # Submissions awaiting follow-up count as action-required (the owner
+        # must call the taxing authority).
         "action_required": (
             len(sections["time_sensitive"])
             + (len(documents_out) - received_count)
@@ -785,7 +599,7 @@ async def get_open_items(
         time_sensitive=sections["time_sensitive"],
         documents=documents_out,
         decisions=decisions_out,
-        waiting_on_mosin=sections["mosin"],
+        waiting_on_cpa=sections["cpa"],
         waiting_on_attorney=sections["attorney"],
         resolved_this_week=resolved_out,
         submissions_in_flight=submissions_out,
@@ -817,8 +631,8 @@ async def mark_document_received(
     that backs the rest of the queue covers this state too. Toggling off
     deletes the marker rows.
 
-    Role floor: accountant — Aaron is owner; CPA accountant is also OK
-    so the CPA can confirm receipt if the document was forwarded directly.
+    Role floor: accountant — the workspace owner passes; a CPA accountant is
+    also OK so the CPA can confirm receipt if the document was forwarded directly.
     """
     require_role(workspace, "accountant")
     key = (body.key or "").strip()
@@ -828,15 +642,14 @@ async def mark_document_received(
     # Use the first entity_id in scope as a placeholder — the marker row
     # isn't entity-specific, but the table requires entity_id NOT NULL.
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
-        # Pick any entity we can see (preferring MU Inc by slug).
+        # Pick any entity we can see (first alphabetically by display name).
         ent_row = (
             await session.execute(
                 text(
                     """
                     SELECT id::text
                     FROM entity
-                    ORDER BY CASE WHEN slug = 'magic-unicorn-inc' THEN 0 ELSE 1 END,
-                             display_name
+                    ORDER BY display_name
                     LIMIT 1
                     """
                 )
@@ -902,7 +715,7 @@ async def record_decision(
     body: DecisionBody,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
-    """Persist Aaron's verdict on a decision item.
+    """Persist the owner's verdict on a decision item.
 
     Writes a memo row with form_reference='DECISION_RESOLVED: <key>|<verdict>'
     so the same audit table covers it. The CPA can override later by
@@ -925,8 +738,7 @@ async def record_decision(
                     """
                     SELECT id::text
                     FROM entity
-                    ORDER BY CASE WHEN slug = 'magic-unicorn-inc' THEN 0 ELSE 1 END,
-                             display_name
+                    ORDER BY display_name
                     LIMIT 1
                     """
                 )

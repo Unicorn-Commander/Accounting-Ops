@@ -126,8 +126,8 @@ def upgrade() -> None:
     # The cast is split_part(debit_account, '·', 1)::int. canonical_form is
     # always "{4-digit-number}·{name}" (see migrations/tenant/0003_journal_v2
     # docstring + chart_of_account.account_number CHECK), so the cast is
-    # guaranteed valid for every row. We've also verified live MU Inc data
-    # (585 entries) is fully clean (0 NULL / 0 non-numeric prefixes).
+    # guaranteed valid for every row. We've also verified live production data
+    # is fully clean (0 NULL / 0 non-numeric prefixes).
     #
     # NULL handling: if debit_account is NULL (allowed by the column today),
     # split_part returns '' and '::int' would fail. We wrap in NULLIF + cast

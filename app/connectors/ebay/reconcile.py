@@ -1,7 +1,7 @@
 """eBay payout ↔ SimpleFIN BoA deposit reconciliation.
 
 The eBay /payout endpoint reports each settlement as a single dollar amount on
-a payout date. SimpleFIN reports the same dollar amount arriving on Aaron's
+a payout date. SimpleFIN reports the same dollar amount arriving on the operator's
 BoA business checking ~1-2 business days later. Auto-match them so:
 
   * the eBay payout settlement journal entry has its corresponding bank-side

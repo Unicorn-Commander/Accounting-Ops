@@ -99,7 +99,7 @@ export function SiteHeaderClient({
                   Sign in
                 </Link>
                 <a
-                  href="mailto:aaron@magicunicorn.tech?subject=Accounting-Ops dev preview"
+                  href="mailto:support@example.com?subject=Accounting-Ops dev preview"
                   className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
                 >
                   Request access

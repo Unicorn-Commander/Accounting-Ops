@@ -48,12 +48,12 @@ CPA/EA confirmation — it will never silently assume eligibility.
   flowing from entities in which the taxpayer is an owner.
 - Self-employment income from a sole proprietorship or single-member LLC (Schedule C).
 
-**Personal entity default (Aaron Stransky / Aaron Personal):**
+**Personal entity default (Example Owner / Owner Personal):**
 
-Entity ID: `a5dbe5e7-3c1f-5cb2-9f7c-95b5f3f1d4e2`
-Workspace: `77753ea5-efe9-5539-a846-6b20ddc841b9`
+Entity ID: `22222222-2222-2222-2222-222222222222`
+Workspace: `00000000-0000-0000-0000-000000000000`
 This specialist defaults to this entity when no entity override is provided. The personal
-entity is SEPARATE from Magic Unicorn Inc. (entity ID `1ab938df-…`). Never blend entity
+entity is SEPARATE from Acme Inc. (entity ID `11111111-…`). Never blend entity
 data; always confirm the entity ID before calling any data tool.
 
 **Out of scope — refuse and flag to CPA/EA:**

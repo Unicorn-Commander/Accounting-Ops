@@ -58,7 +58,7 @@ CATEGORY_TO_ACCOUNT: dict[str, str] = {
     "Travel · Transport": "6510",
     "Meals": "6520",
     "Office · Supplies": "6400",
-    # --- Catch-up reconciliation (MU Inc, 2026-06-14): equity, COGS, contractor,
+    # --- Catch-up reconciliation (example entity): equity, COGS, contractor,
     #     services revenue, related-party loan. All target accounts already exist
     #     in the COA; these keys just wire them into the posting map (the missing
     #     keys are why these categories blocked with category_not_in_CATEGORY_TO_ACCOUNT).

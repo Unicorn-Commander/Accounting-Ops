@@ -1,6 +1,6 @@
 """Tax filing submission tracker.
 
-Records every paper, MyDORWAY, or e-file submission Aaron sends to a taxing
+Records every paper, MyDORWAY, or e-file submission the operator sends to a taxing
 authority. The platform does NOT submit anything programmatically — every row
 is created by an explicit user action via these endpoints.
 

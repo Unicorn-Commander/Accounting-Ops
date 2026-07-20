@@ -176,7 +176,7 @@ def _txn(
 _ACCOUNTS = {
     "1010": "1010·Cash · Primary Checking",
     "1220": "1220·eBay Payouts Receivable",
-    "4150": "4150·eBay / SkyBehind Resale Revenue",
+    "4150": "4150·eBay Resale Revenue",
     "5520": "5520·Payment Processor Fees",
 }
 
@@ -190,7 +190,7 @@ async def test_sale_routes_to_revenue_after_first_run_guard():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     txn = _txn("TXN-SALE-1", "SALE", "9.99")
     result = await ebay_mapper.map_and_post_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="jane",
     )
     assert result.outcome == "posted", result.reason
     # Verify the posted entry has the right debit/credit
@@ -210,7 +210,7 @@ async def test_refund_reverses_sale_routing():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     txn = _txn("TXN-REF-1", "REFUND", "9.99")
     result = await ebay_mapper.map_and_post_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="jane",
     )
     assert result.outcome == "posted"
     entry = session.posted_entries[0]
@@ -223,7 +223,7 @@ async def test_fee_routes_to_processor_fees():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     txn = _txn("TXN-FEE-1", "FEE", "1.25")
     result = await ebay_mapper.map_and_post_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="jane",
     )
     assert result.outcome == "posted"
     entry = session.posted_entries[0]
@@ -245,7 +245,7 @@ async def test_payout_routes_to_cash_default_account():
     assert txn["transactionType"] == "PAYOUT"
     assert txn["transactionId"] == "PAY-12345678"
     result = await ebay_mapper.map_and_post_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="jane",
     )
     assert result.outcome == "posted", result.reason
     entry = session.posted_entries[0]
@@ -258,7 +258,7 @@ async def test_unknown_type_blocked():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     txn = _txn("TXN-X-1", "TRANSFER", "5.00")
     result = await ebay_mapper.map_and_post_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="jane",
     )
     assert result.outcome == "blocked_unknown_type"
     assert not session.posted_entries
@@ -270,7 +270,7 @@ async def test_missing_coa_blocked():
     session = _StubSession(accounts={}, existing_posts=31)
     txn = _txn("TXN-NOCOA", "SALE", "9.99")
     result = await ebay_mapper.map_and_post_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="jane",
     )
     assert result.outcome == "blocked_unknown_account"
     assert not session.posted_entries
@@ -281,7 +281,7 @@ async def test_zero_amount_skipped():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
     txn = _txn("TXN-ZERO", "SALE", "0.00")
     result = await ebay_mapper.map_and_post_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="jane",
     )
     assert result.outcome == "skipped_zero_amount"
 
@@ -292,7 +292,7 @@ async def test_idempotent_hit_returns_blocked_idempotent():
     session.idempotent_hit = True
     txn = _txn("TXN-DUP-1", "SALE", "9.99")
     result = await ebay_mapper.map_and_post_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="jane",
     )
     assert result.outcome == "blocked_idempotent"
     assert result.journal_entry_id is not None
@@ -304,7 +304,7 @@ async def test_first_run_guard_queues_first_30():
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
     txn = _txn("TXN-FIRST-RUN", "SALE", "9.99")
     result = await ebay_mapper.map_and_post_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="jane",
     )
     assert result.outcome == "queued_first_run"
     assert result.approval_id is not None
@@ -326,7 +326,7 @@ async def test_first_run_exactly_at_threshold_posts():
     )
     txn = _txn("TXN-LIMIT", "SALE", "9.99")
     result = await ebay_mapper.map_and_post_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="jane",
     )
     assert result.outcome == "posted"
 
@@ -338,7 +338,7 @@ async def test_pii_not_in_payee_or_description():
     txn = _txn("TXN-PII", "SALE", "10.00")
     txn["buyer"] = {"username": "very_secret_buyer_42", "buyerId": "BUYER123"}
     result = await ebay_mapper.map_and_post_transaction(
-        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="aaron",
+        session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="jane",
     )
     assert result.outcome == "posted"
     entry = session.posted_entries[0]

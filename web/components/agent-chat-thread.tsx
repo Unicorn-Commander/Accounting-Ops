@@ -111,7 +111,7 @@ export function ChatComposer({
       </div>
       {showRuntimeNote && (
         <p className="mt-2 text-[10px] text-ink-tertiary">
-          Runtime: Tier 1 local Qwen on midboy1. Escalates to Claude Opus 4.7 on Tier 3.
+          Runtime: Tier 1 local model on your own inference host. Escalates to a frontier model on Tier 3.
         </p>
       )}
     </div>

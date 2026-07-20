@@ -21,7 +21,7 @@ import pytest
 SAMPLE_MD = """\
 # Form 1120 — 2023 Draft
 
-**Entity:** Magic Unicorn Inc.
+**Entity:** Acme Inc.
 **Tax Year:** 2023
 
 ## Revenue Summary
@@ -82,7 +82,7 @@ def test_pdf_magic_bytes():
 
     html = _build_html(
         body_md=SAMPLE_MD,
-        entity_name="Magic Unicorn Inc.",
+        entity_name="Acme Inc.",
         tax_year=2023,
         doc_title="Form 1120 — Federal Corporate Income Tax Return",
     )
@@ -114,7 +114,7 @@ def test_pdf_contains_expected_content():
 
     html = _build_html(
         body_md=SAMPLE_MD,
-        entity_name="Magic Unicorn Inc.",
+        entity_name="Acme Inc.",
         tax_year=2023,
         doc_title="Form 1120 — Federal Corporate Income Tax Return",
     )
@@ -125,7 +125,7 @@ def test_pdf_contains_expected_content():
 
     # Assertions on extracted or raw bytes.
     expected_fragments = [
-        "Magic Unicorn",
+        "Acme",
         "2023",
         "Revenue",
         "CPA REVIEW REQUIRED",  # watermark text

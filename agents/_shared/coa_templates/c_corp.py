@@ -1,6 +1,6 @@
 """C-Corporation chart-of-accounts template (Form 1120 filer).
 
-Modeled on the production Magic Unicorn LLC C-Corp catalog
+Modeled on the production Acme LLC C-Corp catalog
 (``agents/_shared/coa_catalogs/mu_inc_c_corp.md``) which has 76 accounts.
 This module exposes the generic 46-account system baseline + selected
 entity-helpful refinements (R&D split, meals §274 split, payment processor
@@ -106,7 +106,7 @@ ACCOUNTS: list[dict[str, Any]] = [
     {"number": "4040", "name": "Revenue · Royalties", "type": "revenue",
      "normal_balance": "credit",
      "tax_form_line": "Form 1120 Line 6"},
-    {"number": "4150", "name": "eBay / SkyBehind Resale Revenue", "type": "revenue",
+    {"number": "4150", "name": "eBay Resale Revenue", "type": "revenue",
      "normal_balance": "credit",
      "tax_form_line": "Form 1120 Line 1a",
      "notes": "Gross sales captured by the eBay Sell-Finances connector. Per-transaction SALE rows credit here; FEEs flow to 5520; net settles to 1220 then 1010 on payout."},

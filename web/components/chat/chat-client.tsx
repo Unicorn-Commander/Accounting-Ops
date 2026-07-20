@@ -16,6 +16,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AlertCircle, Bot, History, X } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { openCreditGate, parsePaymentRequired, type CreditGate } from "@/lib/credit-gate";
+import { CreditGateInline } from "@/components/credit-gate-inline";
 import { ChatSidebar } from "./sidebar";
 import { Composer } from "./composer";
 import { PersonaPicker } from "./persona-picker";
@@ -96,6 +98,8 @@ export function ChatClient({
 
   const [loadingSession, setLoadingSession] = useState(false);
   const [pendingError, setPendingError] = useState<string | null>(null);
+  // Set when creating a session returns HTTP 402 (paid call, no credits/BYOK).
+  const [pendingGate, setPendingGate] = useState<CreditGate | null>(null);
 
   const [draft, setDraft] = useState("");
   const [canvas, setCanvas] = useState<CanvasArtifact | null>(null);
@@ -117,6 +121,7 @@ export function ChatClient({
     async (sid: string) => {
       setLoadingSession(true);
       setPendingError(null);
+      setPendingGate(null);
       clearError();
       setMessages([]);
       setCanvas(null);
@@ -234,6 +239,7 @@ export function ChatClient({
   const send = useCallback(async () => {
     const text = draft.trim();
     if (!text) return;
+    setPendingGate(null);
 
     // 1. If no active session, create one bound to the staged persona + entity + year.
     let targetSessionId = activeSessionId;
@@ -252,6 +258,12 @@ export function ChatClient({
           }
         );
         if (!res.ok) {
+          const gate = await parsePaymentRequired(res);
+          if (gate) {
+            openCreditGate(gate);
+            setPendingGate(gate);
+            return;
+          }
           const detail = await res.text().catch(() => "");
           throw new Error(detail || `HTTP ${res.status}`);
         }
@@ -336,6 +348,7 @@ export function ChatClient({
     setActiveSessionId(null);
     setActiveSessionMeta(null);
     clearError();
+    setPendingGate(null);
     setMessages([]);
     setCanvas(null);
     setCanvasPinned(false);
@@ -423,6 +436,8 @@ export function ChatClient({
   }, [messages, stream.inflight]);
 
   const showCanvas = !!canvas;
+  // A credit gate from either the session-create POST or the messages-POST.
+  const activeGate = stream.creditGate ?? pendingGate;
 
   // -------------------------------------------------------------------------
   // Render
@@ -591,7 +606,7 @@ export function ChatClient({
               saveDisabled={false}
             />
           ))}
-          {pendingError && (
+          {pendingError && !pendingGate && (
             <div className="flex items-start gap-2 rounded-md border border-debit/40 bg-debit/[0.05] px-3 py-2 text-xs text-debit">
               <AlertCircle size={13} className="mt-0.5" />
               <p>{pendingError}</p>
@@ -604,12 +619,13 @@ export function ChatClient({
               </button>
             </div>
           )}
-          {stream.error && (
+          {stream.error && !stream.creditGate && (
             <div className="flex items-start gap-2 rounded-md border border-debit/40 bg-debit/[0.05] px-3 py-2 text-xs text-debit">
               <AlertCircle size={13} className="mt-0.5" />
               <p>{stream.error}</p>
             </div>
           )}
+          {activeGate && <CreditGateInline gate={activeGate} />}
         </div>
 
         <Composer

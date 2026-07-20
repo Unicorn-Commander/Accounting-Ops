@@ -4,7 +4,7 @@ Why this exists
 ---------------
 
 Until 2026-05-29 every specialist runner accepted ``--llm-api-key sk-or-v1-...``
-on the command line. On midboy1 ``ps auxwww`` revealed the full key to any
+on the command line. On <host> ``ps auxwww`` revealed the full key to any
 shell user, because the argument lives in ``/proc/<pid>/cmdline``. That is a
 P0 leak path for the OpenRouter / OpenAI key.
 
@@ -109,7 +109,7 @@ def resolve_llm_api_key(
     env_key = (
         os.environ.get("LLM_API_KEY")
         or os.environ.get("OPENROUTER_API_KEY")
-        or os.environ.get("OPENROUTER_KEY")  # legacy alias still seen on midboy1
+        or os.environ.get("OPENROUTER_KEY")  # legacy alias still seen on <host>
     )
     if env_key:
         return env_key

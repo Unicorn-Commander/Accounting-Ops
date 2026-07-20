@@ -5,8 +5,8 @@ PLATFORM FEATURE (not a bespoke one-off script)
 This script is the *first instance* of a reusable "Bank-Statement Reconstruction"
 platform feature. A future customer can take their bank statements (any bank,
 parsed to the same JSON shape), set their entity IDs, point at their own LLM
-endpoint, and reconstruct their books exactly the same way. Magic Unicorn Inc's
-BofA 1792 run is the dog-food.
+endpoint, and reconstruct their books exactly the same way. Pass your own
+workspace/entity IDs and account last-4 via the CLI flags below.
 
 To adapt for a different customer:
   --workspace-id    their workspace UUID
@@ -148,19 +148,15 @@ logging.basicConfig(
 log = logging.getLogger("ingest_bofa")
 
 # ---------------------------------------------------------------------------
-# Constants — MU Inc defaults (customers override via CLI flags)
+# Constants — placeholder defaults (override via CLI flags or env vars)
 # ---------------------------------------------------------------------------
 
-DEFAULT_WORKSPACE_ID = "77753ea5-efe9-5539-a846-6b20ddc841b9"
-DEFAULT_ENTITY_ID = "1ab938df-43f2-567a-8566-800f8a14a466"
-DEFAULT_LAST4 = "1792"
-DEFAULT_INPUT_DIR = (
-    "/Volumes/Studio Storage/Development/Accounting-Ops"
-    "/.claude/worktrees/agent-a12672cd033d61944/out"
-)
+DEFAULT_WORKSPACE_ID = os.getenv("AO_WORKSPACE_ID", "00000000-0000-0000-0000-000000000000")
+DEFAULT_ENTITY_ID = os.getenv("AO_ENTITY_ID", "00000000-0000-0000-0000-000000000000")
+DEFAULT_LAST4 = os.getenv("AO_ACCOUNT_LAST4", "0000")
+DEFAULT_INPUT_DIR = os.getenv("AO_INPUT_DIR", "./out")
 
-# COA cash account for BofA 1792 (Magic Unicorn Inc Primary Checking).
-# Verified 2026-05-28 against the live COA on midboy1.
+# COA cash account for the primary checking account being reconstructed.
 COA_CASH_CANONICAL = "1010·Cash · Primary Checking"
 COA_CASH_LINKED_SOURCE = "simplefin"
 COA_CASH_LINKED_EXT_ID = "ACT-7066851a-cf7a-41d5-aac2-a9d435c19c47"
@@ -1236,9 +1232,9 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--workspace-id", default=DEFAULT_WORKSPACE_ID,
-                        help="Workspace UUID (default: MU Inc)")
+                        help="Workspace UUID (default: AO_WORKSPACE_ID env)")
     parser.add_argument("--entity-id", default=DEFAULT_ENTITY_ID,
-                        help="Entity UUID (default: Magic Unicorn Inc)")
+                        help="Entity UUID (default: AO_ENTITY_ID env)")
     parser.add_argument("--source-account-last4", default=DEFAULT_LAST4,
                         help="Bank account last-4 suffix (default: 1792)")
     parser.add_argument(

@@ -8,7 +8,7 @@ Nonprofit accounting differs structurally from for-profit:
 
 This is a SMALL starter chart — full Form 990 prep typically needs additional
 program-specific revenue and expense categories. The Setup Assistant should
-flag this for Mosin CPA review during nonprofit setup.
+flag this for CPA review during nonprofit setup.
 """
 from __future__ import annotations
 

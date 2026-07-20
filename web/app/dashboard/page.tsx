@@ -203,7 +203,7 @@ export default async function DashboardPage() {
                       No open items requiring action.
                     </p>
                     <p className="mt-0.5 text-[11px] text-ink-tertiary">
-                      {openItemsCounts.counts.waiting_on_mosin} waiting on Mosin ·{" "}
+                      {openItemsCounts.counts.waiting_on_cpa} waiting on the CPA ·{" "}
                       {openItemsCounts.counts.resolved_this_week} resolved this week
                     </p>
                   </div>

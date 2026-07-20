@@ -10,7 +10,7 @@ endpoint. Supports two backends:
 
 - **openai** (default when ``LLM_ENDPOINT_URL`` is set): uses the OpenAI
   Python SDK (>= 1.0) aimed at any OpenAI-compatible local endpoint (e.g.
-  llama-server / Qwen3.6-35B-A3B-Vision on midboy1:8088). Implements a
+  llama-server / Qwen3.6-35B-A3B-Vision on <host>:8088). Implements a
   manual MCP tool-call loop because local endpoints have no native MCP
   integration.
 
@@ -28,7 +28,7 @@ Usage — Anthropic path::
 
 Usage — local Qwen path::
 
-    export LLM_ENDPOINT_URL="http://midboy1:8088/v1"
+    export LLM_ENDPOINT_URL="http://<host>:8088/v1"
     export LLM_MODEL="Qwen3.6-35B-A3B-Vision"
     export LLM_API_KEY="local-qwen"
     export ACCTOPS_SERVICE_TOKEN="<keycloak-service-token>"

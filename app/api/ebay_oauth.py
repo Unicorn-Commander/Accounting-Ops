@@ -1,8 +1,8 @@
 """eBay OAuth authorization-code flow.
 
-eBay Developer Support approved sell.finances scope on 2026-05-30 for Aaron's
-app (the same app keys Listing-Ops uses for production listings). This module
-implements the user-consent OAuth flow end-to-end:
+This module implements the eBay sell.finances user-consent OAuth flow
+end-to-end (configure your own eBay developer app keys via the connector
+credentials):
 
   GET  /api/connectors/ebay/oauth/start?workspace_id=X&entity_id=Y
        -> 302 to eBay's authorize URL with a signed state token

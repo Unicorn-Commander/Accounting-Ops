@@ -15,33 +15,20 @@ export type TaxAnnotation = {
   tone?: "critical" | "warning" | "info";
 };
 
-/** Annotation keyed by `${entitySlug}:${taxYear}`. */
-const ANNOTATIONS: Record<string, TaxAnnotation> = {
-  // MU Inc 2023 — SCDOR Failure-to-File (SC1120-CTD)
-  "magic-unicorn-inc:2023": {
-    headline: "SCDOR Failure-to-File notice (SC1120-CTD) — immediate action required",
-    detail:
-      "SCDOR issued a Failure-to-File notice for SC1120-CTD on 2025-06-16. The cure date has passed. " +
-      "SC Voluntary Disclosure Agreement (VDA) MAY still be available if SCDOR has not made further contact — " +
-      "escalate to CPA Mosin (NorthbridgeTax) immediately to assess VDA eligibility and stop further penalty accrual. " +
-      "Federal 1120 also unfiled for 2023; both must be addressed in the same engagement.",
-    tone: "critical",
-  },
-
-  // MU Inc 2022 — short year
-  "magic-unicorn-inc:2022": {
-    headline: "Short-year return — entity effective 2022-05-11",
-    detail:
-      "Magic Unicorn Inc was incorporated 2022-05-11. The 2022 SC1120 (and federal 1120) cover only the period " +
-      "2022-05-11 through 2022-12-31. Original filing deadline was 2023-04-15. " +
-      "Verify whether a short-year return was ever filed; if not, address alongside 2023 in the CPA engagement.",
-    tone: "warning",
-  },
-};
+/**
+ * Annotation keyed by `${entitySlug}:${taxYear}`.
+ *
+ * COMMUNITY EDITION: this ships EMPTY so no operator's real per-entity tax
+ * situation is baked into the source. Populate it (or, preferably, migrate to
+ * the DB-backed store noted above) to surface CPA notes per entity/year.
+ * Example shape:
+ *   "acme-inc:2023": { headline: "…", detail: "…", tone: "warning" },
+ */
+const ANNOTATIONS: Record<string, TaxAnnotation> = {};
 
 /**
  * Return the annotation for a given entity slug + tax year, or null if none exists.
- * @param entitySlug  e.g. "magic-unicorn-inc"
+ * @param entitySlug  e.g. "acme-inc"
  * @param taxYear     e.g. 2023
  */
 export function getAnnotation(

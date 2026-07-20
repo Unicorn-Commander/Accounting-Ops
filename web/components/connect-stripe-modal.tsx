@@ -188,7 +188,7 @@ export function ConnectStripeModal({
                   type="text"
                   value={label}
                   onChange={(e) => setLabel(e.target.value)}
-                  placeholder="e.g. MU Inc Stripe"
+                  placeholder="e.g. Acme Inc Stripe"
                   maxLength={256}
                   className="mt-1.5 w-full rounded-md border border-default bg-canvas px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
                 />
@@ -224,7 +224,7 @@ export function ConnectStripeModal({
                   className="mt-1.5 w-full rounded-md border border-default bg-canvas px-3 py-2 font-mono text-sm focus:border-brand-500 focus:outline-none"
                 />
                 <span className="mt-1.5 block text-[11px] text-ink-tertiary">
-                  Account number where Stripe charges credit. MU Inc defaults: 4200 (AI Infrastructure Revenue), 4110 (Fabrikam Design DBA), 4030 (Subscriptions). Override per-charge later via category rules.
+                  Account number where Stripe charges credit. Example defaults: 4200 (Services Revenue), 4110 (DBA Revenue), 4030 (Subscriptions). Override per-charge later via category rules.
                 </span>
               </label>
 

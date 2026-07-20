@@ -205,7 +205,7 @@ def _load_service_tokens() -> dict[str, dict[str, Any]]:
 
         {
           "<token>": {
-            "uc_uid": "aaron",
+            "uc_uid": "jane",
             "agent_id": "receipt-reconciler",
             # H2 scope fields (REQUIRED in production — at least one must be set):
             "workspace_ids": ["<wid>", "<wid>"],   // None = all workspaces the user is in
@@ -423,6 +423,63 @@ async def _touch_pat_last_used(pat_id) -> None:  # pragma: no cover - background
         _log.debug("PAT last_used_at bump failed: %s", exc.__class__.__name__)
 
 
+# ---------------------------------------------------------------------------
+# Local self-host token (Community Edition — AO_AUTH_MODE=local)
+# ---------------------------------------------------------------------------
+# In local mode there is no Keycloak/uchub. The web NextAuth Credentials
+# provider signs a short HS256 bearer with the shared AO_LOCAL_AUTH_SECRET
+# after verifying the single admin's password. The token mirrors the shape a
+# Keycloak token would carry (sub/uc_uid + this resource server's audience) so
+# every downstream RBAC / workspace-membership check resolves identically to
+# the Keycloak path — the only difference is the signature scheme + issuer.
+_LOCAL_TOKEN_ISSUER = "ao-local"
+
+
+def _try_authenticate_local(token: str) -> AuthContext | None:
+    """Validate a locally-issued HS256 bearer. None on any miss/failure.
+
+    Active ONLY when auth_mode == "local" AND a signing secret is configured.
+    Returns None (→ caller falls through / 401s) rather than raising, so a
+    stray non-local token in local mode still gets a clean 401 downstream.
+    """
+    settings = get_settings()
+    if not settings.is_local_auth:
+        return None
+    secret = settings.local_auth_secret
+    if not secret:
+        # Fail closed: local mode without a secret cannot mint or verify.
+        _log.warning(
+            "[acctops.auth] AO_AUTH_MODE=local but AO_LOCAL_AUTH_SECRET is unset "
+            "— local login disabled (set the secret to enable self-host auth)."
+        )
+        return None
+    if jwt is None:  # pragma: no cover - jose always present in practice
+        return None
+    try:
+        claims = jwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+            issuer=_LOCAL_TOKEN_ISSUER,
+            audience=settings.accepted_audience,
+            options={"verify_at_hash": False},
+        )
+    except Exception:  # noqa: BLE001 - any decode failure = not a valid local token
+        return None
+    uc_uid = claims.get("uc_uid") or claims.get("sub")
+    if not uc_uid:
+        return None
+    scope = tuple(str(claims.get("scope", "")).split())
+    ctx = AuthContext(
+        uc_uid=str(uc_uid),
+        agent_id=None,
+        scopes=scope,
+        claims=claims,
+    )
+    _stamp_audit_actor(ctx)
+    return ctx
+
+
 async def authenticate_token(token: str) -> AuthContext:
     """Validate a raw bearer token string and return its AuthContext.
 
@@ -484,6 +541,15 @@ async def authenticate_token(token: str) -> AuthContext:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or revoked personal access token",
         )
+
+    # Local self-host token branch (Community Edition — AO_AUTH_MODE=local).
+    # No-op in keycloak mode (returns None immediately). When it validates, we
+    # return the AuthContext directly — the Keycloak/Brigade paths below are for
+    # the suite deployment and are never reached in local mode. Service tokens +
+    # PATs above still work in local mode (both are checked first).
+    local_ctx = _try_authenticate_local(token)
+    if local_ctx is not None:
+        return local_ctx
 
     if jwt is None:
         raise HTTPException(

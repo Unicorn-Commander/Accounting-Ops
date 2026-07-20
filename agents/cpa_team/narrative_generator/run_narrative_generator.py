@@ -2,21 +2,21 @@
 """CPA Narrative Generator — single-shot runner per (workspace, entity, tax_year).
 
 Synthesises all tax_review_queue items + specialist drafts into a single coherent
-CPA client memo (2-5 pages). This is what Morgan sees FIRST — a professional review
+CPA client memo (2-5 pages). This is what the CPA sees FIRST — a professional review
 letter covering all 11 sections: Cover, Executive Summary, Year at a Glance, Federal
 Return Position, 1099-NEC, State Return, Strategy, Sign-Off Items, Judgment Items,
 Next Steps, and Appendix.
 
 Usage — docker exec pattern (production)::
 
-    TOKEN=$(cat /home/muut/.tax-1120-preparer.token)
-    OPENROUTER_KEY=$(cat /home/muut/.openrouter.key)
+    TOKEN=$(cat /home/user/.tax-1120-preparer.token)
+    OPENROUTER_KEY=$(cat /home/user/.openrouter.key)
     docker exec \\
       -e ACCTOPS_SERVICE_TOKEN="$TOKEN" \\
       accounting_ops-app-1 \\
       python /app/agents/cpa_team/narrative_generator/run_narrative_generator.py \\
-        --workspace-id 77753ea5-efe9-5539-a846-6b20ddc841b9 \\
-        --entity-id    1ab938df-43f2-567a-8566-800f8a14a466 \\
+        --workspace-id 00000000-0000-0000-0000-000000000000 \\
+        --entity-id    11111111-1111-1111-1111-111111111111 \\
         --tax-year     2023 \\
         --mcp-url      http://localhost:8000/mcp/ \\
         --output       /drafts/mu-inc-2023-cpa-narrative.md \\
@@ -150,7 +150,7 @@ def _build_user_message(workspace_id: str, entity_id: str, tax_year: int) -> str
         entity_id    : {entity_id}
         tax_year     : {tax_year}
         run_date     : {date.today().isoformat()}
-        requesting_cpa : Morgan Qureshi
+        requesting_cpa : Pat Rivera, CPA
 
         Follow the call sequence in your system prompt exactly:
         1. get_form_1120_data — get the federal package
@@ -446,7 +446,7 @@ def _build_cover(
     entity_name: str | None,
     entity_id: str,
     tax_year: int,
-    cpa_name: str = "Morgan Qureshi",
+    cpa_name: str = "Pat Rivera",
 ) -> str:
     """Build a Section 1 cover block as a fallback when the LLM skipped it."""
     name = entity_name or f"Entity {entity_id[:8]}"

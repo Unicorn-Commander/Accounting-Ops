@@ -244,7 +244,7 @@ class TestBuildPrefillContext:
         queue = [self._queue_item("Form 1120, Line 1a", 2000000)]
         ctx = build_prefill_context(
             tax_year=2023,
-            entity_display_name="Magic Unicorn Inc",
+            entity_display_name="Acme Inc",
             ein=None,
             queue_items=queue,
             cpa_package=pkg,
@@ -260,7 +260,7 @@ class TestBuildPrefillContext:
         }
         ctx = build_prefill_context(
             tax_year=2023,
-            entity_display_name="MU Inc",
+            entity_display_name="Acme Inc",
             ein=None,
             queue_items=[],
             cpa_package=pkg,
@@ -271,7 +271,7 @@ class TestBuildPrefillContext:
         """Lines with no data from either source must NOT appear in p1_values."""
         ctx = build_prefill_context(
             tax_year=2023,
-            entity_display_name="MU Inc",
+            entity_display_name="Acme Inc",
             ein=None,
             queue_items=[],
             cpa_package=None,
@@ -315,7 +315,7 @@ class TestBuildPrefillContext:
             "form_reference": "Form 1125-E, Line 3 (Net Officer Comp)",
             "content": {
                 "proposed_amount_cents": 15000000,
-                "officer1_name": "Aaron Stransky",
+                "officer1_name": "Jane Smith",
                 "officer1_title": "CEO",
                 "officer1_pct_time": "100",
             },
@@ -323,13 +323,13 @@ class TestBuildPrefillContext:
         }
         ctx = build_prefill_context(
             tax_year=2023,
-            entity_display_name="MU Inc",
+            entity_display_name="Acme Inc",
             ein=None,
             queue_items=[item],
             cpa_package=None,
         )
         assert ctx.officer_values.get("net_officer_comp") == "150000"
-        assert ctx.officer_values.get("officer1_name") == "Aaron Stransky"
+        assert ctx.officer_values.get("officer1_name") == "Jane Smith"
         assert ctx.officer_values.get("officer1_title") == "CEO"
 
 

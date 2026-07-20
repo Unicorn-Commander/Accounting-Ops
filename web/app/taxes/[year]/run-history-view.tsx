@@ -69,7 +69,7 @@ function formatTokens(metrics: SpecialistRun["metrics"]): string {
 function formatModelShort(model: string): string {
   // claude-sonnet-4-6  → sonnet-4.6
   // claude-opus-4-7    → opus-4.7
-  // Qwen3.6-35B-...    → Qwen3.6
+  // local-model-1-2    → local-model-1.2
   return model
     .replace(/^claude-/, "")
     .replace(/-(\d+)-(\d+)$/, "-$1.$2")

@@ -41,7 +41,7 @@ def upgrade() -> None:
             "label",
             sa.String(length=256),
             nullable=False,
-            comment="User-visible label, e.g. 'Aaron BofA + USAA' or 'Magic Unicorn eBay'",
+            comment="User-visible label, e.g. 'Business Bank' or 'Acme eBay'",
         ),
         sa.Column(
             "ciphertext",

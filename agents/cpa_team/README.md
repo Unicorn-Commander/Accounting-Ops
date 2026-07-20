@@ -22,7 +22,7 @@ agents/cpa_team/
     ├── run_cpa_resolver.py         ← CLI runner (Brigade-compatible, dual-backend)
     ├── tests_resolution_rules.py   ← unit tests for the rule engine
     └── worked_examples/
-        ├── 2023_full_resolution_pass.md   ← MU Inc 2023 pre-revenue full pass
+        ├── 2023_full_resolution_pass.md   ← Acme Inc 2023 pre-revenue full pass
         ├── escalation_examples.md         ← the 4 mandatory escalation categories
         └── 4_flagged_categories.md        ← Form 1120's 4 always-flagged categories
 ```
@@ -32,16 +32,16 @@ agents/cpa_team/
 ## Quick Start (Production — docker exec)
 
 ```bash
-ssh muut@midboy1
-TOKEN=$(cat /home/muut/.tax-1120-preparer.token)
-OPENROUTER_KEY=$(cat /home/muut/.openrouter.key)
+ssh user@<host>
+TOKEN=$(cat /home/user/.tax-1120-preparer.token)
+OPENROUTER_KEY=$(cat /home/user/.openrouter.key)
 
 docker exec \
   -e ACCTOPS_SERVICE_TOKEN="$TOKEN" \
   accounting_ops-app-1 \
   python /app/agents/cpa_team/tax_resolver/run_cpa_resolver.py \
-    --workspace-id 77753ea5-efe9-5539-a846-6b20ddc841b9 \
-    --entity-id    1ab938df-43f2-567a-8566-800f8a14a466 \
+    --workspace-id 00000000-0000-0000-0000-000000000000 \
+    --entity-id    11111111-1111-1111-1111-111111111111 \
     --tax-year     2023 \
     --acctops-base-url http://localhost:8000 \
     --output       /drafts/cpa-resolution-report-2023.md \
@@ -110,7 +110,7 @@ The rule engine handles all item types produced by the specialist team:
 | `memo` | MEMO-DELIVERABLE, MEMO-RESOLVER, MEMO-GENERIC | 100% |
 | `question` | Q-1125E, Q-941 (→ resolved); Q-ESCALATE (fallback) | ~40% deterministic |
 
-For a typical pre-revenue entity year (e.g., MU Inc 2023), ~100% of items are handled
+For a typical pre-revenue entity year (e.g., Acme Inc 2023), ~100% of items are handled
 deterministically. For revenue years with inter-entity activity or officer compensation,
 expect 10-20% escalation rate.
 

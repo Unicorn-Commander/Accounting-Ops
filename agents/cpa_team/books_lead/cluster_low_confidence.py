@@ -2,7 +2,7 @@
 
 The analyzer's existing ``cluster_id`` encodes the *transaction's*
 description (which includes per-txn IDs and dates), so each cluster ends up
-size 1. That defeats the cluster-card UX: Aaron would see one card per
+size 1. That defeats the cluster-card UX: the owner would see one card per
 transaction even when 12 of them are the same recurring Anthropic API charge.
 
 Phase 3 rewrites ``approval_recommendation.cluster_id`` for all pending
@@ -16,7 +16,7 @@ low-confidence rows so that *similar* transactions share a key:
 
 This way the existing GET
 ``/api/workspaces/{wid}/approval-recommendations`` endpoint will report each
-cluster's count + total + sample payees, and Aaron can click ONE cluster
+cluster's count + total + sample payees, and the owner can click ONE cluster
 ("approve all 12 Anthropic API charges as SaaS · AI?") rather than 12
 individual approvals.
 
@@ -252,7 +252,7 @@ async def main() -> int:
     print(f"  Pending recommendations clustered: {len(pendings)}")
     print(f"  Distinct vendor clusters built:    {len(rollups)}")
     print(
-        "  Aaron now sees ~"
+        "  the owner now sees ~"
         f"{total_decisions_after} cluster cards "
         "instead of one-per-transaction."
     )
