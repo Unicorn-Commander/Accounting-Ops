@@ -31,6 +31,7 @@ from app.api.cfo_brief import router as cfo_brief_router
 from app.api.category_overrides import router as category_overrides_router
 from app.api.contacts import router as contacts_router
 from app.api.credentials import router as credentials_router
+from app.api.data_rights import router as data_rights_router
 from app.api.documents import router as documents_router
 from app.api.billing import router as billing_router
 from app.api.federation import router as federation_router
@@ -136,6 +137,7 @@ app.include_router(onboarding_router)
 app.include_router(members_router)
 app.include_router(contacts_router)
 app.include_router(credentials_router)
+app.include_router(data_rights_router)
 app.include_router(documents_router)
 app.include_router(account_mappings_router)
 app.include_router(category_overrides_router)

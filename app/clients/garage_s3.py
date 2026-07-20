@@ -292,6 +292,59 @@ class GarageS3Client:
             )
         return resp.content
 
+    # ------------------------------------------------------------------ #
+    async def delete_object(
+        self,
+        *,
+        bucket: str,
+        object_key: str,
+        timeout_s: float = _DEFAULT_TIMEOUT_S,
+    ) -> bool:
+        """Delete a single object (DeleteObject). Returns True if it is gone.
+
+        Added for the data-rights erasure path (app/data_rights/erasure.py):
+        purging a workspace's stored receipts and documents from object storage
+        is one of the FIRST things erasure does, because those files are the
+        bulk of the personally-identifying material we hold.
+
+        S3 DeleteObject is idempotent — deleting a key that does not exist
+        returns 204, not 404. We therefore treat both 2xx and 404 as success:
+        the post-condition the caller cares about is "the object is not there",
+        and it isn't. This matters for erasure, which must be safely re-runnable
+        after a partial failure without a already-deleted key aborting the run.
+
+        Raises GarageNotConfigured / GarageUploadError, consistent with the
+        other verbs — a purge that cannot reach the object store must fail
+        loudly rather than report success for files it never touched.
+        """
+        if not self.is_configured():
+            raise GarageNotConfigured(
+                "Garage S3 credentials are not configured (GARAGE_S3_ACCESS_KEY / "
+                "GARAGE_S3_SECRET_KEY)."
+            )
+        signed = self._signed_headers(
+            method="DELETE",
+            object_key=object_key,
+            bucket=bucket,
+            payload=b"",
+        )
+        url = f"{self._endpoint()}/{bucket}/{_encode_key(object_key)}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout_s) as client:
+                resp = await client.delete(url, headers=signed)
+        except httpx.HTTPError as exc:  # network/timeout — never leak internals
+            raise GarageUploadError(
+                f"Object store unreachable: {type(exc).__name__}"
+            ) from exc
+        if resp.status_code == 404:
+            return True  # already absent — the desired post-condition holds
+        if resp.status_code >= 400:
+            raise GarageUploadError(
+                f"Object store rejected delete (HTTP {resp.status_code}).",
+                status_code=resp.status_code,
+            )
+        return True
+
 
 __all__ = (
     "GarageS3Client",
