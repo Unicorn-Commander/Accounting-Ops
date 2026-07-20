@@ -109,6 +109,27 @@ for YEAR in "${YEARS[@]}"; do
     else
         echo "  WARN  Form 1125-E TY $YEAR not available at $F1125E_URL — skipping."
     fi
+
+    # Form 4562 (Depreciation and Amortization)
+    # SAME GOTCHA AS 1120: irs-pdf/f4562.pdf is the 2025 revision, so a
+    # YEAR!=2025 request MUST come from irs-prior or it silently saves the
+    # wrong revision. This matters more for 4562 than for most forms: the 2025
+    # revision INSERTED a 50-year class row into Part III Section B, shifting
+    # residential rental from 19h to 19i and nonresidential real from 19i to
+    # 19j. Saving the 2025 PDF as f4562_2024.pdf would render every real-property
+    # figure one row off. See app/exports/f4562_field_map.py.
+    if [[ "$YEAR" == "2025" ]]; then
+        F4562_URL="https://www.irs.gov/pub/irs-pdf/f4562.pdf"
+    else
+        F4562_URL="https://www.irs.gov/pub/irs-prior/f4562--${YEAR}.pdf"
+    fi
+    F4562_DEST="$FORMS_DIR/f4562_${YEAR}.pdf"
+
+    if head_check "$F4562_URL"; then
+        download_form "$F4562_DEST" "$F4562_URL" "Form 4562 (TY $YEAR)"
+    else
+        echo "  WARN  Form 4562 TY $YEAR not available at $F4562_URL — skipping."
+    fi
 done
 
 # --- Individual forms (current-year fillable) -----------------------------
