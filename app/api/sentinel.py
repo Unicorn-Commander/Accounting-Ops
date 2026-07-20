@@ -440,13 +440,20 @@ async def trigger_run(
     Returns 202 immediately; the cycle runs detached. Tail the app or sentinel
     container logs to follow progress; use GET /sentinel/check-runs to see
     results after.
+
+    Runs with ``force=True``: this is an explicit human request, so it bypasses
+    both cadence gates (the per-workspace ``check_interval_minutes`` and each
+    check's ``CHECK_CADENCE``). Otherwise an admin clicking "Run now" a day
+    into a monthly cadence would get a silent no-op.
     """
     require_role(workspace, "admin")
     from agents.sentinel.run_sentinel import run_workspace_cycle
 
     async def _bg() -> None:
         try:
-            await run_workspace_cycle(workspace.workspace_id, workspace.workspace_slug)
+            await run_workspace_cycle(
+                workspace.workspace_id, workspace.workspace_slug, force=True
+            )
         except Exception as e:  # noqa: BLE001
             _log.exception("Manual sentinel run failed: %s", e)
 
