@@ -326,7 +326,18 @@ def _run_openai(
                     )
 
                 openai_tools = [_mcp_tool_to_openai_function(t) for t in tools]
-                llm = openai.OpenAI(base_url=llm_endpoint_url, api_key=llm_api_key)
+                # Failover-aware drop-in for openai.OpenAI: carries the shared
+                # User-Agent (the UC gateway's Cloudflare 403s the SDK default
+                # with "error code: 1010") and retries ONCE on the cloud
+                # fallback. Inert unless LLM_FALLBACK_BASE_URL is set.
+                from app.llm_client import FailoverClient
+
+                llm = FailoverClient(
+                    base_url=llm_endpoint_url,
+                    api_key=llm_api_key,
+                    model=llm_model,
+                    op="narrative.chat.completions",
+                )
 
                 messages: list[dict[str, Any]] = [
                     {"role": "system", "content": system_prompt},

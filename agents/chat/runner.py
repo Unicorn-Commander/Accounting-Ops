@@ -36,6 +36,10 @@ try:
 except ImportError:  # pragma: no cover
     openai = None  # type: ignore[assignment]
 
+# Single source of truth for the outbound User-Agent + the primary->fallback
+# chain. See app/llm_client.py for why the UA cannot live in an http_client.
+from app.llm_client import FailoverAsyncClient
+
 
 _log = logging.getLogger("acctops.chat.runner")
 
@@ -343,26 +347,26 @@ async def stream_assistant_turn(
                             "delegation tool unavailable (ignored): %s", exc
                         )
 
-                client = openai.AsyncOpenAI(
+                # Failover-aware client: the resolver above already picked the
+                # PRIMARY rung (BYOK > virtual key > OpenRouter); this wraps it
+                # with an optional cloud fallback for infrastructure faults.
+                # Inert unless LLM_FALLBACK_BASE_URL is set.
+                #
+                # The User-Agent lives in app.llm_client (the UC gateway sits
+                # behind Cloudflare, which 403s the openai SDK's default UA with
+                # "error code: 1010"); do NOT re-add a UA literal here.
+                client = FailoverAsyncClient(
                     base_url=openrouter_base_url,
                     api_key=api_key,
+                    model=model,
+                    op="chat.completions.stream",
                     # OpenRouter recommends a referrer / app title for analytics.
-                    default_headers={
+                    extra_headers={
                         "HTTP-Referer": os.environ.get(
                             "PUBLIC_BASE_URL",
                             "https://accounting.magicunicorn.dev",
                         ),
                         "X-Title": "Accounting-Ops Chat",
-                        # DO NOT REMOVE: the UC gateway (llm.unicorncommander.ai)
-                        # sits behind Cloudflare bot-management, which 403s the
-                        # openai SDK's default "OpenAI/Python ..." User-Agent
-                        # ("Your request was blocked"). Sending a descriptive,
-                        # non-SDK UA makes chat pass. Verified: default UA = 403,
-                        # this UA = 200. Overridable via AO_CHAT_USER_AGENT.
-                        "User-Agent": os.environ.get(
-                            "AO_CHAT_USER_AGENT",
-                            "Mozilla/5.0 (compatible; Accounting-Ops-Chat/1.0; +https://unicorncommander.ai)",
-                        ),
                     },
                 )
 
@@ -410,6 +414,13 @@ async def stream_assistant_turn(
                             _msg = "The assistant couldn't respond — please try again."
                         yield {"type": "error", "message": _msg}
                         return
+
+                    # Report the rung that ACTUALLY answered. When failover
+                    # fired we are on a different provider AND model, and the
+                    # client must not claim it used the one it asked for.
+                    if getattr(client, "last_served_by", "primary") == "fallback":
+                        stop_event["model"] = client.last_model
+                        stop_event["backend"] = f"{backend}+failover"
 
                     async for chunk in stream:
                         if cancel_check is not None and cancel_check():

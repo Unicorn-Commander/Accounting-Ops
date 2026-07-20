@@ -40,6 +40,7 @@ from typing import Any
 import httpx
 
 from app.config import Settings, get_settings
+from app.llm_client import LlmTarget, acall_with_failover, llm_default_headers
 
 
 # ---------------------------------------------------------------------------
@@ -214,22 +215,43 @@ class LLMCategorizer:
             # (OpenAI, Anthropic, standard vLLM), so it is safe to send everywhere.
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if settings.llm_api_key:
-            headers["Authorization"] = f"Bearer {settings.llm_api_key}"
+        # PRIMARY rung = the configured endpoint. An optional cloud fallback is
+        # read from LLM_FALLBACK_* env; when unset this is a plain single call,
+        # byte-identical to the pre-failover behavior.
+        primary = LlmTarget(
+            base_url=settings.llm_endpoint_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+            label="primary",
+        )
+        # Records which rung actually answered so the suggestion reports the
+        # endpoint/model that produced it rather than the one we asked for.
+        served: dict[str, LlmTarget] = {}
 
-        url = settings.llm_endpoint_url.rstrip("/") + "/chat/completions"
+        async def _post(target: LlmTarget) -> httpx.Response:
+            served["target"] = target
+            headers = llm_default_headers({"Content-Type": "application/json"})
+            if target.api_key:
+                headers["Authorization"] = f"Bearer {target.api_key}"
+            url = target.base_url.rstrip("/") + "/chat/completions"
+            async with httpx.AsyncClient(timeout=settings.llm_timeout_s) as client:
+                response = await client.post(
+                    url, json={**payload, "model": target.model}, headers=headers
+                )
+                response.raise_for_status()
+                return response
 
         t0 = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=settings.llm_timeout_s) as client:
-                response = await client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
+            response = await acall_with_failover(
+                primary=primary, call=_post, op="categorize.chat.completions"
+            )
         except httpx.TimeoutException:
             return None
         except httpx.HTTPError:
             return None
         duration_ms = int((time.monotonic() - t0) * 1000)
+        used = served.get("target", primary)
 
         raw_json = _extract_completion(response.json())
         if raw_json is None:
@@ -245,8 +267,8 @@ class LLMCategorizer:
             confidence=max(0.0, min(1.0, float(confidence))),
             reasoning=reasoning[:500],   # guard against runaway reasoning strings
             raw_response=raw_json,
-            model=settings.llm_model,
-            endpoint=settings.llm_endpoint_url,
+            model=used.model,
+            endpoint=used.base_url,
             duration_ms=duration_ms,
         )
 
@@ -258,7 +280,7 @@ class LLMCategorizer:
         """
         settings = self._settings
         url = settings.llm_endpoint_url.rstrip("/") + "/models"
-        headers: dict[str, str] = {}
+        headers = llm_default_headers()
         if settings.llm_api_key:
             headers["Authorization"] = f"Bearer {settings.llm_api_key}"
         try:
