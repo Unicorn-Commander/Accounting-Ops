@@ -227,6 +227,116 @@ class Entity(WorkspaceScopedMixin, Base):
 
 
 # ---------------------------------------------------------------------------
+# Entity ownership (shareholders / partners) — drives Schedule K-1
+# Mirrors migrations/tenant/versions/0027_entity_owner.py
+# ---------------------------------------------------------------------------
+
+
+class OwnerType(str, enum.Enum):
+    individual = "individual"
+    entity = "entity"
+    trust = "trust"
+    estate = "estate"
+
+
+class AllocationBasis(str, enum.Enum):
+    """How an entity's items are allocated to its owners.
+
+    ``per_share_per_day`` is the S-corp statutory method (§1377(a)(1)) and is
+    computed automatically. The two ``partnership_agreement_*`` values are
+    ATTESTATIONS about what the partnership agreement says — a partnership may
+    allocate disproportionately under §704(a), so a NULL basis is treated as a
+    refusal to allocate, never as pro rata.
+    """
+
+    PER_SHARE_PER_DAY = "per_share_per_day"
+    PARTNERSHIP_AGREEMENT_PRO_RATA = "partnership_agreement_pro_rata"
+    PARTNERSHIP_AGREEMENT_SPECIAL = "partnership_agreement_special"
+
+
+class EntityOwner(EntityScopedMixin, Base):
+    """A shareholder (1120-S) or partner/member (1065), for a period.
+
+    Multiple rows per owner are expected: ownership is time-sliced by
+    ``effective_from``/``effective_to`` so a mid-year transfer is representable,
+    which is exactly what the per-share-per-day allocation consumes.
+
+    ``shares`` is the S-corp input and the percentages are the partnership
+    inputs — they are not redundant, because a percentage cannot express a
+    mid-year transfer and a partnership's profit/loss/capital percentages
+    routinely differ from one another.
+
+    Stored as a plain ``String`` rather than a PG enum to match 0027 (and to
+    avoid a schema-scoped enum type per workspace); the CHECK constraint in the
+    migration is the enforcement point.
+    """
+
+    __table_args__ = (
+        CheckConstraint(
+            "owner_type IN ('individual','entity','trust','estate')",
+            name="ck_entity_owner_type",
+        ),
+        CheckConstraint(
+            "allocation_basis IS NULL OR allocation_basis IN ("
+            "'per_share_per_day',"
+            "'partnership_agreement_pro_rata',"
+            "'partnership_agreement_special')",
+            name="ck_entity_owner_allocation_basis",
+        ),
+        CheckConstraint(
+            "effective_to IS NULL OR effective_to >= effective_from",
+            name="ck_entity_owner_period",
+        ),
+        CheckConstraint(
+            "shares IS NULL OR shares >= 0", name="ck_entity_owner_shares_nonneg"
+        ),
+        CheckConstraint(
+            "(profit_pct IS NULL OR (profit_pct >= 0 AND profit_pct <= 100)) "
+            "AND (loss_pct IS NULL OR (loss_pct >= 0 AND loss_pct <= 100)) "
+            "AND (capital_pct IS NULL OR "
+            "     (capital_pct >= 0 AND capital_pct <= 100))",
+            name="ck_entity_owner_pct_range",
+        ),
+        Index("ix_entity_owner_entity_period", "entity_id", "effective_from"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    owner_name: Mapped[str] = mapped_column(String(300), nullable=False)
+    owner_type: Mapped[str] = mapped_column(
+        String(24), nullable=False, server_default=OwnerType.individual.value
+    )
+    #: Last 4 of SSN/EIN only — the full identifier belongs in the encrypted
+    #: document path, not in a table a reporting sidecar reads.
+    tax_id_last4: Mapped[str | None] = mapped_column(String(4))
+
+    effective_from: Mapped[date] = mapped_column(Date, nullable=False)
+    effective_to: Mapped[date | None] = mapped_column(Date)
+
+    #: S corporation — share count held during this period (§1377(a)(1)).
+    shares: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+
+    #: Partnership / LLC — percentages 0..100. May legitimately differ.
+    profit_pct: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    loss_pct: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    capital_pct: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+
+    is_general_partner: Mapped[bool | None] = mapped_column(Boolean)
+    is_officer: Mapped[bool | None] = mapped_column(Boolean)
+
+    allocation_basis: Mapped[str | None] = mapped_column(String(48))
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+# ---------------------------------------------------------------------------
 # Event log (entity-scoped, append-only)
 # ---------------------------------------------------------------------------
 
