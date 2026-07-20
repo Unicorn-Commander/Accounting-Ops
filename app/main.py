@@ -55,6 +55,7 @@ from app.api.transactions import router as transactions_router
 from app.api.workspaces import router as workspaces_router
 from app.config import get_settings
 from app.otel import audit_span_middleware, setup_otel
+from app.rate_limit import RateLimitMiddleware
 
 settings = get_settings()
 
@@ -115,6 +116,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.middleware("http")(audit_span_middleware)
+# Per-tenant / per-principal rate limiting. Added AFTER audit_span_middleware so
+# Starlette places it OUTERMOST (add_middleware inserts at position 0 and the
+# stack is built outermost-first), meaning a throttled request is rejected
+# before it costs a tracing span or any routing work — which is the point on a
+# host running at high CPU steal. Self-disabling in Community Edition; see
+# app/rate_limit.py for the tier table and the per-replica caveat.
+# /healthz is exempt: throttling it would break healthchecks + monitoring.
+app.add_middleware(RateLimitMiddleware)
 setup_otel(app)
 if _mcp_http_app is not None:
     # /mcp is gated by MCPAuthMiddleware (validates the uchub Bearer and binds

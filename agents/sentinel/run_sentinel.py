@@ -18,9 +18,23 @@ Cycle steps:
   2. For each active workspace:
      a. Load (or create with defaults) sentinel_config.
      b. Skip if autonomy_level == 'off'.
-     c. Process due sentinel_scheduled_action rows.
-     d. Open a check cycle (cycle_id uuid) and run each enabled check.
-     e. After all checks finish, stamp sentinel_config.last_run_at = now().
+     c. GATE 1 — skip unless sentinel_config.check_interval_minutes has
+        elapsed since sentinel_config.last_run_at.
+     d. Process due sentinel_scheduled_action rows.
+     e. Open a check cycle (cycle_id uuid). GATE 2 — run only the enabled
+        checks whose CHECK_CADENCE has elapsed since their own last run
+        (agents/sentinel/cadence.py + tenant table sentinel_check_state).
+     f. After all checks finish, stamp sentinel_config.last_run_at = now().
+
+Cadence (fixed 2026-07-20)
+=========================
+This loop used to run EVERY enabled check on EVERY tick of one global env
+interval (SENTINEL_DEFAULT_INTERVAL_MINUTES, default 360 = 6h), ignoring both
+``CHECK_CADENCE`` and the per-workspace ``check_interval_minutes`` that the
+settings UI lets users edit. A check labelled "monthly" therefore ran 4x a DAY.
+Both gates are now enforced (see agents/sentinel/cadence.py for the arithmetic
+and the first-cycle rule). The loop interval below is now only a POLLING
+frequency — it decides how often Sentinel looks, never how often a check fires.
 
 Kill switch:
   SENTINEL_DISABLED=true → log + sleep without running.
@@ -54,11 +68,17 @@ from agents.sentinel.actions import (
     ActionContext,
     kill_switch_active,
 )
+from agents.sentinel.cadence import (
+    is_workspace_due,
+    partition_due_checks,
+)
 from agents.sentinel.checks import CHECK_REGISTRY
 from agents.sentinel.config import (
     AutonomyLevel,
     SentinelConfig,
     get_or_create_config,
+    load_check_state,
+    record_check_run,
     update_last_run,
 )
 from app.connectors.regulatory_feeds import poll_all as poll_regulatory_feeds
@@ -266,6 +286,13 @@ async def run_one_check(
                     summary=str(result.get("summary", ""))[:1000],
                     status="completed",
                 )
+                # Cadence stamp, in the SAME transaction as the run record so
+                # the two can never disagree about whether this check ran.
+                await record_check_run(
+                    session, workspace_id, check_type,
+                    status="completed", cycle_id=cycle_id,
+                    findings=int(result.get("findings", 0)),
+                )
                 return {"check_type": check_type, "run_id": str(run_id), **result}
             except Exception as e:  # noqa: BLE001
                 _log.exception("Check %s crashed: %s", check_type, e)
@@ -279,6 +306,13 @@ async def run_one_check(
                     status="failed",
                     error=str(e)[:1000],
                 )
+                # A crashing check still counts as "ran" for cadence purposes —
+                # otherwise a permanently broken check would retry at full loop
+                # frequency forever. consecutive_failures carries the alarm.
+                await record_check_run(
+                    session, workspace_id, check_type,
+                    status="failed", cycle_id=cycle_id, findings=0,
+                )
                 return {"check_type": check_type, "error": str(e)[:500]}
     except Exception as e:  # noqa: BLE001
         # Outer-session-level failure (e.g. workspace schema gone).
@@ -291,23 +325,57 @@ async def run_one_check(
 # ---------------------------------------------------------------------------
 
 
-async def run_workspace_cycle(workspace_id: UUID, workspace_label: str) -> dict[str, Any]:
-    """Run one Sentinel cycle for a single workspace."""
+async def run_workspace_cycle(
+    workspace_id: UUID, workspace_label: str, *, force: bool = False
+) -> dict[str, Any]:
+    """Run one Sentinel cycle for a single workspace.
+
+    ``force=True`` bypasses BOTH cadence gates. Used by the manual admin
+    trigger (POST /sentinel/run) and ``--once --force``: when a human
+    explicitly asks for a run, "not due yet" is the wrong answer. Scheduled
+    daemon ticks never force.
+    """
     if kill_switch_active():
         _log.warning("Sentinel kill switch active; skipping workspace %s", workspace_id)
         return {"workspace_id": str(workspace_id), "skipped": "kill_switch"}
 
-    # Load config inside its own session
+    now = dt.datetime.now(tz=dt.timezone.utc)
+
+    # Load config + per-check cadence state inside one session.
     async with workspace_session(SessionLocal, workspace_id) as session:
         try:
             config = await get_or_create_config(session, workspace_id)
         except Exception as e:  # noqa: BLE001
             _log.exception("Config load failed for %s: %s", workspace_id, e)
             return {"workspace_id": str(workspace_id), "error": f"config_load: {e}"}
+        last_run_by_check = await load_check_state(session, workspace_id)
 
     if config.autonomy_level == AutonomyLevel.OFF:
         _log.info("Sentinel: %s autonomy=off, skipping", workspace_label)
         return {"workspace_id": str(workspace_id), "skipped": "autonomy_off"}
+
+    # ---- GATE 1: the per-workspace interval the settings UI actually edits --
+    # config.last_run_at is None on a brand-new workspace -> always due, so a
+    # fresh tenant is never made to wait out its interval before its first run.
+    if not force and not is_workspace_due(
+        config.last_run_at, config.check_interval_minutes, now
+    ):
+        next_due = config.last_run_at + dt.timedelta(
+            minutes=config.check_interval_minutes
+        )
+        _log.info(
+            "Sentinel: %s not due (interval=%dm, last_run=%s, next=%s), skipping",
+            workspace_label, config.check_interval_minutes,
+            config.last_run_at.isoformat(), next_due.isoformat(),
+        )
+        return {
+            "workspace_id": str(workspace_id),
+            "workspace_label": workspace_label,
+            "skipped": "workspace_not_due",
+            "check_interval_minutes": config.check_interval_minutes,
+            "last_run_at": config.last_run_at.isoformat(),
+            "next_due_at": next_due.isoformat(),
+        }
 
     # Process due scheduled actions first (so they aren't deferred by check work)
     try:
@@ -316,10 +384,18 @@ async def run_workspace_cycle(workspace_id: UUID, workspace_label: str) -> dict[
         _log.exception("Scheduled-action processor failed: %s", e)
         sched_executed = 0
 
+    # ---- GATE 2: per-check CHECK_CADENCE (daily / weekly / monthly) ---------
+    if force:
+        due_checks, deferred = list(config.enabled_checks), []
+    else:
+        due_checks, deferred = partition_due_checks(
+            config.enabled_checks, last_run_by_check, now
+        )
+
     cycle_id = uuid4()
     cycle_started = dt.datetime.now(tz=dt.timezone.utc)
     check_results: list[dict[str, Any]] = []
-    for check_type in config.enabled_checks:
+    for check_type in due_checks:
         result = await run_one_check(workspace_id, check_type, cycle_id, config)
         check_results.append(result)
 
@@ -333,18 +409,28 @@ async def run_workspace_cycle(workspace_id: UUID, workspace_label: str) -> dict[
 
     cycle_dur = (dt.datetime.now(tz=dt.timezone.utc) - cycle_started).total_seconds()
     _log.info(
-        "Sentinel: %s cycle=%s — %d checks, %d findings, %d actions, "
-        "%d scheduled-executed, %.1fs",
-        workspace_label, cycle_id, len(check_results),
-        total_findings, total_actions, sched_executed, cycle_dur,
+        "Sentinel: %s cycle=%s — %d/%d checks due (%d deferred by cadence), "
+        "%d findings, %d actions, %d scheduled-executed, %.1fs",
+        workspace_label, cycle_id, len(check_results), len(config.enabled_checks),
+        len(deferred), total_findings, total_actions, sched_executed, cycle_dur,
     )
+    if deferred:
+        _log.debug(
+            "Sentinel: %s deferred by cadence: %s",
+            workspace_label,
+            ", ".join(f"{d['check_type']}({d['cadence']})" for d in deferred),
+        )
 
     return {
         "workspace_id": str(workspace_id),
         "workspace_label": workspace_label,
         "cycle_id": str(cycle_id),
         "autonomy_level": config.autonomy_level.value,
+        "forced": force,
+        "checks_enabled": len(config.enabled_checks),
         "checks_run": len(check_results),
+        "checks_deferred": len(deferred),
+        "deferred": deferred,
         "findings": total_findings,
         "actions": total_actions,
         "scheduled_executed": sched_executed,
@@ -358,8 +444,14 @@ async def run_workspace_cycle(workspace_id: UUID, workspace_label: str) -> dict[
 # ---------------------------------------------------------------------------
 
 
-async def run_full_cycle(only_workspace: UUID | None = None) -> dict[str, Any]:
-    """Run one full Sentinel cycle: refresh feeds + every active workspace."""
+async def run_full_cycle(
+    only_workspace: UUID | None = None, *, force: bool = False
+) -> dict[str, Any]:
+    """Run one full Sentinel cycle: refresh feeds + every active workspace.
+
+    ``force`` bypasses the cadence gates for every workspace visited (see
+    ``run_workspace_cycle``). Never set on the daemon's scheduled ticks.
+    """
     started = dt.datetime.now(tz=dt.timezone.utc)
 
     # 1. Refresh regulatory feeds (workspace-shared)
@@ -379,7 +471,9 @@ async def run_full_cycle(only_workspace: UUID | None = None) -> dict[str, Any]:
     per_workspace: list[dict[str, Any]] = []
     for ws in workspaces:
         per_workspace.append(
-            await run_workspace_cycle(UUID(ws["id"]), ws["display_name"])
+            await run_workspace_cycle(
+                UUID(ws["id"]), ws["display_name"], force=force
+            )
         )
 
     dur = (dt.datetime.now(tz=dt.timezone.utc) - started).total_seconds()
@@ -437,12 +531,16 @@ def main() -> int:
     parser.add_argument("--once", action="store_true", help="Run one cycle then exit.")
     parser.add_argument("--workspace", type=str, default=None, help="Limit to one workspace UUID.")
     parser.add_argument("--interval", type=int, default=None,
-                        help=f"Seconds between cycles. Default {DEFAULT_INTERVAL_MINUTES*60}.")
+                        help=f"Seconds between cycles (POLLING frequency only; per-check "
+                             f"cadence still applies). Default {DEFAULT_INTERVAL_MINUTES*60}.")
+    parser.add_argument("--force", action="store_true",
+                        help="Bypass the workspace-interval and per-check cadence gates. "
+                             "For manual/debug runs — the daemon loop never forces.")
     args = parser.parse_args()
 
     only_ws = UUID(args.workspace) if args.workspace else None
     if args.once:
-        result = asyncio.run(run_full_cycle(only_ws))
+        result = asyncio.run(run_full_cycle(only_ws, force=args.force))
         import json
         print(json.dumps(result, indent=2, default=str))
         return 0
