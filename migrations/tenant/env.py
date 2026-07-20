@@ -36,18 +36,22 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 
+#: The single consolidated tenant schema (shared-table RLS model, tenant/0025+).
+#: All migrations now target this one schema; the former per-workspace
+#: accounting_ops_<uuid> schemas are gone (renamed to _deprecated_* at cutover).
+SHARED_SCHEMA = "books"
+
+
 def _tenant_schema() -> str:
     x = context.get_x_argument(as_dictionary=True)
-    schema = x.get("tenant")
-    if not schema:
-        raise RuntimeError(
-            "Pass -x tenant=<schema_name>. Example: "
-            "alembic -c alembic-tenant.ini -x tenant=accounting_ops_xxxx upgrade head"
-        )
-    # Defensive: only allow our naming convention to avoid SQL injection through the env arg.
-    if not schema.startswith("accounting_ops_") or any(
-        c not in "abcdefghijklmnopqrstuvwxyz0123456789_" for c in schema
-    ):
+    # Default to the shared schema so `alembic -c alembic-tenant.ini upgrade head`
+    # (no -x) does the right thing in the shared-table model.
+    schema = x.get("tenant") or SHARED_SCHEMA
+    # Defensive: only allow the shared schema or the legacy naming convention
+    # (still accepted during the one-time cutover) to avoid SQL injection.
+    if any(c not in "abcdefghijklmnopqrstuvwxyz0123456789_" for c in schema):
+        raise RuntimeError(f"Invalid tenant schema name: {schema!r}")
+    if schema != SHARED_SCHEMA and not schema.startswith("accounting_ops_"):
         raise RuntimeError(f"Invalid tenant schema name: {schema!r}")
     return schema
 
