@@ -72,7 +72,9 @@ from app.tools.tax_1040 import tax_compute_1040
 from app.tools.tax_flag_for_cpa_review import flag_for_cpa_review
 from app.tools.tax_get_1099_payees import get_1099_payees
 from app.tools.tax_get_current_rule import get_current_rule
+from app.tools.tax_get_form_1065_data import get_form_1065_data
 from app.tools.tax_get_form_1120_data import get_form_1120_data
+from app.tools.tax_get_form_1120s_data import get_form_1120s_data
 from app.tools.tax_get_period_journal import get_period_journal
 from app.tools.tax_get_queue_for_year import get_tax_review_queue
 from app.tools.tax_knowledge import (
@@ -111,7 +113,9 @@ __all__ = [
     "get_cash_position",
     "get_consolidated_p_and_l",
     "get_current_rule",
+    "get_form_1065_data",
     "get_form_1120_data",
+    "get_form_1120s_data",
     "get_invoice",
     "get_journal_entry",
     "get_p_and_l",

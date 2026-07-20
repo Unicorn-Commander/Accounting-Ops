@@ -30,7 +30,9 @@ from app.tools import (
     get_cash_position,
     get_consolidated_p_and_l,
     get_current_rule,
+    get_form_1065_data,
     get_form_1120_data,
+    get_form_1120s_data,
     get_invoice,
     get_journal_entry,
     get_p_and_l,
@@ -213,11 +215,13 @@ def build_server():
     server.tool()(get_tax_knowledge_doc)
 
     # =====================================================================
-    # 1120 Preparer + tax review queue
+    # Business-return preparers (1120 / 1120-S / 1065) + tax review queue
     # =====================================================================
     server.tool()(get_tax_review_queue)
     server.tool()(resolve_tax_review_item)
     server.tool()(get_form_1120_data)
+    server.tool()(get_form_1120s_data)
+    server.tool()(get_form_1065_data)
     server.tool()(get_period_journal)
     server.tool()(get_1099_payees)
     server.tool()(draft_memo)

@@ -140,10 +140,12 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     "search_tax_knowledge":          {"min_role": "viewer",     "read_only": True,  "latency_ms": 500},
     "get_tax_knowledge_doc":         {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
 
-    # ----- 1120 Preparer + tax review queue --------------------------------
+    # ----- Business-return preparers (1120/1120-S/1065) + tax review queue --
     "get_tax_review_queue":          {"min_role": "viewer",     "read_only": True,  "latency_ms": 350},
     "resolve_tax_review_item":       {"min_role": "accountant", "read_only": False, "latency_ms": 600},
     "get_form_1120_data":            {"min_role": "viewer",     "read_only": True,  "latency_ms": 800},
+    "get_form_1120s_data":           {"min_role": "viewer",     "read_only": True,  "latency_ms": 900},
+    "get_form_1065_data":            {"min_role": "viewer",     "read_only": True,  "latency_ms": 900},
     "get_period_journal":            {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
     "get_1099_payees":               {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
     # draft_memo and flag_for_cpa_review write tax_review_queue / memo rows.
