@@ -1,8 +1,17 @@
 """per-workspace schema: entity_owner (shareholders / partners)
 
-Revision ID: 0027_entity_owner
-Revises: 0026_force_rls_shared
+Revision ID: 0029_entity_owner
+Revises: 0028_fixed_asset
 Create Date: 2026-07-20
+
+Re-chained during trunk integration: this migration was authored as ``0027``
+on ``feat/derive-1120s-1065`` at the same time two sibling branches each
+authored their own ``0027``. It was renumbered to ``0029`` and re-pointed at
+``0028_fixed_asset`` so the tenant tree stays a single linear chain
+(0026 -> 0027 -> 0028 -> 0029) instead of forking into three heads. The table
+this migration creates is independent of the other two (no cross-references;
+its only FK is to the pre-existing ``entity``), so the order is arbitrary and
+carries no data dependency.
 
 The ownership layer that Forms 1120-S and 1065 need. Until now the platform
 recorded corporate legal facts on ``entity`` (authorized_shares, par_value_cents
@@ -77,8 +86,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import context, op
 
-revision: str = "0027_entity_owner"
-down_revision: str | None = "0026_force_rls_shared"
+revision: str = "0029_entity_owner"
+down_revision: str | None = "0028_fixed_asset"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

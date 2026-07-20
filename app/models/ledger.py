@@ -228,7 +228,7 @@ class Entity(WorkspaceScopedMixin, Base):
 
 # ---------------------------------------------------------------------------
 # Entity ownership (shareholders / partners) — drives Schedule K-1
-# Mirrors migrations/tenant/versions/0027_entity_owner.py
+# Mirrors migrations/tenant/versions/0029_entity_owner.py
 # ---------------------------------------------------------------------------
 
 

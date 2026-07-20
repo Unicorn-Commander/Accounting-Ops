@@ -1,8 +1,17 @@
 """per-workspace schema: fixed_asset (depreciation / Form 4562)
 
-Revision ID: 0027_fixed_asset
-Revises: 0026_force_rls_shared
+Revision ID: 0028_fixed_asset
+Revises: 0027_sentinel_check_state
 Create Date: 2026-07-20
+
+Re-chained during trunk integration: this migration was authored as ``0027``
+on ``feat/form-4562-depreciation`` at the same time two sibling branches each
+authored their own ``0027``. It was renumbered to ``0028`` and re-pointed at
+``0027_sentinel_check_state`` so the tenant tree stays a single linear chain
+(0026 -> 0027 -> 0028 -> 0029) instead of forking into three heads. The table
+this migration creates is independent of the other two (no cross-references;
+its only FK is to the pre-existing ``entity``), so the order is arbitrary and
+carries no data dependency.
 
 One tenant table:
 
@@ -47,8 +56,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import context, op
 
-revision: str = "0027_fixed_asset"
-down_revision: str | None = "0026_force_rls_shared"
+revision: str = "0028_fixed_asset"
+down_revision: str | None = "0027_sentinel_check_state"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

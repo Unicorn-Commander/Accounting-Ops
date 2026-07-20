@@ -89,35 +89,81 @@ def test_shared_client_stamps_a_draft_notice() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Migration 0027
+# Migration 0029_entity_owner
+#
+# Authored as 0027 on feat/derive-1120s-1065. Two sibling branches
+# (fix/ops-hardening, feat/form-4562-depreciation) independently authored their
+# own 0027 off the same 0026 parent, so merging all three forked the tenant tree
+# into three heads. Integration re-chained them into one linear run:
+#
+#   0026_force_rls_shared
+#     -> 0027_sentinel_check_state   (fix/ops-hardening)
+#     -> 0028_fixed_asset            (feat/form-4562-depreciation)
+#     -> 0029_entity_owner           (feat/derive-1120s-1065)
+#
+# The three tables are mutually independent, so the order carries no data
+# dependency -- but the tree must stay single-headed, which is what these
+# guards enforce.
 # ---------------------------------------------------------------------------
+
+ENTITY_OWNER_REVISION = "0029_entity_owner"
+FORCE_RLS_REVISION = "0026_force_rls_shared"
+
+
+def _tenant_script_dir():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "migrations" / "tenant"))
+    return ScriptDirectory.from_config(cfg)
 
 
 def _migration_source() -> str:
     path = (
-        REPO_ROOT / "migrations" / "tenant" / "versions" / "0027_entity_owner.py"
+        REPO_ROOT / "migrations" / "tenant" / "versions" / f"{ENTITY_OWNER_REVISION}.py"
     )
     return path.read_text()
 
 
 def test_tenant_tree_has_exactly_one_head() -> None:
-    from alembic.config import Config
-    from alembic.script import ScriptDirectory
-
-    cfg = Config(str(REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(REPO_ROOT / "migrations" / "tenant"))
-    heads = list(ScriptDirectory.from_config(cfg).get_heads())
-    assert heads == ["0027_entity_owner"], f"expected a single head, got {heads}"
+    heads = list(_tenant_script_dir().get_heads())
+    assert heads == [ENTITY_OWNER_REVISION], f"expected a single head, got {heads}"
 
 
-def test_0027_chains_from_the_force_rls_migration() -> None:
-    from alembic.config import Config
-    from alembic.script import ScriptDirectory
+def test_entity_owner_chains_back_to_the_force_rls_migration() -> None:
+    """entity_owner must sit on an unbroken chain rooted at the FORCE-RLS
+    migration -- not float on a parallel branch.
 
-    cfg = Config(str(REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(REPO_ROOT / "migrations" / "tenant"))
-    rev = ScriptDirectory.from_config(cfg).get_revision("0027_entity_owner")
-    assert rev.down_revision == "0026_force_rls_shared"
+    The original guard asserted a DIRECT 0026 parent. Re-chaining moved
+    entity_owner to the end of the run, so the invariant that actually matters
+    is walked rather than spot-checked: every hop from entity_owner back to
+    0026 must resolve, which is false the moment anyone re-forks the tree.
+    """
+    script = _tenant_script_dir()
+
+    seen: list[str] = []
+    cursor: str | None = ENTITY_OWNER_REVISION
+    while cursor is not None and cursor != FORCE_RLS_REVISION:
+        seen.append(cursor)
+        down = script.get_revision(cursor).down_revision
+        # A tuple down_revision means a merge revision -- the exact shape this
+        # re-chain exists to avoid.
+        assert isinstance(down, str) or down is None, (
+            f"{cursor} has a branching down_revision {down!r}; "
+            "the tenant tree must stay linear"
+        )
+        cursor = down
+
+    assert cursor == FORCE_RLS_REVISION, (
+        f"{ENTITY_OWNER_REVISION} does not chain back to {FORCE_RLS_REVISION}; "
+        f"walked {seen}"
+    )
+    assert seen == [
+        "0029_entity_owner",
+        "0028_fixed_asset",
+        "0027_sentinel_check_state",
+    ], f"unexpected chain shape: {seen}"
 
 
 def test_0027_applies_force_rls_itself() -> None:
