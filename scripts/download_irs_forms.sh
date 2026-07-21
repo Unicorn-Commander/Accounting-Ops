@@ -166,6 +166,15 @@ if head_check "$FW9_URL"; then
 else
     echo "  WARN  Form W-9 not available at $FW9_URL — skipping."
 fi
+# Form 7004 (Business Extension)
+F7004_URL="https://www.irs.gov/pub/irs-pdf/f7004.pdf"
+F7004_DEST="$FORMS_DIR/f7004.pdf"
+if head_check "$F7004_URL"; then
+    download_form "$F7004_DEST" "$F7004_URL" "Form 7004 (current)"
+else
+    echo "  WARN  Form 7004 not available at $F7004_URL — skipping."
+fi
+
 
 echo ""
 echo "Done. Forms cached in: $FORMS_DIR"
