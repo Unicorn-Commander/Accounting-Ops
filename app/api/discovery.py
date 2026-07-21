@@ -164,6 +164,13 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     # produce a computed 1040 work-product (writes a work_product DRAFT row).
     "tax_compute_1040":              {"min_role": "accountant", "read_only": False, "latency_ms": 1100},
 
+    # ----- Entity ownership (the Schedule K-1 input) -----------------------
+    # upsert_entity_owner writes books.entity_owner (+ a decision_audit row) —
+    # the table the 1120-S/1065 K-1 derivation reads. Admin floor: it decides
+    # who legally receives K-1 income. list is a pure viewer read.
+    "upsert_entity_owner":           {"min_role": "admin",      "read_only": False, "latency_ms": 400},
+    "list_entity_owners":            {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+
     # ----- CPA Narrative + tax status dashboard ----------------------------
     "get_tax_narrative":             {"min_role": "viewer",     "read_only": True,  "latency_ms": 350},
     "trigger_tax_narrative":         {"min_role": "accountant", "read_only": False, "latency_ms": 2000},

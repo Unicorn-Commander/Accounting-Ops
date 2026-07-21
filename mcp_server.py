@@ -53,6 +53,7 @@ from app.tools import (
     list_chart_of_accounts,
     list_closed_periods,
     list_credentials,
+    list_entity_owners,
     list_journal_entries,
     list_my_workspaces,
     list_pending_approvals,
@@ -75,6 +76,7 @@ from app.tools import (
     update_coa_account,
     upsert_account_mappings,
     upsert_ar_customer,
+    upsert_entity_owner,
     verify_journal_chain,
     void_invoice,
 )
@@ -224,6 +226,10 @@ def build_server():
     server.tool()(get_form_1120_data)
     server.tool()(get_form_1120s_data)
     server.tool()(get_form_1065_data)
+    # Entity ownership — the Schedule K-1 input the 1120-S/1065 derivation
+    # reads. Without entity_owner rows the derivation refuses to issue K-1s.
+    server.tool()(upsert_entity_owner)
+    server.tool()(list_entity_owners)
     server.tool()(get_period_journal)
     server.tool()(get_1099_payees)
     server.tool()(draft_memo)

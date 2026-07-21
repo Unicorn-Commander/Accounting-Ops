@@ -20,6 +20,7 @@ from app.tools.coa import (
     update_coa_account,
 )
 from app.tools.create_entity_with_coa import create_entity_with_coa
+from app.tools.entity_owners import list_entity_owners, upsert_entity_owner
 from app.tools.setup_assistant import (
     create_workspace,
     mark_intake_complete,
@@ -137,6 +138,7 @@ __all__ = [
     "list_chart_of_accounts",
     "list_closed_periods",
     "list_credentials",
+    "list_entity_owners",
     "list_journal_entries",
     "list_my_workspaces",
     "list_pending_approvals",
@@ -159,6 +161,7 @@ __all__ = [
     "update_coa_account",
     "upsert_account_mappings",
     "upsert_ar_customer",
+    "upsert_entity_owner",
     "verify_journal_chain",
     "void_invoice",
 ]

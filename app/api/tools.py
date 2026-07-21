@@ -33,9 +33,11 @@ from app.tools import (
     get_runway,
     get_transaction,
     link_receipt_to_transaction,
+    list_entity_owners,
     list_transactions,
     propose_payment,
     query_specialty_rules,
+    upsert_entity_owner,
 )
 
 
@@ -86,6 +88,27 @@ class ConsolidatedPLRequest(BaseModel):
     entity_ids: list[UUID] | None = None
 
 
+class EntityOwnerUpsertRequest(BaseModel):
+    """Body for POST /owners. Decimal fields are STRINGS (house pattern —
+    JSON floats lose precision); dates are YYYY-MM-DD strings."""
+
+    owner_name: str
+    effective_from: str
+    reasoning: str
+    owner_id: UUID | None = None
+    owner_type: str = "individual"
+    tax_id_last4: str | None = None
+    effective_to: str | None = None
+    shares: str | None = None
+    profit_pct: str | None = None
+    loss_pct: str | None = None
+    capital_pct: str | None = None
+    is_general_partner: bool | None = None
+    is_officer: bool | None = None
+    allocation_basis: str | None = None
+    notes: str | None = None
+
+
 def _phase_1(exc: NotImplementedError) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc)
@@ -132,6 +155,15 @@ async def http_query_specialty_rules(
         )
     except NotImplementedError as exc:
         raise _phase_1(exc) from exc
+
+
+@router.get("/owners")
+async def http_list_entity_owners(
+    ctx: EntityContext = Depends(resolve_entity),
+) -> list[dict[str, Any]]:
+    """Ownership rows (shareholders / partners) for the entity — the Schedule
+    K-1 input. Co-equal with the ``list_entity_owners`` MCP tool."""
+    return await list_entity_owners(ctx.workspace.workspace_id, ctx.entity_id)
 
 
 @router.get("/p-and-l")
@@ -235,6 +267,27 @@ async def http_add_specialty_rule(
         )
     except NotImplementedError as exc:
         raise _phase_1(exc) from exc
+
+
+@router.post("/owners")
+async def http_upsert_entity_owner(
+    body: EntityOwnerUpsertRequest,
+    ctx: EntityContext = Depends(resolve_entity),
+) -> dict:
+    """Create or correct one time-sliced ownership row (the Schedule K-1
+    input). Co-equal with the ``upsert_entity_owner`` MCP tool (agents call
+    that one); both delegate to the same implementation, which also appends
+    the ``decision_audit`` row. Validation failures map to 422.
+    """
+    require_role(ctx.workspace, "admin")
+    try:
+        return await upsert_entity_owner(
+            ctx.workspace.workspace_id, ctx.entity_id, **body.model_dump()
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
 
 
 @router.post("/payments/propose")
