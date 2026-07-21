@@ -64,7 +64,7 @@ function Hero() {
           </p>
           <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
             <a
-              href="mailto:aaron@magicunicorn.tech?subject=Accounting-Ops dev preview"
+              href="mailto:support@example.com?subject=Accounting-Ops dev preview"
               className="inline-flex items-center gap-2 rounded-md bg-brand-500 px-5 py-2.5 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600 transition"
             >
               Request dev-preview access
@@ -87,7 +87,7 @@ function Hero() {
               <span className="h-2.5 w-2.5 rounded-full bg-pending/60" />
               <span className="h-2.5 w-2.5 rounded-full bg-credit/60" />
               <span className="ml-3 font-mono text-[11px] text-ink-tertiary">
-                accounting-ops.magicunicorn.dev
+                accounting-ops.example.com
               </span>
               <span className="ml-auto flex items-center gap-1.5 text-[10px] text-ink-tertiary">
                 <span className="h-1.5 w-1.5 rounded-full bg-agent-500 animate-pulse-soft shadow-agent-glow" />
@@ -224,7 +224,7 @@ function Features() {
         <Feature
           icon={<Plug size={18} />}
           title="MCP and A2A native"
-          body="Other apps' agents call into Accounting-Ops over MCP. Our agents call out over A2A. Same skill files behind Claude, Gemini, or on-prem Qwen. Swap runtimes without rewriting your books."
+          body="Other apps' agents call into Accounting-Ops over MCP. Our agents call out over A2A. Same skill files behind Claude, Gemini, or an on-prem open model. Swap runtimes without rewriting your books."
         />
       </div>
     </section>

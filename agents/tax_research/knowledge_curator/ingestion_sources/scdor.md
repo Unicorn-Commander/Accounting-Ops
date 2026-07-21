@@ -7,7 +7,7 @@ All pages are publicly accessible without authentication.
 
 User-Agent:
 ```
-User-Agent: Accounting-Ops-TaxCurator/1.0 (aaron@magicunicorn.tech; non-commercial research)
+User-Agent: Accounting-Ops-TaxCurator/1.0 (you@example.com; non-commercial research)
 ```
 
 ## Key pages to monitor

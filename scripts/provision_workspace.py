@@ -1,14 +1,18 @@
 """Provision a new workspace + create entities + seed FalkorDB subgraph.
 
-Two-phase per the research synthesis:
-  A) public schema: CREATE SCHEMA + insert workspace registry row
-  B) subprocess: alembic upgrade head against the new schema
-Plus FalkorDB subgraph + constraints + initial entity rows.
+Shared-schema model (post tenant/0025+0026): every workspace's rows live in the
+fixed `books` schema, isolated by FORCE RLS on workspace_id. Provisioning is
+therefore rows-only:
+  A) public schema: insert the workspace registry row (postgres_schema='books')
+  B) seed entity rows into `books` (RLS WITH CHECK passes because
+     workspace_session sets app.current_workspace)
+Plus FalkorDB subgraph + initial entity rows. No CREATE SCHEMA, no per-workspace
+alembic run — schema DDL is a one-time `alembic -x tenant=books upgrade head`.
 
 Usage:
     python -m scripts.provision_workspace <workspace_uuid|new> "Display Name" \\
         [--slug auto] [--hipaa] [--tier shared|premium|enterprise] \\
-        [--entity "Magic Unicorn Inc:c_corp" --entity "Aaron Personal:personal"]
+        [--entity "Acme Inc:c_corp" --entity "Jane Personal:personal"]
 """
 from __future__ import annotations
 
@@ -33,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import get_admin_database_url  # noqa: E402
 from app.workspace_session import (  # noqa: E402
-    schema_for_workspace,
+    SHARED_SCHEMA,
     workspace_session,
 )
 
@@ -70,12 +74,15 @@ async def create_workspace_record(
     hipaa_protected: bool = False,
     isolation_tier: str = "shared",
 ) -> str:
-    schema = schema_for_workspace(str(workspace_id))
+    # Shared-schema model: no per-workspace schema is created; every workspace's
+    # rows live in the fixed SHARED_SCHEMA and are isolated by FORCE RLS on
+    # workspace_id. The registry column is kept populated (constant) for
+    # backward-compat with any reader that still selects postgres_schema.
+    schema = SHARED_SCHEMA
     subgraph = f"workspace_{str(workspace_id).replace('-', '_')}"
     bucket = f"accounting-ops-{workspace_id}"
 
     async with engine.begin() as conn:
-        await conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
         await conn.execute(
             text(
                 """
@@ -178,7 +185,7 @@ async def create_entity(
                     :id, :workspace_id, :slug, :display_name, :legal_name, CAST(:kind AS entity_type),
                     :country, :currency, :hipaa, 'active'
                 )
-                ON CONFLICT (slug) DO UPDATE
+                ON CONFLICT (workspace_id, slug) DO UPDATE
                 SET display_name = EXCLUDED.display_name,
                     legal_name = EXCLUDED.legal_name,
                     hipaa_protected = EXCLUDED.hipaa_protected
@@ -215,10 +222,12 @@ async def provision_workspace(
     `entities` is a list of (display_name, kind) tuples. kind is one of
     c_corp / s_corp / llc / partnership / sole_proprietorship / personal / trust / non_profit / estate / other.
 
-    Provisioning is an ADMIN/owner operation (CREATE SCHEMA + DDL + seed rows).
+    Shared-schema model: provisioning inserts the workspace registry row + seed
+    entity rows only (no CREATE SCHEMA, no per-schema migration). It still runs
+    on the admin/owner engine so the registry write + the seed INSERT (under
+    FORCE RLS, with app.current_workspace set by workspace_session) succeed.
     Pass `engine=None` (recommended) to use the admin engine bound to
-    ADMIN_DATABASE_URL. A passed-in engine is honored for back-compat but MUST
-    be an owner-role engine, or the CREATE SCHEMA + registry writes will fail.
+    ADMIN_DATABASE_URL.
     """
     if engine is None:
         engine = _admin_engine()
@@ -226,7 +235,10 @@ async def provision_workspace(
     schema = await create_workspace_record(
         engine, workspace_id, display_name, slug, hipaa_protected, isolation_tier
     )
-    await asyncio.to_thread(run_alembic_upgrade, schema)
+    # Shared-schema model: tables already exist in SHARED_SCHEMA, so provisioning
+    # inserts rows only — NO CREATE SCHEMA and NO per-schema alembic fan-out.
+    # (Schema DDL is a one-time `alembic -x tenant=books upgrade head`, run at
+    # deploy time via upgrade_all_workspaces / the bootstrap, not per workspace.)
     if ensure_workspace_subgraph is not None:
         try:
             await ensure_workspace_subgraph(workspace_id)
@@ -250,29 +262,22 @@ async def provision_workspace(
 
 
 async def upgrade_all_workspaces(engine: AsyncEngine | None = None) -> list[tuple[str, bool]]:
-    """Re-run tenant migrations against every active workspace schema.
+    """Bring the tenant schema up to head.
 
-    Defaults to the admin engine; the alembic subprocess itself always uses the
-    admin URL (run_alembic_upgrade), so this only needs to read the registry.
+    Shared-schema model: there is exactly ONE tenant schema (SHARED_SCHEMA), so
+    this is a single `alembic -x tenant=books upgrade head` — no per-workspace
+    fan-out. Kept as the deploy-time migration entrypoint (name preserved for
+    back-compat with the entrypoint/Makefile). The `engine` arg is unused now
+    (the alembic subprocess uses the admin URL directly) and accepted only so
+    existing callers don't break.
     """
-    if engine is None:
-        engine = _admin_engine()
-    async with engine.connect() as conn:
-        rows = (
-            await conn.execute(
-                text(
-                    "SELECT postgres_schema FROM public.workspace WHERE status = 'active'"
-                )
-            )
-        ).all()
     results: list[tuple[str, bool]] = []
-    for (schema,) in rows:
-        try:
-            await asyncio.to_thread(run_alembic_upgrade, schema)
-            results.append((schema, True))
-        except Exception as exc:
-            print(f"FAILED {schema}: {exc}", file=sys.stderr)
-            results.append((schema, False))
+    try:
+        await asyncio.to_thread(run_alembic_upgrade, SHARED_SCHEMA)
+        results.append((SHARED_SCHEMA, True))
+    except Exception as exc:
+        print(f"FAILED {SHARED_SCHEMA}: {exc}", file=sys.stderr)
+        results.append((SHARED_SCHEMA, False))
     return results
 
 
@@ -299,7 +304,7 @@ async def _cli_main() -> None:
         "--entity",
         action="append",
         default=[],
-        help="Entity to create: 'Display Name:kind' (e.g. 'Magic Unicorn Inc:c_corp'). Repeatable.",
+        help="Entity to create: 'Display Name:kind' (e.g. 'Acme Inc:c_corp'). Repeatable.",
     )
     args = parser.parse_args()
 

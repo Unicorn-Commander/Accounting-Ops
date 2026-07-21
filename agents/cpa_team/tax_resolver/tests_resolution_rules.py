@@ -192,7 +192,7 @@ def test_fp_1099_officer_escalates():
     r = resolve_item(_item(
         "flagged_position",
         form_reference="Form 1120, Line 12 / Form 1125-E",
-        content={"issue": "Aaron Stransky (CEO / officer) paid $18,000 via 1099-NEC"},
+        content={"issue": "Example Owner (CEO / officer) paid $18,000 via 1099-NEC"},
         confidence="high",
     ))
     assert r["decision"] == "escalate", r
@@ -325,7 +325,7 @@ def test_fp_941_payroll_exists_escalates():
     r = resolve_item(_item(
         "flagged_position",
         form_reference="Form 941",
-        content={"issue": "Payroll detected — W-2 wages paid to Aaron. 941 obligation exists."},
+        content={"issue": "Payroll detected — W-2 wages paid to the owner. 941 obligation exists."},
         confidence="high",
     ))
     assert r["decision"] == "escalate", r

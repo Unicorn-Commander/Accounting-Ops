@@ -9,7 +9,7 @@ app/api/stripe_oauth.py) and exposes high-level async methods:
   * list_balance_transactions(starting_after=None, limit=100, type=None, created_gte=None)
 
 Authentication: simple Bearer with the restricted API key. No token refresh —
-restricted API keys are long-lived; Aaron rotates them in the Stripe dashboard
+restricted API keys are long-lived; the operator rotates them in the Stripe dashboard
 if they leak.
 
 Retry behavior:

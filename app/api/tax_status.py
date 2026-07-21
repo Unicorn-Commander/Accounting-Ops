@@ -448,7 +448,7 @@ async def get_tax_status(
 
             # Determine jurisdictions from country_code + kind
             country = (ent.get("country_code") or "US").upper()
-            # For Magic Unicorn Inc (SC C-corp), expose both US + SC.
+            # For an SC-registered C-corp, expose both US + SC.
             # General rule: US entities get [US]; SC-registered get [US, SC].
             # We check entity slug/legal_name for SC indicator — this is a
             # heuristic until jurisdiction is a proper column.

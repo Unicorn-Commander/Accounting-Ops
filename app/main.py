@@ -11,7 +11,6 @@ from app.api.approvals import router as approvals_router
 from app.api.approval_clusters import router as approval_clusters_router
 from app.api.approval_recommendations import router as approval_recommendations_router
 from app.api.chat import router as chat_router
-from app.api.discovery import router as discovery_router
 from app.api.ebay_oauth import router as ebay_oauth_router
 from app.api.stripe_oauth import router as stripe_oauth_router
 from app.api.irs_forms import router as irs_forms_router
@@ -30,11 +29,11 @@ from app.api.cash_history import router as cash_history_router
 from app.api.lineage import router as lineage_router
 from app.api.cfo_brief import router as cfo_brief_router
 from app.api.category_overrides import router as category_overrides_router
-from app.api.clients import router as clients_router
 from app.api.contacts import router as contacts_router
-from app.api.work_inbox import router as work_inbox_router
 from app.api.credentials import router as credentials_router
+from app.api.data_rights import router as data_rights_router
 from app.api.documents import router as documents_router
+from app.api.billing import router as billing_router
 from app.api.federation import router as federation_router
 from app.api.inference_settings import router as inference_settings_router
 from app.api.invoices import router as invoices_router
@@ -52,12 +51,12 @@ from app.api.esign import router as esign_router
 from app.api.efile import router as efile_router
 from app.api.onboarding import router as onboarding_router
 from app.api.setup import router as setup_router
-from app.api.test_brigade_jwt import router as test_brigade_jwt_router
 from app.api.tools import consolidated_router, router as tools_router
 from app.api.transactions import router as transactions_router
 from app.api.workspaces import router as workspaces_router
 from app.config import get_settings
 from app.otel import audit_span_middleware, setup_otel
+from app.rate_limit import RateLimitMiddleware
 
 settings = get_settings()
 
@@ -82,16 +81,19 @@ async def lifespan(_app: FastAPI):
     # is unset (the default until commander wires the hub up). When set,
     # this fires the first discovery + starts a background refresh loop.
     shutdown_brigade_client = None
-    try:
-        from app.security.brigade_client import (
-            init_brigade_client,
-            shutdown_brigade_client as _shutdown_brigade,
-        )
+    # Brigade federation is an ENTERPRISE seam — never initialized (and its
+    # module never imported) in Community Edition.
+    if not settings.is_community:
+        try:
+            from app.security.brigade_client import (
+                init_brigade_client,
+                shutdown_brigade_client as _shutdown_brigade,
+            )
 
-        await init_brigade_client()
-        shutdown_brigade_client = _shutdown_brigade
-    except Exception:  # noqa: BLE001 - brigade client must never block startup
-        pass
+            await init_brigade_client()
+            shutdown_brigade_client = _shutdown_brigade
+        except Exception:  # noqa: BLE001 - brigade client must never block startup
+            pass
 
     try:
         session_manager = getattr(_mcp_server, "session_manager", None)
@@ -110,11 +112,19 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
-    version="0.7.1",
+    version="0.8.0",
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
 )
 app.middleware("http")(audit_span_middleware)
+# Per-tenant / per-principal rate limiting. Added AFTER audit_span_middleware so
+# Starlette places it OUTERMOST (add_middleware inserts at position 0 and the
+# stack is built outermost-first), meaning a throttled request is rejected
+# before it costs a tracing span or any routing work — which is the point on a
+# host running at high CPU steal. Self-disabling in Community Edition; see
+# app/rate_limit.py for the tier table and the per-replica caveat.
+# /healthz is exempt: throttling it would break healthchecks + monitoring.
+app.add_middleware(RateLimitMiddleware)
 setup_otel(app)
 if _mcp_http_app is not None:
     # /mcp is gated by MCPAuthMiddleware (validates the uchub Bearer and binds
@@ -125,13 +135,9 @@ app.include_router(a2a_router)
 app.include_router(workspaces_router)
 app.include_router(onboarding_router)
 app.include_router(members_router)
-app.include_router(clients_router)
 app.include_router(contacts_router)
-# Cross-client CPA "work inbox" (read-only): one merged, stalest-first list of
-# OPEN actionable items (pending approvals + open tax-review) across every
-# workspace the caller can act in. Aggregator only — touches no ledger table.
-app.include_router(work_inbox_router)
 app.include_router(credentials_router)
+app.include_router(data_rights_router)
 app.include_router(documents_router)
 app.include_router(account_mappings_router)
 app.include_router(category_overrides_router)
@@ -177,6 +183,10 @@ app.include_router(personal_access_tokens_router)
 # BYOK inference settings (additive — status/store/remove a workspace's own LLM
 # key; the chat path reads it via workspace_llm_keys.get_byok, untouched here).
 app.include_router(inference_settings_router)
+# Billing & credits STATUS (read-only) — powers the web "Billing & Credits"
+# surface. Community-safe: enterprise entitlement bits are lazy-imported inside
+# the route, so it mounts in both editions (community shows BYOK-only status).
+app.include_router(billing_router)
 app.include_router(tools_router)
 app.include_router(consolidated_router)
 # chat router was already included earlier; do not double-register
@@ -184,11 +194,52 @@ app.include_router(consolidated_router)
 app.include_router(ebay_oauth_router)
 # Stripe API key + webhook (no OAuth; webhook is unauthenticated — security via HMAC signature verification)
 app.include_router(stripe_oauth_router)
-# Discovery (no auth — Brigade federation manifest at /.well-known/mcps.json)
-app.include_router(discovery_router)
-# Brigade JWT verifier test endpoint (admin-only; used by Brigade to confirm
-# our verifier is wired correctly before pushing real federated traffic).
-app.include_router(test_brigade_jwt_router)
+
+# ---------------------------------------------------------------------------
+# ENTERPRISE-HOLD routers (suite / Brigade federation surface).
+# Mounted ONLY in the enterprise edition. In Community Edition these are neither
+# imported nor mounted — several of them (test_brigade_jwt) hard-import
+# enterprise-only modules, so the import itself is deferred behind this gate.
+#   - clients / work_inbox  : multi-client CPA console (web/app/clients/**)
+#   - discovery             : Brigade federation manifest (/.well-known/mcps.json rich form)
+#   - test_brigade_jwt      : Brigade JWT verifier smoke endpoint
+# ---------------------------------------------------------------------------
+if not settings.is_community:
+    from app.api.clients import router as clients_router
+    from app.api.work_inbox import router as work_inbox_router
+    from app.api.discovery import router as discovery_router
+    from app.api.test_brigade_jwt import router as test_brigade_jwt_router
+
+    app.include_router(clients_router)
+    # Cross-client CPA "work inbox" (read-only): one merged, stalest-first list
+    # of OPEN actionable items across every workspace the caller can act in.
+    app.include_router(work_inbox_router)
+    # Discovery (no auth — Brigade federation manifest at /.well-known/mcps.json)
+    app.include_router(discovery_router)
+    # Brigade JWT verifier test endpoint (admin-only; used by Brigade to confirm
+    # our verifier is wired correctly before pushing real federated traffic).
+    app.include_router(test_brigade_jwt_router)
+
+    # Smart-inference credit/entitlement gate → HTTP 402 with the upgrade CTA.
+    # The gate module (app.billing.inference_gate) is enterprise-hold + self-
+    # inerting; register its handler ONLY in the enterprise edition, lazy-importing
+    # the exception so app.billing never enters the community import graph.
+    # Registered against its own type so it takes precedence over any future broad
+    # PermissionError handler (SmartInferenceGateError subclasses PermissionError).
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+    from app.billing.inference_gate import SmartInferenceGateError
+
+    @app.exception_handler(SmartInferenceGateError)
+    async def _smart_inference_gate_402(_request: Request, exc: SmartInferenceGateError):
+        return JSONResponse(
+            status_code=exc.http_status,
+            content={
+                "detail": str(exc),
+                "upgrade_url": exc.upgrade_url,
+                "byok_available": exc.byok_available,
+            },
+        )
 
 
 @app.get("/healthz", tags=["system"])
@@ -221,7 +272,6 @@ async def well_known_mcp() -> dict:
     }
 
 
-@app.get("/.well-known/mcps.json", tags=["discovery"])
 async def well_known_mcps() -> dict:
     """Brigade-ingest manifest + PAT mint advertising.
 
@@ -288,6 +338,16 @@ async def well_known_mcps() -> dict:
             "consolidated_pattern": "/api/workspaces/{workspace_id}/consolidated/...",
         },
     }
+
+
+# The Brigade-ingest manifest is part of the ENTERPRISE federation surface —
+# only advertised in the enterprise edition. Community keeps the plain
+# /.well-known/mcp.json (self-host MCP endpoint) but does not publish the
+# Brigade PAT-mint / federated-auth block.
+if not settings.is_community:
+    app.add_api_route(
+        "/.well-known/mcps.json", well_known_mcps, methods=["GET"], tags=["discovery"]
+    )
 
 
 @app.get("/api/me", tags=["auth"])

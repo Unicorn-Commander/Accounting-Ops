@@ -58,7 +58,7 @@ CATEGORY_TO_ACCOUNT: dict[str, str] = {
     "Travel · Transport": "6510",
     "Meals": "6520",
     "Office · Supplies": "6400",
-    # --- Catch-up reconciliation (MU Inc, 2026-06-14): equity, COGS, contractor,
+    # --- Catch-up reconciliation (example entity): equity, COGS, contractor,
     #     services revenue, related-party loan. All target accounts already exist
     #     in the COA; these keys just wire them into the posting map (the missing
     #     keys are why these categories blocked with category_not_in_CATEGORY_TO_ACCOUNT).
@@ -69,6 +69,12 @@ CATEGORY_TO_ACCOUNT: dict[str, str] = {
     "COGS · Inventory": "5010",
     "Loan from Nate Ellison": "2400",  # related-party note payable (generic)
     "Vehicle · Repairs": "6620",  # business-use vehicle (see COA note re: accountable plan + substantiation)
+    # Depreciation expense (COA 8030). Routes to Form 1120 line 20 via
+    # CATEGORY_TO_1120 — WITHOUT this key an 8030 posting fell through the
+    # unmapped-account catch-all onto line 26 "Other deductions". The figure that
+    # belongs on line 20 is the TAX deduction from Form 4562, not book
+    # depreciation; see the Depreciation note in app/journal/tax_mapping_1120.py.
+    "Depreciation": "8030",
 }
 
 

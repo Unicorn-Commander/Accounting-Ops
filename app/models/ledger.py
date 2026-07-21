@@ -227,6 +227,116 @@ class Entity(WorkspaceScopedMixin, Base):
 
 
 # ---------------------------------------------------------------------------
+# Entity ownership (shareholders / partners) — drives Schedule K-1
+# Mirrors migrations/tenant/versions/0029_entity_owner.py
+# ---------------------------------------------------------------------------
+
+
+class OwnerType(str, enum.Enum):
+    individual = "individual"
+    entity = "entity"
+    trust = "trust"
+    estate = "estate"
+
+
+class AllocationBasis(str, enum.Enum):
+    """How an entity's items are allocated to its owners.
+
+    ``per_share_per_day`` is the S-corp statutory method (§1377(a)(1)) and is
+    computed automatically. The two ``partnership_agreement_*`` values are
+    ATTESTATIONS about what the partnership agreement says — a partnership may
+    allocate disproportionately under §704(a), so a NULL basis is treated as a
+    refusal to allocate, never as pro rata.
+    """
+
+    PER_SHARE_PER_DAY = "per_share_per_day"
+    PARTNERSHIP_AGREEMENT_PRO_RATA = "partnership_agreement_pro_rata"
+    PARTNERSHIP_AGREEMENT_SPECIAL = "partnership_agreement_special"
+
+
+class EntityOwner(EntityScopedMixin, Base):
+    """A shareholder (1120-S) or partner/member (1065), for a period.
+
+    Multiple rows per owner are expected: ownership is time-sliced by
+    ``effective_from``/``effective_to`` so a mid-year transfer is representable,
+    which is exactly what the per-share-per-day allocation consumes.
+
+    ``shares`` is the S-corp input and the percentages are the partnership
+    inputs — they are not redundant, because a percentage cannot express a
+    mid-year transfer and a partnership's profit/loss/capital percentages
+    routinely differ from one another.
+
+    Stored as a plain ``String`` rather than a PG enum to match 0027 (and to
+    avoid a schema-scoped enum type per workspace); the CHECK constraint in the
+    migration is the enforcement point.
+    """
+
+    __table_args__ = (
+        CheckConstraint(
+            "owner_type IN ('individual','entity','trust','estate')",
+            name="ck_entity_owner_type",
+        ),
+        CheckConstraint(
+            "allocation_basis IS NULL OR allocation_basis IN ("
+            "'per_share_per_day',"
+            "'partnership_agreement_pro_rata',"
+            "'partnership_agreement_special')",
+            name="ck_entity_owner_allocation_basis",
+        ),
+        CheckConstraint(
+            "effective_to IS NULL OR effective_to >= effective_from",
+            name="ck_entity_owner_period",
+        ),
+        CheckConstraint(
+            "shares IS NULL OR shares >= 0", name="ck_entity_owner_shares_nonneg"
+        ),
+        CheckConstraint(
+            "(profit_pct IS NULL OR (profit_pct >= 0 AND profit_pct <= 100)) "
+            "AND (loss_pct IS NULL OR (loss_pct >= 0 AND loss_pct <= 100)) "
+            "AND (capital_pct IS NULL OR "
+            "     (capital_pct >= 0 AND capital_pct <= 100))",
+            name="ck_entity_owner_pct_range",
+        ),
+        Index("ix_entity_owner_entity_period", "entity_id", "effective_from"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    owner_name: Mapped[str] = mapped_column(String(300), nullable=False)
+    owner_type: Mapped[str] = mapped_column(
+        String(24), nullable=False, server_default=OwnerType.individual.value
+    )
+    #: Last 4 of SSN/EIN only — the full identifier belongs in the encrypted
+    #: document path, not in a table a reporting sidecar reads.
+    tax_id_last4: Mapped[str | None] = mapped_column(String(4))
+
+    effective_from: Mapped[date] = mapped_column(Date, nullable=False)
+    effective_to: Mapped[date | None] = mapped_column(Date)
+
+    #: S corporation — share count held during this period (§1377(a)(1)).
+    shares: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+
+    #: Partnership / LLC — percentages 0..100. May legitimately differ.
+    profit_pct: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    loss_pct: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    capital_pct: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+
+    is_general_partner: Mapped[bool | None] = mapped_column(Boolean)
+    is_officer: Mapped[bool | None] = mapped_column(Boolean)
+
+    allocation_basis: Mapped[str | None] = mapped_column(String(48))
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+# ---------------------------------------------------------------------------
 # Event log (entity-scoped, append-only)
 # ---------------------------------------------------------------------------
 
@@ -439,6 +549,128 @@ class WorkProduct(EntityScopedMixin, Base):
     # Optional immutable snapshot key (a finalized artifact persisted to object
     # storage). Null = re-render on demand from ``inputs``.
     garage_key: Mapped[str | None] = mapped_column(String(512))
+    created_by_uc_uid: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class FixedAsset(EntityScopedMixin, Base):
+    """One depreciable fixed asset on an entity's books.
+
+    WHY THIS IS A TABLE AND NOT A CALLER-SUPPLIED LIST
+    -------------------------------------------------
+    Depreciation is inherently multi-year and stateful: an asset placed in
+    service in 2023 must still produce the right 2026 deduction, using the
+    convention and the §168(k) percentage that were fixed AT PLACEMENT — not the
+    2026 ones. If the asset list were supplied per-call, the 2026 return would
+    silently depend on the caller correctly re-typing 2023 facts, which is
+    exactly the fabrication risk the platform exists to eliminate (a mistyped
+    prior-year §179 or bonus figure produces a wrong basis with nothing to catch
+    it). Persisting the asset makes the basis history auditable, lets the
+    §179 carryforward chain year to year, and matches the product's thesis of
+    deriving the return FROM THE BOOKS.
+
+    The row is the ``source_ref`` anchor for every Form 4562 figure derived from
+    it, so a reviewer can trace a line on the form back to an asset record.
+    """
+
+    __table_args__ = (
+        Index("ix_fixed_asset_workspace", "workspace_id"),
+        Index("ix_fixed_asset_entity_placed", "entity_id", "placed_in_service"),
+        CheckConstraint("cost_cents >= 0", name="ck_fixed_asset_cost_nonneg"),
+        CheckConstraint(
+            "business_use_pct >= 0 AND business_use_pct <= 100",
+            name="ck_fixed_asset_business_use_pct",
+        ),
+        CheckConstraint(
+            "recovery_period_years > 0", name="ck_fixed_asset_recovery_positive"
+        ),
+        CheckConstraint(
+            "depreciation_system IN ('GDS','ADS')",
+            name="ck_fixed_asset_system",
+        ),
+        CheckConstraint(
+            "method IS NULL OR method IN ('200DB','150DB','S/L')",
+            name="ck_fixed_asset_method",
+        ),
+        CheckConstraint(
+            "convention IS NULL OR convention IN ('HY','MQ','MM')",
+            name="ck_fixed_asset_convention",
+        ),
+        CheckConstraint(
+            "listed_property_type IS NULL OR listed_property_type IN "
+            "('passenger_auto','heavy_vehicle','other_listed')",
+            name="ck_fixed_asset_listed_type",
+        ),
+        # A listed asset MUST declare its type — the §280F(a) caps depend on it.
+        CheckConstraint(
+            "NOT is_listed_property OR listed_property_type IS NOT NULL",
+            name="ck_fixed_asset_listed_type_required",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    description: Mapped[str] = mapped_column(String(300), nullable=False)
+    # Optional client-facing asset tag / serial.
+    asset_tag: Mapped[str | None] = mapped_column(String(64))
+    placed_in_service: Mapped[date] = mapped_column(Date, nullable=False)
+    # When the property was ACQUIRED (binding contract / purchase date). This is
+    # NOT redundant with placed_in_service: from TY2025 the §168(k) percentage
+    # turns on whether acquisition was after the OBBBA cutoff (2025-01-19), so a
+    # 2025 asset acquired in 2024 gets 40% while one acquired in March 2025 gets
+    # 100%. The engine REFUSES to guess when this is null.
+    acquired_on: Mapped[date | None] = mapped_column(Date)
+    cost_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # GDS/ADS recovery period in years (3, 5, 7, 10, 15, 20, 25, 27.5, 39, …).
+    recovery_period_years: Mapped[Decimal] = mapped_column(
+        Numeric(4, 1), nullable=False
+    )
+    depreciation_system: Mapped[str] = mapped_column(
+        String(3), nullable=False, server_default=text("'GDS'")
+    )
+    # NULL = derive from §168(b)/(d) (the normal case). Set only to record a
+    # taxpayer election (e.g. §168(b)(5) straight-line election) or the
+    # convention that actually applied in a prior placement year.
+    method: Mapped[str | None] = mapped_column(String(8))
+    convention: Mapped[str | None] = mapped_column(String(2))
+    # §280F qualified business/investment use percentage.
+    business_use_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), nullable=False, server_default=text("100")
+    )
+    is_listed_property: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # REQUIRED whenever is_listed_property: 'passenger_auto' (§280F(d)(5), GVW
+    # <= 6,000 lbs — subject to the §280F(a) dollar caps), 'heavy_vehicle'
+    # (>6,000 lbs, listed but uncapped), or 'other_listed'. The engine REFUSES to
+    # infer this, because defaulting it the wrong way over-deducts a vehicle.
+    listed_property_type: Mapped[str | None] = mapped_column(String(16))
+    # §179 elected in the placement year (0 = none elected).
+    section_179_elected_cents: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    # §168(k)(7) irrevocable election out of bonus.
+    bonus_elected_out: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # For assets placed in service BEFORE the engine's supported config window:
+    # the §179 / §168(k) amounts actually taken that year. The engine refuses to
+    # guess these, so they must be recorded when migrating historical books.
+    prior_section_179_cents: Mapped[int | None] = mapped_column(BigInteger)
+    prior_bonus_cents: Mapped[int | None] = mapped_column(BigInteger)
+    # Disposal (stops the schedule; gain/loss handled on Form 4797, not here).
+    disposed_on: Mapped[date | None] = mapped_column(Date)
+    disposal_proceeds_cents: Mapped[int | None] = mapped_column(BigInteger)
+    # Where this asset came from (an invoice, a journal entry, an intake) — the
+    # provenance anchor carried onto every Form 4562 figure derived from it.
+    source_ref: Mapped[str | None] = mapped_column(String(300))
+    notes: Mapped[str | None] = mapped_column(Text)
     created_by_uc_uid: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")

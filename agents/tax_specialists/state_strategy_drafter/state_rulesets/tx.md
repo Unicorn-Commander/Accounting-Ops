@@ -146,5 +146,5 @@ Known framework (verify):
 - [ ] Add TX.10 — TX local taxes (some Texas cities/counties have local sales tax — verify)
 - [ ] Add TX.11 — TX no-individual-income-tax note (relevant for officer compensation planning)
 
-**Assigned to:** CPA Mosin / NorthbridgeTax or equivalent TX-licensed tax counsel.
+**Assigned to:** CPA the CPA / NorthbridgeTax or equivalent TX-licensed tax counsel.
 **Priority:** P2 unless entity has significant TX revenue approaching $500K (sales tax nexus) or TX employees.

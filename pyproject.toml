@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "accounting-ops"
-version = "0.7.1"
+version = "0.8.0"
 description = "Agent-first, MCP-first financial operations platform for Magic Unicorn Inc."
 requires-python = ">=3.12"
 dependencies = [
@@ -46,6 +46,14 @@ dev = [
   "pytest>=8.3.3",
   "pytest-asyncio>=0.24.0",
   "ruff>=0.6.9",
+]
+# Cross-replica rate limiting (app/rate_limit.py). NOT needed for the default
+# deployment: the limiter's in-process backend is exact while `app` runs a
+# single replica, and there is no Redis/valkey in the compose stack. Install
+# this extra and set AO_RATE_LIMIT_REDIS_URL only if the app is scaled out, so
+# the replicas share one ceiling instead of each enforcing its own.
+ratelimit = [
+  "redis>=5.0.0",
 ]
 # Tax-agent specialist runner dependencies.
 # Not in main deps — only needed for agents/tax_specialists/*/run_specialist.py.

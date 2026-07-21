@@ -80,7 +80,7 @@ def _make_ctx(monkeypatch, *, audit_records=None, stream_events=None,
     ctx = deleg.DelegationContext(
         workspace_id=WID,
         entity_id=EID,
-        user_uc_uid="aaron",
+        user_uc_uid="jane",
         user_bearer_token=BEARER,
         tax_year=2023,
         cfo_agent_id="cfo-agent",
@@ -320,7 +320,7 @@ async def test_audit_sink_failure_does_not_break_consult(monkeypatch):
         raise RuntimeError("db down")
 
     ctx = deleg.DelegationContext(
-        workspace_id=WID, entity_id=EID, user_uc_uid="aaron",
+        workspace_id=WID, entity_id=EID, user_uc_uid="jane",
         user_bearer_token=BEARER, tax_year=2023, audit_sink=_boom_sink,
     )
     import agents.chat.runner as runner_mod
@@ -519,7 +519,7 @@ async def test_runner_consult_is_silent_and_dispatched_in_process(monkeypatch):
         records.append(rec)
 
     ctx = deleg.DelegationContext(
-        workspace_id=WID, entity_id=EID, user_uc_uid="aaron",
+        workspace_id=WID, entity_id=EID, user_uc_uid="jane",
         user_bearer_token=BEARER, tax_year=2023, audit_sink=_sink,
     )
 

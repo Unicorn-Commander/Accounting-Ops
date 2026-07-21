@@ -694,7 +694,7 @@ async def add_client(
             status_code=403,
             detail=(
                 "Onboarding a client requires an existing CPA, accountant, or "
-                "owner role. Ask Aaron/Shafen to seed your practice workspace "
+                "owner role. Ask a platform admin to seed your practice workspace "
                 "first."
             ),
         )

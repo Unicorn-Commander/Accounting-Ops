@@ -8,10 +8,10 @@ Maps external bank/payment-processor accounts (identified by source +
 external_id) to a specific entity within the workspace. Powers the
 EntitySelector's filter on transactions + cash position.
 
-Example mapping rows in Aaron's workspace:
-  (simplefin, ACC-bofa-1792, Bank of America, Magic Unicorn Checking (1792)) -> Magic Unicorn Inc
-  (simplefin, ACC-usaa-2849, USAA, Checking (2849)) -> Aaron Stransky Personal
-  (simplefin, ACC-usaa-4045, USAA, Signature Visa (4045)) -> Aaron Stransky Personal
+Example mapping rows in a workspace:
+  (simplefin, ACC-bank-0001, Example Bank, Business Checking (0001)) -> Acme Inc
+  (simplefin, ACC-bank-0002, Example Bank, Checking (0002)) -> Owner Personal
+  (simplefin, ACC-bank-0003, Example Bank, Signature Visa (0003)) -> Owner Personal
 """
 from collections.abc import Sequence
 

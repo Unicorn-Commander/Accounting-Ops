@@ -153,7 +153,7 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
                         actions += 1
 
                 # SC1120 — only if SC-registered (proxy: country_code US and entity has SC presence)
-                # For Magic Unicorn (SC C-Corp), this fires. Other US C-Corps without
+                # For Acme (SC C-Corp), this fires. Other US C-Corps without
                 # SC presence get a false positive; future: add jurisdiction column.
                 if ent.country_code == "US":
                     sc_due = sc1120_deadline(tax_year)

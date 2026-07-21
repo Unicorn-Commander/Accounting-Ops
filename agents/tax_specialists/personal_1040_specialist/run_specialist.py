@@ -11,8 +11,8 @@ Supports two backends:
   (>= 1.0) aimed at any OpenAI-compatible endpoint (e.g. OpenRouter with
   anthropic/claude-sonnet-4.6). Implements a manual MCP tool-call loop.
 
-Default entity: Aaron Stransky personal (a5dbe5e7-3c1f-5cb2-9f7c-95b5f3f1d4e2)
-Default workspace: 77753ea5-efe9-5539-a846-6b20ddc841b9
+Default entity: Example Owner personal (22222222-2222-2222-2222-222222222222)
+Default workspace: 00000000-0000-0000-0000-000000000000
 
 Usage — Anthropic backend::
 
@@ -20,10 +20,10 @@ Usage — Anthropic backend::
     export ACCTOPS_SERVICE_TOKEN="<keycloak-service-token>"
 
     python agents/tax_specialists/personal_1040_specialist/run_specialist.py \\
-        --workspace-id 77753ea5-efe9-5539-a846-6b20ddc841b9 \\
-        --entity-id    a5dbe5e7-3c1f-5cb2-9f7c-95b5f3f1d4e2 \\
+        --workspace-id 00000000-0000-0000-0000-000000000000 \\
+        --entity-id    22222222-2222-2222-2222-222222222222 \\
         --tax-year     2024 \\
-        --output       ./drafts/aaron-personal-2024-1040-draft.md \\
+        --output       ./drafts/owner-personal-2024-1040-draft.md \\
         --model        sonnet
 
 Usage — OpenRouter (openai-compatible) backend::
@@ -32,29 +32,29 @@ Usage — OpenRouter (openai-compatible) backend::
     export OPENROUTER_KEY="sk-or-..."
 
     python agents/tax_specialists/personal_1040_specialist/run_specialist.py \\
-        --workspace-id 77753ea5-efe9-5539-a846-6b20ddc841b9 \\
-        --entity-id    a5dbe5e7-3c1f-5cb2-9f7c-95b5f3f1d4e2 \\
+        --workspace-id 00000000-0000-0000-0000-000000000000 \\
+        --entity-id    22222222-2222-2222-2222-222222222222 \\
         --tax-year     2024 \\
         --mcp-url      http://localhost:8000/mcp/ \\
-        --output       /drafts/aaron-personal-2024-1040-draft.md \\
+        --output       /drafts/owner-personal-2024-1040-draft.md \\
         --backend      openai \\
         --llm-endpoint-url https://openrouter.ai/api/v1 \\
         --llm-model    anthropic/claude-sonnet-4.6 \\
         --llm-api-key  "$OPENROUTER_KEY" \\
         --verbose
 
-Usage — dogfood run on midboy1::
+Usage — dogfood run on <host>::
 
-    ssh muut@midboy1
-    TOKEN=$(cat /home/muut/.tax-1120-preparer.token)
-    OPENROUTER_KEY=$(cat /home/muut/.openrouter.key)
+    ssh user@<host>
+    TOKEN=$(cat /home/user/.tax-1120-preparer.token)
+    OPENROUTER_KEY=$(cat /home/user/.openrouter.key)
     docker exec -e ACCTOPS_SERVICE_TOKEN="$TOKEN" accounting_ops-app-1 \\
       python /app/agents/tax_specialists/personal_1040_specialist/run_specialist.py \\
-        --workspace-id 77753ea5-efe9-5539-a846-6b20ddc841b9 \\
-        --entity-id    a5dbe5e7-3c1f-5cb2-9f7c-95b5f3f1d4e2 \\
+        --workspace-id 00000000-0000-0000-0000-000000000000 \\
+        --entity-id    22222222-2222-2222-2222-222222222222 \\
         --tax-year     2024 \\
         --mcp-url      http://localhost:8000/mcp/ \\
-        --output       /drafts/aaron-personal-2024-1040-draft.md \\
+        --output       /drafts/owner-personal-2024-1040-draft.md \\
         --backend      openai \\
         --llm-endpoint-url https://openrouter.ai/api/v1 \\
         --llm-model    anthropic/claude-sonnet-4.6 \\
@@ -79,7 +79,7 @@ Notes:
 
 - Both paths share the same system_prompt.md and worked examples — only the LLM
   client differs.
-- The personal entity (a5dbe5e7) may have sparse journal data. The specialist handles
+- The personal entity (22222222) may have sparse journal data. The specialist handles
   this gracefully: it flags all missing documents and uses placeholder values only.
 - Output directory is created automatically if it does not exist.
 - The specialist's five mandatory veteran flags (VA rating, CRDP/CRSC election,
@@ -131,9 +131,11 @@ _DEFAULT_LLM_ENDPOINT_URL = "http://localhost:8088/v1"
 _DEFAULT_LLM_MODEL = "anthropic/claude-sonnet-4.6"
 _DEFAULT_LLM_API_KEY = "local-qwen"
 
-# Default entity and workspace for Aaron Personal
-_DEFAULT_ENTITY_ID = "a5dbe5e7-3c1f-5cb2-9f7c-95b5f3f1d4e2"
-_DEFAULT_WORKSPACE_ID = "77753ea5-efe9-5539-a846-6b20ddc841b9"
+# Default entity and workspace. These are env-driven so the runner can be
+# pointed at any workspace/entity; the zero-UUID fallbacks are inert
+# placeholders that must be overridden via env or --workspace-id/--entity-id.
+_DEFAULT_ENTITY_ID = os.getenv("SPECIALIST_ENTITY_ID", "00000000-0000-0000-0000-000000000000")
+_DEFAULT_WORKSPACE_ID = os.getenv("SPECIALIST_WORKSPACE_ID", "00000000-0000-0000-0000-000000000000")
 
 _MODEL_MAP = {
     "sonnet": "claude-sonnet-4-6",
@@ -219,7 +221,7 @@ def _build_user_message(
     Parameters
     ----------
     workspace_id:      Workspace UUID.
-    entity_id:         Entity UUID (default: Aaron Personal).
+    entity_id:         Entity UUID (default: Owner Personal).
     tax_year:          Four-digit tax year.
     va_rating:         Optional known VA disability rating percentage (e.g. 60).
     crdp_crsc:         Optional known election: "CRDP" or "CRSC".
@@ -755,7 +757,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run the Personal 1040 Specialist and write a DRAFT 1040 package "
-            "to the specified output file. Defaults to Aaron Personal entity."
+            "to the specified output file. Defaults to Owner Personal entity."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent(f"""\
@@ -774,19 +776,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
             {HELP_TEXT_LLM_API_KEY}
 
-            Default entity: Aaron Personal (a5dbe5e7-3c1f-5cb2-9f7c-95b5f3f1d4e2)
-            Default workspace: 77753ea5-efe9-5539-a846-6b20ddc841b9
+            Default entity: Owner Personal (22222222-2222-2222-2222-222222222222)
+            Default workspace: 00000000-0000-0000-0000-000000000000
         """),
     )
     parser.add_argument(
         "--workspace-id",
         default=_DEFAULT_WORKSPACE_ID,
-        help=f"Workspace UUID (default: Aaron workspace {_DEFAULT_WORKSPACE_ID})",
+        help=f"Workspace UUID (default: the owner workspace {_DEFAULT_WORKSPACE_ID})",
     )
     parser.add_argument(
         "--entity-id",
         default=_DEFAULT_ENTITY_ID,
-        help=f"Entity UUID (default: Aaron Personal {_DEFAULT_ENTITY_ID})",
+        help=f"Entity UUID (default: Owner Personal {_DEFAULT_ENTITY_ID})",
     )
     parser.add_argument(
         "--tax-year",

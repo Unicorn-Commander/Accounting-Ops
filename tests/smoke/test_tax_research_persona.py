@@ -81,7 +81,7 @@ def test_tax_research_system_prompt_builds_with_preamble():
         workspace_id="00000000-0000-0000-0000-000000000001",
         entity_id="00000000-0000-0000-0000-000000000002",
         tax_year=None,  # needs_tax_year=False
-        user_uc_uid="aaron",
+        user_uc_uid="jane",
     )
     assert len(sp) > 500
     assert "Tax Research" in sp

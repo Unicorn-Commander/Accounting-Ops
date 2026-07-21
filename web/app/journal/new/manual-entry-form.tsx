@@ -277,7 +277,7 @@ export function ManualEntryForm({
             type="text"
             value={payee}
             onChange={(e) => setPayee(e.target.value)}
-            placeholder="e.g. Aaron Stransky"
+            placeholder="e.g. Jane Smith"
             className="w-full rounded-md border border-default bg-canvas py-1.5 px-3 text-sm"
           />
         </Field>

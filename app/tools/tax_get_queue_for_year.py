@@ -6,7 +6,7 @@ narrative agent can write coherent section-level prose.
 
 Returns structured data the narrative agent ingests. All statuses are included by
 default so the narrative can distinguish between "items we resolved" (decisions made)
-and "items still pending" (TO-DOs for Morgan).
+and "items still pending" (TO-DOs for the CPA).
 
 Role floor: viewer (same as the existing GET /tax-review-queue endpoint).
 """
@@ -34,7 +34,7 @@ async def get_tax_review_queue(
     """Return all tax_review_queue items for (entity, year) grouped by form_reference.
 
     Fetches the complete queue for the entity-year so the CPA Narrative Generator
-    can synthesize decisions made vs. items still requiring Morgan's judgment.
+    can synthesize decisions made vs. items still requiring the CPA's judgment.
 
     Args:
         workspace_id: Workspace UUID.

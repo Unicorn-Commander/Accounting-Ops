@@ -109,7 +109,7 @@ def _base_claims(**overrides) -> dict:
     now = int(time.time())
     claims = {
         "iss": TRUSTED_ISS,
-        "sub": "aaron",
+        "sub": "jane",
         "aud": EXPECTED_AUD,
         "iat": now - 5,
         "nbf": now - 5,
@@ -159,7 +159,7 @@ async def test_ed25519_happy_path():
     token = _mint_ed25519(_ED_PRIV, _base_claims())
     claims = await bj.verify_brigade_jwt(token)
     assert claims is not None
-    assert claims["sub"] == "aaron"
+    assert claims["sub"] == "jane"
     assert claims["aud"] == EXPECTED_AUD
 
 
@@ -167,7 +167,7 @@ async def test_rs256_happy_path():
     token = _mint_rs256(_RS_PRIV, _base_claims())
     claims = await bj.verify_brigade_jwt(token)
     assert claims is not None
-    assert claims["sub"] == "aaron"
+    assert claims["sub"] == "jane"
 
 
 async def test_aud_list_including_app_accepted():

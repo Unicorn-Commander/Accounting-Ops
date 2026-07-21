@@ -1,5 +1,64 @@
-# Professional-Substitute Layer
+# The professional-substitute stance
 
+Accounting-Ops is built to be an **autonomous professional substitute**, not a
+form-filler you babysit. The agents are designed to do the work a bookkeeper or
+staff accountant would do — end to end — and to keep going without asking for
+permission at every step. Where a traditional tool stops at "here's a suggestion,
+you decide," Accounting-Ops is willing to *do the job*: categorize, post,
+reconcile, draft the statements, assemble the package.
+
+> **This is a design stance, not a legal claim.** Accounting-Ops is software. It
+> is **not** a CPA, an Enrolled Agent, a tax preparer, an attorney, or a
+> fiduciary, and using it creates no professional relationship. You are
+> responsible for everything you file, sign, or pay. See
+> [DISCLAIMER.md](../DISCLAIMER.md).
+
+## Optional autonomy, not mandated human-in-the-loop
+
+The default is that the agent gets real work done. Human review is a **control
+you can turn up or down**, not a tax on every action:
+
+- **Deterministic auto-post** for low-risk, high-confidence work (rule-matched,
+  entity-mapped, sign-consistent, below the materiality threshold).
+- **Queue for confirm** for mid-materiality or model-suggested items.
+- **Hard block** for high-materiality items and for substantiation-required
+  categories (e.g. travel/meals without a receipt) — these require an explicit
+  human confirmation and a memo.
+
+You set where those lines fall. Nothing forces a human into the loop for routine
+bookkeeping; the guards exist for the cases that actually warrant a second look.
+
+## The guardrails that make autonomy safe
+
+Autonomy is paired with hard, auditable guards:
+
+- **Append-only ledger with a hash chain.** Postings are immutable; corrections
+  are *new* reversing entries, and `verify_chain` proves the history wasn't
+  altered.
+- **Provenance-or-nothing.** The software refuses to fabricate a figure it can't
+  trace to a source — it returns an error rather than inventing a number.
+- **Draft / "do not file" watermarks** on every generated tax document.
+- **No transmission, no money movement.** In the Community Edition there is no
+  e-file (MeF), no state-portal submission, no EFTPS, no e-sign, and no
+  trades/transfers/payments on your behalf (see [DISCLAIMER.md](../DISCLAIMER.md)).
+
+## CPA review is optional — and encouraged where it counts
+
+For anything with legal or financial consequence — a tax return, a filing with a
+government agency, financial statements a third party will rely on — have a
+qualified, licensed professional review it. Accounting-Ops makes that review
+*cheaper and faster* by producing clean, sourced, verifiable work — but it does
+not replace the professional's judgment or their license. The choice to involve
+one is yours.
+
+**Your books. Your machine. Your rules.**
+
+---
+
+# Charter and implementation record
+
+_Added 2026-06-25. Governs the autonomous tax/finance work-product features._
+_This section is the engineering charter behind the stance above._
 _Added 2026-06-25. Governs the autonomous tax/finance work-product features._
 
 ## Posture (charter)
@@ -38,6 +97,38 @@ not a to-do list. Three principles govern it:
 | Work-products API | `app/api/work_products.py` | List/detail, `GET …/document.pdf` (re-render + watermark-by-status + provenance guard + audit), `POST …/attest` (the bypassable self-attest gate). |
 | Last-mile UI | `web/app/taxes/w-4p/` | Preview + self-certify card (gated on policy) + download + plain-language "give to your payer, not the IRS" guidance. |
 | Dormant submission rail | `app/submission/rail.py`, `app/api/submission.py` | `SubmissionRail` protocol + adapters. Only `PAPER_PRINT` enabled; e-file/state/EFTPS/e-sign present but raise `FeatureDisabled` (3 gates + kill-switch; even gated, `execute` is a deliberate no-op-raise today). |
+| Depreciation engine + Form 4562 | `app/tax/engines/depreciation.py`, `app/tax/engines/configs_depreciation.py`, `app/tax/engines/macrs_tables.py`, `app/tax/compute_4562.py`, `app/exports/f4562_field_map.py`, `app/exports/f4562_fill.py`, `FixedAsset` model + migration `0027` | The **second computed form**. MACRS (GDS/ADS, half-year / mid-quarter / mid-month, the §168(d)(3) 40% trigger), §179 with the investment phase-out + taxable-income limit + carryforward, §168(k) bonus, §280F listed property **including the §280F(a) passenger-auto dollar caps**. Year constants are cited to IRS Pub 946 and an unsupported year RAISES. Assets persist in `fixed_asset` because depreciation is multi-year state. |
+
+### Form 4562: four things that will bite a future maintainer
+
+1. **The Part III class rows MOVED in the 2025 revision.** A new "50-year
+   property" row at 19h pushed residential rental from 19h→19i and
+   nonresidential real from 19i→19j (Section C gained a 50-year row at 20e, and
+   line 23 split into 23a/23b). Reusing the 2024 map on the 2025 form files
+   residential rental depreciation in the 50-year row — a real number on the
+   wrong line, silently. The engine therefore keys Part III by **recovery
+   period**, `f4562_field_map` owns the per-revision row mapping, and an unmapped
+   year raises. `tests/unit/test_form_4562_render.py` asserts the shift on the
+   RENDERED PDF, not just the map.
+2. **§168(k) depends on the ACQUISITION date from TY2025**, not only the
+   placed-in-service date: OBBBA (P.L. 119-21) reinstated 100% for property
+   acquired after 2025-01-19, while earlier-acquired property placed in service
+   in 2025 stays at 40%. An asset with no `acquired_on` cannot be resolved and
+   the engine raises rather than picking one.
+3. **Real property does NOT use the computed path — it reads the published
+   tables**, and computing it is wrong. The IRS built the mid-month rows by
+   rounding the monthly increment and accumulating, so a January 39-year
+   placement is the published **2.461%**, not the first-principles 2.4573%. The
+   mid-month classes look up `macrs_tables` (reconstructed from Pub 946
+   Appendix A and validated by "every month column sums to exactly 100.000%")
+   and RAISE for a class with no table on file. Personal property is still
+   computed — that route does reproduce Tables A-1 through A-5.
+4. **A listed asset must declare `listed_property_type`.** `passenger_auto`
+   (§280F(d)(5), GVW ≤ 6,000 lbs) is subject to the §280F(a) dollar caps;
+   `heavy_vehicle` is not. The engine refuses to infer it, because defaulting
+   the wrong way silently over-deducts a vehicle — an uncapped $90,000 car would
+   deduct $61,200 in year 1 instead of the statutory $20,400. Caps are on file
+   for placement years 2018-2025; a 2026 placement raises.
 | Local-first chat routing | `agents/chat/inference_config.py`, `app/config.py` | New tier after BYOK: sovereign local qwen (`AO_CHAT_LOCAL_*`) when `EngagementPolicy.prefer_local_inference` is on; cloud is the fallback. Default-safe (off ⇒ unchanged). |
 
 ## The bypassable gate, concretely
@@ -55,11 +146,15 @@ unrelated and untouched).
 
 ## Adding another form
 
-1. A deterministic worksheet in `app/tax/` (year-aware, raises on unsupported year, surfaces
-   assumptions) if the form needs computed lines.
+1. A deterministic worksheet/engine in `app/tax/` (year-aware, raises on unsupported year,
+   surfaces assumptions) if the form needs computed lines. Year constants belong in a separate
+   `configs_*.py` with a `SUPPORTED_TAX_YEARS` tuple and a citation for every figure.
 2. A field map + a `render_<kind>(tax_year, watermark_mode, inputs)` renderer in `app/exports/`,
    reusing `_render_acroform_pdf` (AcroForm) or `_apply_watermark` (generated letters).
-3. A dispatch branch in `app/api/work_products.py::_render_work_product`.
+   **Verify every AcroForm name against the actual PDF** — a name that does not exist fills
+   nothing and fails silently. See `tests/unit/test_form_4562_render.py` for the pattern.
+3. One `FormSpec` entry in `app/exports/form_registry.py`. (No dispatch branch is needed any
+   more — `app/api/work_products.py::_render_work_product` dispatches through the registry.)
 4. A creator tool in `app/tools/` (reads sources for provenance, writes a DRAFT `WorkProduct`),
    wired into `app/tools/__init__.py`, `mcp_server.py`, the persona allow-lists, and
    `app/api/discovery.py::_TOOL_METADATA`.

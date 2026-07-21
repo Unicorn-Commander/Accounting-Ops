@@ -324,7 +324,7 @@ def _build_sc1120_values_from_package(
     SC1120 line 6 = SC net income subject to tax = line 4 - line 5.
     SC1120 line 7 = SC income tax = line 6 × 5%.
 
-    For MU Inc TY 2023: federal taxable income = -$3,670.79 → SC line 1 -3670 →
+    Example (a loss year): federal taxable income = -$3,670.79 → SC line 1 -3670 →
     SC line 3 -3670 → SC line 4 -3670 → SC line 5 (no carryover yet) blank →
     SC line 6 -3670 → SC line 7 $0 (loss year).
     """
@@ -342,7 +342,7 @@ def _build_sc1120_values_from_package(
         values["1"] = line1_str
         # Line 3 = line 1 + line 2 (line 2 = 0 by default; CPA fills if any)
         values["3"] = line1_str
-        # Line 4 = line 3 for single-state SC corp (MU Inc)
+        # Line 4 = line 3 for a single-state SC corp
         values["4"] = line1_str
         # Line 6 = line 4 - line 5; assume line 5 blank → line 6 = line 4
         values["6"] = line1_str
@@ -427,7 +427,7 @@ def build_sc1120_context(
     queue_overrides = _build_sc1120_values_from_queue(queue_items)
     page1.update(queue_overrides)
 
-    # For MU Inc / pre-revenue: license fee line is on page 2 (Part II);
+    # For a pre-revenue corp: license fee line is on page 2 (Part II);
     # we don't auto-fill page 2 yet — the CPA fills it manually.
 
     all_lines = set(SC1120_PAGE1_LINE_COORDS.keys())
@@ -496,7 +496,7 @@ def generate_sc1120v_pdf(
 ) -> bytes:
     """Generate a DRAFT-watermarked, pre-filled SC1120-V (payment voucher) PDF.
 
-    For MU Inc TY 2023: license fee $25.00 → payment_amount_cents=2500.
+    Example: license fee $25.00 → payment_amount_cents=2500.
     """
     if not SC1120V_SOURCE_PDF.exists():
         raise FileNotFoundError(

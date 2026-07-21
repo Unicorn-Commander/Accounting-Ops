@@ -45,7 +45,7 @@ class EntityContext:
 # Use require_role(ctx, "accountant") for write ops.
 #
 # 3-persona expansion (2026-05-30) added:
-#   - platform_admin: highest — global Magic Unicorn operators (Aaron, Shafen)
+#   - platform_admin: highest — global platform operators
 #   - client_owner:   alias of owner for end-customer-purchased workspaces
 #                     (semantic distinction — same privilege level)
 #   - cpa:            external accountant invited across multiple workspaces

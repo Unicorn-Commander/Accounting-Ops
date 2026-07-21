@@ -24,6 +24,36 @@ endif
 test:
 	$(PYTEST) tests/smoke -v
 
+# ---------------------------------------------------------------------------
+# Community Edition self-host
+# ---------------------------------------------------------------------------
+# One-command bootstrap: generates secrets + admin hash, brings up the
+# fleet-free stack (postgres + garage + ollama + app + web), provisions a
+# workspace, grants the local admin, and seeds a chart of accounts.
+SELFHOST_COMPOSE := docker compose -f docker-compose.selfhost.yml
+
+.PHONY: selfhost
+selfhost:
+	./scripts/selfhost_bootstrap.sh
+
+.PHONY: selfhost-up
+selfhost-up:
+	$(SELFHOST_COMPOSE) up -d
+
+.PHONY: selfhost-down
+selfhost-down:
+	$(SELFHOST_COMPOSE) down
+
+.PHONY: selfhost-logs
+selfhost-logs:
+	$(SELFHOST_COMPOSE) logs -f --tail=100
+
+# Optional demo seed: two generic sample workspaces (no PII). Runs inside the
+# running app container. Requires `make selfhost` (or selfhost-up) first.
+.PHONY: demo
+demo:
+	$(SELFHOST_COMPOSE) exec -T app python scripts/seed_local.py
+
 .PHONY: test-collect
 test-collect:
 	$(PYTEST) --collect-only -q

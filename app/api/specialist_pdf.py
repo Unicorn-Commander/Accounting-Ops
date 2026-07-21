@@ -572,7 +572,7 @@ def _build_cover_letter_pdf(
 
         ---
 
-        *Package assembled automatically by Accounting-Ops · Magic Unicorn Inc.*
+        *Package assembled automatically by Accounting-Ops.*
         *{generated_dt}*
     """)
 
@@ -795,7 +795,7 @@ async def get_handoff_package(
         "or attorney. No return should be filed based solely on these drafts without",
         "independent CPA review, corrections, and written sign-off.",
         "",
-        "Accounting-Ops · Magic Unicorn Inc.",
+        "Accounting-Ops",
     ]
     readme_bytes = "\n".join(readme_lines).encode("utf-8")
 

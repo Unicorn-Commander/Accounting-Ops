@@ -254,7 +254,7 @@ function FinalSummary({
         </Link>
         {/* Audit quick-win #3: link to the tax dashboard so the user can
             pick the right year, rather than a hard-coded 2023 path that
-            only matched Aaron's specific catch-up situation. */}
+            only matched one operator's specific catch-up situation. */}
         <Link
           href="/taxes"
           className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-subtle bg-elevated px-3 text-sm text-ink-secondary hover:bg-surface focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"

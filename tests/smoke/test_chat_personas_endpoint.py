@@ -30,7 +30,7 @@ def _service_token_env(monkeypatch):
         "ACCTOPS_SERVICE_TOKENS",
         json.dumps({
             SERVICE_TOKEN: {
-                "uc_uid": "test-aaron",
+                "uc_uid": "test-jane",
                 "agent_id": "smoke",
                 "role_floor": "viewer",
             }

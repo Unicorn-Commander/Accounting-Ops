@@ -12,7 +12,7 @@
 
 IRS.gov is a federal site with Cloudflare protection.  Add a `User-Agent` header:
 ```
-User-Agent: Accounting-Ops-TaxCurator/1.0 (aaron@magicunicorn.tech; non-commercial research)
+User-Agent: Accounting-Ops-TaxCurator/1.0 (you@example.com; non-commercial research)
 ```
 Respect `Retry-After` headers.  Default inter-request delay: 2 seconds.
 

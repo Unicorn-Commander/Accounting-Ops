@@ -3,7 +3,7 @@ import { getActiveContext } from "@/lib/active-context";
 
 // Inline hierarchy crumb shown across every app page:
 //
-//   Workspace · Aaron Stransky  ›  Entity · Magic Unicorn Inc  ›  Tax Year · 2024
+//   Workspace · Jane Smith  ›  Entity · Acme Inc  ›  Tax Year · 2024
 //
 // Each segment is purely informational here (the chips in the header are
 // the interactive controls). The crumb just reassures the user about

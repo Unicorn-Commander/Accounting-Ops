@@ -54,14 +54,14 @@ TAX_OFFICE_ADDRESSES: dict[str, dict[str, str]] = {
 }
 
 
-# Return address for Magic Unicorn Inc — taken from the bigboy /master arch doc
-# and the existing cure letter. If onboarding another entity, the caller passes
-# its return address explicitly.
-DEFAULT_MU_INC_RETURN_ADDRESS = {
-    "name": "Magic Unicorn Unconventional Technology & Stuff Inc.",
-    "line1": "39 Paddlecreek Avenue",
+# Generic placeholder return address. Callers should pass the entity's real
+# return address explicitly (e.g. from workspace/entity settings); this default
+# ships as an obviously-fake example so no real address is baked into the source.
+DEFAULT_RETURN_ADDRESS = {
+    "name": "Example Corp Inc.",
+    "line1": "123 Example Street",
     "line2": "",
-    "city_state_zip": "Charleston, SC 29412",
+    "city_state_zip": "Anytown, ST 00000",
 }
 
 
@@ -72,7 +72,7 @@ class CoverSheetData:
     submission_title: str  # e.g. "TY 2023 SC1120 — Failure-to-File Cure Packet"
     tax_year: int
     entity_name: str
-    entity_ein: str  # raw EIN string, e.g. "00-0000000"
+    entity_ein: str  # raw EIN string, e.g. "12-3456789"
 
     # Where it's going (use TAX_OFFICE_ADDRESSES key, or pass a custom address dict)
     to_office_key: str | None = None
@@ -80,7 +80,7 @@ class CoverSheetData:
 
     # Return address
     return_address: dict[str, str] = field(
-        default_factory=lambda: dict(DEFAULT_MU_INC_RETURN_ADDRESS)
+        default_factory=lambda: dict(DEFAULT_RETURN_ADDRESS)
     )
 
     # Forms / documents enclosed (human-readable strings)

@@ -45,8 +45,8 @@ function pickDefaultEntity(entities: Entity[]): Entity | null {
   if (entities.length === 1) return entities[0];
 
   // Sort by (kind-priority, display_name) and take the top.  This means a
-  // user with [Aaron Personal, Brightwater Labs (partnership), Magic
-  // Unicorn Inc (c_corp), Majiks JV (partnership)] lands on Magic Unicorn
+  // user with [Jane Personal, Example Labs (partnership), Acme
+  // Inc (c_corp), Sample LLC (partnership)] lands on Acme
   // Inc — the C-Corp — not on the alphabetically-first partnership.
   const ranked = [...entities].sort((a, b) => {
     const ra = _kindRank(a.kind);

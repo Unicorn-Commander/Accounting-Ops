@@ -106,7 +106,7 @@ async def create_entity_with_coa(
 
     Args:
         workspace_id: UUID of the workspace.
-        display_name: Human-readable entity name (e.g. "Magic Unicorn Inc").
+        display_name: Human-readable entity name (e.g. "Acme Inc").
             Slug is auto-derived; re-using the same display_name returns the
             existing entity.
         legal_name: Legal name as registered with the state (e.g.

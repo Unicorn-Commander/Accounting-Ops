@@ -14,7 +14,7 @@ Supports two backends:
 
 - **openai** (default when ``LLM_ENDPOINT_URL`` is set): uses the OpenAI Python
   SDK (>= 1.0) aimed at any OpenAI-compatible endpoint (e.g. OpenRouter,
-  llama-server, Qwen on midboy1:8088). Implements a manual MCP tool-call loop.
+  llama-server, Qwen on <host>:8088). Implements a manual MCP tool-call loop.
 
 Usage — Anthropic path::
 
@@ -32,12 +32,12 @@ Usage — Anthropic path::
 Usage — OpenRouter / OpenAI-compatible path::
 
     export ACCTOPS_SERVICE_TOKEN="<keycloak-service-token>"
-    OPENROUTER_KEY=$(cat /home/muut/.openrouter.key)
+    OPENROUTER_KEY=$(cat /home/user/.openrouter.key)
 
     uv run python agents/tax_specialists/state_strategy_drafter/run_specialist.py \\
         --backend      openai \\
-        --workspace-id 77753ea5-efe9-5539-a846-6b20ddc841b9 \\
-        --entity-id    1ab938df-43f2-567a-8566-800f8a14a466 \\
+        --workspace-id 00000000-0000-0000-0000-000000000000 \\
+        --entity-id    11111111-1111-1111-1111-111111111111 \\
         --tax-year     2024 \\
         --state        sc \\
         --mcp-url      http://localhost:8000/mcp/ \\
@@ -781,8 +781,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
               # SC strategy via OpenRouter (Claude Sonnet):
               python run_specialist.py \\
                 --backend openai \\
-                --workspace-id 77753ea5-efe9-5539-a846-6b20ddc841b9 \\
-                --entity-id 1ab938df-43f2-567a-8566-800f8a14a466 \\
+                --workspace-id 00000000-0000-0000-0000-000000000000 \\
+                --entity-id 11111111-1111-1111-1111-111111111111 \\
                 --tax-year 2024 --state sc \\
                 --llm-endpoint-url https://openrouter.ai/api/v1 \\
                 --llm-model anthropic/claude-sonnet-4-6 \\

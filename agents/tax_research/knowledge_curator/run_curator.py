@@ -85,7 +85,7 @@ _SOURCES_FILE = _CURATOR_DIR / "ingestion_sources.yaml"
 _INGESTED_BY = "tax-knowledge-curator"
 _USER_AGENT = (
     "Accounting-Ops-TaxCurator/1.0 "
-    "(aaron@magicunicorn.tech; non-commercial research)"
+    "(you@example.com; non-commercial research)"
 )
 _REQUEST_DELAY_S = 2.0   # polite delay between fetches
 _FETCH_TIMEOUT_S = 30.0

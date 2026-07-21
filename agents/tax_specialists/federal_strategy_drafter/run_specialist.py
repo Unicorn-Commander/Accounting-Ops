@@ -733,12 +733,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
             {HELP_TEXT_LLM_API_KEY}
 
-            Example — run all topics against MU Inc. TY 2025 via OpenRouter::
+            Example — run all topics against Acme Inc. TY 2025 via OpenRouter::
 
               docker exec -e ACCTOPS_SERVICE_TOKEN="$TOKEN" accounting_ops-app-1 \\
                 python /app/agents/tax_specialists/federal_strategy_drafter/run_specialist.py \\
-                  --workspace-id 77753ea5-efe9-5539-a846-6b20ddc841b9 \\
-                  --entity-id    1ab938df-43f2-567a-8566-800f8a14a466 \\
+                  --workspace-id 00000000-0000-0000-0000-000000000000 \\
+                  --entity-id    11111111-1111-1111-1111-111111111111 \\
                   --tax-year     2025 \\
                   --mcp-url      http://localhost:8000/mcp/ \\
                   --output       /drafts/mu-inc-2025-federal-strategy-draft.md \\

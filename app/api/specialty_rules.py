@@ -2,7 +2,7 @@
 
 The MCP tools in ``app/tools/specialty_rules.py`` are ENTITY-SCOPED and write
 through the agent proposal pipeline (every add queues for human approval).
-The /specialty-rules **web page** is workspace-wide — Aaron lands on it from
+The /specialty-rules **web page** is workspace-wide — the operator lands on it from
 the sidebar without picking an entity, and wants to see every active rule
 across every entity in the workspace.
 

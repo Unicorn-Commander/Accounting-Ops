@@ -1,7 +1,7 @@
 """AI Activity timeline + Undo + Challenge endpoints.
 
-The "AI Activity log" is Aaron's view into every action an AI agent took
-on his behalf. It aggregates three append-only sources:
+The "AI Activity log" is the owner's view into every action an AI agent took
+on their behalf. It aggregates three append-only sources:
 
   * ``decision_audit``    — one row per agent-initiated MCP tool call.
                             Carries tool_name, request_payload, response_payload,
@@ -130,7 +130,7 @@ _REVERSIBILITY: dict[str, tuple[str | None, int]] = {
     "categorize": ("journal_post_contra", 24),  # 24h grace window
     "post_correction": ("journal_post_contra", 24),
     # Approval decisions — the underlying JE/rule may already be live;
-    # we treat as challenge-only by design. Aaron can post a manual contra.
+    # we treat as challenge-only by design. The owner can post a manual contra.
     "approval_decision": (None, 0),
     "add_specialty_rule": (None, 0),
     # Specialist runs — they may have written dozens of rows
@@ -167,7 +167,7 @@ def is_reversible(tool_name: str, created_at: dt.datetime) -> bool:
 # Human-readable action labels
 # ---------------------------------------------------------------------------
 #
-# Tool names are MCP-internal. Render something Aaron will actually read.
+# Tool names are MCP-internal. Render something the owner will actually read.
 # Falls back to the raw tool_name for anything not listed.
 
 _ACTION_LABELS: dict[str, str] = {

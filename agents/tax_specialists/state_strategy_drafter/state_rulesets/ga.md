@@ -150,5 +150,5 @@ Before this ruleset is used in production, the following must be completed:
 - [ ] Add GA.12 — GA Job Tax Credit or comparable credits
 - [ ] Add GA.13 — GA controversy and appeal procedure (DOR protest, Tax Tribunal, GA Court of Appeals)
 
-**Assigned to:** CPA Mosin / NorthbridgeTax or equivalent GA tax counsel.
+**Assigned to:** CPA the CPA / NorthbridgeTax or equivalent GA tax counsel.
 **Priority:** P1 if entity has GA nexus or is expanding into GA.

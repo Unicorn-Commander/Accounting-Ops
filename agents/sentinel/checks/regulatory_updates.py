@@ -5,6 +5,18 @@ app.connectors.regulatory_feeds in a periodic side task). For each new entry
 runs a lightweight classifier: does it mention C-Corp / SC / §174 / §1202 /
 estimated-tax / 1099-NEC keywords this entity cares about? If yes, draft a
 memo in the workspace's tax_review_queue.
+
+Feed health (added 2026-07-20)
+==============================
+This check is the CONSUMER of the regulatory feeds, so it is also where a dead
+feed has to become visible. The IRS Newsroom RSS URL 404'd for weeks while this
+check reported a healthy "no new entries" every cycle — because an unreachable
+feed and a quiet news day produce byte-identical output here: zero rows.
+
+``_check_feed_health`` runs FIRST and, critically, runs BEFORE the
+no-new-entries early return. A dead feed produces no entries by definition, so
+health checking placed after that return would be unreachable in exactly the
+situation it exists to catch.
 """
 from __future__ import annotations
 
@@ -15,6 +27,7 @@ from sqlalchemy import text
 
 from agents.sentinel.actions import ActionContext, execute_action
 from agents.sentinel.checks._helpers import list_active_entities
+from app.connectors.regulatory_feeds import feed_health_report
 
 # Keyword vocabulary keyed by signal name. Lower-cased; sub-string match.
 KEYWORD_SIGNALS = {
@@ -99,14 +112,88 @@ async def _mark_classified(session, entry_ids: list[str], tags: dict[str, dict])
         )
 
 
+async def _check_feed_health(ctx: ActionContext) -> dict[str, int]:
+    """Raise a finding for any regulatory feed that has gone persistently dead.
+
+    Severity is ``warning``: the workspace's regulatory monitoring has a blind
+    spot, which is a data-completeness caveat on every "no new updates" result
+    this check has produced since the feed died — a CPA needs to know that.
+
+    One finding PER SOURCE (dedupe_key includes the slug) so a dead IRS feed
+    and a dead SCDOR feed don't collapse into one row and mask each other.
+    ``log_finding`` is the action type because it is available at
+    ``watch_only`` — a workspace that has deliberately limited Sentinel to
+    observation still needs to be told its inputs are broken.
+    """
+    findings = 0
+    actions = 0
+    for feed in await feed_health_report(ctx.session):
+        if not feed.get("stale"):
+            continue
+        source = feed["source"]
+        if feed["never_succeeded"]:
+            age = "has NEVER successfully fetched"
+        else:
+            age = f"has not succeeded in {feed['hours_since_success']:.0f}h"
+        summary = (
+            f"Regulatory feed '{source}' {age} "
+            f"({feed['consecutive_failures']} consecutive failures). "
+            f"Regulatory monitoring that depends on this source is INERT: "
+            f"'no new updates' results are not trustworthy until it is fixed. "
+            f"Last error: {feed['last_error'] or 'n/a'}"
+        )
+        res = await execute_action(
+            ctx,
+            action_type="log_finding",
+            entity_id=None,
+            title=f"Regulatory feed '{source}' is not returning data",
+            summary=summary,
+            severity="warning",
+            details={
+                "feed_source": source,
+                "consecutive_failures": feed["consecutive_failures"],
+                "last_success_at": (
+                    feed["last_success_at"].isoformat()
+                    if feed["last_success_at"] else None
+                ),
+                "hours_since_success": feed["hours_since_success"],
+                "last_error": feed["last_error"],
+                "remediation": (
+                    "Verify the feed URL still resolves and returns parseable "
+                    "content. Sources are env-overridable: REGULATORY_IRS_FR_URL, "
+                    "REGULATORY_IRS_NEWSROOM_URL, REGULATORY_SCDOR_URL."
+                ),
+            },
+            dedupe_key=f"regulatory_feed_stale:{source}",
+            reasoning=(
+                f"regulatory_feed_health.{source}: "
+                f"{feed['consecutive_failures']} consecutive failures and no "
+                f"success within the staleness window."
+            ),
+        )
+        findings += 1
+        if res.get("ok"):
+            actions += 1
+    return {"findings": findings, "actions": actions}
+
+
 async def run(ctx: ActionContext, **_) -> dict[str, Any]:
+    # 0. Feed health FIRST — before the no-entries early return below, because
+    #    a dead feed IS the no-entries case and would otherwise never surface.
+    health = await _check_feed_health(ctx)
+    health_findings = health["findings"]
+    health_actions = health["actions"]
+
     # 1. Fetch unclassified entries (workspace-shared cache in public schema)
     entries = await _fetch_unclassified(ctx.session)
     if not entries:
+        stale_note = (
+            f" ({health_findings} feed(s) FLAGGED STALE)" if health_findings else ""
+        )
         return {
-            "findings": 0,
-            "actions": 0,
-            "summary": "regulatory_updates: no new entries",
+            "findings": health_findings,
+            "actions": health_actions,
+            "summary": f"regulatory_updates: no new entries{stale_note}",
         }
 
     entities = await list_active_entities(ctx.session)
@@ -116,10 +203,14 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
             ctx.session, [e["id"] for e in entries],
             {e["id"]: _classify_entry(e["title"] or "", e["summary"] or "") for e in entries},
         )
-        return {"findings": 0, "actions": 0, "summary": "regulatory_updates: no entities"}
+        return {
+            "findings": health_findings,
+            "actions": health_actions,
+            "summary": "regulatory_updates: no entities",
+        }
 
-    findings = 0
-    actions = 0
+    findings = health_findings
+    actions = health_actions
     classification: dict[str, dict] = {}
     for entry in entries:
         cls = _classify_entry(entry["title"] or "", entry["summary"] or "")
@@ -176,8 +267,12 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
     # want to keep re-scanning them every cycle).
     await _mark_classified(ctx.session, [e["id"] for e in entries], classification)
 
+    stale_note = f", {health_findings} feed(s) FLAGGED STALE" if health_findings else ""
     return {
         "findings": findings,
         "actions": actions,
-        "summary": f"regulatory_updates: {len(entries)} entries scanned, {findings} relevant findings",
+        "summary": (
+            f"regulatory_updates: {len(entries)} entries scanned, "
+            f"{findings - health_findings} relevant findings{stale_note}"
+        ),
     }

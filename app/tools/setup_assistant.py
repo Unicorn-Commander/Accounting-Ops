@@ -9,7 +9,7 @@ power the conversational provisioning flow:
                                intake; the UI listens for this tool call to
                                redirect from /setup -> /dashboard.
   - ``create_workspace``     — provision a brand-new workspace. Admin-only.
-                               Used when Aaron (or any admin) is setting up a
+                               Used when an admin is setting up a
                                second/third workspace via chat.
 
 These are intentionally small, focused tools. The heavy lifting
@@ -35,27 +35,27 @@ from app.mcp_auth import authorize_workspace, current_auth
 _CONNECTOR_PROFILES: dict[str, dict[str, Any]] = {
     "tech_startup_c_corp": {
         "connectors": ["simplefin_bank", "stripe", "github_enterprise"],
-        "invites": ["mosin_cpa"],
-        "notes": "Tech C-Corp: SimpleFIN for bank, Stripe for revenue, GitHub for code → R&D documentation. Invite Mosin as CPA.",
+        "invites": ["cpa"],
+        "notes": "Tech C-Corp: SimpleFIN for bank, Stripe for revenue, GitHub for code → R&D documentation. Invite your CPA.",
     },
     "tech_startup_s_corp": {
         "connectors": ["simplefin_bank", "stripe", "gusto_payroll"],
-        "invites": ["mosin_cpa"],
+        "invites": ["cpa"],
         "notes": "S-Corp owner-operators NEED payroll (Gusto/ADP) to satisfy reasonable-compensation rules.",
     },
     "consulting_services": {
         "connectors": ["simplefin_bank", "stripe"],
-        "invites": ["mosin_cpa"],
+        "invites": ["cpa"],
         "notes": "Services business: bank + Stripe (if accepting card payments). 1099 tracker built-in.",
     },
     "ecommerce": {
         "connectors": ["simplefin_bank", "shopify", "stripe", "amazon_seller"],
-        "invites": ["mosin_cpa"],
+        "invites": ["cpa"],
         "notes": "E-commerce: bank + commerce platform + processor. Sales tax tracking is critical — Avalara/TaxJar later.",
     },
     "brick_and_mortar_retail": {
         "connectors": ["simplefin_bank", "square"],
-        "invites": ["mosin_cpa"],
+        "invites": ["cpa"],
         "notes": "Brick-and-mortar retail: bank + Square POS. Inventory tracking required for accrual basis.",
     },
     "personal": {
@@ -65,17 +65,17 @@ _CONNECTOR_PROFILES: dict[str, dict[str, Any]] = {
     },
     "nonprofit": {
         "connectors": ["simplefin_bank", "stripe"],
-        "invites": ["mosin_cpa", "audit_committee_chair"],
-        "notes": "Nonprofit: bank + Stripe for donations. Strongly recommend Mosin + a board/audit member as viewer.",
+        "invites": ["cpa", "audit_committee_chair"],
+        "notes": "Nonprofit: bank + Stripe for donations. Strongly recommend your CPA + a board/audit member as viewer.",
     },
     "real_estate_holding": {
         "connectors": ["simplefin_bank"],
-        "invites": ["mosin_cpa", "property_manager"],
+        "invites": ["cpa", "property_manager"],
         "notes": "Real estate LLC: bank only typically; rent flows in/out via management. Add property manager as viewer.",
     },
     "default": {
         "connectors": ["simplefin_bank"],
-        "invites": ["mosin_cpa"],
+        "invites": ["cpa"],
         "notes": "Generic profile: connect a bank, invite a CPA. Add a payment processor if you accept card payments.",
     },
 }
@@ -126,7 +126,7 @@ async def suggest_connectors(
     Returns:
         {
           "connectors": ["simplefin_bank", "stripe", ...],
-          "invites":    ["mosin_cpa"],
+          "invites":    ["cpa"],
           "profile_key": "tech_startup_c_corp",
           "notes": "..."
         }
@@ -166,7 +166,7 @@ async def mark_intake_complete(
         entity_id: the entity that was just provisioned.
         summary: 1-2 sentence recap shown to the user.
         next_steps: optional list of recommended next actions
-            (e.g. ["Connect SimpleFIN", "Invite Mosin"]).
+            (e.g. ["Connect SimpleFIN", "Invite your CPA"]).
 
     Returns: ``{"status": "complete", "summary": ..., "next_steps": [...]}``.
 
@@ -208,7 +208,7 @@ async def create_workspace(
     INSERT under the admin DB role. Provisioning takes 5-15 seconds.
 
     Args:
-        display_name: Human-readable name (e.g. "Aaron + Shafen Shared").
+        display_name: Human-readable name (e.g. "Acme Shared Workspace").
         slug: Optional URL slug. Auto-derived from display_name.
         hipaa_protected: Mark this workspace as HIPAA-isolated.
         isolation_tier: One of "shared" | "premium" | "enterprise".

@@ -6,7 +6,7 @@ C-Corp or S-Corp entity with categorized R&D-flavored expenses (categories
 like "SaaS · AI", "SaaS · Dev", "Research", "Software"), draft a memo
 flagging that §174 amortization treatment must be applied on the 1120.
 
-This is a perennial flag for Magic Unicorn Inc: the entity capitalises ~all
+This is a perennial flag for Acme Inc: the entity capitalises ~all
 its AI/research SaaS. Sentinel re-surfaces it quarterly so it doesn't get
 forgotten between drafting cycles.
 """

@@ -170,6 +170,6 @@ Known framework (verify):
 - [ ] Add CA.12 — CA LLC fee structure (not C-corp but relevant for affiliate entities)
 - [ ] Add CA.13 — Bay Area local taxes (SF gross receipts tax, etc.) if entity has SF presence
 
-**Assigned to:** CA-licensed CPA or CA tax counsel (CPA Mosin / NorthbridgeTax may not be
+**Assigned to:** CA-licensed CPA or CA tax counsel (CPA the CPA / NorthbridgeTax may not be
 CA-licensed — verify credentials before relying on CA tax advice).
 **Priority:** P1 if entity has CA customers over $500K (sales tax nexus) or CA employees.

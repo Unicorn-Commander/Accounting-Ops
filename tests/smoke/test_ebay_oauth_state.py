@@ -30,7 +30,7 @@ def _build_payload(*, ttl_s: int = 600) -> dict:
     return {
         "wid": str(uuid.uuid4()),
         "eid": str(uuid.uuid4()),
-        "uid": "aaron",
+        "uid": "jane",
         "nonce": "test-nonce-abc",
         "exp": int(time.time()) + ttl_s,
     }

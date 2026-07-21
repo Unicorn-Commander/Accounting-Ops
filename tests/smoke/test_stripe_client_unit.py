@@ -119,13 +119,13 @@ def test_blob_round_trip_preserves_fields():
     b = _blob(
         webhook_secret="whsec_SECRETSECRETSECRET",
         default_revenue_account="4030",
-        business_name="Magic Unicorn LLC",
+        business_name="Acme LLC",
     )
     out = b.as_blob()
     assert out["api_key"] == "rk_live_000000000000000000000000"
     assert out["webhook_secret"] == "whsec_SECRETSECRETSECRET"
     assert out["default_revenue_account"] == "4030"
-    assert out["business_name"] == "Magic Unicorn LLC"
+    assert out["business_name"] == "Acme LLC"
     assert out["environment"] == "live"
 
 

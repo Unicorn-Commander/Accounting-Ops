@@ -10,7 +10,7 @@ endpoint. Supports two backends:
 
 - **openai** (default when ``LLM_ENDPOINT_URL`` is set): uses the OpenAI
   Python SDK (>= 1.0) aimed at any OpenAI-compatible local endpoint (e.g.
-  llama-server / Qwen3.6-35B-A3B-Vision on midboy1:8088). Implements a
+  llama-server / Qwen3.6-35B-A3B-Vision on <host>:8088). Implements a
   manual MCP tool-call loop because local endpoints have no native MCP
   integration.
 
@@ -33,7 +33,7 @@ Usage — local Qwen path::
 
     uv run python agents/tax_specialists/audit_defense_specialist/run_specialist.py \\
         --backend      openai \\
-        --llm-endpoint-url http://midboy1:8088/v1 \\
+        --llm-endpoint-url http://<host>:8088/v1 \\
         --llm-model    Qwen3.6-35B-A3B-Vision \\
         --llm-api-key  local-qwen \\
         --workspace-id <UUID> \\
@@ -61,7 +61,7 @@ Environment variables:
 Notice types (--notice-type):
 
     scdor-ftf       SCDOR failure-to-file / SC1120-CTD delinquency notice.
-                    Primary use: MU Inc. TY 2023.
+                    Primary use: Acme Inc. TY 2023.
     irs-cp2000      IRS CP2000 underreporter notice.
     irs-cp504       IRS CP504 intent-to-levy notice.
     penalty-abate   Standalone reasonable-cause penalty abatement statement.
@@ -622,7 +622,7 @@ async def _run_openai_path(
                         "All substantive output was written to the database via the tool calls above.\n\n"
                         "## CPA Next Steps\n\n"
                         "1. Review all items in the tax_review_queue for entity "
-                        f"1ab938df-43f2-567a-8566-800f8a14a466 / TY 2023.\n"
+                        f"11111111-1111-1111-1111-111111111111 / TY 2023.\n"
                         "2. The cure letter draft is in the `audit_defense_cure_letter` memo.\n"
                         "3. The VDA analysis is in the `audit_defense_vda_analysis` memo.\n"
                         "4. The document checklist is in the `audit_defense_document_checklist` memo.\n"
@@ -633,8 +633,8 @@ async def _run_openai_path(
                         "```\n"
                         "export ANTHROPIC_API_KEY=sk-ant-...\n"
                         "python run_specialist.py --backend anthropic --model sonnet \\\n"
-                        "    --workspace-id 77753ea5-efe9-5539-a846-6b20ddc841b9 \\\n"
-                        "    --entity-id 1ab938df-43f2-567a-8566-800f8a14a466 \\\n"
+                        "    --workspace-id 00000000-0000-0000-0000-000000000000 \\\n"
+                        "    --entity-id 11111111-1111-1111-1111-111111111111 \\\n"
                         "    --tax-year 2023 --notice-type scdor-ftf\n"
                         "```\n\n"
                         "---\n"

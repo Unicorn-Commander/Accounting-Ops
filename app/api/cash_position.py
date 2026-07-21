@@ -30,8 +30,8 @@ async def _simplefin_access_url(workspace: WorkspaceContext) -> str | None:
 
     The credential comes ONLY from the per-workspace encrypted store
     (public.tenant_credentials). There is NO environment-variable fallback:
-    a uc_uid-keyed env var (SIMPLEFIN_ACCESS_URL_<UID>, and especially the
-    SIMPLEFIN_ACCESS_URL_AARON catch-all) would let a workspace with no stored
+    a uc_uid-keyed env var (e.g. a SIMPLEFIN_ACCESS_URL_<UID> catch-all) would
+    let a workspace with no stored
     credential read whichever bank connection happened to be in the process
     environment — a cross-workspace financial-data leak (audit finding C1).
     Returns None when this workspace has no stored SimpleFIN credential; the

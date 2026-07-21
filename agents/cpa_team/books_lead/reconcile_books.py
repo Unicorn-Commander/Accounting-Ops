@@ -234,12 +234,12 @@ def render_markdown(
     integ: IntegrityFindings,
 ) -> str:
     lines: list[str] = []
-    lines.append("# Books Reconciliation — Magic Unicorn Inc")
+    lines.append("# Books Reconciliation — Acme Inc")
     lines.append("")
     lines.append("Run by: `books-lead` sub-agent  ")
     lines.append(f"Run date: {dt.date.today().isoformat()}  ")
-    lines.append(f"Entity: `1ab938df-43f2-567a-8566-800f8a14a466` (Magic Unicorn Inc)  ")
-    lines.append(f"Workspace: `77753ea5-efe9-5539-a846-6b20ddc841b9`")
+    lines.append(f"Entity: `11111111-1111-1111-1111-111111111111` (Acme Inc)  ")
+    lines.append(f"Workspace: `00000000-0000-0000-0000-000000000000`")
     lines.append("")
     lines.append("## Per-year reconciliation")
     lines.append("")
@@ -297,7 +297,7 @@ def render_markdown(
     )
     lines.append(
         "* The Gap column is `posted_je_total − approved_queue_total`. The "
-        "Magic Unicorn journal carries ~570 `journal_entry` rows from the "
+        "Acme journal carries ~570 `journal_entry` rows from the "
         "`ingest_bofa_live.py` Tier-1 auto_post path (materiality L < $75), "
         "which never went through the approval_queue — so the gap is "
         "EXPECTED to roughly equal the auto-posted portion of each year's "
@@ -348,7 +348,7 @@ def render_markdown(
     lines.append("")
     lines.append(
         "Phase 3 clustered the dated pending rows into vendor groups (see "
-        "`approval_recommendation.cluster_id`), so Aaron's review surface is "
+        "`approval_recommendation.cluster_id`), so the owner's review surface is "
         "**≈ 60 multi-member cluster cards + ~291 singleton cards** rather than "
         "830 individual rows. That's a ~58% reduction in click count."
     )

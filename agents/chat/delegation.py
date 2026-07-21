@@ -131,6 +131,10 @@ class DelegationContext:
     user_uc_uid: str
     user_bearer_token: str
     tax_year: int | None = None
+    # Caller's verified token claims — read by the smart-inference entitlement
+    # gate on the consult (itself a paid cloud call). None ⇒ the gate treats it
+    # as "no entitlement claim" and (absent BYOK) fails closed.
+    claims: dict[str, Any] | None = None
 
     # ---- LLM wiring (mirrors the outer chat turn) ----
     backend: str | None = None
@@ -430,6 +434,43 @@ async def dispatch_consult(
             "specialist": specialist,
         }
 
+    # ---- Smart-inference gate: the consult is itself a paid cloud call. ----
+    # Defense-in-depth — the CFO turn was already gated pre-stream in
+    # app/api/chat.py, but gate the consult too so any direct/future caller of
+    # this path is covered. Contract: NEVER raise — return a structured payload.
+    # Self-inerting + edition-guarded import (community never imports app.billing).
+    from app.config import get_settings
+
+    if not get_settings().is_community:
+        from app.billing.inference_gate import (
+            SmartInferenceGateError,
+            check_smart_inference_access,
+        )
+
+        try:
+            await check_smart_inference_access(
+                workspace_id=ctx.workspace_id,
+                claims=ctx.claims,
+                what=f"Consulting the {specialist} specialist",
+            )
+        except SmartInferenceGateError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "specialist": specialist,
+                "upgrade_url": exc.upgrade_url,
+            }
+        except Exception:  # noqa: BLE001 — dispatch_consult must never raise; fail CLOSED
+            _log.warning(
+                "smart-inference gate errored during consult; blocking (fail-closed)",
+                exc_info=True,
+            )
+            return {
+                "ok": False,
+                "error": "Specialist consultation is temporarily unavailable.",
+                "specialist": specialist,
+            }
+
     # Reserve the slot BEFORE running so a slow/erroring consult still counts
     # against the budget (prevents an unbounded retry loop in one turn).
     ctx.consults_used += 1
@@ -575,6 +616,7 @@ def build_cfo_delegation(
     user_uc_uid: str,
     user_bearer_token: str,
     tax_year: int | None,
+    claims: dict[str, Any] | None = None,
     cfo_agent_id: str = "cfo-agent",
     agent_session_id: str | None = None,
     backend: str | None = None,
@@ -607,6 +649,7 @@ def build_cfo_delegation(
         user_uc_uid=user_uc_uid,
         user_bearer_token=user_bearer_token,
         tax_year=tax_year,
+        claims=claims,
         backend=backend,
         openrouter_base_url=openrouter_base_url,
         openrouter_api_key=openrouter_api_key,

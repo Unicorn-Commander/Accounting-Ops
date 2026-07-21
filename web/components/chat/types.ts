@@ -138,7 +138,17 @@ export type StreamEvent =
       model?: string;
       backend?: string;
     }
-  | { type: "error"; message: string };
+  | {
+      type: "error";
+      message: string;
+      // Forward-compat: a future mid-stream credit gate may tag the error with a
+      // machine code + the same fields as the pre-stream 402 body. The v1 UX does
+      // NOT depend on these — per-workspace entitlement means the top-level
+      // pre-stream check already covers a CFO→specialist sub-call.
+      code?: string;
+      upgrade_url?: string | null;
+      byok_available?: boolean;
+    };
 
 // An artifact tracked by the canvas pane (open / preview).
 export type CanvasArtifact = {

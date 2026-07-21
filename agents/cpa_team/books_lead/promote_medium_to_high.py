@@ -18,10 +18,10 @@ extracted from `description`). If the vendor:
 
 then promote → auto-apply via the same posting primitive as Phase 1.
 Otherwise keep at medium with an updated rationale describing why we did
-NOT promote (so Aaron can see the reasoning when he reviews).
+NOT promote (so the owner can see the reasoning when he reviews).
 
 This is REAL MONEY: we are intentionally conservative. Better to leave a
-row for Aaron to decide than to misclassify.
+row for the owner to decide than to misclassify.
 
 Notes
 -----
@@ -181,7 +181,7 @@ def vendor_signature(description: str | None) -> str | None:
     Examples:
       "PURCHASE 0801 APPLE.COM/BILL 866-712-7753 CA"
         -> "apple com bill"
-      "PAYPAL DES:INST XFER ID:1031538994833 INDN:MAGIC UNICORN UNCONVEN CO"
+      "PAYPAL DES:INST XFER ID:1031538994833 INDN:ACME EXAMPLE CO"
         -> "paypal des inst"
     """
     if not description:

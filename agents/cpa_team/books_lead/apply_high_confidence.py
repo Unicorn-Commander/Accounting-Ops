@@ -17,8 +17,8 @@ Safety
 ------
 * Each approval is processed in its own transaction (rollback if anything
   fails — no half-applied state, the row stays 'pending').
-* `posted_by_uc_uid` = 'aaron' (the impersonated user; mirrors the decide
-  endpoint's `workspace.user_uc_uid` value).
+* `posted_by_uc_uid` = the acting owner uc_uid (the impersonated user; mirrors
+  the decide endpoint's `workspace.user_uc_uid` value).
 * `model_version` = 'books-lead/v1' (so audit trail makes the source obvious).
 * `user_confirmed=True` bypasses the materiality re-gate — exactly what the
   HTTP `_approve_bank_transaction_import` helper does, since the
@@ -51,9 +51,14 @@ from app.journal import PostingOutcome, PostingRefusal, post_journal_entry
 from app.workspace_session import schema_for_workspace, workspace_session
 
 
-WORKSPACE_ID = UUID("77753ea5-efe9-5539-a846-6b20ddc841b9")
-ENTITY_ID = UUID("1ab938df-43f2-567a-8566-800f8a14a466")
-ACTING_UC_UID = "aaron"  # workspace owner (impersonated by the books-lead run)
+# Batch target + acting identity are env-driven so this run is not bound to any
+# one deployment's workspace/owner. Set BOOKS_LEAD_WORKSPACE_ID / _ENTITY_ID and
+# BOOKS_LEAD_ACTING_UC_UID (falls back to the local-admin uc_uid, default "admin").
+WORKSPACE_ID = UUID(os.getenv("BOOKS_LEAD_WORKSPACE_ID", "00000000-0000-0000-0000-000000000000"))
+ENTITY_ID = UUID(os.getenv("BOOKS_LEAD_ENTITY_ID", "00000000-0000-0000-0000-000000000000"))
+ACTING_UC_UID = os.getenv(
+    "BOOKS_LEAD_ACTING_UC_UID", get_settings().local_admin_uc_uid
+)  # workspace owner impersonated by the books-lead run
 AGENT_ID = "books-lead"
 MODEL_VERSION = "books-lead/v1"
 

@@ -21,9 +21,9 @@ async function main(): Promise<void> {
   // slugify
   const slugCases: [string, string][] = [
     ["Magic Unicorn LLC!", "magic-unicorn-llc"],
-    ["aaron-stransky", "aaron-stransky"],
+    ["jane-smith", "jane-smith"],
     ["  hello   world  ", "hello-world"],
-    ["Brightwater Labs, Inc.", "brightwater-labs-inc"]
+    ["Example Labs, Inc.", "example-labs-inc"]
   ];
   for (const [input, expected] of slugCases) {
     const got = slugify(input);
@@ -59,40 +59,40 @@ async function main(): Promise<void> {
   if (isValidPeriod("nonsense")) throw new Error("isValidPeriod(nonsense) should be false");
 
   // buildExportFilename — covers all 6 backend formats.
-  const ws = "aaron-stransky";
-  const ent = "magic-unicorn-inc";
+  const ws = "jane-smith";
+  const ent = "acme-inc";
   const filenameCases: [Parameters<typeof buildExportFilename>[0], string][] = [
     [
       { workspaceSlug: ws, entitySlug: ent, period: "2026-Q2", format: "csv" },
-      "accounting-ops-aaron-stransky-magic-unicorn-inc-2026-q2.csv"
+      "accounting-ops-jane-smith-acme-inc-2026-q2.csv"
     ],
     [
       { workspaceSlug: ws, entitySlug: ent, period: "ytd", format: "iif" },
-      "accounting-ops-aaron-stransky-magic-unicorn-inc-ytd.iif"
+      "accounting-ops-jane-smith-acme-inc-ytd.iif"
     ],
     [
       { workspaceSlug: ws, entitySlug: ent, period: "ytd", format: "qbo" },
-      "accounting-ops-aaron-stransky-magic-unicorn-inc-ytd.qbo"
+      "accounting-ops-jane-smith-acme-inc-ytd.qbo"
     ],
     [
       { workspaceSlug: ws, entitySlug: ent, period: "ytd", format: "pl" },
-      "accounting-ops-aaron-stransky-magic-unicorn-inc-ytd.pl.pdf"
+      "accounting-ops-jane-smith-acme-inc-ytd.pl.pdf"
     ],
     [
       { workspaceSlug: ws, entitySlug: ent, period: "ytd", format: "balance-sheet" },
-      "accounting-ops-aaron-stransky-magic-unicorn-inc-ytd.balance-sheet.pdf"
+      "accounting-ops-jane-smith-acme-inc-ytd.balance-sheet.pdf"
     ],
     [
       { workspaceSlug: ws, entitySlug: ent, period: "ytd", format: "cash-flow" },
-      "accounting-ops-aaron-stransky-magic-unicorn-inc-ytd.cash-flow.pdf"
+      "accounting-ops-jane-smith-acme-inc-ytd.cash-flow.pdf"
     ],
     [
       { workspaceSlug: ws, entitySlug: null, period: "ytd", format: "csv" },
-      "accounting-ops-aaron-stransky-consolidated-ytd.csv"
+      "accounting-ops-jane-smith-consolidated-ytd.csv"
     ],
     [
       { workspaceSlug: ws, entitySlug: ent, period: "2026-01-01..2026-05-22", format: "csv" },
-      "accounting-ops-aaron-stransky-magic-unicorn-inc-2026-01-01-to-2026-05-22.csv"
+      "accounting-ops-jane-smith-acme-inc-2026-01-01-to-2026-05-22.csv"
     ]
   ];
   for (const [args, expected] of filenameCases) {

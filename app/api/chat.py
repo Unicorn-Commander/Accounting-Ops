@@ -74,6 +74,7 @@ from agents.chat.runner import (
 )
 from app.auth import AuthContext, validate_bearer_token
 from app.authz import assert_entity_in_scope
+from app.config import get_settings
 from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
@@ -462,6 +463,7 @@ async def send_chat_message(
     body: SendMessageRequest,
     request: Request,
     workspace: WorkspaceContext = Depends(resolve_workspace),
+    auth: AuthContext = Depends(validate_bearer_token),
 ) -> StreamingResponse:
     """Append the user message and stream the assistant response as SSE.
 
@@ -497,6 +499,24 @@ async def send_chat_message(
             raise HTTPException(
                 status_code=409,
                 detail=f"Session bound to unknown persona {persona_slug!r}",
+            )
+
+        # Smart-inference credit/entitlement gate (hosted prod only). Chat is
+        # ALWAYS a paid cloud call — the runner has no local path — so every turn
+        # is gated. Checked PRE-stream (before the user turn is persisted and the
+        # StreamingResponse starts) so a block is a real HTTP 402 handled by the
+        # app-level handler → {detail, upgrade_url, byok_available}, not a broken
+        # SSE. Self-inerting: no-op in community, when AO_SMART_GATE_ENABLED is
+        # off, and for entitled or BYOK workspaces. Lazy + edition-guarded import
+        # keeps app.billing out of the community import graph.
+        if not get_settings().is_community:
+            from app.billing.inference_gate import check_smart_inference_access
+
+            _persona_label = getattr(persona, "display_name", None) or persona_slug
+            await check_smart_inference_access(
+                workspace_id=str(workspace.workspace_id),
+                claims=auth.claims,
+                what=f"The {_persona_label}",
             )
 
         entity_id = loaded["entity_id"]
@@ -721,6 +741,7 @@ async def send_chat_message(
                 user_uc_uid=workspace.user_uc_uid,
                 user_bearer_token=user_bearer,
                 tax_year=tax_year,
+                claims=auth.claims,
                 cfo_agent_id=persona_slug,
                 agent_session_id=str(session_id),
                 **_deleg_route,
@@ -991,11 +1012,11 @@ async def save_chat_message_as_memo(
         # tax_review_queue entry.
         #
         # Heuristic on the memo text (lowercase substring match):
-        #   * "decide", "deduct currently", "elect" -> Decisions awaiting Aaron
+        #   * "decide", "deduct currently", "elect" -> Decisions awaiting the owner
         #   * "send", "provide", "upload", "pull",
         #     "obtain", "need to get"               -> Documents (informational)
         #   * "critical", "urgent", "deadline"      -> Time-sensitive
-        #   * else                                   -> Mosin review (default)
+        #   * else                                   -> CPA review (default)
         lower = memo_text.lower()
         if any(w in lower for w in ("critical", "urgent", "deadline", "immediately")):
             bucket = "time_sensitive"

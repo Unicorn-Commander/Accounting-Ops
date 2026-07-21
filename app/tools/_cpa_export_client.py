@@ -1,0 +1,113 @@
+"""Shared client for the accounting-ops-cpa-export return endpoints.
+
+Extracted so ``get_form_1120s_data`` and ``get_form_1065_data`` reuse ONE copy
+of the auth handshake rather than each carrying a transcription of it — the
+pattern established (and audited) in ``tax_get_form_1120_data``.
+
+Audit 2026-05-31 Bug 10 — identity forwarding
+=============================================
+The sidecar must authorize the ACTUAL caller, not a static service token whose
+permissions could drift broader than the caller's. So after the local
+``authorize_workspace`` succeeds we mint a short-lived HMAC-signed internal
+assertion bound to (uc_uid, workspace_id, entity_id, role, scopes) and send it
+in ``X-Internal-Assertion``. The sidecar verifies it with the same master key
+and runs its own membership + entity-scope checks against that identity.
+
+``ACCTOPS_SERVICE_TOKEN`` is still attached as a bearer, but only as a transport
+handshake so an unauthenticated caller cannot reach the sidecar at all.
+"""
+from __future__ import annotations
+
+import os
+from typing import Any
+from uuid import UUID
+
+import httpx
+
+from app.config import get_settings
+from app.mcp_auth import authorize_workspace, current_auth
+from app.security.crypto import get_crypto
+from app.security.internal_assertion import sign_assertion
+
+_DRAFT_NOTICE = (
+    "DRAFT — for CPA review only. "
+    "This package was generated from the platform's journal entries and has NOT "
+    "been reviewed or approved by a licensed tax professional. "
+    "Do not file without CPA sign-off."
+)
+
+
+async def fetch_return_package(
+    *,
+    form_path: str,
+    form_label: str,
+    workspace_id: UUID,
+    entity_id: UUID,
+    tax_year: int,
+) -> dict[str, Any]:
+    """GET /exports/{form_path}/{tax_year} from the cpa-export sidecar.
+
+    ``form_path`` is the URL segment ("1120s", "1065"); ``form_label`` is the
+    human name used in error messages.
+    """
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="viewer")
+
+    settings = get_settings()
+    auth = current_auth()
+
+    headers: dict[str, str] = {}
+    if auth is not None:
+        try:
+            master_key = get_crypto().master_key_bytes()
+            headers["X-Internal-Assertion"] = sign_assertion(
+                master_key,
+                uc_uid=auth.uc_uid,
+                workspace_id=str(workspace_id),
+                entity_id=str(entity_id),
+                role=ctx.role,
+                scopes=auth.scopes,
+                agent_id=auth.agent_id,
+            )
+        except Exception:  # pragma: no cover - master key not bootstrapped in some envs
+            # Without the master key the assertion is impossible; fall through to
+            # bearer-only auth. The sidecar still gates access via the service
+            # token, and logs loudly that identity forwarding is unavailable.
+            pass
+
+    service_token = os.getenv("ACCTOPS_SERVICE_TOKEN") or os.getenv("CPA_EXPORT_TOKEN")
+    if service_token:
+        headers["Authorization"] = f"Bearer {service_token}"
+
+    url = (
+        f"{settings.cpa_export_url.rstrip('/')}/exports/{form_path}/{tax_year}"
+        f"?workspace_id={workspace_id}&entity_id={entity_id}"
+    )
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(url, headers=headers)
+
+    if response.status_code == 400:
+        raise ValueError(
+            f"cpa-export rejected the {form_label} request: {response.text[:300]}"
+        )
+    if response.status_code == 404:
+        raise LookupError(
+            f"{form_label} export not found for entity {entity_id}, year "
+            f"{tax_year}. Check the entity and year."
+        )
+    if response.status_code == 403:
+        raise PermissionError(
+            f"cpa-export service denied access to entity {entity_id}, year "
+            f"{tax_year}."
+        )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"cpa-export returned HTTP {response.status_code}: {response.text[:200]}"
+        )
+
+    data = response.json()
+    data["_draft_notice"] = _DRAFT_NOTICE
+    return data
+
+
+__all__ = ("fetch_return_package",)

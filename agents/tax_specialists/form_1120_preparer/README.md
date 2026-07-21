@@ -50,12 +50,12 @@ auto-selects the Anthropic backend.
 ### Backend 2 — Local Qwen via llama-server (OpenAI-compatible)
 
 Best for: privacy-sensitive clients, air-gapped deployments, cost elimination
-at the expense of some reasoning quality. Requires midboy1 (2x Tesla P40) or
+at the expense of some reasoning quality. Requires <host> (2x Tesla P40) or
 equivalent GPU server running `llama-server` with the
 `Qwen3.6-35B-A3B-Vision` model.
 
 ```bash
-export LLM_ENDPOINT_URL="http://midboy1:8088/v1"
+export LLM_ENDPOINT_URL="http://<host>:8088/v1"
 export LLM_MODEL="Qwen3.6-35B-A3B-Vision"
 export LLM_API_KEY="local-qwen"   # placeholder; llama-server ignores it
 
@@ -116,7 +116,7 @@ curl -s \
   -d "client_id=accounting-ops-app" \
   -d "client_secret=<secret>" \
   -d "grant_type=client_credentials" \
-  "https://auth.unicorncommander.ai/realms/uchub/protocol/openid-connect/token" \
+  "https://auth.example.com/realms/uchub/protocol/openid-connect/token" \
   | jq -r .access_token
 ```
 
@@ -133,7 +133,7 @@ curl -s \
 | **Tool calling** | Native MCP integration via Anthropic SDK beta | Manual loop; requires OpenAI function-calling support from the model or JSON-mode fallback |
 | **Context window** | 200K (Sonnet/Opus 4) | 32K–128K depending on quantisation |
 | **Iteration cap** | SDK-managed (no hard cap) | 30 iterations (configurable in `_MAX_LOOP_ITERATIONS`) |
-| **Reliability** | Production-grade | Dependent on local GPU uptime (midboy1); no SLA |
+| **Reliability** | Production-grade | Dependent on local GPU uptime (<host>); no SLA |
 | **Best for** | Production, complex returns, CPA deliverables | Dogfood, privacy-sensitive, cost experimentation |
 
 ### Known quirks with local models

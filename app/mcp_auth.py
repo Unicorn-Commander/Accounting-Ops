@@ -161,19 +161,25 @@ async def authorize_workspace(
     # the delegated user must still be a member of the resolved workspace). The
     # tool-arg workspace_id must equal the token's scoped workspace_id claim, so a
     # federated caller can only act within the workspace Brigade scoped it to.
-    from app.platform.workspace_registry import (
-        federation_claim_workspace_id,
-        is_federation_token,
-        resolve_internal_workspace_id,
-    )
+    # Federation (Brigade uc-registry → internal workspace mapping) is an
+    # ENTERPRISE seam. Community Edition never mints federation tokens, so the
+    # branch — and the app.platform.workspace_registry import — is skipped there.
+    from app.config import get_settings as _get_settings
 
-    if is_federation_token(auth):
-        claim_wsid = federation_claim_workspace_id(auth)
-        if claim_wsid and str(workspace_id) != claim_wsid:
-            raise PermissionError(
-                "workspace does not match the federation token's scoped workspace"
-            )
-        workspace_id = await resolve_internal_workspace_id(workspace_id)
+    if not _get_settings().is_community:
+        from app.platform.workspace_registry import (
+            federation_claim_workspace_id,
+            is_federation_token,
+            resolve_internal_workspace_id,
+        )
+
+        if is_federation_token(auth):
+            claim_wsid = federation_claim_workspace_id(auth)
+            if claim_wsid and str(workspace_id) != claim_wsid:
+                raise PermissionError(
+                    "workspace does not match the federation token's scoped workspace"
+                )
+            workspace_id = await resolve_internal_workspace_id(workspace_id)
 
     try:
         role, entity_scope, hipaa, slug = await _resolve_membership(

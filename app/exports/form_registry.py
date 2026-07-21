@@ -111,6 +111,14 @@ FORM_REGISTRY: dict[str, FormSpec] = {
     "4868": FormSpec(kind="4868", title="Form 4868 — Automatic Extension to File (individual)",
         jurisdiction="federal", mode="fill", module="app.exports.f4868_fill",
         func="render_4868", goes_to="the IRS", category="individual"),
+    # Depreciation — the only other COMPUTED federal form besides the 1040.
+    # Figures come from the deterministic engine (app.tax.engines.depreciation)
+    # via app.tax.compute_4562; the renderer only places them on the correct
+    # form REVISION (the Part III class rows moved in 2025 — see f4562_field_map).
+    "4562": FormSpec(kind="4562", title="Form 4562 — Depreciation and Amortization",
+        jurisdiction="federal", mode="computed", module="app.exports.f4562_fill",
+        func="render_4562", goes_to="attached to your business return (the IRS)",
+        category="business"),
     # State.
     "ca-540": FormSpec(kind="ca-540", title="California Form 540 — Resident Income Tax Return",
         jurisdiction="CA", mode="fill", module="app.exports.ca_540_fill",

@@ -266,7 +266,7 @@ async def test_record_learned_pattern_merges_vendor_and_rule(monkeypatch):
     _install_fake_graph(monkeypatch, graph)
 
     await falkordb.record_learned_pattern(
-        WID, EID, "Anthropic", "SaaS · AI", confirmed_by="aaron",
+        WID, EID, "Anthropic", "SaaS · AI", confirmed_by="jane",
     )
     q, params = graph.queries[0]
     assert "MERGE (v:Vendor {entity_id: $entity_id, name: $name})" in q

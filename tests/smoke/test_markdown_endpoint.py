@@ -90,7 +90,7 @@ def drafts_dir(tmp_path: Path) -> Path:
     # Place a sample draft matching the slug "form-1120" for year 2023.
     sample = d / "mu-inc-2023-form-1120-draft.md"
     sample.write_text(
-        "# Form 1120 — 2023 Draft\n\n**Entity:** Magic Unicorn Inc.\n\n"
+        "# Form 1120 — 2023 Draft\n\n**Entity:** Acme Inc.\n\n"
         "## Revenue Summary\n\n| Line | Amount |\n|------|--------|\n| 1a | $48,250 |\n",
         encoding="utf-8",
     )
@@ -156,13 +156,13 @@ def client(drafts_dir: Path):
             patch.object(
                 _spdf_module,
                 "_get_entity_display_name",
-                AsyncMock(return_value="Magic Unicorn Inc."),
+                AsyncMock(return_value="Acme Inc."),
             ),
             patch("app.api.irs_forms.workspace_session", _mock_workspace_session),
             patch.object(
                 _irs_module,
                 "_fetch_entity_meta",
-                AsyncMock(return_value=("Magic Unicorn Inc.", None)),
+                AsyncMock(return_value=("Acme Inc.", None)),
             ),
             patch.object(
                 _irs_module,

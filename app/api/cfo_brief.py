@@ -6,9 +6,9 @@ already-RBAC-enforced sources and synthesizes one small, ranked, plain-
 language payload for a NON-accountant:
 
   1. open-items aggregator  (app/api/open_items.py :: get_open_items)
-       — time-sensitive items, documents Aaron must pull, decisions needing
-         his OK, submissions awaiting follow-up. This is the "what's on
-         Aaron's plate" source of truth.
+       — time-sensitive items, documents the owner must pull, decisions needing
+         their OK, submissions awaiting follow-up. This is the "open items for
+         the workspace" source of truth.
   2. cash position          (app/api/cash_position.py :: workspace_cash_position)
        — live SimpleFIN assets vs. credit-card balances.
   3. sentinel findings      (sentinel_finding table)
@@ -70,9 +70,9 @@ _SEVERITY_RANK: dict[str, int] = {
 # the top of "what needs you now". These are intentionally coarse buckets;
 # within a bucket we break ties on recency / severity / due-date.
 _SCORE_TIME_SENSITIVE = 90
-_SCORE_AWAITING_FOLLOWUP = 85  # Aaron must call the taxing authority
-_SCORE_DECISION = 70  # needs Aaron's OK
-_SCORE_DOCUMENT = 55  # Aaron must go pull a document
+_SCORE_AWAITING_FOLLOWUP = 85  # the owner must call the taxing authority
+_SCORE_DECISION = 70  # needs the owner's OK
+_SCORE_DOCUMENT = 55  # the owner must go pull a document
 # Sentinel findings are scored from their severity (see _finding_score).
 
 # How many priorities the brief surfaces. The card shows the top 2-3; we
@@ -314,7 +314,7 @@ def _rank_priorities(
             )
         )
 
-    # 2. Submissions awaiting follow-up — Aaron must call the taxing authority.
+    # 2. Submissions awaiting follow-up — the owner must call the taxing authority.
     for row in oi.get("submissions_in_flight", []) or []:
         if (row.get("status") or "") != "awaiting_followup":
             continue
@@ -338,7 +338,7 @@ def _rank_priorities(
             )
         )
 
-    # 3. Decisions needing Aaron's OK (only the still-pending ones).
+    # 3. Decisions needing the owner's OK (only the still-pending ones).
     for dec in oi.get("decisions", []) or []:
         if (dec.get("status") or "pending") != "pending":
             continue
@@ -357,7 +357,7 @@ def _rank_priorities(
             )
         )
 
-    # 4. Documents Aaron must physically pull (only the still-pending ones).
+    # 4. Documents the owner must physically pull (only the still-pending ones).
     for doc in oi.get("documents", []) or []:
         if (doc.get("status") or "pending") != "pending":
             continue

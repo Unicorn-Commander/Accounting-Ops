@@ -11,7 +11,7 @@ Usage::
         --workspace-id 550e8400-e29b-41d4-a716-446655440000 \\
         --entity-id    aabbccdd-1234-5678-9abc-000000000001 \\
         --tax-year     2023 \\
-        --request      "prepare 2023 returns for Magic Unicorn Inc" \\
+        --request      "prepare 2023 returns for Acme Inc" \\
         --output-dir   ./drafts/ \\
         --model        sonnet
 
@@ -20,9 +20,9 @@ Usage::
         --workspace-id 550e8400-e29b-41d4-a716-446655440000 \\
         --entity-id    aabbccdd-1234-5678-9abc-000000000001 \\
         --tax-year     2023 \\
-        --request      "prepare 2023 returns for Magic Unicorn Inc" \\
+        --request      "prepare 2023 returns for Acme Inc" \\
         --backend      openai \\
-        --llm-endpoint-url http://midboy1:8088/v1 \\
+        --llm-endpoint-url http://<host>:8088/v1 \\
         --output-dir   ./drafts/
 
 Environment variables:
@@ -882,12 +882,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
               ANTHROPIC_API_KEY       Anthropic API key                   [required]
 
             Examples:
-              # Full trio (federal + 1099 + SC) for MU Inc 2023:
+              # Full trio (federal + 1099 + SC) for Acme Inc 2023:
               uv run python agents/tax_specialists/coordinator/run_coordinator.py \\
                 --workspace-id 550e8400-e29b-41d4-a716-446655440000 \\
                 --entity-id    aabbccdd-1234-5678-9abc-000000000001 \\
                 --tax-year     2023 \\
-                --request      "prepare 2023 returns for Magic Unicorn Inc" \\
+                --request      "prepare 2023 returns for Acme Inc" \\
                 --output-dir   ./drafts/
 
               # Dry run — print dispatch plan without launching specialists:
@@ -905,7 +905,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 --tax-year     2023 \\
                 --request      "prepare 2023 returns" \\
                 --backend      openai \\
-                --llm-endpoint-url http://midboy1:8088/v1
+                --llm-endpoint-url http://<host>:8088/v1
         """),
     )
     parser.add_argument("--workspace-id", required=True, help="Workspace UUID")
@@ -916,7 +916,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--request",
         required=True,
-        help='Natural-language user request (e.g. "prepare 2023 returns for Magic Unicorn Inc")',
+        help='Natural-language user request (e.g. "prepare 2023 returns for Acme Inc")',
     )
     parser.add_argument(
         "--output-dir",
@@ -943,7 +943,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--llm-endpoint-url",
         default=None,
-        help="LLM endpoint URL for specialist runners (e.g. http://midboy1:8088/v1)",
+        help="LLM endpoint URL for specialist runners (e.g. http://<host>:8088/v1)",
     )
     parser.add_argument(
         "--dry-run",

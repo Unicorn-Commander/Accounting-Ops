@@ -27,14 +27,19 @@ export function AppSidebar({
   canAdmin = false,
   initialCollapsed = false,
   workspaceName = "Workspace",
+  isCommunity = false,
 }: {
   canAdmin?: boolean;
   initialCollapsed?: boolean;
   workspaceName?: string;
+  isCommunity?: boolean;
 }) {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(initialCollapsed);
-  const sections = useMemo(() => visibleSections(canAdmin), [canAdmin]);
+  const sections = useMemo(
+    () => visibleSections(canAdmin, isCommunity),
+    [canAdmin, isCommunity]
+  );
 
   // Section open/closed state — server-safe default from defaultOpen, then
   // hydrate user prefs from localStorage and force-open the active section.
@@ -235,12 +240,14 @@ export function AppSidebar({
 export function SidebarMobileNav({
   canAdmin = false,
   onNavigate,
+  isCommunity = false,
 }: {
   canAdmin?: boolean;
   onNavigate?: () => void;
+  isCommunity?: boolean;
 }) {
   const pathname = usePathname();
-  const sections: NavSection[] = visibleSections(canAdmin);
+  const sections: NavSection[] = visibleSections(canAdmin, isCommunity);
 
   return (
     <nav className="flex flex-col gap-1" aria-label="Primary navigation">

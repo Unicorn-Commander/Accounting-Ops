@@ -1,6 +1,6 @@
 # books-lead sub-agent
 
-Auto-resolves Magic Unicorn Inc's `approval_queue` backlog so Aaron's review
+Auto-resolves Acme Inc's `approval_queue` backlog so the owner's review
 surface shrinks from "one decision per transaction" to "one decision per
 vendor cluster".
 
@@ -20,13 +20,13 @@ vendor cluster".
      * Pending amount is within 0.5× .. 2× the prior median, AND
      * Description has no counter-signal token (refund / reversal / adjustment / chargeback / dispute / return / credit / rbt), AND
      * Category is not in the CPA-flagged list (SaaS · AI / Banking · Interest / Inter-entity transfer / Contractor · 1099-NEC).
-   Conservative by design — REAL MONEY, prefer keeping for Aaron to mis-post.
+   Conservative by design — REAL MONEY, prefer keeping for the owner to mis-post.
 
 3. **`cluster_low_confidence.py`** — re-keys `approval_recommendation.cluster_id`
    for all pending low + medium rows to a vendor-grouped signature
    (`{vendor_sig}|{category_slug}`), so the existing
    `GET /api/.../approval-recommendations` endpoint reports per-vendor cluster
-   cards instead of per-transaction singletons. Aaron can then approve "all 50
+   cards instead of per-transaction singletons. the owner can then approve "all 50
    Venmo personal-card transfers as Owner Distribution" as ONE decision.
 
 4. **`reconcile_books.py`** — emits `/drafts/books-reconciliation-2026-05-30.md`
@@ -35,7 +35,7 @@ vendor cluster".
 
 ## Run order
 
-All scripts target the Magic Unicorn Inc entity hard-coded in
+All scripts target the Acme Inc entity hard-coded in
 `apply_high_confidence.py` (`WORKSPACE_ID`, `ENTITY_ID`). They are
 idempotent on re-run: Phase 1's posting is gated by
 `(entity_id, source, source_external_id)` UNIQUE; Phases 2 & 3 do
