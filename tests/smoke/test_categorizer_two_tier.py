@@ -263,3 +263,59 @@ async def test_outbound_calls_carry_non_sdk_user_agent():
         assert ua, "User-Agent must be set explicitly"
         assert not ua.startswith("OpenAI/"), f"CF-blocked SDK UA leaked: {ua!r}"
         assert not ua.startswith("python-httpx"), f"default httpx UA leaked: {ua!r}"
+
+
+# ---------------------------------------------------------------------------
+# 5. Env-var contract — the names deployments actually set
+# ---------------------------------------------------------------------------
+
+def test_env_var_names_match_the_documented_contract(monkeypatch):
+    """The primaries read CATEGORIZER_LLM_* (with the _LLM_ infix).
+
+    Regression guard: they were first wired to CATEGORIZER_* (no infix). The
+    four FALLBACK vars happened to match, so escalation switched on while the
+    primaries silently fell through to the llm_* inheritance -- ignoring the
+    operator's configured model, key, AND timeout (30s inherited where 90s was
+    set). A short timeout returns None, which escalates to the PAID frontier
+    model, so a naming typo turned into unnecessary cloud spend.
+
+    The contract is documented in the app/categorization/llm.py module
+    docstring; this pins it so the two cannot drift apart again.
+    """
+    from app.config import get_settings as _gs
+
+    # get_settings is @lru_cache'd -- without clearing, a previously-built
+    # Settings is returned and the monkeypatched env is silently ignored.
+    _gs.cache_clear()
+    monkeypatch.setenv("CATEGORIZER_LLM_ENDPOINT_URL", "http://configured/v1")
+    monkeypatch.setenv("CATEGORIZER_LLM_MODEL", "configured-model")
+    monkeypatch.setenv("CATEGORIZER_LLM_API_KEY", "configured-key")
+    monkeypatch.setenv("CATEGORIZER_LLM_TIMEOUT_S", "90")
+    monkeypatch.setenv("CATEGORIZER_FALLBACK_MODEL", "configured-frontier")
+    monkeypatch.setenv("CATEGORIZER_FALLBACK_ENDPOINT_URL", "http://frontier/v1")
+    monkeypatch.setenv("CATEGORIZER_FALLBACK_API_KEY", "frontier-key")
+    monkeypatch.setenv("CATEGORIZER_ESCALATE_BELOW_CONFIDENCE", "0.5")
+
+    s = _gs()
+    assert s.categorizer_endpoint_url == "http://configured/v1"
+    assert s.categorizer_model == "configured-model"
+    assert s.categorizer_api_key == "configured-key"
+    assert s.categorizer_timeout_s == 90, "a configured timeout must not fall back to llm_timeout_s"
+    assert s.categorizer_fallback_model == "configured-frontier"
+    assert s.categorizer_fallback_endpoint_url == "http://frontier/v1"
+    assert s.categorizer_fallback_api_key == "frontier-key"
+    assert s.categorizer_escalate_below_confidence == 0.5
+    _gs.cache_clear()  # don't leak the configured env into later tests
+
+
+def test_documented_env_names_are_the_ones_read():
+    """Every CATEGORIZER_* name in the llm.py docstring must be read by config."""
+    import re
+    from pathlib import Path
+
+    documented = set(re.findall(r"\b(CATEGORIZER_[A-Z_]+)\b",
+                                Path("app/categorization/llm.py").read_text()))
+    read_by_config = set(re.findall(r"\b(CATEGORIZER_[A-Z_]+)\b",
+                                    Path("app/config.py").read_text()))
+    missing = sorted(documented - read_by_config)
+    assert not missing, f"documented but never read by config.py: {missing}"

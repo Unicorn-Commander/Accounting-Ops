@@ -361,10 +361,17 @@ def get_settings() -> Settings:
         llm_model=_llm_model,
         llm_api_key=_llm_api_key,
         llm_timeout_s=_llm_timeout_s,
-        categorizer_endpoint_url=os.getenv("CATEGORIZER_ENDPOINT_URL", ""),
-        categorizer_model=os.getenv("CATEGORIZER_MODEL", ""),
-        categorizer_api_key=os.getenv("CATEGORIZER_API_KEY", ""),
-        categorizer_timeout_s=int(os.getenv("CATEGORIZER_TIMEOUT_S") or 0),
+        # NB: CATEGORIZER_LLM_* (with the _LLM_ infix) is the documented contract
+        # -- see the app/categorization/llm.py module docstring, and it is what
+        # deployments already set. Naming these CATEGORIZER_* (no infix) silently
+        # ignored the operator's configured model/key/timeout and fell through to
+        # the llm_* inheritance below, which on dogfood meant a 30s timeout where
+        # 90s was configured -- short timeouts return None, which ESCALATES to the
+        # paid frontier model. Fallback knobs have no infix, matching the docstring.
+        categorizer_endpoint_url=os.getenv("CATEGORIZER_LLM_ENDPOINT_URL", ""),
+        categorizer_model=os.getenv("CATEGORIZER_LLM_MODEL", ""),
+        categorizer_api_key=os.getenv("CATEGORIZER_LLM_API_KEY", ""),
+        categorizer_timeout_s=int(os.getenv("CATEGORIZER_LLM_TIMEOUT_S") or 0),
         categorizer_fallback_model=os.getenv("CATEGORIZER_FALLBACK_MODEL", ""),
         categorizer_fallback_endpoint_url=os.getenv("CATEGORIZER_FALLBACK_ENDPOINT_URL", ""),
         categorizer_fallback_api_key=os.getenv("CATEGORIZER_FALLBACK_API_KEY", ""),
