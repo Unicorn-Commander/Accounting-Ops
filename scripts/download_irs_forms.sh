@@ -174,6 +174,15 @@ if head_check "$F7004_URL"; then
 else
     echo "  WARN  Form 7004 not available at $F7004_URL — skipping."
 fi
+# Form 8821 (Tax Information Authorization)
+F8821_URL="https://www.irs.gov/pub/irs-pdf/f8821.pdf"
+F8821_DEST="$FORMS_DIR/f8821.pdf"
+if head_check "$F8821_URL"; then
+    download_form "$F8821_DEST" "$F8821_URL" "Form 8821 (current)"
+else
+    echo "  WARN  Form 8821 not available at $F8821_URL — skipping."
+fi
+
 
 
 echo ""

@@ -155,6 +155,10 @@ FORM_REGISTRY: dict[str, FormSpec] = {
     "9465": FormSpec(kind="9465", title="Form 9465 — Installment Agreement Request",
         jurisdiction="federal", mode="fill", module="app.exports.f9465_fill",
         func="render_9465", goes_to="the IRS", category="individual"),
+    # --- Representation (added 2026-07-15) -----------------------------------
+    "8821": FormSpec(kind="8821", title="Form 8821 — Tax Information Authorization",
+        jurisdiction="federal", mode="fill", module="app.exports.f8821_fill",
+        func="render_8821", goes_to="the IRS", category="representation"),
 }
 
 
