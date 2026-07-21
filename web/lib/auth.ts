@@ -67,9 +67,14 @@ async function verifyLocalPassword(password: string): Promise<boolean> {
   const [, saltHex, keyHex] = parts;
   try {
     // node:crypto is only reachable from the Node route handler (authorize),
-    // never the edge middleware — so this dynamic import stays out of the edge
-    // bundle.
-    const crypto = await import("node:crypto");
+    // never the edge middleware. A bare dynamic import is NOT enough:
+    // middleware.ts imports `auth` from this module, so webpack pulls this file
+    // into the EDGE graph and then fails to resolve the "node:" scheme
+    // ("UnhandledSchemeError: Reading from node:crypto is not handled by
+    // plugins") — which breaks `next build` outright. webpackIgnore keeps the
+    // specifier untouched so it resolves at RUNTIME, where only the Node route
+    // handler ever reaches it. Do not remove the magic comment.
+    const crypto = await import(/* webpackIgnore: true */ "node:crypto");
     const salt = Buffer.from(saltHex, "hex");
     const expected = Buffer.from(keyHex, "hex");
     const derived = crypto.scryptSync(password, salt, expected.length);
