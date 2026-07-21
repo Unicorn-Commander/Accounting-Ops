@@ -19,7 +19,6 @@ Four required cases per spec:
 """
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import time
 from decimal import Decimal

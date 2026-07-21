@@ -71,7 +71,6 @@ from app.exports.form_prefill import (
 )
 from app.exports.f1125e_field_map import (
     F1125E_FIELDS,
-    TAXPAYER_COMPLETED_KEYS,
 )
 
 

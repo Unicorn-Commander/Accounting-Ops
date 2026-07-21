@@ -44,11 +44,14 @@ Usage
             "llc": {"value": "true", "source_ref": "intake#1", "origin": "user_entered"},
             "llc_classification": {"value": "P", "source_ref": "intake#1", "origin": "user_entered"},
             "address": {"value": "123 Main St", "source_ref": "intake#1", "origin": "user_entered"},
-            "city": {"value": "Columbia", "source_ref": "intake#1", "origin": "user_entered"},
-            "state": {"value": "SC", "source_ref": "intake#1", "origin": "user_entered"},
-            "zip_code": {"value": "29201", "source_ref": "intake#1", "origin": "user_entered"},
+            "city_state_zip": {"value": "Columbia, SC 29201", "source_ref": "intake#1", "origin": "user_entered"},
         },
     )
+
+Note: Line 6 of the official form is ONE box ("City, state, and ZIP code"),
+so the logical key is the suite-standard ``city_state_zip`` (same as the
+W-4P / 843 / 941 / Schedule C maps). The requester box is likewise one
+field: ``requester_name_address``.
 """
 
 from __future__ import annotations
@@ -63,18 +66,21 @@ from app.exports.form_prefill import (
 from app.exports.fw9_field_map import (
     FW9_FIELDS,
     FW9_RADIO_FIELDS,
+    FW9_CHECKBOX_FIELDS,
     FW9_LLC_CLASSIFICATION,
     FW9_OTHER_DETAIL,
-    VALID_FW9_FIELDS,
 )
 
-# Truthy strings that set a line-3a radio button or line-3b checkbox.
+# Truthy strings that set a line-3a classification box or line-3b checkbox.
 _TRUE_VALUES = {"true", "1", "yes", "y", "x", "on", "checked"}
 
 # Identity items the renderer never auto-fills, even if supplied — the taxpayer
 # enters these themselves. (Form W-9 Part I TIN is entered by the taxpayer.)
+# Includes the legacy ``tin_part*`` aliases so older callers' TIN inputs stay
+# explicitly blocked rather than depending on unknown-key skipping.
 TAXPAYER_COMPLETED_KEYS: frozenset[str] = frozenset({
-    "tin_part1", "tin_part2", "tin_part3", "tin_part4", "tin_part5"
+    "ssn_part1", "ssn_part2", "ssn_part3", "ein_part1", "ein_part2",
+    "tin_part1", "tin_part2", "tin_part3", "tin_part4", "tin_part5",
 })
 
 
@@ -118,17 +124,28 @@ def render_w9(
     inputs:
         ``{field_key: {"value": str, "source_ref": str, "origin": str}}`` where
         ``field_key`` is a LOGICAL key from ``FW9_FIELDS`` (e.g. ``"name"``,
-        ``"address"``, ``"city"``) OR a radio key from ``FW9_RADIO_FIELDS``
-        (``"individual_sole_prop"``, ``"c_corporation"``, etc.) whose truthy
-        value ("true"/"1"/"yes"/"x") sets that radio.
+        ``"address"``, ``"city_state_zip"``, ``"requester_name_address"``), a
+        classification key from ``FW9_RADIO_FIELDS``
+        (``"individual_sole_prop"``, ``"c_corporation"``, ``"s_corporation"``,
+        ``"partnership"``, ``"trust_estate"``, ``"llc"``, ``"other"``), or a
+        checkbox key from ``FW9_CHECKBOX_FIELDS`` (``"foreign_status"``,
+        line 3b) whose truthy value ("true"/"1"/"yes"/"x") checks that box.
 
         Notes:
           - ``llc_classification``: If "llc" is selected, this value (C, S, or P)
             is written to the LLC classification box.
           - ``other_detail``: If "other" is selected, this value is written to
             the other detail box.
-          - ``tin_part1``..``tin_part5`` are NEVER filled here even if supplied
-            (identity items for the taxpayer).
+          - ``city_state_zip`` is ONE box on the official form (line 6); pass
+            the already-formatted "City, ST 12345" string, as with the W-4P.
+          - ``requester_name_address`` is the single optional requester box to
+            the right of lines 5-6. The baked overlay draws values on ONE
+            line — keep this concise (~35 chars) or it will overflow the
+            printed box.
+          - Part I TIN keys (``ssn_part1``..``ssn_part3``,
+            ``ein_part1``/``ein_part2``, legacy ``tin_part1``..``tin_part5``)
+            are NEVER filled here even if supplied (identity items the
+            taxpayer enters themselves).
           - An unknown / unmapped key is silently skipped (conservative — never
             invent a field, never write to a line we don't recognize).
 
@@ -161,11 +178,15 @@ def render_w9(
         if key in TAXPAYER_COMPLETED_KEYS:
             continue
 
-        # Radio buttons (Line 3a): a truthy value sets the radio; anything
+        # Classification boxes (Line 3a) and standalone checkboxes (Line 3b):
+        # a truthy value sets the box to its own on-state ("1".."7" for the
+        # 3a widgets — each widget has a distinct export value); anything
         # else leaves it unselected.
-        if key in FW9_RADIO_FIELDS:
+        if key in FW9_RADIO_FIELDS or key in FW9_CHECKBOX_FIELDS:
             if value.strip().lower() in _TRUE_VALUES:
-                fname, on_state = FW9_RADIO_FIELDS[key]
+                fname, on_state = (
+                    FW9_RADIO_FIELDS.get(key) or FW9_CHECKBOX_FIELDS[key]
+                )
                 field_values[fname] = on_state
             continue
 

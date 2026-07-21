@@ -8,9 +8,7 @@ These tests don't need a live stack — they exercise:
 """
 from __future__ import annotations
 
-import pathlib
 
-import pytest
 
 
 # ---------------------------------------------------------------------------

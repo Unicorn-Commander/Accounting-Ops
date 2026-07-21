@@ -16,7 +16,6 @@ Everything runs against fakes — no live FalkorDB, no live Postgres.
 """
 from __future__ import annotations
 
-import pytest
 
 from agents.chat import cfo_context
 

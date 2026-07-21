@@ -43,15 +43,16 @@ Usage
         tax_year=2025,
         watermark_mode=WatermarkMode.DRAFT,
         inputs={
-            "name":              {"value": "Aaron J Stransky", "source_ref": "intake#1", "origin": "user_entered"},
-            "address":           {"value": "123 Main St", "source_ref": "intake#1", "origin": "user_entered"},
-            "city":              {"value": "Columbia", "source_ref": "intake#1", "origin": "user_entered"},
-            "state":             {"value": "SC", "source_ref": "intake#1", "origin": "user_entered"},
-            "zip":               {"value": "29201", "source_ref": "intake#1", "origin": "user_entered"},
-            "total_owed_5":      {"value": "12000", "source_ref": "calc#1", "origin": "computed"},
-            "monthly_payment_8": {"value": "500", "source_ref": "intake#1", "origin": "user_entered"},
-            "payment_day_9":     {"value": "15", "source_ref": "intake#1", "origin": "user_entered"},
-            "consent":           {"value": "true", "source_ref": "intake#1", "origin": "user_entered"},
+            "request_forms":       {"value": "1040", "source_ref": "intake#1", "origin": "user_entered"},
+            "tax_periods":         {"value": "2024", "source_ref": "intake#1", "origin": "user_entered"},
+            "first_name":          {"value": "Aaron J", "source_ref": "intake#1", "origin": "user_entered"},
+            "last_name":           {"value": "Stransky", "source_ref": "intake#1", "origin": "user_entered"},
+            "address":             {"value": "123 Main St", "source_ref": "intake#1", "origin": "user_entered"},
+            "city_state_zip":      {"value": "Columbia, SC 29201", "source_ref": "intake#1", "origin": "user_entered"},
+            "total_owed_5":        {"value": "12,000", "source_ref": "calc#1", "origin": "computed"},
+            "monthly_payment_11a": {"value": "500", "source_ref": "intake#1", "origin": "user_entered"},
+            "payment_day_12":      {"value": "15", "source_ref": "intake#1", "origin": "user_entered"},
+            "marital_single_16a":  {"value": "true", "source_ref": "intake#1", "origin": "user_entered"},
         },
     )
 """
@@ -71,8 +72,9 @@ from app.exports.f9465_field_map import (
     TAXPAYER_COMPLETED_KEYS,
 )
 
-# Truthy strings that set a line-8 / line-9 checkbox. Anything else (incl.
-# "false"/"no"/blank) leaves the box /Off (conservative).
+# Truthy strings that set a checkbox / radio choice (1b, the 433-F bullet,
+# 13c, 14, and the Part II choice keys). Anything else (incl. "false"/"no"/
+# blank) leaves the box /Off (conservative).
 _TRUE_VALUES = {"true", "1", "yes", "y", "x", "on", "checked"}
 
 
@@ -115,12 +117,15 @@ def render_9465(
         pro has finalized it). Mirrors the W-4P / 1040 watermark behavior.
     inputs:
         ``{field_key: {"value": str, "source_ref": str, "origin": str}}`` where
-        ``field_key`` is a LOGICAL key from ``F9465_FIELDS`` (e.g. ``"name"``,
-        ``"total_owed_5"``, ``"monthly_payment_8"``) OR a checkbox key from
-        ``F9465_CHECKBOX_FIELDS`` (``"address_changed"``, ``"consent"``, etc.)
-        whose truthy value ("true"/"1"/"yes"/"x") sets that box. Provenance
-        (``source_ref``) is validated upstream; this renderer trusts the caller.
-        A blank/empty value is skipped.
+        ``field_key`` is a LOGICAL key from ``F9465_FIELDS`` (e.g.
+        ``"first_name"``, ``"total_owed_5"``, ``"monthly_payment_11a"``) OR a
+        checkbox/choice key from ``F9465_CHECKBOX_FIELDS``
+        (``"address_new_1b"``, ``"marital_single_16a"``, etc.) whose truthy
+        value ("true"/"1"/"yes"/"x") sets that box. Radio-style questions
+        (16a/16b/19/21/25a/25b/26a/26b) are one key per choice — pass at most
+        one truthy choice per question. Provenance (``source_ref``) is
+        validated upstream; this renderer trusts the caller. A blank/empty
+        value is skipped.
 
         Notes:
           - ``ssn``, ``spouse_ssn``, ``routing_number``, ``account_number`` are
@@ -150,7 +155,7 @@ def render_9465(
         if not isinstance(payload, dict):
             continue
         value = payload.get("value")
-        if value is None or str(value) == "":
+        if value is None or str(value).strip() == "":
             continue
         value = str(value)
 

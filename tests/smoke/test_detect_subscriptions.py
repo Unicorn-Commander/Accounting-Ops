@@ -14,7 +14,6 @@ I/O, runs on a laptop with no stack).
 from __future__ import annotations
 
 from datetime import date, timedelta
-from decimal import Decimal
 
 from app.subscriptions.detect import detect_subscriptions
 

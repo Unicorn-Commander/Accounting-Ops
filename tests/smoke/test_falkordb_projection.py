@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
-import pytest
 
 from app import falkordb
 from app.categorization import CategorySuggestion, apply_learned_pattern

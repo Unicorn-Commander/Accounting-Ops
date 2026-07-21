@@ -12,7 +12,10 @@ What Form 843 is
 -----------------
 Form 843 is used to claim a refund or request abatement of certain taxes,
 penalties, and interest. It is not a general refund form (use 1040-X for that).
-The fillable form is the official IRS form.
+The fillable form is the official IRS form (Rev. December 2024 — the redesigned
+revision: a 17-position reason-for-filing group on page 1, tax-type boxes a-g,
+return-type boxes a-n and the explanation on page 2). See ``f843_field_map``
+for the verified widget-by-widget layout.
 
 Conservative blank-fill
 -----------------------
@@ -36,15 +39,20 @@ Usage
         tax_year=2025,
         watermark_mode=WatermarkMode.DRAFT,
         inputs={
-            "name":              {"value": "Aaron J Stransky", "source_ref": "intake#1", "origin": "user_entered"},
-            "address":           {"value": "123 Main St", "source_ref": "intake#1", "origin": "user_entered"},
-            "city_state_zip":    {"value": "Columbia, SC 29201", "source_ref": "intake#1", "origin": "user_entered"},
-            "ssn_ein":           {"value": "123-45-6789", "source_ref": "intake#1", "origin": "user_entered"},
-            "period_begin":      {"value": "01/01/2025", "source_ref": "intake#1", "origin": "user_entered"},
-            "period_end":        {"value": "12/31/2025", "source_ref": "intake#1", "origin": "user_entered"},
-            "amount":            {"value": "12000", "source_ref": "calc#1", "origin": "computed"},
-            "explanation":       {"value": "I am claiming a refund because...", "source_ref": "intake#1", "origin": "user_entered"},
-            "tax_type_income":   {"value": "true", "source_ref": "intake#1", "origin": "user_entered"},
+            "name":         {"value": "Aaron J Stransky", "source_ref": "intake#1", "origin": "user_entered"},
+            "ssn":          {"value": "123-45-6789", "source_ref": "intake#1", "origin": "user_entered"},
+            "address":      {"value": "123 Main St", "source_ref": "intake#1", "origin": "user_entered"},
+            "city":         {"value": "Columbia", "source_ref": "intake#1", "origin": "user_entered"},
+            "state":        {"value": "SC", "source_ref": "intake#1", "origin": "user_entered"},
+            "zip":          {"value": "29201", "source_ref": "intake#1", "origin": "user_entered"},
+            "period_begin": {"value": "01/01/2025", "source_ref": "intake#1", "origin": "user_entered"},
+            "period_end":   {"value": "12/31/2025", "source_ref": "intake#1", "origin": "user_entered"},
+            "amount":       {"value": "12,000", "source_ref": "calc#1", "origin": "computed"},
+            "explanation":  {"value": "I am claiming a refund because...", "source_ref": "intake#1", "origin": "user_entered"},
+            # One reason-for-filing box (exclusive group, page 1 top):
+            "filing_reason_penalty_reasonable_cause": {"value": "true", "source_ref": "intake#1", "origin": "user_entered"},
+            # Line 4 tax type + line 7 request reason:
+            "tax_type_income":         {"value": "true", "source_ref": "intake#1", "origin": "user_entered"},
             "reason_reasonable_cause": {"value": "true", "source_ref": "intake#1", "origin": "user_entered"},
         },
     )
@@ -110,15 +118,19 @@ def render_843(
     inputs:
         ``{field_key: {"value": str, "source_ref": str, "origin": str}}`` where
         ``field_key`` is a LOGICAL key from ``F843_FIELDS`` (e.g. ``"name"``,
-        ``"amount"``, ``"explanation"``) OR a checkbox key from
-        ``F843_CHECKBOX_FIELDS`` (e.g. ``"tax_type_income"``,
-        ``"reason_reasonable_cause"``) whose truthy value ("true"/"1"/"yes"/"x")
-        sets that box. Provenance (``source_ref``) is validated upstream; this
-        renderer trusts the caller. A blank/empty value is skipped.
+        ``"amount"``, ``"explanation"``, ``"irc_section"``) OR a checkbox key
+        from ``F843_CHECKBOX_FIELDS`` (e.g. ``"tax_type_income"``,
+        ``"reason_reasonable_cause"``, ``"filing_reason_penalty_reasonable_cause"``)
+        whose truthy value ("true"/"1"/"yes"/"x") sets that box. Provenance
+        (``source_ref``) is validated upstream; this renderer trusts the
+        caller. A blank/empty value is skipped.
 
         Notes:
           - An unknown / unmapped key is silently skipped (conservative — never
             invent a field).
+          - The ``filing_reason_*`` boxes (page 1 top) and the ``reason_*``
+            line-7 boxes are each EXCLUSIVE one-of groups on the printed form:
+            supply at most one truthy key per group.
 
     Raises
     ------

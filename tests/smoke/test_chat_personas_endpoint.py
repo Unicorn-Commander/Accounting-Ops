@@ -13,7 +13,6 @@ drift, the picker silently degrades — so we hold the line in CI.
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
 

@@ -159,6 +159,11 @@ FORM_REGISTRY: dict[str, FormSpec] = {
     "8821": FormSpec(kind="8821", title="Form 8821 — Tax Information Authorization",
         jurisdiction="federal", mode="fill", module="app.exports.f8821_fill",
         func="render_8821", goes_to="the IRS", category="representation"),
+    "2848": FormSpec(kind="2848", title="Form 2848 — Power of Attorney and Declaration of Representative",
+        jurisdiction="federal", mode="fill", module="app.exports.f2848_fill",
+        func="render_2848",
+        goes_to="the IRS CAF unit (fax/mail per the form instructions) — valid only after the taxpayer signs line 7 and each representative signs Part II",
+        category="representation"),
 }
 
 

@@ -21,7 +21,6 @@ import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
 
-import pytest
 
 import agents.sentinel.checks.subscription_monitor as sm
 from agents.sentinel.checks import CHECK_REGISTRY

@@ -35,7 +35,6 @@ from pypdf import PdfReader, PdfWriter
 from app.exports.form_prefill import (
     WatermarkMode,
     _apply_watermark,
-    _build_watermark_overlay,
 )
 
 # ---------------------------------------------------------------------------

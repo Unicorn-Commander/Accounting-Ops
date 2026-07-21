@@ -22,6 +22,13 @@ Any line whose input is absent is left blank. We never guess, never insert a
 zero, and never derive one line from another (e.g. line 8 balance due is taken
 from the caller, not computed from lines 6 and 7).
 
+Left blank for the human
+------------------------
+The filer's **identifying number** (EIN/SSN, logical key ``"ein"``) is
+intentionally LEFT BLANK even if supplied, consistent with the 1040 / 1120 /
+1120-S / 1065 / 4562 / 4868 renderers — identity numbers are the filer's own
+entry.
+
 XFA-hybrid form
 ---------------
 Form 7004 is a modern XFA-hybrid AcroForm (``topmostSubform[0]`` field naming,
@@ -44,10 +51,8 @@ Usage
             "city_town":         {"value": "Columbia", "source_ref": "intake#1", "origin": "user_entered"},
             "state":             {"value": "SC", "source_ref": "intake#1", "origin": "user_entered"},
             "zip_code":          {"value": "29201", "source_ref": "intake#1", "origin": "user_entered"},
-            "ein":               {"value": "12-3456789", "source_ref": "intake#1", "origin": "user_entered"},
             "form_code":         {"value": "12", "source_ref": "intake#1", "origin": "user_entered"},
-            "fiscal_year_begin": {"value": "Jan 1, 2025", "source_ref": "intake#1", "origin": "user_entered"},
-            "fiscal_year_end":   {"value": "Dec 31, 2025", "source_ref": "intake#1", "origin": "user_entered"},
+            "calendar_year_yy":  {"value": "25", "source_ref": "intake#1", "origin": "user_entered"},
             "tentative_tax_6":   {"value": "12000", "source_ref": "calc#1", "origin": "computed"},
             "payments_7":        {"value": "9000", "source_ref": "w2#1", "origin": "document"},
             "balance_due_8":     {"value": "3000", "source_ref": "calc#1", "origin": "computed"},
@@ -68,10 +73,11 @@ from app.exports.form_prefill import (
 from app.exports.f7004_field_map import (
     F7004_FIELDS,
     F7004_CHECKBOX_FIELDS,
+    F7004_TAXPAYER_COMPLETED_KEYS,
 )
 
-# Truthy strings that set a checkbox/radio. Anything else (incl.
-# "false"/"no"/blank) leaves the box /Off (conservative).
+# Truthy strings that set a checkbox. Anything else (incl. "false"/"no"/blank)
+# leaves the box /Off (conservative).
 _TRUE_VALUES = {"true", "1", "yes", "y", "x", "on", "checked"}
 
 
@@ -115,19 +121,28 @@ def render_7004(
     inputs:
         ``{field_key: {"value": str, "source_ref": str, "origin": str}}`` where
         ``field_key`` is a LOGICAL key from ``F7004_FIELDS`` (e.g. ``"name"``,
-        ``"tentative_tax_6"``, ``"balance_due_8"``) OR a checkbox/radio key from
-        ``F7004_CHECKBOX_FIELDS`` (e.g. ``"foreign_corp_2"``, ``"short_year_initial"``)
-        whose truthy value ("true"/"1"/"yes"/"x") sets that box. Provenance
-        (``source_ref``) is validated upstream; this renderer trusts the caller.
-        A blank/empty value is skipped.
+        ``"tentative_tax_6"``, ``"balance_due_8"``) OR a checkbox key from
+        ``F7004_CHECKBOX_FIELDS`` (e.g. ``"foreign_corp_2"``,
+        ``"short_year_initial"``) whose truthy value ("true"/"1"/"yes"/"x") sets
+        that box. Provenance (``source_ref``) is validated upstream; this
+        renderer trusts the caller. A blank/empty value is skipped.
 
         Notes:
+          - ``"ein"`` (the identifying number) is NEVER filled here even if
+            supplied — an identity item the filer enters themselves.
+          - ``"form_code"`` is a convenience key: line 1 is printed as TWO
+            single-digit comb boxes, so a 2-character code (e.g. "12" for
+            Form 1120, "09" for Form 1065) is split across
+            ``form_code_digit1`` / ``form_code_digit2``. A value that is not
+            exactly 2 characters after trimming is skipped (conservative —
+            never guess which box a malformed code belongs in). The digit keys
+            may also be supplied directly.
           - An unknown / unmapped key is silently skipped (conservative — never
             invent a field).
-          - Radio buttons (line 5b short tax year reasons) are mutually exclusive
-            in the PDF, but this renderer simply sets the box for whichever key
-            is provided with a truthy value. If multiple are provided, the last
-            one processed wins (dict iteration order).
+          - Line 5b's five short-tax-year reason boxes are SEPARATE fields with
+            distinct on-states; this renderer sets every box whose key arrives
+            truthy and does not enforce mutual exclusivity — the printed form
+            expects one reason, which upstream validation is responsible for.
 
     Raises
     ------
@@ -154,12 +169,27 @@ def render_7004(
             continue
         value = str(value)
 
-        # Checkbox/Radio keys: a truthy value sets the box; anything else
-        # leaves it /Off.
+        # Checkbox keys: a truthy value sets the box (with that box's own
+        # on-state — line 5b's states differ per box); anything else leaves
+        # it /Off.
         if key in F7004_CHECKBOX_FIELDS:
             if value.strip().lower() in _TRUE_VALUES:
                 fname, on_state = F7004_CHECKBOX_FIELDS[key]
                 field_values[fname] = on_state
+            continue
+
+        # Identity items the filer completes themselves — never auto-filled.
+        if key in F7004_TAXPAYER_COMPLETED_KEYS:
+            continue
+
+        # Line 1 convenience key: split a 2-digit form code across the two
+        # single-digit comb boxes. A malformed (non-2-char) code is skipped
+        # rather than guessed.
+        if key == "form_code":
+            code = value.strip()
+            if len(code) == 2:
+                field_values[F7004_FIELDS["form_code_digit1"]] = code[0]
+                field_values[F7004_FIELDS["form_code_digit2"]] = code[1]
             continue
 
         # Ordinary text line: map the logical key to its AcroForm field name.
@@ -170,3 +200,6 @@ def render_7004(
             field_values[acro_name] = value
 
     return _render_acroform_pdf(source_bytes, field_values, watermark_mode), "application/pdf"
+
+
+__all__ = ["render_7004", "_f7004_form_path", "WatermarkMode"]

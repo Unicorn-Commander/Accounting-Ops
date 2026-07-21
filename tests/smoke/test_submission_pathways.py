@@ -26,7 +26,6 @@ from app.api.usps_tracking import (
 )
 from app.exports.cover_sheet import (
     CoverSheetData,
-    DEFAULT_RETURN_ADDRESS,
     TAX_OFFICE_ADDRESSES,
     generate_cover_sheet_pdf,
 )

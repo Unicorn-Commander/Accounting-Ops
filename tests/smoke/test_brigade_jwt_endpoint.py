@@ -13,7 +13,6 @@ import pytest
 from fastapi import FastAPI
 
 import app.api.test_brigade_jwt as endpoint
-import app.auth as auth
 import app.security.brigade_jwt as bj
 from app.auth import AuthContext
 

@@ -17,7 +17,6 @@ No database, no I/O — all tests are pure Python.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -118,9 +117,9 @@ class TestCoverageComplete:
             and cat not in NON_1120_PL_CATEGORIES
         ]
         assert missing == [], (
-            f"The following CATEGORY_TO_ACCOUNT keys have neither a page-1 "
-            f"CATEGORY_TO_1120 mapping nor an explicit Schedule L route and "
-            f"would be silently dropped from the 1120 package:\n"
+            "The following CATEGORY_TO_ACCOUNT keys have neither a page-1 "
+            "CATEGORY_TO_1120 mapping nor an explicit Schedule L route and "
+            "would be silently dropped from the 1120 package:\n"
             + "\n".join(f"  - {c!r}" for c in missing)
         )
 

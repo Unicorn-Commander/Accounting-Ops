@@ -21,11 +21,12 @@ zero, and never derive one line from another.
 
 Taxpayer-completed fields
 -------------------------
-The taxpayer's signature and date (and potentially the designee's signature
-if required by specific use cases, though typically only taxpayer signs) are
-intentionally LEFT BLANK by this renderer even if values were supplied — they
-are identity items the taxpayer must enter themselves. See
-``TAXPAYER_COMPLETED_KEYS``.
+The taxpayer's signature and date are intentionally LEFT BLANK by this
+renderer even if values were supplied — they are identity items the taxpayer
+must enter themselves (on this Rev. 1-2021 PDF the signature/date lines are
+not AcroForm fields at all; only Print Name / Title are fillable). See
+``TAXPAYER_COMPLETED_KEYS``. The "For IRS Use Only" header box is likewise
+never mapped or written.
 
 XFA-hybrid form
 ---------------
@@ -43,27 +44,26 @@ Usage
         tax_year=2025,
         watermark_mode=WatermarkMode.DRAFT,
         inputs={
-            "taxpayer_name":      {"value": "John Doe", "source_ref": "intake#1", "origin": "user_entered"},
-            "taxpayer_address":   {"value": "123 Main St", "source_ref": "intake#1", "origin": "user_entered"},
-            "taxpayer_city":      {"value": "Columbia", "source_ref": "intake#1", "origin": "user_entered"},
-            "taxpayer_state":     {"value": "SC", "source_ref": "intake#1", "origin": "user_entered"},
-            "taxpayer_zip":       {"value": "29201", "source_ref": "intake#1", "origin": "user_entered"},
-            "taxpayer_tin":       {"value": "123-45-6789", "source_ref": "intake#1", "origin": "user_entered"},
-            "taxpayer_phone":     {"value": "555-1234", "source_ref": "intake#1", "origin": "user_entered"},
-            "designee_name":      {"value": "Jane Smith, CPA", "source_ref": "intake#1", "origin": "user_entered"},
-            "designee_address":   {"value": "456 Oak Ave", "source_ref": "intake#1", "origin": "user_entered"},
-            "designee_city":      {"value": "Columbia", "source_ref": "intake#1", "origin": "user_entered"},
-            "designee_state":     {"value": "SC", "source_ref": "intake#1", "origin": "user_entered"},
-            "designee_zip":       {"value": "29201", "source_ref": "intake#1", "origin": "user_entered"},
-            "designee_caf":       {"value": "12345", "source_ref": "intake#1", "origin": "user_entered"},
-            "designee_ptin":      {"value": "P12345678", "source_ref": "intake#1", "origin": "user_entered"},
-            "designee_phone":     {"value": "555-5678", "source_ref": "intake#1", "origin": "user_entered"},
-            "designee_fax":       {"value": "555-9999", "source_ref": "intake#1", "origin": "user_entered"},
-            "tax_type_1":         {"value": "Federal", "source_ref": "intake#1", "origin": "user_entered"},
-            "tax_form_1":         {"value": "1040", "source_ref": "intake#1", "origin": "user_entered"},
-            "tax_years_1":        {"value": "2024", "source_ref": "intake#1", "origin": "user_entered"},
-            "tax_matters_1":      {"value": "All matters", "source_ref": "intake#1", "origin": "user_entered"},
-            "designee_new_address":{"value": "true", "source_ref": "intake#1", "origin": "user_entered"},
+            # Line 1 — the official form has ONE combined name-and-address box
+            # (no separate city/state/ZIP fields). Values render on a single
+            # line, so pass a compact comma-separated block.
+            "taxpayer_name_address": {"value": "John Doe, 123 Main St, Columbia, SC 29201", "source_ref": "intake#1", "origin": "user_entered"},
+            "taxpayer_tin":          {"value": "123-45-6789", "source_ref": "intake#1", "origin": "user_entered"},
+            "taxpayer_phone":        {"value": "555-1234", "source_ref": "intake#1", "origin": "user_entered"},
+            # Line 2 — up to two designees on the form itself.
+            "designee_name_address": {"value": "Jane Smith CPA, 456 Oak Ave, Columbia, SC 29201", "source_ref": "intake#1", "origin": "user_entered"},
+            "designee_caf":          {"value": "1234-56789R", "source_ref": "intake#1", "origin": "user_entered"},
+            "designee_ptin":         {"value": "P12345678", "source_ref": "intake#1", "origin": "user_entered"},
+            "designee_phone":        {"value": "555-5678", "source_ref": "intake#1", "origin": "user_entered"},
+            "designee_fax":          {"value": "555-9999", "source_ref": "intake#1", "origin": "user_entered"},
+            "designee_notice_copies":{"value": "true", "source_ref": "intake#1", "origin": "user_entered"},
+            # Line 3 — tax information table rows 1-3.
+            "tax_type_1":            {"value": "Income", "source_ref": "intake#1", "origin": "user_entered"},
+            "tax_form_1":            {"value": "1040", "source_ref": "intake#1", "origin": "user_entered"},
+            "tax_years_1":           {"value": "2024", "source_ref": "intake#1", "origin": "user_entered"},
+            "tax_matters_1":         {"value": "All matters", "source_ref": "intake#1", "origin": "user_entered"},
+            # Line 6 — print name / title only; signature+date stay blank.
+            "taxpayer_print_name":   {"value": "John Doe", "source_ref": "intake#1", "origin": "user_entered"},
         },
     )
 """
@@ -127,16 +127,17 @@ def render_8821(
         pro has finalized it). Mirrors the W-4P / 1040 watermark behavior.
     inputs:
         ``{field_key: {"value": str, "source_ref": str, "origin": str}}`` where
-        ``field_key`` is a LOGICAL key from ``F8821_FIELDS`` (e.g. ``"name"``,
-        ``"tax_type_1"``) OR a checkbox key from ``F8821_CHECKBOX_FIELDS``
-        (e.g. ``"designee_new_address"``) whose truthy value ("true"/"1"/"yes"/"x")
-        sets that box. Provenance (``source_ref``) is validated upstream; this
-        renderer trusts the caller. A blank/empty value is skipped.
+        ``field_key`` is a LOGICAL key from ``F8821_FIELDS`` (e.g.
+        ``"taxpayer_name_address"``, ``"tax_type_1"``) OR a checkbox key from
+        ``F8821_CHECKBOX_FIELDS`` (e.g. ``"designee_notice_copies"``) whose
+        truthy value ("true"/"1"/"yes"/"x") sets that box. Provenance
+        (``source_ref``) is validated upstream; this renderer trusts the
+        caller. A blank/empty value is skipped.
 
         Notes:
-          - ``taxpayer_signature``, ``taxpayer_date``, ``designee_signature``,
-            ``designee_date`` are NEVER filled here even if supplied (identity
-            items for the taxpayer/designee).
+          - ``taxpayer_signature`` / ``taxpayer_date`` are NEVER filled here
+            even if supplied (identity items the taxpayer completes; on this
+            revision they are not AcroForm fields at all).
           - An unknown / unmapped key is silently skipped (conservative — never
             invent a field, never write to a line we don't recognize).
 

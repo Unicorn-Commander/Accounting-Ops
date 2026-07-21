@@ -264,7 +264,7 @@ def _body_paragraphs(inputs: dict[str, Any], tax_year: int | None) -> list[str]:
     elif response_type == "request_abatement":
         paras.append(
             "I am requesting that the penalty assessed on this notice be abated. The "
-            f"balance is small relative to my overall history of compliance, and I "
+            "balance is small relative to my overall history of compliance, and I "
             "have otherwise filed and paid as required. I am asking the Department to "
             "consider both first-time penalty relief and reasonable-cause relief, as "
             "the circumstances that led to this notice were not the result of willful "

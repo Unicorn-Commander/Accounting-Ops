@@ -386,7 +386,6 @@ class TestFieldMapConsistency:
 class TestGenerateFormPdfMissingPdf:
     def test_raises_file_not_found_when_pdf_absent(self):
         """Without the IRS PDFs downloaded, FileNotFoundError should be raised."""
-        from pathlib import Path
         from app.exports.form_prefill import IRS_FORMS_DIR
 
         # Only run this assertion if the form PDF is actually absent
