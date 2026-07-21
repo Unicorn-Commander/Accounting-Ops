@@ -83,12 +83,33 @@ async def test_brigade_jwt_passes_via_authenticate_token():
     assert ctx.uc_uid == "jane-from-brigade"
 
 
-async def test_brigade_jwt_with_uc_uid_claim_prefers_it():
-    """When Brigade carries an explicit uc_uid claim, prefer it over sub."""
-    claims = _base_claims(sub="brigade-internal-id", uc_uid="jane")
+async def test_brigade_jwt_uc_uid_equals_sub_conformant():
+    """SUITE-IDENTITY D1: a conformant Brigade token carries uc_uid == sub and
+    resolves to that single identity (the normal case)."""
+    claims = _base_claims(sub="jane", uc_uid="jane")
     token = _mint_ed25519(_ED_PRIV, claims)
     ctx = await auth.authenticate_token(token)
     assert ctx.uc_uid == "jane"
+
+
+async def test_brigade_jwt_diverging_uc_uid_uses_sub_and_logs(caplog):
+    """SUITE-IDENTITY D1 (binding): if a token carries uc_uid != sub, AO MUST log
+    LOUDLY at ERROR and resolve to ``sub`` — never the divergent uc_uid (which
+    would be a silent re-keying trap). This replaces the retired pre-convergence
+    'prefer uc_uid over sub' behaviour.
+    """
+    import logging
+
+    claims = _base_claims(sub="brigade-canonical-sub", uc_uid="jane-divergent")
+    token = _mint_ed25519(_ED_PRIV, claims)
+    with caplog.at_level(logging.ERROR, logger="acctops.auth"):
+        ctx = await auth.authenticate_token(token)
+    # Resolves to sub, NOT the divergent uc_uid.
+    assert ctx.uc_uid == "brigade-canonical-sub"
+    # And it logged the divergence loudly with the stable grep-able marker.
+    assert any(
+        "uc_uid_diverges_from_sub" in rec.message for rec in caplog.records
+    ), [rec.message for rec in caplog.records]
 
 
 async def test_brigade_jwt_extracts_scope_list():

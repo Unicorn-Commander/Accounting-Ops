@@ -77,9 +77,14 @@ def _mint(private_pem: str, claims: dict, *, kid: str = KID) -> str:
 
 def _base_claims(**overrides) -> dict:
     now = int(time.time())
+    # SUITE-IDENTITY D1: uc_uid is a STRICT alias of sub. A conformant uchub
+    # token therefore carries uc_uid == sub (this fixture used to diverge them as
+    # an incidental "prefer uc_uid" placeholder; that contract is retired —
+    # divergence now logs ERROR and resolves to sub). Keep them equal so these
+    # audience-focused tests exercise the normal, conformant identity path.
     claims = {
         "iss": ISSUER,
-        "sub": "user-123",
+        "sub": "jane",
         "uc_uid": "jane",
         "azp": AGENT_CLIENT,  # minted by an agent client, NOT the app itself
         "iat": now,

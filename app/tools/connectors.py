@@ -37,6 +37,7 @@ from sqlalchemy import text
 
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace, current_auth
+from app.tenancy import canonical_role
 from app.workspace_session import workspace_session
 
 
@@ -57,14 +58,20 @@ async def list_my_workspaces() -> list[dict[str, Any]]:
     """List the workspaces the current caller belongs to.
 
     Mirrors GET /api/me/workspaces. Returns a row per membership with:
-    {id, slug, display_name, role, isolation_tier, hipaa_protected,
-     entity_count, last_active_at}.
+    {id, workspace_id, slug, display_name, role, role_canonical, is_default,
+     isolation_tier, hipaa_protected, entity_count, last_active_at}.
+
+    `role` is the AO app-role; `role_canonical` is the SUITE-IDENTITY §7 suite
+    role Brigade/MCP speak (federation contract: {workspace_id, slug,
+    display_name, role(canonical), is_default}). `workspace_id` is the canonical
+    alias of `id`. Both additions are additive — the existing keys are unchanged.
 
     Useful as a discovery call: an agent that just received an OAuth token can
     enumerate the workspaces it can operate against without needing to be told.
 
     Role floor: any authenticated caller (no membership required to ask, but
-    the response only contains workspaces the caller IS a member of).
+    the response only contains workspaces the caller IS a member of, and only
+    those with an ACTIVE membership).
     """
     auth = current_auth()
     if auth is None:
@@ -84,12 +91,14 @@ async def list_my_workspaces() -> list[dict[str, Any]]:
                             w.slug              AS slug,
                             w.display_name      AS display_name,
                             m.role::text        AS role,
+                            m.is_default        AS is_default,
                             w.isolation_tier::text AS isolation_tier,
                             w.hipaa_protected   AS hipaa_protected,
                             m.last_active_at    AS last_active_at
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :user_id
+                          AND m.status = 'active'
                           AND w.status = 'active'
                         ORDER BY w.display_name
                         """
@@ -101,6 +110,10 @@ async def list_my_workspaces() -> list[dict[str, Any]]:
     workspaces: list[dict[str, Any]] = []
     for r in rows:
         entry = {k: _b(v) for k, v in dict(r).items()}
+        # Canonical suite role + canonical workspace key alias (SUITE-IDENTITY
+        # §7) — additive; the raw `role` + `id` keys are kept for back-compat.
+        entry["role_canonical"] = canonical_role(entry["role"])
+        entry["workspace_id"] = entry["id"]
         try:
             async with workspace_session(SessionLocal, entry["id"]) as ws:
                 count_row = (

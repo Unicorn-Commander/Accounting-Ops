@@ -300,6 +300,36 @@ def _match_service_token(presented: str) -> dict[str, Any] | None:
 _log = logging.getLogger("acctops.auth")
 
 
+def _resolve_uc_uid(claims: dict[str, Any]) -> str | None:
+    """Resolve the canonical user key from a verified-claims dict.
+
+    SUITE-IDENTITY D1 (binding): the user key is the uchub ``sub``; ``uc_uid`` is
+    a STRICT alias defined to equal ``sub``. No client may emit a divergent
+    ``uc_uid`` mapper. If a token nonetheless carries ``uc_uid != sub``, that is a
+    silent re-keying trap — we log LOUDLY at ERROR and resolve to ``sub`` (never
+    the divergent ``uc_uid``).
+
+    Returns the resolved user key, or ``None`` when neither claim is present
+    (the caller turns that into a 401 / a fall-through).
+
+    Behaviour-preserving for the conformant case (``uc_uid == sub`` or ``uc_uid``
+    absent): returns exactly what ``claims.get("uc_uid") or claims.get("sub")``
+    returned before. The only change is the divergent case, which previously
+    silently preferred ``uc_uid`` and now prefers ``sub`` with an ERROR log.
+    """
+    claimed_uc_uid = claims.get("uc_uid")
+    sub = claims.get("sub")
+    if claimed_uc_uid is not None and sub is not None and claimed_uc_uid != sub:
+        _log.error(
+            "[acctops.auth] uc_uid_diverges_from_sub: uc_uid=%r != sub=%r — "
+            "using sub per SUITE-IDENTITY D1 (uc_uid is a strict alias of sub)",
+            claimed_uc_uid,
+            sub,
+        )
+        return sub
+    return claimed_uc_uid or sub
+
+
 def _extract_brigade_scopes(claims: dict[str, Any]) -> tuple[str, ...]:
     """Pull Brigade-style scopes from a verified-claims dict, tolerantly.
 
@@ -466,7 +496,9 @@ def _try_authenticate_local(token: str) -> AuthContext | None:
         )
     except Exception:  # noqa: BLE001 - any decode failure = not a valid local token
         return None
-    uc_uid = claims.get("uc_uid") or claims.get("sub")
+    # SUITE-IDENTITY D1: uc_uid ≡ sub. Local tokens are minted by AO itself with
+    # both equal; a divergent uc_uid logs at ERROR and resolves to sub anyway.
+    uc_uid = _resolve_uc_uid(claims)
     if not uc_uid:
         return None
     scope = tuple(str(claims.get("scope", "")).split())
@@ -582,7 +614,8 @@ async def authenticate_token(token: str) -> AuthContext:
             b_is_m2m = bool(
                 b_actor_app and b_actor_app in get_settings().trusted_m2m_callers
             )
-            b_uc_uid = brigade_claims.get("uc_uid") or brigade_claims.get("sub")
+            # SUITE-IDENTITY D1: uc_uid ≡ sub. Diverging uc_uid logs + uses sub.
+            b_uc_uid = _resolve_uc_uid(brigade_claims)
             # Brigade mints sub = the customer's EMAIL today; AO keys accounts on
             # the opaque uc_uid. Translate an email-shaped identifier to the
             # canonical uc_uid via public.user_account.email (mirrors project-ops's
@@ -705,7 +738,9 @@ async def authenticate_token(token: str) -> AuthContext:
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token"
         ) from exc
 
-    uc_uid = claims.get("uc_uid") or claims.get("sub")
+    # SUITE-IDENTITY D1: the user key is the uchub sub; uc_uid is a strict alias.
+    # A divergent uc_uid is logged at ERROR and we resolve to sub (never uc_uid).
+    uc_uid = _resolve_uc_uid(claims)
     if not uc_uid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Token lacks uc_uid/sub"
@@ -808,18 +843,19 @@ async def _try_brigade(token: str) -> AuthContext | None:
     if claims is None:
         return None
 
-    # The sub claim IS the uc_uid in Brigade's contract. If Brigade chooses to
-    # use a different field (e.g. uc_uid claim or org_id/user_id), prefer
-    # claims['uc_uid'] when present; otherwise fall back to sub. Either way,
-    # the value must resolve to an existing user_account in the workspace's
-    # tenancy layer for any tool call to succeed.
+    # The sub claim IS the uc_uid in Brigade's contract (SUITE-IDENTITY D1:
+    # uc_uid is a strict alias of sub). _resolve_uc_uid logs LOUDLY at ERROR and
+    # resolves to sub if a token ever carries a divergent uc_uid — never the
+    # divergent uc_uid. Either way the value must resolve to an existing
+    # user_account in the workspace's tenancy layer for any tool call to succeed
+    # (no auto-provision here).
     # RFC 8693 act claim — the acting APP is act.client_id (act.sub is the
     # federated subject). A trusted M2M caller is authorized without an AO user.
     act = claims.get("act") or {}
     actor_app = act.get("client_id") if isinstance(act, dict) else None
     is_m2m = bool(actor_app and actor_app in get_settings().trusted_m2m_callers)
 
-    uc_uid = claims.get("uc_uid") or claims.get("sub")
+    uc_uid = _resolve_uc_uid(claims)
     if is_m2m:
         # Synthetic uc_uid — never matches a real user_account; the M2M caller
         # has no AO membership and never auto-provisions one. Skip resolution.
