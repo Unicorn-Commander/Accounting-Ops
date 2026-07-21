@@ -39,6 +39,10 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 
+from agents.sentinel.checks._helpers import (
+    federal_1120_deadline,
+    federal_return_deadline,
+)
 from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
@@ -53,19 +57,16 @@ TAX_YEARS = [2022, 2023, 2024, 2025]
 # ---------------------------------------------------------------------------
 
 
-def _filing_deadline(tax_year: int) -> dt.date:
-    """Return the federal + SC filing deadline for a C-corp tax year.
+def _filing_deadline(tax_year: int, kind: str = "c_corp") -> dt.date:
+    """Return the federal + SC filing deadline for this entity kind's tax year.
 
-    Standard: April 15, year+1. Advance to next Monday if that falls on
-    Saturday or Sunday (IRS / SCDOR practice mirrors federal).
+    1120 and 1040 filers are due the 15th day of the 4th month (April 15);
+    flow-throughs filing 1120-S or 1065 are due the 15th day of the 3rd month
+    (March 15). Advance to next Monday if that falls on a weekend (IRS / SCDOR
+    practice mirrors federal). Kinds we prepare no return for fall back to
+    April 15 so the dashboard still renders a sane date.
     """
-    d = dt.date(tax_year + 1, 4, 15)
-    # 5 = Saturday, 6 = Sunday
-    if d.weekday() == 5:   # Saturday → Monday (+2)
-        d += dt.timedelta(days=2)
-    elif d.weekday() == 6:  # Sunday → Monday (+1)
-        d += dt.timedelta(days=1)
-    return d
+    return federal_return_deadline(tax_year, kind) or federal_1120_deadline(tax_year)
 
 
 def _date_or_none(value: Any) -> dt.date | None:
@@ -478,7 +479,7 @@ async def get_tax_status(
                     incorporated_at.isoformat() if is_short_year else None
                 )
 
-                deadline = _filing_deadline(tax_year)
+                deadline = _filing_deadline(tax_year, entity_type)
                 deadline_str = deadline.isoformat()
 
                 key = (entity_id, tax_year)
