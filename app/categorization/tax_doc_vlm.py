@@ -35,6 +35,7 @@ import httpx
 
 from app.categorization.receipt_vlm import _extract_completion
 from app.config import Settings, get_settings
+from app.llm_client import llm_default_headers
 
 _log = logging.getLogger("accounting_ops.tax_doc_vlm")
 
@@ -157,7 +158,10 @@ class TaxDocExtractor:
             "temperature": 0.0,
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        headers = {"Content-Type": "application/json"}
+        # Shared UA (Cloudflare in front of the UC gateway 403s the SDK/urllib
+        # defaults with "error code: 1010"). NO failover here -- see the note in
+        # receipt_vlm: the fallback rung is a text model, not a vision one.
+        headers = llm_default_headers({"Content-Type": "application/json"})
         if settings.llm_api_key:
             headers["Authorization"] = f"Bearer {settings.llm_api_key}"
         url = settings.llm_endpoint_url.rstrip("/") + "/chat/completions"

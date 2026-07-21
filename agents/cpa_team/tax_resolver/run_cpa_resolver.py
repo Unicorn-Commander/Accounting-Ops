@@ -340,7 +340,18 @@ def _llm_second_opinion(
         print(f"[resolver] Requesting LLM second-opinion on {len(escalated_items)} escalations ...")
 
     try:
-        client = openai.OpenAI(base_url=llm_endpoint_url, api_key=llm_api_key)
+        # Failover-aware drop-in for openai.OpenAI: carries the shared
+        # User-Agent (the UC gateway's Cloudflare 403s the SDK default with
+        # "error code: 1010") and retries ONCE on the cloud fallback for
+        # infrastructure faults. Inert unless LLM_FALLBACK_BASE_URL is set.
+        from app.llm_client import FailoverClient
+
+        client = FailoverClient(
+            base_url=llm_endpoint_url,
+            api_key=llm_api_key,
+            model=llm_model,
+            op="resolver.chat.completions",
+        )
         response = client.chat.completions.create(
             model=llm_model,
             messages=[

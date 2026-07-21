@@ -60,6 +60,7 @@ from typing import Any, Literal
 import httpx
 
 from app.config import Settings, get_settings
+from app.llm_client import llm_default_headers
 
 _log = logging.getLogger(__name__)
 
@@ -295,7 +296,11 @@ class ReceiptVLMExtractor:
             # return empty content). Silently ignored by endpoints that lack it.
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        headers: dict[str, str] = {"Content-Type": "application/json"}
+        # Shared UA (Cloudflare in front of the UC gateway 403s the SDK/urllib
+        # defaults with "error code: 1010"). NO failover on the VLM path: the
+        # LLM_FALLBACK_* rung is a TEXT model, and silently re-sending a vision
+        # request to it would return confident garbage instead of an error.
+        headers = llm_default_headers({"Content-Type": "application/json"})
         if settings.llm_api_key:
             headers["Authorization"] = f"Bearer {settings.llm_api_key}"
         url = settings.llm_endpoint_url.rstrip("/") + "/chat/completions"
@@ -416,7 +421,11 @@ class ReceiptVLMExtractor:
             "temperature": 0.0,
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        headers: dict[str, str] = {"Content-Type": "application/json"}
+        # Shared UA (Cloudflare in front of the UC gateway 403s the SDK/urllib
+        # defaults with "error code: 1010"). NO failover on the VLM path: the
+        # LLM_FALLBACK_* rung is a TEXT model, and silently re-sending a vision
+        # request to it would return confident garbage instead of an error.
+        headers = llm_default_headers({"Content-Type": "application/json"})
         if settings.llm_api_key:
             headers["Authorization"] = f"Bearer {settings.llm_api_key}"
         url = settings.llm_endpoint_url.rstrip("/") + "/chat/completions"

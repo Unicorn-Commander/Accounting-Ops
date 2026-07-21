@@ -91,6 +91,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from agents._shared.api_keys import HELP_TEXT_LLM_API_KEY, resolve_llm_api_key
 from agents._shared.limits import MAX_OUTPUT_TOKENS
+from app.llm_client import FailoverAsyncClient
 
 # ---------------------------------------------------------------------------
 # Soft dependency checks — deferred to the backend that actually needs them
@@ -401,9 +402,16 @@ async def _run_openai_path(
             else:
                 effective_system = system_prompt + _JSON_FALLBACK_SUFFIX
 
-            client = openai.AsyncOpenAI(
+            # Failover-aware client (drop-in for openai.AsyncOpenAI). Carries
+            # the shared User-Agent -- the UC gateway sits behind Cloudflare,
+            # which 403s the openai SDK's default UA with "error code: 1010" --
+            # and retries ONCE on the cloud fallback for infrastructure faults.
+            # Inert unless LLM_FALLBACK_BASE_URL is set.
+            client = FailoverAsyncClient(
                 base_url=llm_endpoint_url,
                 api_key=llm_api_key,
+                model=llm_model,
+                op="specialist.chat.completions",
             )
 
             messages: list[dict[str, Any]] = [
