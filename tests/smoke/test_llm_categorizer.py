@@ -60,11 +60,13 @@ _ALLOWED = [
 ]
 
 # Minimal settings that point at a fake URL (never contacted in these tests).
+# The categorizer reads the CATEGORIZER_* (text) knobs, distinct from the vision
+# receipt-VLM llm_* knobs — see app/config.py.
 _TEST_SETTINGS = Settings(
-    llm_endpoint_url="http://fake-llm.internal/v1",
-    llm_model="fake-model",
-    llm_api_key="",      # no key — local/no-auth mode
-    llm_timeout_s=5,
+    categorizer_endpoint_url="http://fake-llm.internal/v1",
+    categorizer_model="fake-model",
+    categorizer_api_key="",      # no key — local/no-auth mode
+    categorizer_timeout_s=5,
     llm_max_tokens=200,
 )
 
@@ -411,3 +413,114 @@ async def test_health_returns_reachable_false_on_connection_error():
 
     assert result["reachable"] is False
     assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Frontier fallback (per-agent routing policy)
+# ---------------------------------------------------------------------------
+
+_FALLBACK_SETTINGS = Settings(
+    categorizer_endpoint_url="http://qwen.internal/v1",
+    categorizer_model="qwen-primary",
+    categorizer_api_key="",
+    categorizer_timeout_s=5,
+    llm_max_tokens=200,
+    categorizer_fallback_model="frontier-fallback",
+    categorizer_fallback_endpoint_url="http://frontier.internal/v1",
+    categorizer_fallback_api_key="sk-test",
+    categorizer_escalate_below_confidence=0.5,
+)
+
+
+# Capture the REAL class before any patch so side_effect factories don't recurse
+# into the patched mock.
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+def _completion(category: str, confidence: float) -> dict[str, Any]:
+    return {"category": category, "confidence": confidence, "reasoning": "t"}
+
+
+def _model_aware_client(responses: dict[str, dict]):
+    """side_effect factory: each httpx.AsyncClient() gets a fresh transport that
+    answers per the request's `model` (so primary + fallback hops both work)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content).get("model")
+        if model not in responses:
+            return httpx.Response(500, json={"error": f"unexpected model {model}"})
+        content = json.dumps(responses[model])
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+    return lambda *a, **k: _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_primary_escalates_to_frontier():
+    """Qwen returns low confidence → escalate; the frontier answer is returned."""
+    side = _model_aware_client({
+        "qwen-primary": _completion("Office · Supplies", 0.2),
+        "frontier-fallback": _completion("SaaS · AI", 0.95),
+    })
+    cat = LLMCategorizer(settings=_FALLBACK_SETTINGS)
+    with patch("httpx.AsyncClient", side_effect=side):
+        r = await cat.suggest(payee=None, description="X", memo=None, amount=Decimal("-1"),
+                              allowed_categories=["Office · Supplies", "SaaS · AI", "Uncategorized"])
+    assert r is not None
+    assert r.category == "SaaS · AI"        # the frontier answer wins
+    assert r.model == "frontier-fallback"   # audit trail records the escalation
+
+
+@pytest.mark.asyncio
+async def test_primary_hallucination_escalates_to_frontier():
+    """Qwen returns a rejected category → primary None → escalate to frontier."""
+    side = _model_aware_client({
+        "qwen-primary": _completion("Not A Real Category", 0.9),
+        "frontier-fallback": _completion("Meals", 0.8),
+    })
+    cat = LLMCategorizer(settings=_FALLBACK_SETTINGS)
+    with patch("httpx.AsyncClient", side_effect=side):
+        r = await cat.suggest(payee=None, description="X", memo=None, amount=Decimal("-1"),
+                              allowed_categories=["Meals", "Uncategorized"])
+    assert r is not None
+    assert r.category == "Meals"
+    assert r.model == "frontier-fallback"
+
+
+@pytest.mark.asyncio
+async def test_confident_primary_does_not_escalate():
+    """Qwen confident (>= threshold) → keep primary; frontier is never called."""
+    hits = {"frontier": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content).get("model") == "frontier-fallback":
+            hits["frontier"] += 1
+        content = json.dumps(_completion("Meals", 0.9))
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    def side(*a, **k):
+        return _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler))
+    cat = LLMCategorizer(settings=_FALLBACK_SETTINGS)
+    with patch("httpx.AsyncClient", side_effect=side):
+        r = await cat.suggest(payee=None, description="X", memo=None, amount=Decimal("-1"),
+                              allowed_categories=["Meals", "Uncategorized"])
+    assert r is not None
+    assert r.category == "Meals"
+    assert r.model == "qwen-primary"   # primary kept
+    assert hits["frontier"] == 0       # fallback never invoked
+
+
+@pytest.mark.asyncio
+async def test_qwen_abstention_escalates_even_when_confident():
+    """Qwen says Uncategorized with HIGH confidence → still escalate. An
+    abstention means 'I couldn't place this', so frontier gets a shot regardless
+    of the self-reported confidence in the abstention."""
+    side = _model_aware_client({
+        "qwen-primary": _completion("Uncategorized", 0.95),
+        "frontier-fallback": _completion("Meals", 0.8),
+    })
+    cat = LLMCategorizer(settings=_FALLBACK_SETTINGS)
+    with patch("httpx.AsyncClient", side_effect=side):
+        r = await cat.suggest(payee=None, description="X", memo=None, amount=Decimal("-1"),
+                              allowed_categories=["Meals", "Uncategorized"])
+    assert r is not None
+    assert r.category == "Meals"          # frontier placed it
+    assert r.model == "frontier-fallback"

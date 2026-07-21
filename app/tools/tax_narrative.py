@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 
 from app.authz import assert_entity_in_scope
+from app.config import get_settings
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace
 from app.workspace_session import workspace_session
@@ -190,9 +191,13 @@ async def trigger_tax_narrative(
         or ""
     )
     mcp_url = os.environ.get("ACCTOPS_MCP_URL", "http://localhost:8000/mcp")
-    llm_endpoint_url = os.environ.get("LLM_ENDPOINT_URL", "http://localhost:8088/v1")
-    llm_model = os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-4.6")
-    llm_api_key = os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_KEY", ""))
+    # CPA-team FRONTIER config — dedicated, NOT the vision-repurposed LLM_* env.
+    # (The receipt-VLM owns LLM_ENDPOINT_URL/LLM_MODEL/LLM_API_KEY; reading those
+    # here pointed narration at the vision model/key → 401 on OpenRouter.)
+    settings = get_settings()
+    llm_endpoint_url = settings.narrative_llm_endpoint_url
+    llm_model = settings.narrative_llm_model
+    llm_api_key = settings.narrative_llm_api_key or os.environ.get("OPENROUTER_API_KEY", "")
 
     if not service_token:
         raise RuntimeError(
@@ -223,7 +228,16 @@ async def trigger_tax_narrative(
             "--llm-api-key", llm_api_key,
             "--verbose",
         ]
-        env = {**os.environ, "ACCTOPS_SERVICE_TOKEN": service_token}
+        # Inject the CPA-team frontier config as LLM_* so the runner's
+        # resolve_llm_api_key() picks up THIS key/endpoint/model — overriding the
+        # vision receipt-VLM values it would otherwise inherit from os.environ.
+        env = {
+            **os.environ,
+            "ACCTOPS_SERVICE_TOKEN": service_token,
+            "LLM_ENDPOINT_URL": llm_endpoint_url,
+            "LLM_MODEL": llm_model,
+            "LLM_API_KEY": llm_api_key,
+        }
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -231,7 +245,11 @@ async def trigger_tax_narrative(
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+            # A full 11-section memo (large queue context + long-form output) runs
+            # ~4-6 min on frontier; 180s killed it mid-generation. This is a
+            # background job (caller polls get_tax_narrative), so a generous cap is
+            # fine. Reduce later if the narrative is tuned to the 2-5 page spec.
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
             if proc.returncode != 0:
                 log.error(
                     "[narrative] run_id=%s exited %d stderr=%s",

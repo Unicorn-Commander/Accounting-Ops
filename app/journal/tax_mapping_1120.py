@@ -38,8 +38,12 @@ class F1120Mapping:
 
     Fields
     ------
-    section : "income" | "deductions" | "tax" | "other_income"
-        Which part of Form 1120 page 1 this lands on.
+    section : "income" | "deductions" | "tax" | "other_income" | "excluded"
+        Which part of Form 1120 page 1 this lands on. ``"excluded"`` means the
+        category does NOT belong on page 1 at all — e.g. balance-sheet equity
+        (owner contributions/draws) which are not income or deductible expenses;
+        they appear on Schedule L, not the income statement, and must be left
+        OUT of any income/deduction total.
     line : str
         The 1120 line reference (e.g. "1a", "26", "30"). Lines with sub-parts
         use the lettered form matching the 2024 revision ("1a" = gross receipts,
@@ -53,7 +57,7 @@ class F1120Mapping:
         Rationale for the mapping + any CPA override guidance.
     """
 
-    section: Literal["income", "deductions", "tax", "other_income"]
+    section: Literal["income", "deductions", "tax", "other_income", "excluded"]
     line: str
     label: str
     confidence: Confidence
@@ -428,6 +432,38 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
             "CPA MUST classify each inter-entity transaction before filing. "
             "Line 26 is a placeholder to prevent silent drops — not an "
             "assertion of deductibility."
+        ),
+    ),
+
+    # ------------------------------------------------------------------
+    # EQUITY — owner contributions / draws (NOT on Form 1120 page 1)
+    # ------------------------------------------------------------------
+
+    "Owner's Contribution": F1120Mapping(
+        section="excluded",
+        line="—",
+        label="Not on Form 1120 page 1 (balance-sheet equity)",
+        confidence="high",
+        notes=(
+            "Capital the owner/shareholder pays INTO the corporation (account "
+            "3010). This is a balance-sheet equity event — paid-in capital on "
+            "Schedule L (line 22/23), NOT income. It must NOT be included in "
+            "gross receipts or any income total on page 1. Excluded by design."
+        ),
+    ),
+
+    "Owner's Draw": F1120Mapping(
+        section="excluded",
+        line="—",
+        label="Not on Form 1120 page 1 (balance-sheet equity)",
+        confidence="high",
+        notes=(
+            "Money paid OUT to the owner/shareholder or spent personally "
+            "(account 3020). A distribution/draw is a reduction of equity on "
+            "Schedule L, NOT a deductible business expense. It must NOT appear "
+            "in any deduction total on page 1. For a C-corp a shareholder "
+            "distribution may also implicate dividend treatment — CPA reviews. "
+            "Excluded from page 1 by design."
         ),
     ),
 }
