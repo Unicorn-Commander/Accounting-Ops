@@ -110,6 +110,23 @@ for YEAR in "${YEARS[@]}"; do
         echo "  WARN  Form 1125-E TY $YEAR not available at $F1125E_URL — skipping."
     fi
 
+    # Form 1096 (Annual Summary and Transmittal of U.S. Information Returns).
+    # YEAR-SPECIFIC like the 1125-E: the current irs-pdf copy is the CURRENT
+    # year's transmittal; prior years live in irs-prior. (The official 1096 is
+    # a red-ink scannable form -- our fill is a SELF_CERTIFIED-watermarked
+    # review copy, never represented as the scannable original.)
+    if [[ "$YEAR" == "2025" ]]; then
+        F1096_URL="https://www.irs.gov/pub/irs-pdf/f1096.pdf"
+    else
+        F1096_URL="https://www.irs.gov/pub/irs-prior/f1096--${YEAR}.pdf"
+    fi
+    F1096_DEST="$FORMS_DIR/f1096_${YEAR}.pdf"
+    if head_check "$F1096_URL"; then
+        download_form "$F1096_DEST" "$F1096_URL" "Form 1096 (TY $YEAR)"
+    else
+        echo "  WARN  Form 1096 TY $YEAR not available at $F1096_URL — skipping."
+    fi
+
     # Form 4562 (Depreciation and Amortization)
     # SAME GOTCHA AS 1120: irs-pdf/f4562.pdf is the 2025 revision, so a
     # YEAR!=2025 request MUST come from irs-prior or it silently saves the
@@ -189,6 +206,24 @@ if head_check "$F2848_URL"; then
     download_form "$F2848_DEST" "$F2848_URL" "Form 2848 (current)"
 else
     echo "  WARN  Form 2848 not available at $F2848_URL — skipping."
+fi
+
+# Form 843 (Claim for Refund and Request for Abatement) — current revision.
+F843_URL="https://www.irs.gov/pub/irs-pdf/f843.pdf"
+F843_DEST="$FORMS_DIR/f843.pdf"
+if head_check "$F843_URL"; then
+    download_form "$F843_DEST" "$F843_URL" "Form 843 (current)"
+else
+    echo "  WARN  Form 843 not available at $F843_URL — skipping."
+fi
+
+# Form 9465 (Installment Agreement Request) — current revision.
+F9465_URL="https://www.irs.gov/pub/irs-pdf/f9465.pdf"
+F9465_DEST="$FORMS_DIR/f9465.pdf"
+if head_check "$F9465_URL"; then
+    download_form "$F9465_DEST" "$F9465_URL" "Form 9465 (current)"
+else
+    echo "  WARN  Form 9465 not available at $F9465_URL — skipping."
 fi
 
 
