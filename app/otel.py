@@ -58,16 +58,16 @@ async def audit_span_middleware(request: Request, call_next: Callable):
     tracer = trace.get_tracer("accounting_ops.audit")
     started = time.perf_counter()
     with tracer.start_as_current_span("http.request") as span:
-        span.set_attribute(
-            "workspace_id",
-            request.path_params.get("workspace_id")
-            or request.headers.get("x-workspace-id", "unknown"),
-        )
-        span.set_attribute(
-            "entity_id",
-            request.path_params.get("entity_id")
-            or request.headers.get("x-entity-id", "unknown"),
-        )
+        # This middleware runs BEFORE routing (the same fact app/rate_limit.py
+        # documents for its own pre-routing parse): request.path_params is
+        # ALWAYS {} here, so tenant ids can only be seeded as placeholders. The
+        # authoritative values are stamped in `finally` below, after the router
+        # has populated this request's scope. Tenant identity is intentionally
+        # NOT read from request headers — the old tenant-header fallback was an
+        # unvalidated client-controlled value (the finding-M2 spoof class), and
+        # no client in the repo ever sent it.
+        span.set_attribute("workspace_id", "unknown")
+        span.set_attribute("entity_id", "unknown")
         # Actor identity is intentionally NOT read from request headers — it is
         # set from the validated AuthContext by set_actor_attributes() (called
         # in validate_bearer_token). Seed placeholders so the attribute always
@@ -83,4 +83,14 @@ async def audit_span_middleware(request: Request, call_next: Callable):
             span.set_attribute("outcome", "error")
             raise
         finally:
+            # Routing has run by now, even when the endpoint raised: the router
+            # mutates this request's scope dict in place, so the matched
+            # route's params are visible here. Requests that never matched a
+            # route (404) keep the "unknown" placeholder.
+            workspace_id = request.path_params.get("workspace_id")
+            if workspace_id:
+                span.set_attribute("workspace_id", str(workspace_id))
+            entity_id = request.path_params.get("entity_id")
+            if entity_id:
+                span.set_attribute("entity_id", str(entity_id))
             span.set_attribute("latency_ms", round((time.perf_counter() - started) * 1000, 2))

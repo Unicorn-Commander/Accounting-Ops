@@ -13,6 +13,14 @@ These tests are pure: they drive set_actor_attributes against a fake span and
 assert the middleware seeds placeholders rather than echoing headers. (OTel is
 optional, so set_actor_attributes is a no-op when trace is None — we exercise
 the real-span path by installing a fake current span.)
+
+The second half of the file is the TENANT twin of M2: audit_span_middleware
+used to read request.path_params at span start — but the middleware runs
+BEFORE routing, where path_params is always {}, so the only live source of
+workspace_id / entity_id was the spoofable x-workspace-id / x-entity-id header
+fallback. The fix seeds "unknown", re-stamps from the real matched-route
+params after call_next (the router mutates the request scope in place), and
+drops the header fallback entirely.
 """
 from __future__ import annotations
 
@@ -196,3 +204,184 @@ def test_spoofed_actor_headers_do_not_reach_the_audit_span(monkeypatch):
     assert attrs.get("user_uc_uid") == "audit-real", attrs
     assert attrs.get("user_uc_uid") != "ATTACKER-SPOOF", "spoofed uc_uid leaked!"
     assert attrs.get("agent_id") != "evil-agent", "spoofed agent_id leaked!"
+
+
+# ---------------------------------------------------------------------------
+# Tenant attribution (workspace_id / entity_id) — the M2 twin.
+# ---------------------------------------------------------------------------
+
+
+def _attach_span_capture():
+    """Attach a capturing exporter to the process-global tracer provider.
+
+    Same singleton dance as the actor E2E test above: set_tracer_provider only
+    honours the FIRST call in a process, so we attach to whichever SDK provider
+    is actually global instead of assuming our set won. Returns
+    (captured_spans, provider).
+    """
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import (
+        SimpleSpanProcessor,
+        SpanExporter,
+        SpanExportResult,
+    )
+
+    captured: list = []
+
+    class _Capture(SpanExporter):
+        def export(self, spans):
+            captured.extend(spans)
+            return SpanExportResult.SUCCESS
+
+        def shutdown(self):  # pragma: no cover - nothing to clean up
+            pass
+
+    try:
+        trace.set_tracer_provider(TracerProvider())
+    except Exception:  # pragma: no cover - provider already set in this process
+        pass
+    provider = trace.get_tracer_provider()
+    if not hasattr(provider, "add_span_processor"):  # pragma: no cover
+        pytest.skip("global tracer provider is not an SDK TracerProvider")
+    provider.add_span_processor(SimpleSpanProcessor(_Capture()))
+    return captured, provider
+
+
+def _last_http_request_span_attrs(captured, provider) -> dict:
+    provider.force_flush()
+    spans = [s for s in captured if s.name == "http.request"]
+    assert spans, "audit middleware did not emit an http.request span"
+    return dict(spans[-1].attributes or {})
+
+
+def _tiny_app():
+    """Throwaway FastAPI app with ONLY the audit middleware — no auth, no DB.
+
+    The middleware is registered exactly as app/main.py does it
+    (app.middleware("http") → BaseHTTPMiddleware), so the routing/scope
+    semantics under test match the real app.
+    """
+    from fastapi import FastAPI
+
+    tiny = FastAPI()
+    tiny.middleware("http")(otel.audit_span_middleware)
+
+    @tiny.get("/api/workspaces/{workspace_id}/entities/{entity_id}/ping")
+    async def _ping(workspace_id: str, entity_id: str):
+        return {"ok": True}
+
+    @tiny.get("/api/workspaces/{workspace_id}/boom")
+    async def _boom(workspace_id: str):
+        raise RuntimeError("endpoint blew up")
+
+    return tiny
+
+
+def test_middleware_does_not_trust_tenant_headers():
+    """Source guard, tenant twin of the actor guard above: the middleware must
+    not read the spoofable x-workspace-id / x-entity-id headers at all —
+    tenant attribution comes from the matched route's path params."""
+    src = inspect.getsource(otel.audit_span_middleware)
+    assert "x-workspace-id" not in src, "middleware still reads spoofable x-workspace-id header"
+    assert "x-entity-id" not in src, "middleware still reads spoofable x-entity-id header"
+
+
+def test_routed_request_stamps_real_path_params_post_call():
+    """A routed request must stamp the REAL workspace_id / entity_id from the
+    matched route's path params — which only exist AFTER call_next, since the
+    middleware itself runs pre-routing where path_params is always {}. Spoof
+    headers riding along must not influence either attribute."""
+    pytest.importorskip("opentelemetry")
+    from starlette.testclient import TestClient
+
+    captured, provider = _attach_span_capture()
+    client = TestClient(_tiny_app())
+    resp = client.get(
+        "/api/workspaces/ws-real/entities/ent-real/ping",
+        headers={"x-workspace-id": "SPOOF-WS", "x-entity-id": "SPOOF-ENT"},
+    )
+    assert resp.status_code == 200
+
+    attrs = _last_http_request_span_attrs(captured, provider)
+    assert attrs.get("workspace_id") == "ws-real", attrs
+    assert attrs.get("entity_id") == "ent-real", attrs
+    assert attrs.get("outcome") == "200"
+
+
+def test_unrouted_request_keeps_unknown_never_the_header():
+    """A request that never matches a route (404) keeps the neutral "unknown"
+    placeholder even when spoof headers are sent: pre-routing emptiness must
+    fall back to a marker, never to a client-controlled header value."""
+    pytest.importorskip("opentelemetry")
+    from starlette.testclient import TestClient
+
+    captured, provider = _attach_span_capture()
+    client = TestClient(_tiny_app())
+    resp = client.get(
+        "/no/such/route",
+        headers={"x-workspace-id": "SPOOF-WS", "x-entity-id": "SPOOF-ENT"},
+    )
+    assert resp.status_code == 404
+
+    attrs = _last_http_request_span_attrs(captured, provider)
+    assert attrs.get("workspace_id") == "unknown", attrs
+    assert attrs.get("entity_id") == "unknown", attrs
+
+
+def test_endpoint_exception_still_stamps_tenant_ids():
+    """The re-stamp lives in `finally`, so a request whose endpoint raises
+    still gets tenant attribution (routing had already matched)."""
+    pytest.importorskip("opentelemetry")
+    from starlette.testclient import TestClient
+
+    captured, provider = _attach_span_capture()
+    client = TestClient(_tiny_app(), raise_server_exceptions=False)
+    resp = client.get("/api/workspaces/ws-err/boom")
+    assert resp.status_code == 500
+
+    attrs = _last_http_request_span_attrs(captured, provider)
+    assert attrs.get("workspace_id") == "ws-err", attrs
+    assert attrs.get("outcome") == "error"
+
+
+def test_spoofed_tenant_headers_do_not_reach_the_audit_span():
+    """End-to-end through app.main's real app (real middleware ordering): a
+    workspace-scoped request carrying forged x-workspace-id / x-entity-id
+    headers must attribute the audit span to the URL's workspace id — never
+    the header. The request is deliberately unauthenticated (missing bearer →
+    immediate 401, no DB touched), but the route has already MATCHED by then —
+    which is the point: tenant stamping is post-routing and survives
+    dependency failures.
+
+    Skips where the OTel SDK isn't installed; runs in the app image / CI.
+    """
+    import asyncio
+
+    pytest.importorskip("opentelemetry")
+    captured, provider = _attach_span_capture()
+
+    import httpx
+    from httpx import ASGITransport
+
+    from app.main import app
+
+    wid = "1e6d9f6e-0000-4000-8000-000000000abc"
+
+    async def _drive():
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            return await c.get(
+                f"/api/workspaces/{wid}/approvals/clusters",
+                headers={"x-workspace-id": "SPOOF-WS", "x-entity-id": "SPOOF-ENT"},
+            )
+
+    resp = asyncio.run(_drive())
+    assert resp.status_code == 401, resp.text  # unauthenticated — but ROUTED
+
+    attrs = _last_http_request_span_attrs(captured, provider)
+    assert attrs.get("workspace_id") == wid, attrs
+    assert attrs.get("workspace_id") != "SPOOF-WS", "spoofed workspace_id leaked!"
+    # The clusters route has no entity path param → neutral placeholder wins,
+    # never the client header.
+    assert attrs.get("entity_id") == "unknown", attrs
