@@ -4,10 +4,15 @@ This module is a **platform feature**, not a bespoke script. Any future customer
 can point their own Accounting-Ops deployment at their preferred model by setting
 three environment variables:
 
-    LLM_ENDPOINT_URL   — any OpenAI-compatible /v1/chat/completions endpoint
-    LLM_MODEL          — the model identifier the endpoint expects
-    LLM_API_KEY        — blank for local/no-auth (Ollama / llama.cpp / vLLM),
-                         or the cloud API key for OpenRouter / OpenAI / Anthropic
+    CATEGORIZER_LLM_ENDPOINT_URL — any OpenAI-compatible /v1/chat/completions endpoint
+    CATEGORIZER_LLM_MODEL        — the model identifier the endpoint expects
+    CATEGORIZER_LLM_API_KEY      — blank for local/no-auth (Ollama / llama.cpp / vLLM),
+                                   or the virtual/cloud key for the metered gateway
+
+These are SEPARATE from the vision receipt-OCR knobs (LLM_ENDPOINT_URL / LLM_MODEL /
+LLM_API_KEY), which stay pinned to an image-capable model. Categorization is pure
+text classification, so it routes to a text model (default: local Qwen text;
+suite: the metered gateway alias ``qwen3.6-35b-a3b``). See app/config.py.
 
 The categorizer is intentionally thin and opinionated:
 
@@ -40,7 +45,7 @@ from typing import Any
 import httpx
 
 from app.config import Settings, get_settings
-from app.llm_client import LlmTarget, acall_with_failover, llm_default_headers
+from app.llm_client import llm_default_headers
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +115,42 @@ _FEW_SHOT_EXAMPLES = [
             '"reasoning":"ACH credit payout pattern matches marketplace revenue."}'
         ),
     },
+    {
+        "role": "user",
+        "content": (
+            "Transaction: description='Zelle payment from Jordan Lee', "
+            "amount=500.00, payee=None, memo=None\n"
+            "Allowed categories: [\"Revenue · Marketplace\", "
+            "\"Owner's Contribution\", \"Owner's Draw\", \"Uncategorized\"]\n"
+            "Reply with JSON only."
+        ),
+    },
+    {
+        "role": "assistant",
+        "content": (
+            '{"category":"Owner\'s Contribution","confidence":0.80,'
+            '"reasoning":"Incoming Zelle in an individual\'s name is the owner '
+            'funding the business, not third-party revenue."}'
+        ),
+    },
+    {
+        "role": "user",
+        "content": (
+            "Transaction: description='CHECKCARD AMAZON MUSIC*9K8V 888-802-3080 WA', "
+            "amount=-9.80, payee=None, memo=None\n"
+            "Allowed categories: [\"SaaS · Productivity\", \"SaaS · AI\", "
+            "\"Office · Supplies\", \"Uncategorized\"]\n"
+            "Reply with JSON only."
+        ),
+    },
+    {
+        "role": "assistant",
+        "content": (
+            '{"category":"Uncategorized","confidence":0.30,'
+            '"reasoning":"A music streaming subscription is entertainment; no '
+            'allowed category fits, so abstain rather than mislabel it productivity."}'
+        ),
+    },
 ]
 
 _SYSTEM_PROMPT = (
@@ -123,9 +164,28 @@ _SYSTEM_PROMPT = (
     "The allowed categories use a middle-dot character `·` (U+00B7) as a separator — "
     "for example `\"Office · Supplies\"` NOT `\"Office Supplies\"`. "
     "Copy the category string character-for-character from the provided list. "
-    "If you cannot confidently categorize the transaction, set category to "
-    '"Uncategorized" if it appears in the allowed list, otherwise use the closest '
-    "allowed category and set confidence low. "
+    "If no allowed category is a clear, confident fit, choose \"Uncategorized\" "
+    "(when it is in the allowed list) with low confidence. Do NOT force a poor "
+    "match into an unrelated bucket — abstaining is better than guessing wrong. "
+    "CALIBRATION (important): only assign a real category when the merchant's "
+    "SPECIFIC nature clearly matches it. If you are inferring from a vague keyword, "
+    "or the merchant could plausibly fit several buckets, set category to "
+    "\"Uncategorized\" with confidence 0.3 or lower — reserve confidence above 0.7 "
+    "for unambiguous matches. Common traps to AVOID: a phone / internet / telecom "
+    "bill (AT&T, Verizon, Comcast, T-Mobile) is NOT email or AI software. A music "
+    "or video streaming subscription (Amazon Music, Spotify, Netflix, Hulu) is "
+    "entertainment — if there is no entertainment/subscription category, use "
+    "\"Uncategorized\", NOT \"productivity\". A bar, restaurant, brewery, cafe, "
+    "diner, or music venue is \"Meals\", NOT \"Travel · Lodging\" — lodging means "
+    "hotels / motels / Airbnb only. A government or municipal charge (city, county, "
+    "DMV, parks) is usually \"Uncategorized\" unless it is clearly a specific listed "
+    "service. When unsure between a specific bucket and Uncategorized, prefer "
+    "Uncategorized — a downstream reviewer will refine it. "
+    "Money the business owner moves to or from the business in their own name "
+    "(e.g. Zelle / Venmo / Cash App to or from the owner) is an OWNER transfer, "
+    "not income or an expense: use \"Owner's Contribution\" for money received "
+    "from the owner and \"Owner's Draw\" for money paid to the owner or spent "
+    "personally — but only when those categories appear in the allowed list. "
     "Do not include any text outside the JSON object."
 )
 
@@ -203,55 +263,98 @@ class LLMCategorizer:
             {"role": "user", "content": user_content},
         ]
 
-        payload: dict[str, Any] = {
-            "model": settings.llm_model,
-            "messages": messages,
-            "max_tokens": settings.llm_max_tokens,
-            "temperature": 0.0,   # deterministic; we want consistent categorization
-            # Suppress Qwen3 / llama.cpp extended-thinking mode.
-            # Without this, Qwen3 spending all token budget on reasoning_content
-            # and produces an empty content field (observed: 148/148 → None).
-            # The parameter is silently ignored by endpoints that don't support it
-            # (OpenAI, Anthropic, standard vLLM), so it is safe to send everywhere.
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
-        # PRIMARY rung = the configured endpoint. An optional cloud fallback is
-        # read from LLM_FALLBACK_* env; when unset this is a plain single call,
-        # byte-identical to the pre-failover behavior.
-        primary = LlmTarget(
-            base_url=settings.llm_endpoint_url,
-            api_key=settings.llm_api_key,
-            model=settings.llm_model,
-            label="primary",
+        # --- Primary model (routine tier — Qwen by default) ---
+        primary = await self._run_model(
+            model=settings.categorizer_model,
+            endpoint=settings.categorizer_endpoint_url,
+            api_key=settings.categorizer_api_key,
+            timeout=settings.categorizer_timeout_s,
+            messages=messages,
+            allowed_categories=allowed_categories,
         )
-        # Records which rung actually answered so the suggestion reports the
-        # endpoint/model that produced it rather than the one we asked for.
-        served: dict[str, LlmTarget] = {}
 
-        async def _post(target: LlmTarget) -> httpx.Response:
-            served["target"] = target
-            headers = llm_default_headers({"Content-Type": "application/json"})
-            if target.api_key:
-                headers["Authorization"] = f"Bearer {target.api_key}"
-            url = target.base_url.rstrip("/") + "/chat/completions"
-            async with httpx.AsyncClient(timeout=settings.llm_timeout_s) as client:
-                response = await client.post(
-                    url, json={**payload, "model": target.model}, headers=headers
+        # --- Frontier fallback (per-agent routing policy) ---
+        # Escalate to the configured frontier model when the primary returned
+        # nothing valid, OR returned a confidence below the threshold. The
+        # escalated answer is preferred; if it too fails we keep the primary.
+        # The returned suggestion's ``model`` field records which model actually
+        # produced it, so the audit trail shows when/where we escalated.
+        fb_model = settings.categorizer_fallback_model
+        if fb_model:
+            needs_escalation = (
+                primary is None
+                # Qwen abstaining IS "I couldn't place this" — give frontier a
+                # shot regardless of how confident Qwen is in the abstention.
+                or primary.category == "Uncategorized"
+                or primary.confidence < settings.categorizer_escalate_below_confidence
+            )
+            if needs_escalation:
+                fallback = await self._run_model(
+                    model=fb_model,
+                    endpoint=(
+                        settings.categorizer_fallback_endpoint_url
+                        or settings.categorizer_endpoint_url
+                    ),
+                    api_key=settings.categorizer_fallback_api_key,
+                    timeout=settings.categorizer_timeout_s,
+                    messages=messages,
+                    allowed_categories=allowed_categories,
                 )
-                response.raise_for_status()
-                return response
+                if fallback is not None:
+                    return fallback
+
+        return primary
+
+    async def _run_model(
+        self,
+        *,
+        model: str,
+        endpoint: str,
+        api_key: str,
+        timeout: int,
+        messages: list[dict[str, str]],
+        allowed_categories: list[str],
+    ) -> LLMCategorySuggestion | None:
+        """Run ONE categorization call against a specific model/endpoint.
+
+        Returns a validated suggestion, or None on timeout / HTTP error /
+        malformed JSON / hallucinated category. Shared by both the primary
+        (Qwen) and frontier-fallback paths so the prompt + validation are
+        identical across models.
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": self._settings.llm_max_tokens,
+            "temperature": 0.0,   # deterministic; consistent categorization
+        }
+        # Only Qwen3 / llama.cpp needs thinking suppressed (otherwise it burns the
+        # whole budget on reasoning_content → empty content). Frontier models
+        # (Anthropic/OpenAI via the gateway) don't take this param — and some
+        # gateways reject unknown params — so send it ONLY to Qwen models.
+        if "qwen" in model.lower():
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+
+        # The UC gateway sits behind Cloudflare, which 403s (error 1010) the
+        # openai SDK's default "OpenAI/Python" UA. llm_default_headers()
+        # supplies the non-blocked UA. Both the primary and the frontier
+        # fallback route through here, so one call site covers both rungs.
+        # Do NOT inline a UA literal (a source-grep guard test forbids it).
+        headers = llm_default_headers({"Content-Type": "application/json"})
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        url = endpoint.rstrip("/") + "/chat/completions"
 
         t0 = time.monotonic()
         try:
-            response = await acall_with_failover(
-                primary=primary, call=_post, op="categorize.chat.completions"
-            )
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
         except httpx.TimeoutException:
             return None
         except httpx.HTTPError:
             return None
         duration_ms = int((time.monotonic() - t0) * 1000)
-        used = served.get("target", primary)
 
         raw_json = _extract_completion(response.json())
         if raw_json is None:
@@ -267,8 +370,8 @@ class LLMCategorizer:
             confidence=max(0.0, min(1.0, float(confidence))),
             reasoning=reasoning[:500],   # guard against runaway reasoning strings
             raw_response=raw_json,
-            model=used.model,
-            endpoint=used.base_url,
+            model=model,
+            endpoint=endpoint,
             duration_ms=duration_ms,
         )
 
@@ -279,24 +382,24 @@ class LLMCategorizer:
         and optionally error (str).
         """
         settings = self._settings
-        url = settings.llm_endpoint_url.rstrip("/") + "/models"
+        url = settings.categorizer_endpoint_url.rstrip("/") + "/models"
         headers = llm_default_headers()
-        if settings.llm_api_key:
-            headers["Authorization"] = f"Bearer {settings.llm_api_key}"
+        if settings.categorizer_api_key:
+            headers["Authorization"] = f"Bearer {settings.categorizer_api_key}"
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(url, headers=headers)
                 reachable = resp.status_code < 500
         except Exception as exc:
             return {
-                "endpoint": settings.llm_endpoint_url,
-                "model": settings.llm_model,
+                "endpoint": settings.categorizer_endpoint_url,
+                "model": settings.categorizer_model,
                 "reachable": False,
                 "error": str(exc),
             }
         return {
-            "endpoint": settings.llm_endpoint_url,
-            "model": settings.llm_model,
+            "endpoint": settings.categorizer_endpoint_url,
+            "model": settings.categorizer_model,
             "reachable": reachable,
         }
 

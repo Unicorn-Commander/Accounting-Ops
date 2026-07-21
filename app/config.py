@@ -1,7 +1,7 @@
 from functools import lru_cache
 import os
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class Settings(BaseModel):
@@ -138,6 +138,47 @@ class Settings(BaseModel):
     llm_api_key: str = ""          # blank = local/no-auth; set in env for cloud
     llm_timeout_s: int = 30
 
+    # ---- Categorizer model routing (two-tier) ----
+    # The categorizer runs a PRIMARY model and may escalate to a FRONTIER
+    # fallback. All four primary knobs default to the llm_* values above, so an
+    # unconfigured deployment behaves EXACTLY as the single-model categorizer
+    # did -- these exist to let the categorizer diverge from the receipt-VLM
+    # settings without forcing every deployment to set them.
+    #
+    # Escalation is OFF unless categorizer_fallback_model is set. When it is
+    # blank the threshold below is never consulted, so adding these fields
+    # cannot change behavior on its own.
+    categorizer_endpoint_url: str = ""   # blank -> llm_endpoint_url
+    categorizer_model: str = ""          # blank -> llm_model
+    categorizer_api_key: str = ""        # blank -> llm_api_key
+    categorizer_timeout_s: int = 0       # 0     -> llm_timeout_s
+    categorizer_fallback_model: str = ""              # blank = NO escalation
+    categorizer_fallback_endpoint_url: str = ""       # blank -> primary endpoint
+    categorizer_fallback_api_key: str = ""
+    # Escalate when the primary's confidence is below this. Only consulted when
+    # a fallback model is configured.
+    categorizer_escalate_below_confidence: float = 0.60
+
+    @model_validator(mode="after")
+    def _inherit_categorizer_from_llm(self) -> "Settings":
+        """Blank categorizer_* primaries inherit the effective llm_* values.
+
+        This lives on the MODEL, not in get_settings(), because Settings is
+        constructed directly in several places (tests, scripts, workers). If the
+        inheritance only ran in the factory, those callers would silently get an
+        empty endpoint and the categorizer would build the URL "/chat/completions"
+        with no base -- a ValueError at request time, far from the cause.
+        """
+        if not self.categorizer_endpoint_url:
+            self.categorizer_endpoint_url = self.llm_endpoint_url
+        if not self.categorizer_model:
+            self.categorizer_model = self.llm_model
+        if not self.categorizer_api_key:
+            self.categorizer_api_key = self.llm_api_key
+        if not self.categorizer_timeout_s:
+            self.categorizer_timeout_s = self.llm_timeout_s
+        return self
+
     # ---- bbox-oracle (traditional OCR cross-check) ----
     # URL of the bbox-oracle service.  POST {url}/ocr with multipart field "file"
     # (PNG/JPG) → {"text": "...", "lines": [{"text", "bbox", "score"}, ...]}.
@@ -273,6 +314,13 @@ def get_settings() -> Settings:
     # Resolve client_id first so accepted_audience can default to the EFFECTIVE
     # client id (env-overridden or not), not the static class default.
     keycloak_client_id = os.getenv("KEYCLOAK_CLIENT_ID", defaults.keycloak_client_id)
+    # Resolve the llm_* block first: the categorizer_* primaries INHERIT these
+    # when unset, so they must be the effective (env-resolved) values, not the
+    # static class defaults.
+    _llm_endpoint_url = os.getenv("LLM_ENDPOINT_URL", defaults.llm_endpoint_url)
+    _llm_model = os.getenv("LLM_MODEL", defaults.llm_model)
+    _llm_api_key = os.getenv("LLM_API_KEY", defaults.llm_api_key)
+    _llm_timeout_s = int(os.getenv("LLM_TIMEOUT_S", str(defaults.llm_timeout_s)))
     return Settings(
         public_base_url=os.getenv("PUBLIC_BASE_URL", defaults.public_base_url),
         edition=os.getenv("AO_EDITION", defaults.edition),
@@ -309,10 +357,21 @@ def get_settings() -> Settings:
         qwen_vlm_url=os.getenv("QWEN_VLM_URL", defaults.qwen_vlm_url),
         default_workspace_id=os.getenv("DEFAULT_WORKSPACE_ID") or os.getenv("TENANT_ID"),
         default_entity_id=os.getenv("DEFAULT_ENTITY_ID"),
-        llm_endpoint_url=os.getenv("LLM_ENDPOINT_URL", defaults.llm_endpoint_url),
-        llm_model=os.getenv("LLM_MODEL", defaults.llm_model),
-        llm_api_key=os.getenv("LLM_API_KEY", defaults.llm_api_key),
-        llm_timeout_s=int(os.getenv("LLM_TIMEOUT_S", str(defaults.llm_timeout_s))),
+        llm_endpoint_url=_llm_endpoint_url,
+        llm_model=_llm_model,
+        llm_api_key=_llm_api_key,
+        llm_timeout_s=_llm_timeout_s,
+        categorizer_endpoint_url=os.getenv("CATEGORIZER_ENDPOINT_URL", ""),
+        categorizer_model=os.getenv("CATEGORIZER_MODEL", ""),
+        categorizer_api_key=os.getenv("CATEGORIZER_API_KEY", ""),
+        categorizer_timeout_s=int(os.getenv("CATEGORIZER_TIMEOUT_S") or 0),
+        categorizer_fallback_model=os.getenv("CATEGORIZER_FALLBACK_MODEL", ""),
+        categorizer_fallback_endpoint_url=os.getenv("CATEGORIZER_FALLBACK_ENDPOINT_URL", ""),
+        categorizer_fallback_api_key=os.getenv("CATEGORIZER_FALLBACK_API_KEY", ""),
+        categorizer_escalate_below_confidence=float(
+            os.getenv("CATEGORIZER_ESCALATE_BELOW_CONFIDENCE")
+            or defaults.categorizer_escalate_below_confidence
+        ),
         llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", str(defaults.llm_max_tokens))),
         ocr_bbox_service_url=os.getenv("OCR_BBOX_SERVICE_URL", defaults.ocr_bbox_service_url),
         cpa_export_url=os.getenv("CPA_EXPORT_URL", defaults.cpa_export_url),
