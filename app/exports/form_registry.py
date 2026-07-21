@@ -122,6 +122,9 @@ FORM_REGISTRY: dict[str, FormSpec] = {
     "w-9": FormSpec(kind="w-9", title="Form W-9 — Request for Taxpayer Identification Number and Certification",
         jurisdiction="federal", mode="fill", module="app.exports.fw9_fill",
         func="render_w9", goes_to="the requester (NOT the IRS)", category="business"),
+    "1125-e": FormSpec(kind="1125-e", title="Form 1125-E — Compensation of Officers",
+        jurisdiction="federal", mode="fill", module="app.exports.f1125e_fill",
+        func="render_1125e", goes_to="the IRS (attachment to Form 1120/1120-S)", category="business"),
     # State.
     "ca-540": FormSpec(kind="ca-540", title="California Form 540 — Resident Income Tax Return",
         jurisdiction="CA", mode="fill", module="app.exports.ca_540_fill",
