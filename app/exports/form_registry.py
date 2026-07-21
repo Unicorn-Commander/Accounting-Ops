@@ -143,6 +143,11 @@ FORM_REGISTRY: dict[str, FormSpec] = {
     "843": FormSpec(kind="843", title="Form 843 — Claim for Refund and Request for Abatement",
         jurisdiction="federal", mode="fill", module="app.exports.f843_fill",
         func="render_843", goes_to="the IRS", category="representation"),
+    # --- Annual Transmittal ---
+    "1096": FormSpec(kind="1096", title="Form 1096 — Annual Summary and Transmittal of U.S. Information Returns (record copy)",
+        jurisdiction="federal", mode="fill", module="app.exports.f1096_fill",
+        func="render_1096", goes_to="the IRS (⚠️ official red-ink copy only — this render is a preparation/record copy and must not be filed)",
+        category="business"),
 }
 
 
