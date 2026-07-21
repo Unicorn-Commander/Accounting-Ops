@@ -182,6 +182,15 @@ if head_check "$F8821_URL"; then
 else
     echo "  WARN  Form 8821 not available at $F8821_URL — skipping."
 fi
+# Form 2848 (Power of Attorney)
+F2848_URL="https://www.irs.gov/pub/irs-pdf/f2848.pdf"
+F2848_DEST="$FORMS_DIR/f2848.pdf"
+if head_check "$F2848_URL"; then
+    download_form "$F2848_DEST" "$F2848_URL" "Form 2848 (current)"
+else
+    echo "  WARN  Form 2848 not available at $F2848_URL — skipping."
+fi
+
 
 
 
