@@ -91,7 +91,8 @@ async def check_smart_inference_access(
     when the workspace must add credits or a BYOK key first.
 
     Order (fail-closed): community/flag-off → allow · BYOK present → allow ·
-    entitled to accounting-ops → allow · else → raise.
+    stored (comped) virtual key present → allow · entitled to accounting-ops →
+    allow · else → raise.
 
     Args:
         workspace_id: the workspace whose access is being checked.
@@ -121,6 +122,24 @@ async def check_smart_inference_access(
                 "entitlement check (not failing open).",
                 workspace_id,
             )
+
+    # 2b. Comped access — an operator-granted, budget-capped gateway virtual key
+    #     (scripts/grant_comped_access.py --mode credit) stores under connector
+    #     litellm_virtual_key/label platform. That key IS an access grant: this
+    #     module decides access, the GATEWAY decides spend (max_budget). Without
+    #     this check a comped-credit workspace 402s the day the gate flips on,
+    #     despite holding a funded key. Read-only — never get_or_mint here.
+    try:
+        from app.security.workspace_llm_keys import has_virtual_key
+
+        if await has_virtual_key(workspace_id):
+            return
+    except Exception:  # noqa: BLE001 — degrade to the entitlement check, not open
+        _log.debug(
+            "virtual-key lookup failed for workspace=%s; falling through to the "
+            "entitlement check (not failing open).",
+            workspace_id,
+        )
 
     # 3. Entitled to Accounting-Ops (token claim) ⇒ allow.
     if workspace_has_products(claims, PRODUCT_ACCOUNTING_OPS):

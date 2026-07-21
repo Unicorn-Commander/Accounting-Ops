@@ -75,6 +75,30 @@ async def get_byok(workspace_id: str) -> tuple[str, str, str | None] | None:
         return (raw, "unknown", None)
 
 
+async def has_virtual_key(workspace_id: str) -> bool:
+    """READ-ONLY: does this workspace already hold a stored gateway virtual key?
+
+    Used by the smart-inference gate as the comped-access check: an operator
+    comp (scripts/grant_comped_access.py --mode credit) stores a budget-capped
+    virtual key under connector ``litellm_virtual_key`` / label ``platform``.
+    That stored key IS an access grant — the gateway enforces spend via its
+    max_budget, so the gate's job is only to recognize it exists. Deliberately
+    NOT get_or_mint: the gate must never create billing artifacts as a side
+    effect of an access check.
+    """
+    wid = uuid.UUID(str(workspace_id))
+    async with SessionLocal() as session:
+        raw = await get_credential_plaintext(
+            session,
+            wid,
+            CONNECTOR_VIRTUAL,
+            label=_VIRTUAL_LABEL,
+            requesting_service="chat_inference",
+        )
+        await session.commit()
+    return bool(raw)
+
+
 async def get_or_mint_virtual_key(
     workspace_id: str,
     *,

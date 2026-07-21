@@ -38,12 +38,29 @@ def _patch_settings(monkeypatch, **over):
     monkeypatch.setattr(inference_gate, "get_settings", lambda: _settings(**over))
 
 
-def _patch_byok(monkeypatch, behavior):
+def _patch_byok(monkeypatch, behavior, virtual=None):
     """Inject a fake ``app.security.workspace_llm_keys`` so the gate's lazy import
-    resolves to ``behavior`` without importing the real (DB-bound) module."""
+    resolves to ``behavior`` without importing the real (DB-bound) module.
+
+    ``virtual`` stubs ``has_virtual_key`` (the comped-access check); default =
+    absent, preserving every pre-comp test's expectations.
+    """
     mod = types.ModuleType("app.security.workspace_llm_keys")
     mod.get_byok = behavior  # type: ignore[attr-defined]
+    mod.has_virtual_key = virtual or _virtual_absent  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "app.security.workspace_llm_keys", mod)
+
+
+async def _virtual_present(_wid):
+    return True
+
+
+async def _virtual_absent(_wid):
+    return False
+
+
+async def _virtual_boom(_wid):
+    raise RuntimeError("virtual-key store unavailable")
 
 
 async def _byok_present(_wid):
@@ -118,3 +135,25 @@ def test_byok_error_but_entitled_allows(monkeypatch):
     _patch_settings(monkeypatch)
     _patch_byok(monkeypatch, _byok_boom)
     _run(claims=ENTITLED)  # no raise
+
+
+def test_comped_virtual_key_allows_when_not_entitled(monkeypatch):
+    """An operator comp (--mode credit) stores a budget-capped virtual key; the
+    gate must recognize it as an access grant — otherwise a comped friend 402s
+    the day AO_SMART_GATE_ENABLED flips on, despite holding a funded key."""
+    _patch_settings(monkeypatch)
+    _patch_byok(monkeypatch, _byok_absent, virtual=_virtual_present)
+    asyncio.run(
+        check_smart_inference_access(workspace_id="ws-comped", claims=NOT_ENTITLED)
+    )
+
+
+def test_virtual_key_lookup_failure_fails_closed(monkeypatch):
+    """A broken key store must NOT fail open: no BYOK + no entitlement + boom
+    lookup ⇒ still blocked."""
+    _patch_settings(monkeypatch)
+    _patch_byok(monkeypatch, _byok_absent, virtual=_virtual_boom)
+    with pytest.raises(SmartInferenceGateError):
+        asyncio.run(
+            check_smart_inference_access(workspace_id="ws-broken", claims=NOT_ENTITLED)
+        )
