@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Magic Unicorn Unconventional Technology & Stuff Inc
+# and the Accounting-Ops contributors.
+# SPDX-License-Identifier: AGPL-3.0-or-later
 import asyncio
 from decimal import Decimal
 from typing import Any

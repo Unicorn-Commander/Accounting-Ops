@@ -46,7 +46,8 @@ trace to a source (it returns an error rather than inventing a number).
 This program is distributed under the GNU Affero General Public License v3
 **WITHOUT ANY WARRANTY**; without even the implied warranty of MERCHANTABILITY or
 FITNESS FOR A PARTICULAR PURPOSE. See the [LICENSE](LICENSE) file. To the maximum
-extent permitted by law, Magic Unicorn LLC and the contributors are not liable
+extent permitted by law, Magic Unicorn Unconventional Technology & Stuff Inc
+and the contributors are not liable
 for any claim, damages, taxes, penalties, interest, or other liability arising
 from your use of this software.
 
