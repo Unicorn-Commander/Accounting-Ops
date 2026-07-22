@@ -299,6 +299,17 @@ def _match_service_token(presented: str) -> dict[str, Any] | None:
 
 _log = logging.getLogger("acctops.auth")
 
+# SUITE-IDENTITY D1 divergence log dedup: once-per-identity-per-process.
+# After the guard shipped, every request from a legacy-attributed user with a
+# divergent mapper flooded ERROR logs (sub deterministically wins; re-logging
+# every request is pure noise). Keyed by the canonical identity (``sub``).
+_UC_UID_DIVERGE_LOGGED: set[str] = set()
+
+
+def _reset_uc_uid_diverge_log_for_tests() -> None:
+    """Test helper: clear the once-per-identity diverge-log set."""
+    _UC_UID_DIVERGE_LOGGED.clear()
+
 
 def _resolve_uc_uid(claims: dict[str, Any]) -> str | None:
     """Resolve the canonical user key from a verified-claims dict.
@@ -307,7 +318,8 @@ def _resolve_uc_uid(claims: dict[str, Any]) -> str | None:
     a STRICT alias defined to equal ``sub``. No client may emit a divergent
     ``uc_uid`` mapper. If a token nonetheless carries ``uc_uid != sub``, that is a
     silent re-keying trap — we log LOUDLY at ERROR and resolve to ``sub`` (never
-    the divergent ``uc_uid``).
+    the divergent ``uc_uid``). The ERROR is emitted once per identity (``sub``)
+    per process so legacy mappers do not spam the log on every request.
 
     Returns the resolved user key, or ``None`` when neither claim is present
     (the caller turns that into a 401 / a fall-through).
@@ -320,12 +332,15 @@ def _resolve_uc_uid(claims: dict[str, Any]) -> str | None:
     claimed_uc_uid = claims.get("uc_uid")
     sub = claims.get("sub")
     if claimed_uc_uid is not None and sub is not None and claimed_uc_uid != sub:
-        _log.error(
-            "[acctops.auth] uc_uid_diverges_from_sub: uc_uid=%r != sub=%r — "
-            "using sub per SUITE-IDENTITY D1 (uc_uid is a strict alias of sub)",
-            claimed_uc_uid,
-            sub,
-        )
+        identity_key = str(sub)
+        if identity_key not in _UC_UID_DIVERGE_LOGGED:
+            _UC_UID_DIVERGE_LOGGED.add(identity_key)
+            _log.error(
+                "[acctops.auth] uc_uid_diverges_from_sub: uc_uid=%r != sub=%r — "
+                "using sub per SUITE-IDENTITY D1 (uc_uid is a strict alias of sub)",
+                claimed_uc_uid,
+                sub,
+            )
         return sub
     return claimed_uc_uid or sub
 
@@ -766,6 +781,12 @@ async def authenticate_token(token: str) -> AuthContext:
     if is_trusted_m2m:
         # Synthetic uc_uid — never matches a real user_account row.
         uc_uid = f"m2m:{azp}"
+    else:
+        # Keycloak-login only (NOT Brigade, NOT M2M): bind-or-provision so a
+        # verified-email match re-keys an existing ACTIVE row instead of minting
+        # a blank ghost (live incident 2026-07-22). See helper docstring for the
+        # bind-vs-fail-closed abuse analysis.
+        await _ensure_keycloak_user_identity(str(uc_uid), claims)
 
     ctx = AuthContext(
         uc_uid=uc_uid,
@@ -791,6 +812,199 @@ async def validate_bearer_token(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token"
         )
     return await authenticate_token(credentials.credentials)
+
+
+def _is_synthetic_uc_uid(uc_uid: str) -> bool:
+    """True for non-human synthetic keys that must never email-bind.
+
+    Covers trusted-M2M (``m2m:<azp>``) and agent-style prefixes (``agent-*``).
+    These identities have no human email and must never re-key a human row.
+    """
+    return uc_uid.startswith("m2m:") or uc_uid.startswith("agent-")
+
+
+def _token_email(claims: dict[str, Any]) -> str | None:
+    """Return the token email claim (stripped) or None if absent/blank/non-str."""
+    raw = claims.get("email")
+    if not isinstance(raw, str):
+        return None
+    email = raw.strip()
+    return email or None
+
+
+def _token_email_verified(claims: dict[str, Any]) -> bool:
+    """OIDC ``email_verified`` must be the boolean True — string/1 do not count.
+
+    Unverified email is the spoofing surface for the Keycloak bind path: a
+    hostile IdP client or pre-verify session could assert any address. We only
+    trust the claim when Keycloak has stamped the boolean true.
+    """
+    return claims.get("email_verified") is True
+
+
+async def _ensure_keycloak_user_identity(
+    uc_uid: str, claims: dict[str, Any]
+) -> None:
+    """Keycloak-login path only: bind-or-provision ``public.user_account``.
+
+    LIVE INCIDENT 2026-07-22: after SUITE-IDENTITY D1 (sub wins on
+    ``uc_uid != sub``), SSO resolved to a sub with no row and the later
+    auto-provision path minted a blank ghost (no email, no memberships) → the
+    owner of production books landed on "create your workspace" as if data was
+    gone. Hand-seeded / imported / migrated accounts keyed under a legacy
+    ``uc_uid`` with a real email are the landmine.
+
+    **Bind choice (preferred over fail-closed-on-match):** when an ACTIVE row
+    matches the token email (``lower(email)``) AND ``email_verified is True``,
+    re-key that row's ``uc_uid`` one-way to the resolved sub and log at WARNING
+    (old → new). Why bind, not always-409:
+
+    * A verified email is the only OIDC claim that safely links a new sub to an
+      already-seeded AO account (KC ``verifyEmail`` is on for uchub).
+    * Fail-closed-on-every-match would permanently lock out every migrated
+      human until an operator re-keys by hand — the exact outage we just had.
+    * The spoofing abuse case is **unverified** email claims: we fail closed
+      with HTTP 409 when a match exists but ``email_verified`` is not True, so
+      an attacker cannot re-key someone else's account by asserting their
+      address without KC verification.
+
+    Never provisions NULL email when the token carries one. Synthetic
+    ``m2m:*`` / ``agent-*`` ids are no-ops (caller should also skip). Brigade
+    is deliberately NOT wired here — it already resolves via
+    ``_uc_uid_for_email`` and must not auto-provision.
+
+    DB blips: log + soft-return so pure JWT validation still works when the
+    identity store is briefly unavailable (downstream membership resolution
+    will fail closed on its own). The 409 for unverified-email match is hard.
+    """
+    if _is_synthetic_uc_uid(uc_uid):
+        return
+
+    email = _token_email(claims)
+    email_verified = _token_email_verified(claims)
+
+    from sqlalchemy import text
+
+    from app.db import SessionLocal
+
+    try:
+        async with SessionLocal() as session:
+            async with session.begin():
+                by_uid = (
+                    await session.execute(
+                        text(
+                            "SELECT id, email FROM public.user_account "
+                            "WHERE uc_uid = :uc"
+                        ),
+                        {"uc": uc_uid},
+                    )
+                ).first()
+                if by_uid is not None:
+                    # Already keyed on sub. Backfill email if the row is blank
+                    # and the token carries one — never leave a known address
+                    # as NULL when we have it.
+                    if email and not by_uid.email:
+                        await session.execute(
+                            text(
+                                "UPDATE public.user_account "
+                                "SET email = :email, last_seen_at = now() "
+                                "WHERE id = :id"
+                            ),
+                            {"email": email, "id": by_uid.id},
+                        )
+                    else:
+                        await session.execute(
+                            text(
+                                "UPDATE public.user_account "
+                                "SET last_seen_at = now() WHERE id = :id"
+                            ),
+                            {"id": by_uid.id},
+                        )
+                    return
+
+                if email:
+                    match = (
+                        await session.execute(
+                            text(
+                                """
+                                SELECT id, uc_uid FROM public.user_account
+                                WHERE lower(email) = lower(:email) AND is_active
+                                ORDER BY last_seen_at DESC NULLS LAST
+                                LIMIT 1
+                                """
+                            ),
+                            {"email": email},
+                        )
+                    ).first()
+                    if match is not None:
+                        if not email_verified:
+                            # Fail closed: match without verified email is the
+                            # spoofing surface. Do NOT bind; do NOT mint a ghost.
+                            raise HTTPException(
+                                status_code=status.HTTP_409_CONFLICT,
+                                detail=(
+                                    "An account already exists for this email under "
+                                    "a different identity. Verify your email with "
+                                    "the identity provider, or contact support."
+                                ),
+                            )
+                        old_uc = match.uc_uid
+                        if old_uc != uc_uid:
+                            _log.warning(
+                                "[acctops.auth] keycloak_email_bind: re-keying "
+                                "user_account uc_uid old=%r new=%r "
+                                "(email_verified=true)",
+                                old_uc,
+                                uc_uid,
+                            )
+                            await session.execute(
+                                text(
+                                    """
+                                    UPDATE public.user_account
+                                    SET uc_uid = :new_uc, last_seen_at = now()
+                                    WHERE id = :id
+                                    """
+                                ),
+                                {"new_uc": uc_uid, "id": match.id},
+                            )
+                        return
+
+                # Genuinely new user — provision with email when the token has
+                # one so later tenancy auto-provision paths find this row and
+                # never insert a NULL-email ghost.
+                if email:
+                    await session.execute(
+                        text(
+                            """
+                            INSERT INTO public.user_account
+                                (id, uc_uid, email, is_active, created_at, last_seen_at)
+                            VALUES
+                                (gen_random_uuid(), :uc, :email, true, now(), now())
+                            """
+                        ),
+                        {"uc": uc_uid, "email": email},
+                    )
+                else:
+                    await session.execute(
+                        text(
+                            """
+                            INSERT INTO public.user_account
+                                (id, uc_uid, is_active, created_at, last_seen_at)
+                            VALUES
+                                (gen_random_uuid(), :uc, true, now(), now())
+                            """
+                        ),
+                        {"uc": uc_uid},
+                    )
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - DB blip → soft-return
+        _log.warning(
+            "[acctops.auth] keycloak identity ensure skipped (db error %s) — "
+            "falling through; downstream may still auto-provision",
+            exc.__class__.__name__,
+        )
+        return
 
 
 async def _uc_uid_for_email(email: str) -> str | None:
