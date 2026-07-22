@@ -25,8 +25,11 @@ from app.llm_client import (
     FailoverClient,
     LlmTarget,
     acall_with_failover,
+    apply_llm_user,
+    bind_llm_user,
     call_with_failover,
     classify_failure,
+    current_llm_user,
     llm_default_headers,
     llm_user_agent,
     resolve_fallback_target,
@@ -545,3 +548,114 @@ class TestFailoverSyncClient:
         with pytest.raises(httpx.HTTPStatusError):
             client.chat.completions.create(model="qwen3.6-35b", messages=[])
         assert "fallback" not in fake_clients
+
+
+# ===========================================================================
+# End-user attribution (user=<workspace_id>)
+# ===========================================================================
+
+WS_ID = "11111111-2222-3333-4444-555555555555"
+
+
+class TestApplyLlmUser:
+    def test_explicit_kwargs_win(self):
+        out = apply_llm_user({"user": "explicit-ws", "model": "m"}, default="client-ws")
+        assert out["user"] == "explicit-ws"
+        assert out["model"] == "m"
+
+    def test_client_default_used_when_kwargs_blank(self):
+        out = apply_llm_user({"user": "  ", "model": "m"}, default=WS_ID)
+        assert out["user"] == WS_ID
+
+    def test_contextvar_used_when_no_default(self):
+        with bind_llm_user(WS_ID):
+            assert current_llm_user() == WS_ID
+            out = apply_llm_user({"model": "m"})
+            assert out["user"] == WS_ID
+        assert current_llm_user() is None
+
+    def test_no_invention_when_unbound(self):
+        out = apply_llm_user({"model": "m"})
+        assert "user" not in out
+
+    def test_bind_stacks_and_restores(self):
+        with bind_llm_user("outer"):
+            assert current_llm_user() == "outer"
+            with bind_llm_user("inner"):
+                assert current_llm_user() == "inner"
+            assert current_llm_user() == "outer"
+        assert current_llm_user() is None
+
+
+class TestUserAttributionOnCreate:
+    """Every Failover create must stamp user= when attribution is configured."""
+
+    async def test_client_constructor_user_on_every_request(self, fake_clients):
+        client = FailoverAsyncClient(
+            base_url=PRIMARY.base_url,
+            api_key=PRIMARY.api_key,
+            model=PRIMARY.model,
+            user=WS_ID,
+        )
+        await client.chat.completions.create(model="qwen3.6-35b", messages=[])
+        assert fake_clients["primary"].calls[0]["user"] == WS_ID
+
+    async def test_context_bind_inherits_without_constructor_arg(self, fake_clients):
+        client = FailoverAsyncClient(
+            base_url=PRIMARY.base_url, api_key=PRIMARY.api_key, model=PRIMARY.model
+        )
+        with bind_llm_user(WS_ID):
+            await client.chat.completions.create(model="qwen3.6-35b", messages=[])
+        assert fake_clients["primary"].calls[0]["user"] == WS_ID
+
+    async def test_explicit_create_user_overrides_client(self, fake_clients):
+        client = FailoverAsyncClient(
+            base_url=PRIMARY.base_url,
+            api_key=PRIMARY.api_key,
+            model=PRIMARY.model,
+            user="client-ws",
+        )
+        await client.chat.completions.create(
+            model="qwen3.6-35b", messages=[], user="per-call-ws"
+        )
+        assert fake_clients["primary"].calls[0]["user"] == "per-call-ws"
+
+    async def test_streaming_preserved_with_user(self, monkeypatch, fake_clients):
+        _configure_fallback(monkeypatch)
+        client = FailoverAsyncClient(
+            base_url=PRIMARY.base_url,
+            api_key=PRIMARY.api_key,
+            model=PRIMARY.model,
+            user=WS_ID,
+        )
+        fake_clients["primary"].exc = _status_error(503)
+        await client.chat.completions.create(
+            model="qwen3.6-35b", messages=[], stream=True
+        )
+        fb_call = fake_clients["fallback"].calls[0]
+        assert fb_call["stream"] is True
+        assert fb_call["user"] == WS_ID
+        assert fb_call["model"] == "cloud-model"
+
+    def test_sync_client_stamps_user(self, fake_clients):
+        client = FailoverClient(
+            base_url=PRIMARY.base_url,
+            api_key=PRIMARY.api_key,
+            model=PRIMARY.model,
+            user=WS_ID,
+        )
+        client.chat.completions.create(model="qwen3.6-35b", messages=[])
+        assert fake_clients["primary"].calls[0]["user"] == WS_ID
+
+    def test_failover_preserves_user_on_both_rungs(self, monkeypatch, fake_clients):
+        _configure_fallback(monkeypatch)
+        client = FailoverClient(
+            base_url=PRIMARY.base_url,
+            api_key=PRIMARY.api_key,
+            model=PRIMARY.model,
+            user=WS_ID,
+        )
+        fake_clients["primary"].exc = _status_error(500)
+        client.chat.completions.create(model="qwen3.6-35b", messages=[])
+        assert fake_clients["primary"].calls[0]["user"] == WS_ID
+        assert fake_clients["fallback"].calls[0]["user"] == WS_ID

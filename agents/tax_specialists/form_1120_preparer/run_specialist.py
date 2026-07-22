@@ -418,6 +418,7 @@ async def _run_openai_path(
                 api_key=llm_api_key,
                 model=llm_model,
                 op="specialist.chat.completions",
+                user=str(workspace_id),
             )
 
             messages: list[dict[str, Any]] = [

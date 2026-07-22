@@ -314,6 +314,8 @@ async def _collect_consult_turn(
         user_bearer_token=ctx.user_bearer_token,
         max_iterations=CONSULT_MAX_TOOL_ITERATIONS,
         max_tokens=CONSULT_MAX_TOKENS,
+        # Same workspace attribution as the outer CFO turn (gateway/Lago user=).
+        llm_user=ctx.workspace_id,
     )
     if model:
         runner_kwargs["model"] = model

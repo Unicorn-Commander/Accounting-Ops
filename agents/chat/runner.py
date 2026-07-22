@@ -209,6 +209,7 @@ async def stream_assistant_turn(
     max_tokens: int = MAX_TOKENS_PER_TURN,
     cancel_check: Any = None,  # callable[[], bool] | None — polled between deltas
     delegation: Any = None,  # DelegationContext | None — enables consult_specialist
+    llm_user: str | None = None,  # workspace_id for gateway end-user attribution
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream chat events for one assistant turn.
 
@@ -235,6 +236,10 @@ async def stream_assistant_turn(
         cancel_check:       Optional callable; when it returns True, the loop
                             stops cleanly and emits a {"type": "stop",
                             "stop_reason": "cancelled"} event.
+        llm_user:           Workspace UUID stamped as OpenAI ``user=`` on every
+                            outbound LLM request (LiteLLM/Lago end-user
+                            attribution). Prefer the workspace id, not the SSO
+                            subject. Optional — omit only for non-tenant evals.
         delegation:         Optional ``agents.chat.delegation.DelegationContext``.
                             When supplied, the CFO persona is given a LOCAL
                             ``consult_specialist`` tool (NOT an MCP tool) that
@@ -360,6 +365,8 @@ async def stream_assistant_turn(
                     api_key=api_key,
                     model=model,
                     op="chat.completions.stream",
+                    # Workspace id → OpenAI ``user`` for gateway/Lago attribution.
+                    user=llm_user,
                     # OpenRouter recommends a referrer / app title for analytics.
                     extra_headers={
                         "HTTP-Referer": os.environ.get(

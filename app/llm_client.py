@@ -1,4 +1,4 @@
-"""Outbound-LLM HTTP resilience: ONE User-Agent, ONE failover chain.
+"""Outbound-LLM HTTP resilience: ONE User-Agent, ONE failover chain, ONE user=.
 
 Why this module exists
 ======================
@@ -19,7 +19,16 @@ The UA literal lives HERE and nowhere else, and is overridable via
 ``AO_LLM_USER_AGENT`` so a future Cloudflare rule that happens to block our
 string can be worked around with an env change instead of a redeploy.
 
-**(2) Failover.** Before this module AO had none: ``resolve_chat_inference`` is a
+**(2) End-user attribution (``user=<workspace_id>``).** The OpenAI-compatible
+``user`` field on chat/completions is how LiteLLM / Lago attribute spend to an
+end-user. AO keys this to the **workspace UUID** (not the human SSO subject):
+that is the tenancy unit budgets and metering already use. Injection happens
+HERE on every Failover client ``.chat.completions.create`` so all ~12 call
+sites inherit it — pass ``user=`` on the client constructor, or bind a
+context via :func:`bind_llm_user` at a request boundary. Explicit per-call
+``user=`` still wins.
+
+**(3) Failover.** Before this module AO had none: ``resolve_chat_inference`` is a
 *precedence chain* (BYOK > per-workspace virtual key > platform virtual key >
 OpenRouter) that picks ONE provider up front. If that provider was down, the
 request just failed. This module wraps -- and never replaces -- that resolver:
@@ -53,13 +62,82 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from typing import Any, TypeVar
 
 _log = logging.getLogger("acctops.llm")
 
 T = TypeVar("T")
+
+# ---------------------------------------------------------------------------
+# End-user attribution (OpenAI ``user`` field → LiteLLM / Lago end-user)
+# ---------------------------------------------------------------------------
+#
+# Value is the workspace UUID string. Scoped via ContextVar so nested LLM
+# calls (CFO → specialist consult) inherit the outer turn's workspace without
+# every create() site threading the arg by hand. Client constructor ``user=``
+# is the other entry point; both feed :func:`apply_llm_user`.
+
+_llm_user: ContextVar[str | None] = ContextVar("ao_llm_user", default=None)
+
+
+def current_llm_user() -> str | None:
+    """Workspace id currently bound for outbound LLM attribution, or None."""
+    val = _llm_user.get()
+    if val is None:
+        return None
+    stripped = str(val).strip()
+    return stripped or None
+
+
+@contextmanager
+def bind_llm_user(user_id: str | None) -> Iterator[None]:
+    """Bind ``user=<workspace_id>`` for all Failover client creates in this scope.
+
+    Nested binds stack correctly (ContextVar tokens). Passing ``None`` / blank
+    is a no-op bind (does not clear an outer value — use an empty scope only
+    when you intentionally want no attribution).
+    """
+    cleaned = (str(user_id).strip() if user_id is not None else "") or None
+    token: Token[str | None] = _llm_user.set(cleaned)
+    try:
+        yield
+    finally:
+        _llm_user.reset(token)
+
+
+def apply_llm_user(
+    kwargs: Mapping[str, Any],
+    *,
+    default: str | None = None,
+) -> dict[str, Any]:
+    """Return kwargs with ``user`` set for gateway end-user attribution.
+
+    Precedence (first non-blank wins):
+      1. explicit ``kwargs["user"]`` (call-site override)
+      2. ``default`` (client constructor ``user=``)
+      3. :func:`current_llm_user` (bound context)
+
+    If none resolve, kwargs are returned unchanged (local / BYOK paths may
+    legitimately run without a workspace id). Never invents a fake id.
+    """
+    out = dict(kwargs)
+    existing = out.get("user")
+    if existing is not None and str(existing).strip():
+        out["user"] = str(existing).strip()
+        return out
+    for candidate in (default, current_llm_user()):
+        if candidate is None:
+            continue
+        cleaned = str(candidate).strip()
+        if cleaned:
+            out["user"] = cleaned
+            return out
+    return out
+
 
 # ---------------------------------------------------------------------------
 # User-Agent
@@ -455,6 +533,7 @@ class _FailoverClientBase:
         extra_headers: Mapping[str, str | None] | None = None,
         fallback: LlmTarget | None = None,
         op: str = "chat.completions",
+        user: str | None = None,
         **client_kwargs: Any,
     ) -> None:
         self.primary = LlmTarget(base_url=base_url, api_key=api_key, model=model, label="primary")
@@ -462,6 +541,10 @@ class _FailoverClientBase:
         self.op = op
         self._extra_headers = extra_headers
         self._client_kwargs = client_kwargs
+        # Workspace UUID (or other end-user id) stamped on every create() as
+        # the OpenAI-compatible ``user`` field for LiteLLM/Lago attribution.
+        cleaned = (str(user).strip() if user is not None else "") or None
+        self.user: str | None = cleaned
         # Which rung served the most recent call -- so a caller can report the
         # model it ACTUALLY used instead of the one it asked for.
         self.last_served_by: str = "primary"
@@ -472,8 +555,8 @@ class _FailoverClientBase:
         return self.fallback is not None
 
     def _target_for(self, target: LlmTarget, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Per-attempt kwargs: substitute the rung's model when it has one."""
-        out = dict(kwargs)
+        """Per-attempt kwargs: attribute user=, substitute fallback model."""
+        out = apply_llm_user(kwargs, default=self.user)
         if target.label == "fallback" and target.model:
             out["model"] = target.model
         return out
@@ -489,6 +572,9 @@ class FailoverAsyncClient(_FailoverClientBase):
     Drop-in for ``openai.AsyncOpenAI`` at call sites that only use
     ``.chat.completions.create``. Streaming is preserved: ``create(stream=True)``
     returns the ``AsyncStream`` of whichever rung answered.
+
+    Pass ``user=<workspace_id>`` (or bind via :func:`bind_llm_user`) so every
+    completion request carries the OpenAI ``user`` field for gateway metering.
 
     Note that failover covers *establishing* the stream, not mid-stream faults --
     once tokens have been emitted to the user we cannot silently replay the

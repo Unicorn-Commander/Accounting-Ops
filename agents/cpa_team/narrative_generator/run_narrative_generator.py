@@ -337,6 +337,7 @@ def _run_openai(
                     api_key=llm_api_key,
                     model=llm_model,
                     op="narrative.chat.completions",
+                    user=str(workspace_id),
                 )
 
                 messages: list[dict[str, Any]] = [
