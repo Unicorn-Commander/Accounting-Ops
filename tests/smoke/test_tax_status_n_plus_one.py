@@ -17,12 +17,9 @@ benchmark in the integration tier can measure wall-clock latency.
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from typing import Any
 from unittest.mock import MagicMock
 from uuid import uuid4
 
-import pytest
 
 import app.api.tax_status as tax_status_mod
 

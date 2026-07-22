@@ -15,7 +15,8 @@
 # Optional add-ons (compose profiles):
 #   --profile embeddings   Infinity embedding server (Tax Knowledge RAG)
 #   --profile graph        FalkorDB agent-memory projection (best-effort)
-# Both degrade gracefully — the app boots and works fine without them.
+#   --profile sentinel     Autonomous CPA daemon (periodic workspace checks)
+# embeddings/graph degrade gracefully; sentinel is opt-in and off by default.
 # =============================================================================
 
 services:
@@ -31,7 +32,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "${SELFHOST_BIND_IP:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+      - "${SELFHOST_BIND_IP:-127.0.0.1}:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -234,6 +235,47 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+    networks:
+      - accounting_ops
+
+  # ----------- Optional: Sentinel autonomous CPA daemon (profile: sentinel) --
+  # Periodic worker running checks across every active workspace, drafting
+  # memos / flagging items / scheduling reminders. Same image as `app`.
+  # Opt-in via --profile sentinel (off by default — same as docker-compose.yml).
+  # Per-workspace pause: sentinel_config.autonomy_level='off'.
+  # Global kill switch: SENTINEL_DISABLED=true.
+  # AO_EDITION / AO_AUTH_MODE default to community-safe values so the daemon
+  # never assumes Keycloak or enterprise federation on a CE self-host.
+  sentinel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    profiles: ["sentinel"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # ---- Community-safe defaults (match app/web; override via .env) -------
+      AO_EDITION: ${AO_EDITION:-community}
+      AO_AUTH_MODE: ${AO_AUTH_MODE:-local}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://accounting_ops:${POSTGRES_PASSWORD}@postgres:5432/accounting_ops}
+      ADMIN_DATABASE_URL: ${ADMIN_DATABASE_URL:-postgresql+asyncpg://accounting_ops:${POSTGRES_PASSWORD}@postgres:5432/accounting_ops}
+      ACCTOPS_MASTER_KEY_PATH: /run/secrets/accounting_ops_master_key
+      LLM_ENDPOINT_URL: ${LLM_ENDPOINT_URL:-http://ollama:11434/v1}
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5vl:7b}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      SENTINEL_DEFAULT_INTERVAL_MINUTES: ${SENTINEL_DEFAULT_INTERVAL_MINUTES:-360}
+      SENTINEL_LOG_LEVEL: ${SENTINEL_LOG_LEVEL:-INFO}
+      SENTINEL_DISABLED: ${SENTINEL_DISABLED:-false}
+    secrets:
+      - accounting_ops_master_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    command: ["python", "-m", "agents.sentinel.run_sentinel"]
     networks:
       - accounting_ops
 

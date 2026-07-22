@@ -1,33 +1,34 @@
 """Per-request workspace + entity session.
 
-Pattern (per research synthesis):
+Pattern (shared-table RLS+GUC — the suite-canonical model; migrations
+tenant/0025+0026 consolidated the former schema-per-workspace layout into the
+single fixed `books` schema):
 - Single global AsyncEngine + default pool stays efficient.
 - Per-request: BEGIN
-      -> SET LOCAL search_path = "<workspace_schema>", public
-      -> SET LOCAL app.current_workspace = '<workspace_uuid>'  (RLS backstop)
+      -> SET LOCAL search_path = books, public         (constant; not per-tenant)
+      -> SET LOCAL app.current_workspace = '<workspace_uuid>'  (the isolation key)
       -> queries -> COMMIT
 - SET LOCAL auto-resets at COMMIT/ROLLBACK; no pool bleed.
 - Entity-level scoping is enforced in application code, not at the DB layer
-  (workspace_id is the schema boundary; entity_id is a row predicate).
+  (workspace_id is the isolation boundary; entity_id is a row predicate).
 
-Defense in depth (audit finding C3):
-- search_path picks the *schema* (workspace boundary). If a query ever runs
-  with a missing/stale search_path, it could touch another workspace's schema.
-- The `app.current_workspace` GUC is read by Row-Level Security policies on
-  every workspace-scoped table (migrations tenant/0005). Because each schema
-  holds exactly one workspace's rows (workspace_id == that workspace), a query
-  that lands in the wrong schema sees ZERO rows instead of another tenant's
-  data: RLS filters `workspace_id = app.current_workspace`, and the wrong
-  schema has no rows with this workspace_id. So the GUC + RLS turns a
-  search_path mistake from a data leak into an empty result.
-- The runtime role is NOT the table owner and is NOT BYPASSRLS, so RLS is
-  fully enforced against it. RLS is ENABLEd (not FORCEd): the owner role keeps
-  full visibility for migrations + operator maintenance; only the app's
-  least-privilege role is gated. See migrations/tenant/0005 for the rationale.
+Defense in depth:
+- Every workspace-scoped table lives in `books` and carries a workspace_id
+  column with a FORCE ROW LEVEL SECURITY policy `workspace_id =
+  current_workspace_id()` (migrations tenant/0026). `current_workspace_id()`
+  reads the `app.current_workspace` GUC this module sets per request; if the
+  GUC is unset it returns NULL, so `workspace_id = NULL` is never true and the
+  query sees ZERO rows (default-deny). Cross-workspace leakage is a SQL
+  impossibility enforced by the engine, not by developer discipline.
+- RLS is FORCEd, so it applies even to the table owner / admin role: a query
+  that forgets to set the GUC sees nothing, regardless of which role runs it.
+  The runtime role is additionally NOT the owner and NOT BYPASSRLS.
 
-Why workspace at schema level + entity at row level:
-- Workspace isolation is a hard requirement (HIPAA + customer separation).
-  Schema-per-workspace makes cross-workspace leakage a SQL impossibility.
+Why workspace via RLS + entity at row level:
+- Workspace isolation is a hard requirement (HIPAA + customer separation);
+  FORCE RLS on workspace_id makes cross-workspace leakage impossible at the
+  engine layer while keeping one shared schema (bounded pg_catalog, one
+  migration head — no per-tenant schema fan-out).
 - Entity is a sub-grouping within a workspace, used for FERS-style rules,
   per-entity P&L, CPA-handoff scoping. Row-level filter is enough.
 """
@@ -47,8 +48,17 @@ _WORKSPACE_SCHEMA_RE = re.compile(
 )
 
 
+#: The single shared schema that holds every workspace's rows post-consolidation.
+SHARED_SCHEMA = "books"
+
+
 def schema_for_workspace(workspace_id: str | uuid.UUID) -> str:
-    """Compute the Postgres schema name for a workspace UUID."""
+    """DEPRECATED (shared-schema model): compute the legacy per-workspace schema name.
+
+    Retained only for historical tooling/tests and to validate that a workspace
+    id is a well-formed UUID. Runtime sessions now use the constant
+    ``SHARED_SCHEMA`` (``books``); nothing should derive a search_path from this.
+    """
     sid = str(workspace_id).lower()
     schema = f"accounting_ops_{sid.replace('-', '_')}"
     if not _WORKSPACE_SCHEMA_RE.match(schema):
@@ -70,20 +80,22 @@ async def set_workspace_search_path(
     """Pin search_path + RLS GUCs to the workspace for the current transaction.
 
     Sets, transaction-locally:
-      - search_path = "<workspace_schema>", public   (schema boundary)
-      - app.current_workspace = <workspace_uuid>      (RLS backstop, required)
+      - search_path = books, public                   (constant shared schema)
+      - app.current_workspace = <workspace_uuid>      (the RLS isolation key)
       - app.current_entity = <entity_uuid>            (when known; optional)
 
     SET LOCAL / set_config(..., is_local => true) auto-reset at COMMIT/ROLLBACK
     and cannot bleed into the next request that reuses this pooled connection.
 
-    The schema name is validated as our naming convention by
-    schema_for_workspace (raises on a non-UUID), so the f-string for
-    search_path is injection-safe. The GUC values go through set_config with
-    bound parameters.
+    Isolation is enforced by FORCE RLS on workspace_id keyed on the
+    app.current_workspace GUC (migrations tenant/0026), not by a per-workspace
+    schema. The GUC value goes through set_config with bound parameters.
     """
-    schema = schema_for_workspace(workspace_id)
-    await session.execute(text(f'SET LOCAL search_path = "{schema}", public'))
+    # Defensive: the GUC value below is what RLS keys on, so make sure the
+    # workspace id is a well-formed UUID (raises on garbage). search_path is a
+    # fixed literal (no interpolation) in the shared-schema model.
+    uuid.UUID(str(workspace_id))
+    await session.execute(text("SET LOCAL search_path = books, public"))
     # set_config(name, value, is_local) — is_local=true == SET LOCAL semantics.
     # Bound params keep the values fully parameterized.
     await session.execute(

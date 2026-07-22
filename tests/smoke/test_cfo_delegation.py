@@ -26,7 +26,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import pytest
 
 from agents.chat import delegation as deleg
 
@@ -490,9 +489,12 @@ async def test_runner_consult_is_silent_and_dispatched_in_process(monkeypatch):
 
     fake_session = _FakeMCPSession(names=["get_runway", "draft_memo"])
     _install_fake_mcp(monkeypatch, fake_session)
+    # The runner builds its client via app.llm_client.FailoverAsyncClient (which
+    # carries the shared User-Agent + the primary->fallback chain), so the stub
+    # is installed at THAT seam, not at openai.AsyncOpenAI.
     monkeypatch.setattr(
-        runner_mod.openai, "AsyncOpenAI",
-        lambda *a, **k: _OneToolCallThenAnswer(), raising=False,
+        runner_mod, "FailoverAsyncClient",
+        lambda *a, **k: _OneToolCallThenAnswer(),
     )
 
     # The inner consult would call stream_assistant_turn again (the SAME
@@ -581,8 +583,8 @@ async def test_runner_without_delegation_has_no_consult_tool(monkeypatch):
             return _stream()
 
     monkeypatch.setattr(
-        runner_mod.openai, "AsyncOpenAI",
-        lambda *a, **k: _NoToolModel(), raising=False,
+        runner_mod, "FailoverAsyncClient",
+        lambda *a, **k: _NoToolModel(),
     )
 
     events = []

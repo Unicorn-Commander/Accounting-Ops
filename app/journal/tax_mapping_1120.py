@@ -38,12 +38,16 @@ class F1120Mapping:
 
     Fields
     ------
-    section : "income" | "deductions" | "tax" | "other_income"
-        Which part of Form 1120 page 1 this lands on.
+    section : "income" | "deductions" | "tax" | "other_income" | "excluded"
+        Which part of Form 1120 page 1 this lands on. ``"excluded"`` means the
+        category does NOT belong on page 1 at all — e.g. balance-sheet equity
+        (owner contributions/draws) which are not income or deductible expenses;
+        they appear on Schedule L, not the income statement, and must be left
+        OUT of any income/deduction total.
     line : str
         The 1120 line reference (e.g. "1a", "26", "30"). Lines with sub-parts
         use the lettered form matching the 2024 revision ("1a" = gross receipts,
-        "2" = returns/allowances, etc.).
+        "2" = cost of goods sold, etc.).
     label : str
         The IRS line label verbatim from the 2024 Form 1120 instructions,
         truncated for readability.
@@ -53,7 +57,7 @@ class F1120Mapping:
         Rationale for the mapping + any CPA override guidance.
     """
 
-    section: Literal["income", "deductions", "tax", "other_income"]
+    section: Literal["income", "deductions", "tax", "other_income", "excluded"]
     line: str
     label: str
     confidence: Confidence
@@ -69,6 +73,19 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
     # ------------------------------------------------------------------
     # REVENUE
     # ------------------------------------------------------------------
+
+    "Revenue · Services": F1120Mapping(
+        section="income",
+        line="1a",
+        label="Gross receipts or sales",
+        confidence="high",
+        notes=(
+            "Service revenue is gross receipts from the corporation's principal "
+            "trade — the core of line 1a (Form 1120 instructions p. 8). This is "
+            "the operating revenue of a services C-corp; without it line 1a is "
+            "materially understated. Returns/allowances (if any) go on line 1b."
+        ),
+    ),
 
     "Revenue · Marketplace": F1120Mapping(
         section="income",
@@ -100,13 +117,23 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
     ),
 
     # ------------------------------------------------------------------
-    # COGS (line 2 is returns; line 3 is the gross-profit subtractor)
+    # COGS (line 2, supported by Form 1125-A)
     # ------------------------------------------------------------------
-    # NOTE: COGS accounts (5xxx) are not CATEGORY_TO_ACCOUNT keys today —
-    # they post via direct account resolution. They are included here so a
-    # future category can be added without breaking the coverage test.
-    # The mapping is defensible: COGS reduces gross receipts to gross profit
-    # on line 3. 1120 instructions p. 8–9.
+
+    "COGS · Inventory": F1120Mapping(
+        section="income",
+        line="2",
+        label="Cost of goods sold (Form 1125-A)",
+        confidence="high",
+        notes=(
+            "Inventory cost of goods sold is reported on Form 1120 line 2 and "
+            "computed on Form 1125-A. Although line 2 sits in the page-1 Income "
+            "section, it is a subtractive amount used to calculate gross profit "
+            "on line 3; it must not be treated as positive income or as a page-1 "
+            "operating deduction. CPA should reconcile beginning inventory, "
+            "purchases, and ending inventory to Form 1125-A."
+        ),
+    ),
 
     # ------------------------------------------------------------------
     # EXPENSES — Infrastructure
@@ -281,6 +308,48 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
         ),
     ),
 
+    "Vehicle · Repairs": F1120Mapping(
+        section="deductions",
+        line="26",
+        label="Other deductions",
+        confidence="medium",
+        notes=(
+            "Ordinary repair and maintenance costs for a business-use vehicle. "
+            "Consistent with this module's convention for operating expenses, "
+            "report the deductible business-use portion on line 26 with an "
+            "attached statement labeled 'Vehicle repairs and maintenance'. "
+            "A CPA may reclassify the amount to line 14 (Repairs and maintenance). "
+            "Capital improvements, personal-use costs, and amounts reimbursable "
+            "under an accountable plan require separate treatment."
+        ),
+    ),
+
+    "Depreciation": F1120Mapping(
+        section="deductions",
+        line="20",
+        label="Depreciation from Form 4562 not claimed on Form 1125-A or elsewhere on return",
+        confidence="high",
+        notes=(
+            "Book depreciation posted to COA 8030 'Depreciation Expense'. Form "
+            "1120 line 20 is the dedicated depreciation line and is the ONLY "
+            "correct home for it — before this mapping existed the 8030 account "
+            "fell through the unmapped-account catch-all to line 26 'Other "
+            "deductions', which is the wrong line (and left line 20 blank on "
+            "every C-corp return the platform produced).\n\n"
+            "IMPORTANT — book vs TAX depreciation. The amount that belongs on "
+            "line 20 is the TAX deduction computed on Form 4562 (MACRS + §179 + "
+            "§168(k)), NOT the book depreciation expense in the ledger. Those "
+            "differ for essentially every asset, and the difference is a "
+            "Schedule M-1 reconciling item. The authoritative figure is Form "
+            "4562 line 22, produced by app.tax.engines.depreciation; the ledger "
+            "balance in 8030 is only a fallback when no fixed-asset records "
+            "exist. See app/tax/compute_4562.py and docs/PROFESSIONAL-SUBSTITUTE.md.\n\n"
+            "Depreciation capitalized into inventory under §263A is claimed on "
+            "Form 1125-A (COGS) instead — line 20 is explicitly the depreciation "
+            "'not claimed on Form 1125-A or elsewhere on return'."
+        ),
+    ),
+
     "Meals": F1120Mapping(
         section="deductions",
         line="26",
@@ -296,6 +365,65 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
             "preparers prefer to book only the deductible 50% in the "
             "system; CPA should standardize the approach at engagement start. "
             "Confidence = high because 50% meals-to-line-26 is settled law."
+        ),
+    ),
+
+    # ------------------------------------------------------------------
+    # EXPENSES — Occupancy, payroll & insurance
+    # ------------------------------------------------------------------
+
+    "Rent · Facilities": F1120Mapping(
+        section="deductions",
+        line="16",
+        label="Rents",
+        confidence="high",
+        notes=(
+            "Rent paid for business premises / facilities. Form 1120 line 16 "
+            "is the dedicated 'Rents' line. Statement label: 'Facility rent'. "
+            "Confidence = high: dedicated line, settled placement. Rent paid to "
+            "a related party (e.g. an owner-controlled entity) must be at fair "
+            "market value — CPA should confirm §267 / reasonableness."
+        ),
+    ),
+
+    "Utilities": F1120Mapping(
+        section="deductions",
+        line="26",
+        label="Other deductions",
+        confidence="high",
+        notes=(
+            "Electricity, gas, water, internet, and telephone for business "
+            "premises. No dedicated 1120 line; line 26 with statement label "
+            "'Utilities'. Confidence = high: settled practice."
+        ),
+    ),
+
+    "Payroll · Wages": F1120Mapping(
+        section="deductions",
+        line="13",
+        label="Salaries and wages (less employment credits)",
+        confidence="high",
+        notes=(
+            "Wages and salaries paid to NON-officer employees. Form 1120 line "
+            "13 is the dedicated line; it must be reported NET of any "
+            "employment credits (e.g. Work Opportunity Credit). Officer "
+            "compensation belongs on line 12 (Form 1125-E), NOT here — a CPA "
+            "should confirm no owner-officer wages were mis-posted to 6350. "
+            "Amounts capitalized into inventory under §263A go to Form 1125-A."
+        ),
+    ),
+
+    "Insurance": F1120Mapping(
+        section="deductions",
+        line="26",
+        label="Other deductions",
+        confidence="high",
+        notes=(
+            "Business insurance premiums (general liability, property, E&O, "
+            "commercial auto). No dedicated 1120 line; line 26 with statement "
+            "label 'Insurance'. Employee health/benefit insurance instead "
+            "belongs on line 24 (Employee benefit programs) — CPA should split "
+            "if 6800 commingles employee-benefit premiums."
         ),
     ),
 
@@ -363,6 +491,38 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
             "CPA MUST classify each inter-entity transaction before filing. "
             "Line 26 is a placeholder to prevent silent drops — not an "
             "assertion of deductibility."
+        ),
+    ),
+
+    # ------------------------------------------------------------------
+    # EQUITY — owner contributions / draws (NOT on Form 1120 page 1)
+    # ------------------------------------------------------------------
+
+    "Owner's Contribution": F1120Mapping(
+        section="excluded",
+        line="—",
+        label="Not on Form 1120 page 1 (balance-sheet equity)",
+        confidence="high",
+        notes=(
+            "Capital the owner/shareholder pays INTO the corporation (account "
+            "3010). This is a balance-sheet equity event — paid-in capital on "
+            "Schedule L (line 22/23), NOT income. It must NOT be included in "
+            "gross receipts or any income total on page 1. Excluded by design."
+        ),
+    ),
+
+    "Owner's Draw": F1120Mapping(
+        section="excluded",
+        line="—",
+        label="Not on Form 1120 page 1 (balance-sheet equity)",
+        confidence="high",
+        notes=(
+            "Money paid OUT to the owner/shareholder or spent personally "
+            "(account 3020). A distribution/draw is a reduction of equity on "
+            "Schedule L, NOT a deductible business expense. It must NOT appear "
+            "in any deduction total on page 1. For a C-corp a shareholder "
+            "distribution may also implicate dividend treatment — CPA reviews. "
+            "Excluded from page 1 by design."
         ),
     ),
 }
@@ -538,6 +698,21 @@ BALANCE_SHEET_1120: dict[str, ScheduleLMapping] = {
         ),
     ),
 
+    "liability_shareholder_loan": ScheduleLMapping(
+        line="19",
+        label="Loans from shareholders",
+        side="liabilities_equity",
+        confidence="high",
+        notes=(
+            "The 'Loan from Jason Allen' category is a loan from a shareholder "
+            "recorded in COA 2400. Schedule L line 19 is the specific line for "
+            "loans from shareholders, regardless of whether a non-shareholder "
+            "note with the same maturity would otherwise use line 17 or 20. "
+            "CPA should confirm the debt is bona fide and reconcile its terms "
+            "and year-end balance; a capital contribution belongs on line 23."
+        ),
+    ),
+
     "liability_notes": ScheduleLMapping(
         line="20",
         label="Mortgages, notes, bonds payable in 1 year or more",
@@ -559,18 +734,16 @@ BALANCE_SHEET_1120: dict[str, ScheduleLMapping] = {
     # ------------------------------------------------------------------
 
     "equity_capital": ScheduleLMapping(
-        line="22a",
-        label="Capital stock — preferred stock",
+        line="23",
+        label="Additional paid-in capital",
         side="liabilities_equity",
         confidence="medium",
         notes=(
-            "Owner contributions / paid-in capital (COA 3010). "
-            "Schedule L line 22a (preferred) or 22b (common). "
-            "For a closely-held C-corp, contributed capital maps here. "
-            "CPA should verify par value vs additional paid-in capital "
-            "split if a formal cap table exists. "
-            "Note: line 23 is Additional paid-in capital — often the "
-            "more correct home for contributed capital above par."
+            "The 'Owner Contribution' category records a C-corporation "
+            "shareholder contribution in COA 3010. It is additional paid-in "
+            "capital on Schedule L line 23, not page-1 income. CPA should "
+            "reconcile the contribution to the cap table and separate any "
+            "stated par value to common or preferred stock on line 22b or 22a."
         ),
     ),
 
@@ -580,7 +753,8 @@ BALANCE_SHEET_1120: dict[str, ScheduleLMapping] = {
         side="liabilities_equity",
         confidence="low",
         notes=(
-            "Owner distributions (COA 3020). "
+            "The 'Owner Distribution' category records shareholder "
+            "distributions in COA 3020. "
             "Distributions reduce retained earnings but do NOT appear as a "
             "standalone line on Schedule L — they flow through the retained "
             "earnings reconciliation (line 25). CPA must prepare an equity "
@@ -603,6 +777,18 @@ BALANCE_SHEET_1120: dict[str, ScheduleLMapping] = {
         ),
     ),
 }
+
+
+# CATEGORY_TO_ACCOUNT keys that are balance-sheet activity, intentionally
+# excluded from the Form 1120 page-1 P&L package. Each category has an explicit
+# route to a Schedule L bucket above so exclusion can never become a silent drop.
+BALANCE_SHEET_CATEGORY_TO_KEY: dict[str, str] = {
+    "Owner Contribution": "equity_capital",
+    "Owner Distribution": "equity_distributions",
+    "Loan from Jason Allen": "liability_shareholder_loan",
+}
+
+NON_1120_PL_CATEGORIES: frozenset[str] = frozenset(BALANCE_SHEET_CATEGORY_TO_KEY)
 
 
 # ---------------------------------------------------------------------------

@@ -33,7 +33,7 @@ import {
   type ApprovalClustersResponse,
   type ApprovalItem,
   formatUsd
-} from "@/lib/approval-cluster-format";
+} from "@/lib/approval-clusters";
 import { ClusterCard } from "./cluster-card";
 import { SingletonDeck } from "./singleton-deck";
 import { useUndoToast } from "./use-undo-toast";

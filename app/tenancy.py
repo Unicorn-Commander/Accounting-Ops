@@ -79,6 +79,47 @@ def is_platform_admin(role: str) -> bool:
     return role in PLATFORM_ROLES
 
 
+# ---------------------------------------------------------------------------
+# Canonical suite role projection (SUITE-IDENTITY §7).
+#
+# AO keeps its rich 9-rank internal _ROLE_RANK + entity_scope UNCHANGED for all
+# authz (require_role / role_floor / _cap_role / ServiceScope). The canonical
+# suite role is a REPORTING-ONLY projection — derived only when AO reports a
+# membership over MCP / federation so Brigade speaks one role vocabulary across
+# the suite. Rank order: viewer < member < manager < admin < owner.
+#
+#   AO app-role        -> suite role
+#   viewer, client_user-> viewer
+#   bookkeeper         -> member
+#   accountant, cpa    -> manager
+#   admin              -> admin
+#   owner, client_owner-> owner
+#
+# platform_admin is a suite-global realm role ("cross-workspace operator"), NOT
+# a workspace role — it never appears on a membership row, so it is intentionally
+# absent from this map and an unknown role projects to the least-privilege
+# `viewer`.
+_CANONICAL_ROLE = {
+    "viewer": "viewer",
+    "client_user": "viewer",
+    "bookkeeper": "member",
+    "accountant": "manager",
+    "cpa": "manager",
+    "admin": "admin",
+    "owner": "owner",
+    "client_owner": "owner",
+}
+
+
+def canonical_role(app_role: str) -> str:
+    """Project an AO app-role onto the canonical suite role (SUITE-IDENTITY §7).
+
+    Reporting-only — does NOT affect AO's internal authz. Unknown roles map to
+    the least-privilege ``viewer`` (never widen reach on an unrecognised value).
+    """
+    return _CANONICAL_ROLE.get(app_role, "viewer")
+
+
 def role_at_least(role: str, minimum: str) -> bool:
     """True if `role` has at least `minimum`-level permissions."""
     return _ROLE_RANK.get(role, -1) >= _ROLE_RANK.get(minimum, 99)
@@ -140,6 +181,7 @@ async def _resolve_membership(
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :user_id
                           AND m.workspace_id = :workspace_id
+                          AND m.status = 'active'
                           AND w.status = 'active'
                         LIMIT 1
                         """
@@ -412,11 +454,20 @@ async def resolve_tenant(
     auth: AuthContext = Depends(validate_bearer_token),
     tenant_id_header: str | None = Header(default=None, alias="X-Tenant-ID"),
 ) -> TenantContext:
-    """Deprecated. Provided so existing code keeps compiling during the refactor."""
+    """Deprecated. Provided so existing code keeps compiling during the refactor.
+
+    SUITE-IDENTITY §1 / D2: the cross-app workspace key is ``workspace_id``;
+    ``org_id`` is deprecated entirely (it means two different things across apps)
+    and ``tenant_id`` as a CLAIM is likewise retired. This deprecated path now
+    reads ``workspace_id`` ONLY from the token claim — it no longer falls back to
+    a ``tenant_id`` claim or ``org_id``. The path param + ``X-Tenant-ID`` header
+    are retained solely for the pre-existing ``/…/{tenant_id}/…`` URLs until the
+    E3 cleanup deletes ``TenantContext``/``resolve_tenant``/``X-Tenant-ID``
+    outright.
+    """
     raw_tenant_id = (
         request.path_params.get("tenant_id")
         or tenant_id_header
-        or auth.claims.get("tenant_id")
         or auth.claims.get("workspace_id")
     )
     if not raw_tenant_id:
@@ -446,4 +497,5 @@ __all__: Iterable[str] = (
     "resolve_tenant",  # deprecated
     "role_at_least",
     "require_role",
+    "canonical_role",
 )

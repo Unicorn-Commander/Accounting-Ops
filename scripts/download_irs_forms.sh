@@ -80,7 +80,9 @@ for YEAR in "${YEARS[@]}"; do
     echo "=== Tax Year $YEAR ==="
 
     # Form 1120
-    if [[ "$YEAR" == "2024" ]]; then
+    # NOTE(2026-07-10): irs-pdf/f1120.pdf is now the 2025 revision - the old
+    # YEAR==2024 shortcut silently saved the WRONG revision as f1120_2024.pdf.
+    if [[ "$YEAR" == "2025" ]]; then
         F1120_URL="https://www.irs.gov/pub/irs-pdf/f1120.pdf"
     else
         F1120_URL="https://www.irs.gov/pub/irs-prior/f1120--${YEAR}.pdf"
@@ -107,7 +109,125 @@ for YEAR in "${YEARS[@]}"; do
     else
         echo "  WARN  Form 1125-E TY $YEAR not available at $F1125E_URL — skipping."
     fi
+
+    # Form 1096 (Annual Summary and Transmittal of U.S. Information Returns).
+    # YEAR-SPECIFIC like the 1125-E: the current irs-pdf copy is the CURRENT
+    # year's transmittal; prior years live in irs-prior. (The official 1096 is
+    # a red-ink scannable form -- our fill is a SELF_CERTIFIED-watermarked
+    # review copy, never represented as the scannable original.)
+    if [[ "$YEAR" == "2025" ]]; then
+        F1096_URL="https://www.irs.gov/pub/irs-pdf/f1096.pdf"
+    else
+        F1096_URL="https://www.irs.gov/pub/irs-prior/f1096--${YEAR}.pdf"
+    fi
+    F1096_DEST="$FORMS_DIR/f1096_${YEAR}.pdf"
+    if head_check "$F1096_URL"; then
+        download_form "$F1096_DEST" "$F1096_URL" "Form 1096 (TY $YEAR)"
+    else
+        echo "  WARN  Form 1096 TY $YEAR not available at $F1096_URL — skipping."
+    fi
+
+    # Form 4562 (Depreciation and Amortization)
+    # SAME GOTCHA AS 1120: irs-pdf/f4562.pdf is the 2025 revision, so a
+    # YEAR!=2025 request MUST come from irs-prior or it silently saves the
+    # wrong revision. This matters more for 4562 than for most forms: the 2025
+    # revision INSERTED a 50-year class row into Part III Section B, shifting
+    # residential rental from 19h to 19i and nonresidential real from 19i to
+    # 19j. Saving the 2025 PDF as f4562_2024.pdf would render every real-property
+    # figure one row off. See app/exports/f4562_field_map.py.
+    if [[ "$YEAR" == "2025" ]]; then
+        F4562_URL="https://www.irs.gov/pub/irs-pdf/f4562.pdf"
+    else
+        F4562_URL="https://www.irs.gov/pub/irs-prior/f4562--${YEAR}.pdf"
+    fi
+    F4562_DEST="$FORMS_DIR/f4562_${YEAR}.pdf"
+
+    if head_check "$F4562_URL"; then
+        download_form "$F4562_DEST" "$F4562_URL" "Form 4562 (TY $YEAR)"
+    else
+        echo "  WARN  Form 4562 TY $YEAR not available at $F4562_URL — skipping."
+    fi
 done
+
+# --- Individual forms (current-year fillable) -----------------------------
+# Form W-4P (pension/annuity withholding certificate — professional-substitute
+# path) and Form 1040. W-4P is filed on the current-year form regardless of the
+# 1099-R's year (it elects future withholding).
+echo ""
+echo "=== Individual forms (current) ==="
+
+FW4P_URL="https://www.irs.gov/pub/irs-pdf/fw4p.pdf"
+FW4P_DEST="$FORMS_DIR/f-w4p.pdf"
+if head_check "$FW4P_URL"; then
+    download_form "$FW4P_DEST" "$FW4P_URL" "Form W-4P (current)"
+else
+    echo "  WARN  Form W-4P not available at $FW4P_URL — skipping."
+fi
+
+F1040_URL="https://www.irs.gov/pub/irs-pdf/f1040.pdf"
+F1040_DEST="$FORMS_DIR/f1040.pdf"
+if head_check "$F1040_URL"; then
+    download_form "$F1040_DEST" "$F1040_URL" "Form 1040 (current)"
+else
+    echo "  WARN  Form 1040 not available at $F1040_URL — skipping."
+fi
+
+# Note: SC ST-3 is a SC Department of Revenue form, fetched separately into
+# data/sc_forms/ST-3.pdf from https://dor.sc.gov/sites/dor/files/forms/ST3.pdf
+
+# Form W-9 (Request for TIN)
+FW9_URL="https://www.irs.gov/pub/irs-pdf/fw9.pdf"
+FW9_DEST="$FORMS_DIR/fw9.pdf"
+if head_check "$FW9_URL"; then
+    download_form "$FW9_DEST" "$FW9_URL" "Form W-9 (current)"
+else
+    echo "  WARN  Form W-9 not available at $FW9_URL — skipping."
+fi
+# Form 7004 (Business Extension)
+F7004_URL="https://www.irs.gov/pub/irs-pdf/f7004.pdf"
+F7004_DEST="$FORMS_DIR/f7004.pdf"
+if head_check "$F7004_URL"; then
+    download_form "$F7004_DEST" "$F7004_URL" "Form 7004 (current)"
+else
+    echo "  WARN  Form 7004 not available at $F7004_URL — skipping."
+fi
+# Form 8821 (Tax Information Authorization)
+F8821_URL="https://www.irs.gov/pub/irs-pdf/f8821.pdf"
+F8821_DEST="$FORMS_DIR/f8821.pdf"
+if head_check "$F8821_URL"; then
+    download_form "$F8821_DEST" "$F8821_URL" "Form 8821 (current)"
+else
+    echo "  WARN  Form 8821 not available at $F8821_URL — skipping."
+fi
+# Form 2848 (Power of Attorney)
+F2848_URL="https://www.irs.gov/pub/irs-pdf/f2848.pdf"
+F2848_DEST="$FORMS_DIR/f2848.pdf"
+if head_check "$F2848_URL"; then
+    download_form "$F2848_DEST" "$F2848_URL" "Form 2848 (current)"
+else
+    echo "  WARN  Form 2848 not available at $F2848_URL — skipping."
+fi
+
+# Form 843 (Claim for Refund and Request for Abatement) — current revision.
+F843_URL="https://www.irs.gov/pub/irs-pdf/f843.pdf"
+F843_DEST="$FORMS_DIR/f843.pdf"
+if head_check "$F843_URL"; then
+    download_form "$F843_DEST" "$F843_URL" "Form 843 (current)"
+else
+    echo "  WARN  Form 843 not available at $F843_URL — skipping."
+fi
+
+# Form 9465 (Installment Agreement Request) — current revision.
+F9465_URL="https://www.irs.gov/pub/irs-pdf/f9465.pdf"
+F9465_DEST="$FORMS_DIR/f9465.pdf"
+if head_check "$F9465_URL"; then
+    download_form "$F9465_DEST" "$F9465_URL" "Form 9465 (current)"
+else
+    echo "  WARN  Form 9465 not available at $F9465_URL — skipping."
+fi
+
+
+
 
 echo ""
 echo "Done. Forms cached in: $FORMS_DIR"

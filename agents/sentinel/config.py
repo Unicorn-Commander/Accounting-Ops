@@ -19,6 +19,7 @@ Action types each level may take are enumerated in ``actions.ALLOWED_BY_LEVEL``.
 """
 from __future__ import annotations
 
+import datetime as dt
 import enum
 import logging
 from dataclasses import dataclass
@@ -68,6 +69,7 @@ ALL_CHECK_TYPES: tuple[str, ...] = (
     "officer_comp",
     "nol_carryforward",
     "qsbs_holding",
+    "subscription_monitor",
     # Monthly
     "cash_runway",
     "yoy_diff",
@@ -90,6 +92,7 @@ CHECK_CADENCE: dict[str, str] = {
     "officer_comp":          "weekly",
     "nol_carryforward":      "weekly",
     "qsbs_holding":          "weekly",
+    "subscription_monitor":  "weekly",
     "cash_runway":           "monthly",
     "yoy_diff":              "monthly",
     "connector_health":      "monthly",
@@ -107,6 +110,11 @@ class SentinelConfig:
     enabled_checks: tuple[str, ...]  # the resolved list (after expanding "all")
     notify_owners: bool
     notify_accountants: bool
+    # When this workspace's last Sentinel cycle ran. ``None`` == never, which
+    # the workspace-level cadence gate treats as DUE (first-cycle rule). Read
+    # by agents/sentinel/cadence.is_workspace_due so ``check_interval_minutes``
+    # is actually ENFORCED rather than merely displayed in the settings UI.
+    last_run_at: dt.datetime | None = None
 
     def is_enabled(self, check_type: str) -> bool:
         return check_type in self.enabled_checks
@@ -142,7 +150,7 @@ async def get_or_create_config(
                 """
                 SELECT autonomy_level, check_interval_minutes,
                        max_actions_per_day, enabled_checks,
-                       notify_owners, notify_accountants
+                       notify_owners, notify_accountants, last_run_at
                 FROM sentinel_config
                 WHERE workspace_id = :wid
                 """
@@ -176,6 +184,10 @@ async def get_or_create_config(
             enabled_checks=ALL_CHECK_TYPES,
             notify_owners=True,
             notify_accountants=True,
+            # Brand-new config row: never run. The workspace gate treats this
+            # as due, so a freshly provisioned workspace runs its first cycle
+            # immediately instead of waiting out check_interval_minutes.
+            last_run_at=None,
         )
 
     raw_level = (row["autonomy_level"] or "draft_and_flag").strip().lower()
@@ -196,6 +208,7 @@ async def get_or_create_config(
         enabled_checks=_expand_enabled(row["enabled_checks"]),
         notify_owners=bool(row["notify_owners"]),
         notify_accountants=bool(row["notify_accountants"]),
+        last_run_at=row["last_run_at"],
     )
 
 
@@ -210,4 +223,97 @@ async def update_last_run(session: AsyncSession, workspace_id: UUID) -> None:
             """
         ),
         {"wid": str(workspace_id)},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-check cadence state (tenant table sentinel_check_state, migration 0027)
+#
+# These two helpers are the durable half of cadence enforcement. Without a
+# persisted last-run-per-(workspace, check), every restart of the sentinel
+# container would re-fire every monthly check — silently reintroducing the
+# "monthly check runs 4x a day" defect this fixes.
+# ---------------------------------------------------------------------------
+
+
+async def load_check_state(
+    session: AsyncSession, workspace_id: UUID
+) -> dict[str, dt.datetime | None]:
+    """Map ``check_type -> last_run_at`` for one workspace.
+
+    A check_type ABSENT from the returned dict has never run, and the cadence
+    gate treats that as due. Degrades to ``{}`` (== run everything) if the
+    table is missing, so a deploy that lands the code before migration 0027 is
+    a no-op rather than a crash — the pre-fix behaviour, not an outage.
+    """
+    try:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT check_type, last_run_at
+                    FROM sentinel_check_state
+                    WHERE workspace_id = :wid
+                    """
+                ),
+                {"wid": str(workspace_id)},
+            )
+        ).mappings().all()
+    except Exception as e:  # noqa: BLE001
+        _log.warning(
+            "sentinel_check_state unreadable for %s (%s); running all enabled "
+            "checks this cycle (pre-0027 fallback)",
+            workspace_id, e,
+        )
+        return {}
+    return {r["check_type"]: r["last_run_at"] for r in rows}
+
+
+async def record_check_run(
+    session: AsyncSession,
+    workspace_id: UUID,
+    check_type: str,
+    *,
+    status: str = "completed",
+    cycle_id: UUID | None = None,
+    findings: int = 0,
+) -> None:
+    """Upsert the per-check cadence stamp after a run.
+
+    Called for BOTH success and failure: a crashing check still counts as
+    "ran", so a persistently broken check stays on its cadence instead of
+    retrying at full loop frequency. ``consecutive_failures`` carries the
+    "this check is broken" signal instead.
+    """
+    ok = status == "completed"
+    await session.execute(
+        text(
+            """
+            INSERT INTO sentinel_check_state (
+                workspace_id, check_type, last_run_at, last_status,
+                last_cycle_id, last_findings_count, consecutive_failures,
+                updated_at
+            ) VALUES (
+                :wid, :ct, now(), :st, :cyc, :findings, :init_fail, now()
+            )
+            ON CONFLICT (workspace_id, check_type) DO UPDATE SET
+                last_run_at = now(),
+                last_status = EXCLUDED.last_status,
+                last_cycle_id = EXCLUDED.last_cycle_id,
+                last_findings_count = EXCLUDED.last_findings_count,
+                consecutive_failures = CASE
+                    WHEN EXCLUDED.last_status = 'completed' THEN 0
+                    ELSE sentinel_check_state.consecutive_failures + 1
+                END,
+                updated_at = now()
+            """
+        ),
+        {
+            "wid": str(workspace_id),
+            "ct": check_type,
+            "st": "completed" if ok else "failed",
+            "cyc": str(cycle_id) if cycle_id else None,
+            "findings": int(findings or 0),
+            "init_fail": 0 if ok else 1,
+        },
     )

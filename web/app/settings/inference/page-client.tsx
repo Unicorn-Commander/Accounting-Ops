@@ -115,11 +115,11 @@ export function InferenceSettingsClient({
               ) : (
                 <>
                   <p className="text-sm font-semibold text-ink-primary">
-                    Using platform credits
+                    Using Unicorn Commander credits
                   </p>
                   <p className="mt-1 text-xs leading-relaxed text-ink-secondary">
                     AI usage in <strong>{workspaceName}</strong> draws on your
-                    Platform credit balance. Bring your own API key to
+                    Unicorn Commander credit balance. Bring your own API key to
                     bill the provider directly instead.
                   </p>
                 </>
@@ -162,7 +162,7 @@ export function InferenceSettingsClient({
           Paste a key from a supported provider and your AI usage is billed by
           that provider directly, not metered by us. Your key is encrypted at
           rest, never shown again, and never leaves your workspace. Remove it any
-          time to fall back to platform credits.
+          time to fall back to Unicorn Commander credits.
         </p>
         <ul className="mt-3 space-y-1.5 text-xs text-ink-tertiary">
           <li>
@@ -186,7 +186,7 @@ export function InferenceSettingsClient({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <ComingSoonRow
             icon={<CreditCard size={16} />}
-            title="Buy platform credits"
+            title="Buy Unicorn Commander credits"
             description="Top up prepaid credits and we handle the provider billing with a hard spend cap."
           />
           <ComingSoonRow
@@ -220,7 +220,7 @@ export function InferenceSettingsClient({
               </Dialog.Title>
             </div>
             <div className="px-6 py-5 text-sm text-ink-secondary">
-              Accounting-Ops will go back to using platform credits for
+              Accounting-Ops will go back to using Unicorn Commander credits for
               AI in <strong>{workspaceName}</strong>. You can add a key again any
               time. This deletes the stored key permanently.
             </div>

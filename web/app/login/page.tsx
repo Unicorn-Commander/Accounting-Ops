@@ -4,7 +4,7 @@ import { APP_VERSION_LABEL } from "@/lib/version";
 
 export const metadata = {
   title: "Sign in · Accounting-Ops",
-  description: "Sign in to Accounting-Ops via your configured identity provider."
+  description: "Sign in to Accounting-Ops via the Unicorn Commander identity provider."
 };
 
 export default async function LoginPage({
@@ -46,7 +46,7 @@ export default async function LoginPage({
               <>Sign in with your self-host administrator credentials.</>
             ) : (
               <>
-                Authentication runs through the configured identity provider
+                Authentication runs through the Unicorn Commander identity provider
                 (Keycloak <code className="font-mono text-xs">uchub</code> realm).
                 Same login as Brigade, Crisis-Ops, Project-Ops.
               </>
@@ -129,7 +129,7 @@ export default async function LoginPage({
                 className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-brand-500 px-4 py-2.5 text-sm font-medium text-white shadow-brand-glow hover:bg-brand-600 transition"
               >
                 <Lock size={14} />
-                Sign in with identity provider
+                Sign in with Unicorn Commander
                 <ArrowRight size={14} />
               </button>
             </form>

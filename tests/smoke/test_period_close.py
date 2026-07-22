@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import date
-from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -25,7 +24,6 @@ from fastapi import HTTPException
 
 from app.journal.posting import (
     PostingRefusal,
-    PostingOutcome,
     post_journal_entry,
 )
 

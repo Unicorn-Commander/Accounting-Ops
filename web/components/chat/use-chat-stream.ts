@@ -14,6 +14,11 @@
 
 import { useCallback, useRef, useState } from "react";
 import type { RenderedMessage, StreamEvent, ToolEvent } from "./types";
+import {
+  openCreditGate,
+  parsePaymentRequired,
+  type CreditGate
+} from "@/lib/credit-gate";
 
 export type StartArgs = {
   workspaceId: string;
@@ -28,6 +33,9 @@ export function useChatStream() {
   const [inflight, setInflight] = useState<RenderedMessage | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when a paid call returns HTTP 402 so the thread can render an inline
+  // credit CTA rather than a plain error row.
+  const [creditGate, setCreditGate] = useState<CreditGate | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const cancelTargetRef = useRef<{ workspaceId: string; sessionId: string } | null>(null);
 
@@ -40,6 +48,7 @@ export function useChatStream() {
     abortRef.current = ctl;
     cancelTargetRef.current = { workspaceId, sessionId };
     setError(null);
+    setCreditGate(null);
     setStreaming(true);
 
     // Seed an empty assistant placeholder so the UI immediately shows the
@@ -67,6 +76,21 @@ export function useChatStream() {
         }
       );
       if (!res.ok || !res.body) {
+        // Paid "smart" AI call with no credits/entitlement/BYOK → HTTP 402 with a
+        // frozen JSON gate body. Surface it as a structured credit gate (pop the
+        // global modal + an inline CTA) instead of a bare error string, and
+        // settle the turn without committing an empty assistant bubble.
+        if (res.status === 402) {
+          const gate = await parsePaymentRequired(res);
+          if (gate) {
+            openCreditGate(gate);
+            setCreditGate(gate);
+            setError(gate.detail);
+            setInflight(null);
+            final = null;
+            return;
+          }
+        }
         const detail = await res.text().catch(() => "");
         throw new Error(detail || `HTTP ${res.status}`);
       }
@@ -248,7 +272,10 @@ export function useChatStream() {
   // Explicitly clear a surfaced error — call when abandoning the current turn
   // (new chat, switching/resuming a session) so a prior failure's ErrorRow
   // doesn't linger under the fresh thread until the next send.
-  const clearError = useCallback(() => setError(null), []);
+  const clearError = useCallback(() => {
+    setError(null);
+    setCreditGate(null);
+  }, []);
 
-  return { inflight, streaming, error, start, cancel, clear, clearError };
+  return { inflight, streaming, error, creditGate, start, cancel, clear, clearError };
 }

@@ -301,12 +301,12 @@ class TestBuildPrefillContext:
     def test_entity_name_set(self):
         ctx = build_prefill_context(
             tax_year=2024,
-            entity_display_name="Example Holdings LLC",
+            entity_display_name="Unicorn Commander LLC",
             ein="12-3456789",
             queue_items=[],
             cpa_package=None,
         )
-        assert ctx.entity_display_name == "Example Holdings LLC"
+        assert ctx.entity_display_name == "Unicorn Commander LLC"
         assert ctx.ein == "12-3456789"
 
     def test_officer_comp_from_queue(self):
@@ -386,7 +386,6 @@ class TestFieldMapConsistency:
 class TestGenerateFormPdfMissingPdf:
     def test_raises_file_not_found_when_pdf_absent(self):
         """Without the IRS PDFs downloaded, FileNotFoundError should be raised."""
-        from pathlib import Path
         from app.exports.form_prefill import IRS_FORMS_DIR
 
         # Only run this assertion if the form PDF is actually absent

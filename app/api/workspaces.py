@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 from app.auth import AuthContext, validate_bearer_token
 from app.db import SessionLocal
-from app.tenancy import WorkspaceContext, resolve_workspace
+from app.tenancy import WorkspaceContext, canonical_role, resolve_workspace
 from app.workspace_session import workspace_session
 
 router = APIRouter(tags=["workspaces"])
@@ -52,8 +52,17 @@ async def list_my_workspaces(
 ) -> list[dict[str, Any]]:
     """Return all workspaces the authenticated user has a membership in.
 
-    Each row: `id`, `slug`, `display_name`, `role`, `isolation_tier`,
-    `hipaa_protected`, `entity_count`, `last_active_at`.
+    Each row: `id`, `workspace_id` (canonical alias of `id`), `slug`,
+    `display_name`, `role` (AO app-role, kept for the existing UI),
+    `role_canonical` (the SUITE-IDENTITY §7 suite role Brigade/MCP speak),
+    `is_default`, `isolation_tier`, `hipaa_protected`, `entity_count`,
+    `last_active_at`.
+
+    The active-membership filter (`m.status='active'`) mirrors
+    `_resolve_membership` so a suspended/revoked membership stops appearing here
+    too. `role` is the raw AO app-role (unchanged wire shape for the
+    WorkspaceSwitcher); `role_canonical` is added additively so federation
+    consumers get the canonical role without breaking the existing UI contract.
     """
     user_id = await _ensure_user_account(auth.uc_uid)
     async with SessionLocal() as session:
@@ -67,6 +76,7 @@ async def list_my_workspaces(
                             w.slug              AS slug,
                             w.display_name      AS display_name,
                             m.role::text        AS role,
+                            m.is_default        AS is_default,
                             w.isolation_tier::text AS isolation_tier,
                             w.hipaa_protected   AS hipaa_protected,
                             w.postgres_schema   AS postgres_schema,
@@ -74,6 +84,7 @@ async def list_my_workspaces(
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :user_id
+                          AND m.status = 'active'
                           AND w.status = 'active'
                         ORDER BY w.display_name
                         """
@@ -85,6 +96,10 @@ async def list_my_workspaces(
     workspaces: list[dict[str, Any]] = []
     for row in rows:
         entry = dict(row)
+        # Canonical suite role (SUITE-IDENTITY §7) — additive; keep raw `role`.
+        entry["role_canonical"] = canonical_role(entry["role"])
+        # Canonical workspace key alias (the suite atom) — additive; keep `id`.
+        entry["workspace_id"] = entry["id"]
         # Count entities (per-workspace schema)
         try:
             async with workspace_session(SessionLocal, entry["id"]) as ws:
