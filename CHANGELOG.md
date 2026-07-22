@@ -3,6 +3,23 @@
 All notable changes to Accounting-Ops Community Edition are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-07-22
+
+### Added
+- **Rich README** — end-to-end transaction-lifecycle, architecture, provenance-lineage, materiality,
+  and agent-roster diagrams (rendered), a differentiation matrix, and user + technical "how it works"
+  and "who it's for" sections.
+- Light-mode dashboard screenshot alongside the existing captures.
+
+### Changed
+- Refreshed the Community Edition from the upstream codebase: updated regulatory-reference feeds and a
+  100 MB upload cap for receipts/documents.
+
+### Security
+- **Hardened login identity handling** — a returning user is bound to their existing account by
+  verified email instead of provisioning a duplicate/blank account; unverified-email matches fail closed.
+- Read-only comped-access check on model usage.
+
 ## [0.8.0] — Community Edition
 
 The first public open-source release: the **first open-source autonomous AI accountant**.
