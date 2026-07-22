@@ -2,9 +2,10 @@
 
 Thank you for your interest in contributing! Accounting-Ops is an open-core
 project: the Community Edition in this repository is licensed under
-**AGPL-3.0-or-later**, and Magic Unicorn LLC additionally offers the project under
-a commercial license. To keep that dual-licensing model working, we ask every
-contributor to sign off on the **Developer Certificate of Origin (DCO)**.
+**AGPL-3.0-or-later**, and Magic Unicorn Unconventional Technology & Stuff Inc
+additionally offers the project under a commercial license. To keep that
+dual-licensing model working, we ask every contributor to sign off on the
+**Developer Certificate of Origin (DCO)**.
 
 ## Ground rules
 
@@ -15,6 +16,27 @@ contributor to sign off on the **Developer Certificate of Origin (DCO)**.
 - This project handles people's financial records. Prefer correctness and
   provenance over cleverness. Do not add code that fabricates figures it cannot
   trace to a source.
+
+## Branch conventions
+
+| Pattern | Use |
+|---|---|
+| `main` | Protected integration branch. Do not push directly. |
+| `dev/<agent-or-user>/<task-id>-<short-slug>` | Feature / fix work (e.g. `dev/grok/t8e387a12-community-prepublish`). |
+| `docs/<slug>` | Documentation-only changes. |
+| `chore/<slug>` | Tooling, deps, non-user-facing maintenance. |
+| `agents/<name>` | Agent prompt / specialist packages. |
+
+Guidelines:
+
+- Branch from an up-to-date `origin/main` (or the base named in the task).
+- Prefer **fresh worktrees** over dirty shared checkouts when parallel agents
+  are active.
+- Keep commits focused; one logical change per commit when practical.
+- **Do not rewrite published history** (`git push --force` to shared branches is
+  forbidden). Secret hygiene fixes land as forward commits or coordinated
+  orphan-snapshot work — never ad-hoc history rewrites.
+- Open a PR against `main`. Title/body should name the task id when one exists.
 
 ## Developer Certificate of Origin (DCO) — required
 
@@ -75,6 +97,41 @@ By making a contribution to this project, I certify that:
     this project or the open source license(s) involved.
 ```
 
+## Source file license headers
+
+New or substantially rewritten source files should carry a short AGPL header at
+the top (after any shebang). Entry points already use this form:
+
+```python
+# Copyright (C) 2026 Magic Unicorn Unconventional Technology & Stuff Inc
+# and the Accounting-Ops contributors.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+```
+
+For TypeScript / JavaScript, use the same text with `//` comments. The
+repository license of record is still [LICENSE](LICENSE) + [NOTICE](NOTICE);
+headers make provenance obvious in file-level excerpts and downstream forks.
+A full-tree header retrofit is not required for every historical module before
+opening a PR — add headers when you touch a file's top or create a new one.
+
+## Enterprise modules are outside this repository
+
+This repository is the **Community Edition**. The following live outside the
+community tree (or are gated off when `AO_EDITION=community`) and must **not**
+be contributed here as if they were free AGPL surface:
+
+- Multi-tenant firm / multi-client CPA console and cross-client work inbox
+- Hosted-frontier billing, smart-inference credit gates, and suite entitlement
+- Brigade / cross-app federation clients, discovery manifests, and M2M seams
+- Platform org resolution and uc-registry workspace mapping
+- Related commercial-only packages distributed under a separate license
+
+See [COMMUNITY_MANIFEST.md](COMMUNITY_MANIFEST.md) for the path-level
+COMMUNITY / ENTANGLED / ENTERPRISE-HOLD classification, and [NOTICE](NOTICE)
+for the dual-licensing statement. If a change only makes sense for enterprise
+hosting or suite federation, discuss it with the maintainers rather than
+landing it in Community paths.
+
 ## Development setup
 
 See the [README](README.md) QUICKSTART for the self-host development flow
@@ -94,5 +151,5 @@ By submitting a contribution with a DCO sign-off, you agree that your
 contribution is licensed under AGPL-3.0-or-later for the Community Edition, and
 you affirm the certifications in the DCO above — which include that the work may
 be redistributed consistent with the project's license(s). This preserves Magic
-Unicorn LLC's ability to offer the project under both the AGPL and a commercial
-license.
+Unicorn Unconventional Technology & Stuff Inc's ability to offer the project
+under both the AGPL and a commercial license.

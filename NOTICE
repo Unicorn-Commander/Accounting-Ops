@@ -1,5 +1,6 @@
 Accounting-Ops — Community Edition
-Copyright (C) 2026 Magic Unicorn LLC and the Accounting-Ops contributors.
+Copyright (C) 2026 Magic Unicorn Unconventional Technology & Stuff Inc
+and the Accounting-Ops contributors.
 
 This program is free software: you can redistribute it and/or modify it under
 the terms of the GNU Affero General Public License as published by the Free
@@ -13,8 +14,8 @@ PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
 --------------------------------------------------------------------------------
 Dual licensing
 --------------------------------------------------------------------------------
-Magic Unicorn LLC is the steward of this project and offers Accounting-Ops under
-a dual-licensing model:
+Magic Unicorn Unconventional Technology & Stuff Inc is the steward of this
+project and offers Accounting-Ops under a dual-licensing model:
 
   * The Community Edition (this repository) is licensed under AGPL-3.0-or-later.
   * Enterprise modules (multi-tenant firm platform, hosted-frontier billing,
@@ -23,7 +24,8 @@ a dual-licensing model:
 
 Contributions to this repository are accepted under the Developer Certificate of
 Origin (DCO 1.1); see CONTRIBUTING.md. The DCO sign-off preserves Magic Unicorn
-LLC's ability to offer the project under both the AGPL and a commercial license.
+Unconventional Technology & Stuff Inc's ability to offer the project under both
+the AGPL and a commercial license.
 
 --------------------------------------------------------------------------------
 Not professional advice
