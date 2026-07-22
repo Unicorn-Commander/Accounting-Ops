@@ -32,6 +32,9 @@ ENV HOSTNAME=0.0.0.0
 COPY --from=builder /app/.next/standalone ./
 # Static assets must be co-located with the standalone server
 COPY --from=builder /app/.next/static ./.next/static
+# public/ is NOT bundled into standalone — without this every public asset
+# (landing-assets, icon-192/512, manifest icons) 404s in production.
+COPY --from=builder /app/public ./public
 
 EXPOSE 3000
 
