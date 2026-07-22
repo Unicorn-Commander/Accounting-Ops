@@ -35,6 +35,9 @@ COPY --from=builder /app/.next/static ./.next/static
 # public/ is NOT bundled into standalone — without this every public asset
 # (landing-assets, icon-192/512, manifest icons) 404s in production.
 COPY --from=builder /app/public ./public
+# Legal draft markdown is read at runtime via fs (see lib/legal-docs.ts).
+# Tracing usually packs it; copy explicitly so /terms /privacy /legal never 404.
+COPY --from=builder /app/content ./content
 
 EXPOSE 3000
 

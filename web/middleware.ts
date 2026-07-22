@@ -5,6 +5,9 @@ import { NextResponse } from "next/server";
 const PUBLIC = [
   "/",                  // marketing landing
   "/login",             // sign-in page
+  "/terms",             // legal drafts (public, DRAFT banner)
+  "/privacy",
+  "/legal",
   "/api/auth",          // NextAuth callbacks
   // eBay's OAuth redirect lands here with no Bearer (third-party top-level
   // navigation); it's secured by the HMAC-signed single-use state token, not
