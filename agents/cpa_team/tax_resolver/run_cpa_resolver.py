@@ -351,6 +351,7 @@ def _llm_second_opinion(
             api_key=llm_api_key,
             model=llm_model,
             op="resolver.chat.completions",
+            user=str(workspace_id),
         )
         response = client.chat.completions.create(
             model=llm_model,

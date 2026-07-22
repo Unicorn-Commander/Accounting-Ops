@@ -1,0 +1,8 @@
+# Mock fixture — gateway consumer with a real (non-blank) platform key declaration.
+services:
+  app:
+    environment:
+      AO_ROUTE_CHAT_THROUGH_GATEWAY: "1"
+      LLM_GATEWAY_BASE_URL: https://llm.example.test
+      LLM_PLATFORM_VIRTUAL_KEY: sk-fixture-ao-platform
+      LLM_GATEWAY_ADMIN_KEY: sk-fixture-ao-admin

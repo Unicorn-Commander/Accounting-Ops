@@ -1,0 +1,5 @@
+services:
+  api:
+    environment:
+      LITELLM_BASE_URL: https://llm.example.test
+      LITELLM_API_KEY: sk-fixture-contact-ops

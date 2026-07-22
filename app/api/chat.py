@@ -787,6 +787,7 @@ async def send_chat_message(
                 model=selected_model,
                 cancel_check=lambda: _is_cancelled(str(session_id)),
                 delegation=delegation_ctx,
+                llm_user=str(workspace.workspace_id),
                 **_runner_route,
             ):
                 etype = event.get("type", "text_delta")
