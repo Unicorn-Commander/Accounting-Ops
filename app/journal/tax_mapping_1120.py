@@ -369,6 +369,65 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
     ),
 
     # ------------------------------------------------------------------
+    # EXPENSES — Occupancy, payroll & insurance
+    # ------------------------------------------------------------------
+
+    "Rent · Facilities": F1120Mapping(
+        section="deductions",
+        line="16",
+        label="Rents",
+        confidence="high",
+        notes=(
+            "Rent paid for business premises / facilities. Form 1120 line 16 "
+            "is the dedicated 'Rents' line. Statement label: 'Facility rent'. "
+            "Confidence = high: dedicated line, settled placement. Rent paid to "
+            "a related party (e.g. an owner-controlled entity) must be at fair "
+            "market value — CPA should confirm §267 / reasonableness."
+        ),
+    ),
+
+    "Utilities": F1120Mapping(
+        section="deductions",
+        line="26",
+        label="Other deductions",
+        confidence="high",
+        notes=(
+            "Electricity, gas, water, internet, and telephone for business "
+            "premises. No dedicated 1120 line; line 26 with statement label "
+            "'Utilities'. Confidence = high: settled practice."
+        ),
+    ),
+
+    "Payroll · Wages": F1120Mapping(
+        section="deductions",
+        line="13",
+        label="Salaries and wages (less employment credits)",
+        confidence="high",
+        notes=(
+            "Wages and salaries paid to NON-officer employees. Form 1120 line "
+            "13 is the dedicated line; it must be reported NET of any "
+            "employment credits (e.g. Work Opportunity Credit). Officer "
+            "compensation belongs on line 12 (Form 1125-E), NOT here — a CPA "
+            "should confirm no owner-officer wages were mis-posted to 6350. "
+            "Amounts capitalized into inventory under §263A go to Form 1125-A."
+        ),
+    ),
+
+    "Insurance": F1120Mapping(
+        section="deductions",
+        line="26",
+        label="Other deductions",
+        confidence="high",
+        notes=(
+            "Business insurance premiums (general liability, property, E&O, "
+            "commercial auto). No dedicated 1120 line; line 26 with statement "
+            "label 'Insurance'. Employee health/benefit insurance instead "
+            "belongs on line 24 (Employee benefit programs) — CPA should split "
+            "if 6800 commingles employee-benefit premiums."
+        ),
+    ),
+
+    # ------------------------------------------------------------------
     # EXPENSES — Banking
     # ------------------------------------------------------------------
 

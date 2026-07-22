@@ -204,7 +204,7 @@ async def upsert_account_mappings(
                         :external_org, :external_account_name, :label, :notes,
                         :auto_categorize
                     )
-                    ON CONFLICT (source, external_account_id) DO UPDATE
+                    ON CONFLICT (workspace_id, source, external_account_id) DO UPDATE
                     SET entity_id = EXCLUDED.entity_id,
                         external_org = EXCLUDED.external_org,
                         external_account_name = EXCLUDED.external_account_name,

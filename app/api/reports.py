@@ -804,6 +804,13 @@ async def trial_balance(
         # MAB entity predicate (same shape as journal_entry's — switch je.
         # prefix for mab.).
         mab_entity_clause = entity_clause.replace("je.entity_id", "mab.entity_id")
+        # COA display-metadata predicate. CRITICAL: without this, a single
+        # entity's trial balance joins its per-account_number aggregate to
+        # EVERY entity's same-numbered COA row (every entity has a "1010"),
+        # fanning each account out N-ways and inflating the grand totals so the
+        # sheet reports balanced=false. Scope the COA lookup to the same entity
+        # (or the allowed scope set when consolidated).
+        coa_entity_clause = entity_clause.replace("je.entity_id", "c.entity_id")
 
         rows = (
             await session.execute(
@@ -874,9 +881,15 @@ async def trial_balance(
                         agg.total_debit,
                         agg.total_credit
                     FROM aggregated agg
-                    JOIN chart_of_account coa
-                      ON coa.account_number::int = agg.account_number
-                     AND coa.is_active = true
+                    JOIN LATERAL (
+                        SELECT c.canonical_form, c.account_type
+                        FROM chart_of_account c
+                        WHERE c.account_number::int = agg.account_number
+                          AND c.is_active = true
+                          {coa_entity_clause}
+                        ORDER BY c.is_system DESC NULLS LAST, c.id
+                        LIMIT 1
+                    ) coa ON true
                     WHERE agg.total_debit != 0 OR agg.total_credit != 0
                     ORDER BY agg.account_number
                     """

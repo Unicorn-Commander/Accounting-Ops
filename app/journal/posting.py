@@ -83,6 +83,14 @@ CATEGORY_TO_ACCOUNT: dict[str, str] = {
     # belongs on line 20 is the TAX deduction from Form 4562, not book
     # depreciation; see the Depreciation note in app/journal/tax_mapping_1120.py.
     "Depreciation": "8030",
+    # Common operating expenses. These COA accounts ship in the default
+    # template (app/journal/accounts.py); without a category key an agent
+    # cannot post rent/utilities/insurance/payroll at all. Keys use the COA
+    # canonical "Type · Subtype" form; each also has a CATEGORY_TO_1120 line.
+    "Rent · Facilities": "6600",
+    "Utilities": "6610",
+    "Insurance": "6800",  # account existed in the template; key was missing
+    "Payroll · Wages": "6350",
 }
 
 
@@ -155,6 +163,65 @@ async def resolve_accounts_for_txn(
     if amount_cents < 0:
         return AccountPair(debit_account=cat_canonical, credit_account=cash_canonical)
     return AccountPair(debit_account=cash_canonical, credit_account=cat_canonical)
+
+
+async def _diagnose_resolution_failure(
+    session: AsyncSession,
+    *,
+    entity_id: str,
+    category: str,
+    external_account_id: str,
+) -> tuple[str, "PostingResult"]:
+    """Explain WHY ``resolve_accounts_for_txn`` returned None.
+
+    The single "not in CATEGORY_TO_ACCOUNT or COA missing entry" message
+    conflated three distinct failures (unlinked cash account, unknown category,
+    missing category account) and cost callers several blind probe rounds. Runs
+    only on the refusal path. Returns ``(reason, outcome)``.
+    """
+    cash = (
+        await session.execute(
+            text(
+                "SELECT 1 FROM chart_of_account WHERE entity_id = :eid "
+                "AND linked_external_account_id = :ext AND is_active = true LIMIT 1"
+            ),
+            {"eid": entity_id, "ext": external_account_id},
+        )
+    ).first()
+    if not cash:
+        return (
+            f"No active chart-of-accounts cash/card account is linked to "
+            f"external_account_id '{external_account_id}' for this entity — link a "
+            f"COA account to it (connector setup) before posting from this account.",
+            "blocked_unmapped",
+        )
+    num = CATEGORY_TO_ACCOUNT.get(category)
+    if not num:
+        return (
+            f"Category '{category}' has no chart-of-accounts mapping "
+            f"(not in CATEGORY_TO_ACCOUNT).",
+            "blocked_unknown_category",
+        )
+    cat = (
+        await session.execute(
+            text(
+                "SELECT 1 FROM chart_of_account WHERE entity_id = :eid "
+                "AND account_number = :num AND is_active = true LIMIT 1"
+            ),
+            {"eid": entity_id, "num": num},
+        )
+    ).first()
+    if not cat:
+        return (
+            f"Category '{category}' maps to account {num}, but this entity has no "
+            f"active chart-of-accounts row for {num} — create the account first.",
+            "blocked_unknown_category",
+        )
+    return (
+        f"Could not resolve accounts for category '{category}' "
+        f"(external_account_id '{external_account_id}').",
+        "blocked_unknown_category",
+    )
 
 
 # ---------- Posting ----------------------------------------------------
@@ -479,18 +546,21 @@ async def post_journal_entry(
         source=source,
     )
     if pair is None:
+        reason, refusal_outcome = await _diagnose_resolution_failure(
+            session,
+            entity_id=entity_id,
+            category=category,
+            external_account_id=external_account_id,
+        )
         await _log_post_attempt(
             session, workspace_id=workspace_id, entity_id=entity_id, source=source,
-            source_external_id=source_external_id, outcome="blocked_unknown_category",
+            source_external_id=source_external_id, outcome=refusal_outcome,
             journal_entry_id=None,
-            reason=f"Could not resolve COA accounts for category '{category}'",
+            reason=reason,
             actor_uc_uid=posted_by_uc_uid, actor_agent_id=posted_by_agent_id,
             amount_cents=amount_cents, category=category,
         )
-        return PostingRefusal(
-            outcome="blocked_unknown_category",
-            reason=f"Category '{category}' not in CATEGORY_TO_ACCOUNT or COA missing entry",
-        )
+        return PostingRefusal(outcome=refusal_outcome, reason=reason)
 
     # ---- 3. Idempotency check (before chain compute) ----
     if source_external_id:

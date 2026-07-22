@@ -19,6 +19,7 @@ entity rather than creating a duplicate. COA inserts skip rows whose
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -87,6 +88,25 @@ def _resolve_template_kind(kind: str, coa_template: str | None) -> str:
         )
     # Resolve synonym (e.g. personal -> personal_1040, sole_proprietorship -> sole_prop)
     return chosen
+
+
+def _parse_iso_date(value: str | None, field: str) -> date | None:
+    """Coerce an ISO ``YYYY-MM-DD`` string to a ``date`` for a DATE bind.
+
+    asyncpg encodes a DATE parameter by calling ``.toordinal()`` on the value,
+    so passing the raw string crashes with ``'str' object has no attribute
+    'toordinal'``. Parse it here (or raise a clear error) before binding.
+    """
+    if value in (None, ""):
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{field} must be an ISO date (YYYY-MM-DD); got {value!r}"
+        ) from exc
 
 
 async def create_entity_with_coa(
@@ -182,6 +202,7 @@ async def create_entity_with_coa(
             existed_before = True
         else:
             entity_id = uuid4()
+            incorp_date = _parse_iso_date(incorporated_at, "incorporated_at")
             await session.execute(
                 text(
                     """
@@ -210,7 +231,7 @@ async def create_entity_with_coa(
                     "kind": db_kind,
                     "country": country_code,
                     "soi": state_of_incorporation,
-                    "incorp": incorporated_at,
+                    "incorp": incorp_date,
                     "ra": registered_agent,
                     "tax_id": tax_id_encrypted.encode("utf-8") if isinstance(tax_id_encrypted, str) else tax_id_encrypted,
                 },
