@@ -7,6 +7,7 @@ import { ChevronDown, ChevronsLeft, ChevronsRight } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { visibleSections, type NavSection } from "@/lib/nav-sections";
 import { APP_VERSION_LABEL } from "@/lib/version";
+import { LegalFooterLinks } from "@/components/legal-footer-links";
 
 const COOKIE = "aops_sidebar_collapsed";
 const SECTIONS_KEY = "aops_nav_sections_open";
@@ -228,9 +229,12 @@ export function AppSidebar({
       </nav>
 
       {!collapsed && (
-        <div className="flex items-center gap-2 border-t border-[var(--hairline)] px-3 py-2.5 text-[11px] text-[var(--ink-4)]">
-          <span className="dot-live" />
-          <span>{APP_VERSION_LABEL}</span>
+        <div className="border-t border-[var(--hairline)] px-3 py-2.5 space-y-1.5">
+          <div className="flex items-center gap-2 text-[11px] text-[var(--ink-4)]">
+            <span className="dot-live" />
+            <span>{APP_VERSION_LABEL}</span>
+          </div>
+          <LegalFooterLinks className="text-[var(--ink-4)] [&_a]:text-[var(--ink-4)] [&_a:hover]:text-[var(--ink-2)]" />
         </div>
       )}
     </aside>

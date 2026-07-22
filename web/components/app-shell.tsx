@@ -7,6 +7,7 @@ import { ChatLauncher } from "@/components/chat/chat-launcher";
 import { ContextBreadcrumb } from "@/components/context-breadcrumb";
 import { GlobalToast } from "@/components/global-toast";
 import { CreditGateModal } from "@/components/credit-gate-modal";
+import { LegalFooterLinks } from "@/components/legal-footer-links";
 import { getActiveContext } from "@/lib/active-context";
 import { fetchChatPersonas } from "@/lib/chat";
 import { auth } from "@/lib/auth";
@@ -63,6 +64,14 @@ export async function AppShell({
             </div>
           )}
           {children}
+          <footer className="mt-10 border-t border-subtle px-4 py-4 md:px-6 print:hidden">
+            <div className="mx-auto flex w-full max-w-7xl flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between">
+              <LegalFooterLinks />
+              <p className="text-[10px] text-ink-disabled">
+                Draft legal · not professional advice
+              </p>
+            </div>
+          </footer>
         </main>
       </div>
       {ctx?.activeWorkspace && chatEntity && chatPersonas.length > 0 && (
