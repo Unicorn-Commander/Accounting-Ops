@@ -7,7 +7,7 @@ import { PremiumLanding } from "@/components/premium-landing";
 export const metadata: Metadata = {
   title: "Accounting-Ops — Books that can answer for themselves",
   description:
-    "AI-native financial operations with append-only books, tamper-evident provenance, agent workflows, human approvals, reporting, tax preparation, and deployment on your terms.",
+    "Accounting-Ops is a verifiable financial operating system — append-only, tamper-evident books where every number shows its source. Agents do the work, you keep the authority: reconciliation, reporting, invoicing, and tax preparation on your own infrastructure.",
   alternates: { canonical: "https://accounting-ops.magicunicorn.dev/" },
   openGraph: {
     title: "Accounting-Ops — Books that can answer for themselves",
