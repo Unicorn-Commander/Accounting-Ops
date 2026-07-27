@@ -22,7 +22,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.8.0] — Community Edition
 
-The first public open-source release: the **first open-source autonomous AI accountant**.
+The first public open-source release: a self-hostable AI accounting system where the books stay on your hardware and every number traces to its source.
 
 ### Added
 - **Open-core Community Edition** — a single-workspace, self-hostable, AGPL-3.0 build that runs

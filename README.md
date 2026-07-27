@@ -2,23 +2,26 @@
 
 <h1>Accounting-Ops</h1>
 
-### The first open-source autonomous AI accountant
+### Your books, kept — on your hardware, with every number traceable to its source
 
-**Verifiable books. Agents do the work — you keep the authority — every number shows its source.**
+**The bookkeeping grind, handled: agents categorize, reconcile, close the month, and assemble tax packages — you keep every approval.**
 
-Autonomous agents keep your general ledger — categorizing transactions, reconciling receipts,
-drafting statements, and assembling tax packages — on an **append-only, hash-chained journal you
-can audit line by line**. It runs entirely on **your** hardware with **your** models.
-No cloud account. No telemetry. No black boxes in your books.
+Small businesses and bookkeepers lose days to manual categorization, reconciliation, month-end,
+and tax prep. Accounting-Ops puts autonomous agents on that work and keeps you in command:
+nothing posts until a deterministic rule clears it or you sign off, and **every number traces back
+to the source document, the rule that validated it, and the human who approved it** — on an
+**append-only, hash-chained journal you can audit line by line**. It runs entirely on **your**
+hardware with **your** models. No cloud account. No telemetry. No black boxes in your books.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-8B5CF6?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.9.0-8B5CF6?style=flat-square)](CHANGELOG.md)
+[![Website](https://img.shields.io/badge/website-accounting--ops.unicorncommander.ai-06B6D4?style=flat-square)](https://accounting-ops.unicorncommander.ai)
 [![Self-host](https://img.shields.io/badge/self--host-one%20command-22D3EE?style=flat-square)](#quickstart)
 [![Telemetry](https://img.shields.io/badge/telemetry-none%20by%20default-34D399?style=flat-square)](#security--your-data)
 [![Bring your own model](https://img.shields.io/badge/models-bring%20your%20own-22D3EE?style=flat-square)](#bring-your-own-model)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-8B5CF6?style=flat-square)](CONTRIBUTING.md)
 
-**[Quickstart](#quickstart)&nbsp; · &nbsp;[How it works](#how-it-works--one-transaction-end-to-end)&nbsp; · &nbsp;[Features](#what-it-does)&nbsp; · &nbsp;[Architecture](#architecture)&nbsp; · &nbsp;[Editions](#editions)&nbsp; · &nbsp;[Who it's for](#who-its-for)&nbsp; · &nbsp;[Disclaimer](DISCLAIMER.md)**
+**[Website](https://accounting-ops.unicorncommander.ai)&nbsp; · &nbsp;[Quickstart](#quickstart)&nbsp; · &nbsp;[How it works](#how-it-works--one-transaction-end-to-end)&nbsp; · &nbsp;[Features](#what-it-does)&nbsp; · &nbsp;[Architecture](#architecture)&nbsp; · &nbsp;[Editions](#editions)&nbsp; · &nbsp;[Who it's for](#who-its-for)&nbsp; · &nbsp;[Disclaimer](DISCLAIMER.md)**
 
 <br/>
 
@@ -39,9 +42,10 @@ No cloud account. No telemetry. No black boxes in your books.
 
 ## Why it exists
 
-Every AI bookkeeping product on the market asks you to ship your general ledger to somebody
-else's cloud and trust a model you can't see. Accounting-Ops takes the opposite stance — the four
-ideas the rest of this README expands on:
+If you keep the books for a small business, the work is real and relentless: transactions to
+categorize, accounts to reconcile, a month to close, a tax package to pull together. Most AI tools
+that promise to help want your general ledger in their cloud, behind a model you can't inspect.
+Accounting-Ops takes the opposite stance — the four ideas the rest of this README expands on:
 
 - **🔒 Sovereignty is the default.** Self-host on your own hardware, air-gapped if you need to.
   Your journal, your encryption keys, your egress policy. We never see your books and never will.
@@ -105,11 +109,14 @@ flowchart TD
 | Surface | What it does |
 |---|---|
 | **Dashboard** | Net cash + YTD Revenue / Expenses / Net Income from the journal, a CFO brief of what needs you, and a live feed of every agent decision |
+| **Bank & revenue feeds** | Connect a bank via **SimpleFIN** (plus eBay / Stripe revenue) or import a CSV — everything lands in one review stream |
 | **Transactions** | Unified transaction stream with categorization, per-entity badges, and materiality |
 | **Reconciliation** | Human-in-the-loop review — *Confirm* posts to the journal, *Reject* trains a category override |
+| **Invoices & AR** | Draft and issue invoices, track receivables, and record payments straight against the ledger |
 | **Journal** | Paginated, per-entity SHA-256 verify-chain with double-entry detail, provenance, and reversal lineage |
-| **Reports** | P&L / Balance Sheet / Cash Flow with period chips, rendered in-app — no external service |
-| **Taxes** | Tax-knowledge Q&A + draft tax-form packages, watermarked **draft / do not file** |
+| **Reports** | P&L / Balance Sheet / Cash Flow / Trial Balance with period chips, rendered in-app — no external service |
+| **Taxes** | Searchable tax knowledge base + advisory, a **review queue** for anything a human should see, and prefilled IRS / state form packages (Form 1120 + Schedule L + 1125-E, South Carolina, 1099-NEC) — every draft watermarked **draft / do not file** |
+| **Sentinel** | An autonomous CPA daemon that runs scheduled checks over your books at an autonomy level you set, surfaces findings, and queues actions for your approval |
 | **CPA export** | CSV / IIF / QBO XML / PDF exports for your accountant (optional sidecar) |
 | **Chat / ⌘K** | Ask anything over your live books; the agent answers with the numbers *and* their lineage |
 
@@ -168,14 +175,24 @@ flowchart TB
     COORD["Coordinator"] --> CAT["Categorizer"]
     COORD --> REC["Reconciler"]
     COORD --> CFO["CFO brief"]
+    COORD --> SENT["Sentinel daemon<br/>scheduled checks"]
     COORD --> TAX["Tax specialists<br/>1120 · 1040 · state · 1099 · officer-comp · audit-defense"]
     CAT --> GATE{{"Materiality gate<br/>→ you"}}
     REC --> GATE
+    SENT --> GATE
     TAX --> DRAFT["Draft package<br/>watermarked · do not file"]
     GATE --> JOURNAL["Append-only journal"]
     style GATE fill:#F59E0B,color:#000
     style JOURNAL fill:#8B5CF6,color:#fff
 ```
+
+### The Sentinel daemon — a standing watch on your books
+
+Leave **Sentinel** running and it keeps an eye on the books for you. On a schedule you set, at an
+**autonomy level you choose**, it runs a battery of checks — uncategorized transactions, stale
+reconciliations, missing receipts, period-close readiness — and surfaces **findings** plus proposed
+**scheduled actions**. Like every other agent it drafts and flags; nothing consequential happens
+without clearing the materiality gate and your approval.
 
 ### Ask your books anything
 
@@ -332,7 +349,7 @@ simply not mounted when `AO_EDITION=community`.
 | | Community (this repo, AGPL) | Enterprise |
 |---|---|---|
 | Ledger, categorization, reports, CPA export | ✅ | ✅ |
-| Agents (categorize / reconcile / CFO / tax specialists) | ✅ | ✅ |
+| Agents (categorize / reconcile / CFO / Sentinel / tax specialists) | ✅ | ✅ |
 | Auth | **Local single-admin** (`AO_AUTH_MODE=local`) | Keycloak / OIDC SSO |
 | Bring-your-own models | ✅ (Ollama by default) | ✅ + shared gateway |
 | Multi-client CPA console / cross-client work inbox | — | ✅ |
@@ -409,6 +426,13 @@ co-pilot that only suggests, and not a black box that just decides. It never fab
 (a missing source is an error, HTTP 422, not a guess), it watermarks anything unfiled as *draft*,
 and it routes anything it isn't sure about to you. Read the full posture in
 **[docs/PROFESSIONAL-SUBSTITUTE.md](docs/PROFESSIONAL-SUBSTITUTE.md)**.
+
+## Learn more
+
+- **Product site — [accounting-ops.unicorncommander.ai](https://accounting-ops.unicorncommander.ai)** — the guided tour, screenshots, and how Accounting-Ops fits alongside the rest of the suite.
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the full runtime picture, data flows, and the hash-chain spec.
+- **[docs/AGENT-ACTIVITY-SPEC.md](docs/AGENT-ACTIVITY-SPEC.md)** — the agent-activity event model.
+- **[docs/PROFESSIONAL-SUBSTITUTE.md](docs/PROFESSIONAL-SUBSTITUTE.md)** — the design posture in full.
 
 ## Contributing
 

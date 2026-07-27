@@ -58,7 +58,7 @@ The maintainer pushes the button.
 ## The only steps left (maintainer's call)
 1. **Flip public** — make the Forgejo + GitHub `accounting-ops-community` repos (and, when ready,
    the 3 satellites) public; the mirrors keep everything in sync.
-   **Launch line:** "the first open-source autonomous AI accountant."
+   **Launch line:** "Self-hostable AI accounting — your books stay on your hardware, and every number traces to its source."
 2. Recommended: swap the push-mirror credential (currently a broad personal PAT embedded in
    Forgejo) for a repo-scoped deploy token before/at publish.
 3. Optional/future: add a build + lint CI job (current CI is secret-scan + DCO only); fully
