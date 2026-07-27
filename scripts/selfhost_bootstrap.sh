@@ -69,10 +69,23 @@ fi
 # 2. secrets
 # ---------------------------------------------------------------------------
 gen_if_blank POSTGRES_PASSWORD
+gen_if_blank APP_DB_PASSWORD
 gen_if_blank GARAGE_RPC_SECRET
 gen_if_blank GARAGE_ADMIN_TOKEN
 gen_if_blank NEXTAUTH_SECRET
 gen_if_blank AO_LOCAL_AUTH_SECRET
+
+# Bake the ACTUAL passwords into the DB URLs (no nested ${...} refs). Compose
+# does NOT re-interpolate a ${VAR} that appears *inside* a value read from .env
+# via env_file, so leaving ${APP_DB_PASSWORD}/${POSTGRES_PASSWORD} in
+# DATABASE_URL / ADMIN_DATABASE_URL yields a BLANK password in the container —
+# the app then can't authenticate to Postgres, which surfaces downstream as a
+# workspace-provisioning transaction error. Expanding them here is robust across
+# all Compose versions.
+_pgpw="$(get_env POSTGRES_PASSWORD)"
+_apppw="$(get_env APP_DB_PASSWORD)"
+set_env DATABASE_URL "postgresql+asyncpg://accounting_ops_app:${_apppw}@postgres:5432/accounting_ops"
+set_env ADMIN_DATABASE_URL "postgresql+asyncpg://accounting_ops:${_pgpw}@postgres:5432/accounting_ops"
 
 # ---------------------------------------------------------------------------
 # 3. edition + auth mode
@@ -124,6 +137,13 @@ log "app health: ${status:-unknown}"
 # ---------------------------------------------------------------------------
 log "running public-schema migrations..."
 "${COMPOSE[@]}" exec -T app alembic -c alembic-public.ini upgrade head
+
+# Tenant (shared "books") schema — creates entity/journal/etc. Provisioning
+# inserts rows into this schema, so it MUST exist first. Run as the OWNER
+# (ADMIN_DATABASE_URL) since it creates tables, triggers, grants + RLS policies.
+log "running tenant-schema (books) migrations..."
+"${COMPOSE[@]}" exec -T app sh -c \
+  'DATABASE_URL="$ADMIN_DATABASE_URL" alembic -c alembic-tenant.ini -x tenant=books upgrade head'
 
 WORKSPACE_ID="$(get_env DEFAULT_WORKSPACE_ID)"
 if [ -z "$WORKSPACE_ID" ]; then

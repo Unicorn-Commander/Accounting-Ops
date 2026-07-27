@@ -70,6 +70,10 @@ def run_migrations_online() -> None:
     # migration's writes COMMIT. begin() does that.
     with connectable.begin() as connection:
         connection.dialect.default_schema_name = schema
+        # Create the tenant schema on first run. Fresh self-host installs have no
+        # pre-existing schema (the shared "books" schema is created here); existing
+        # deployments are unaffected thanks to IF NOT EXISTS.
+        connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
         connection.execute(text(f'SET search_path = "{schema}", public'))
         context.configure(
             connection=connection,
