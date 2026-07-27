@@ -131,7 +131,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("slug"),
+        sa.UniqueConstraint("workspace_id", "slug"),
     )
     op.create_index("ix_entity_workspace_id", "entity", ["workspace_id"])
     op.create_check_constraint(
