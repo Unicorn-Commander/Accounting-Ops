@@ -341,6 +341,14 @@ function StatusBadge({ state }: { state: PersonalAccessToken["state"] }) {
 // Create modal
 // ---------------------------------------------------------------------------
 
+/** Least-privilege starting selection: read-only if the owner has it, else the
+ * single narrowest scope they do have. Never "everything the role allows". */
+function defaultScopeSelection(meta: PATMeta): Set<string> {
+  const allowed = meta.owner_allowed_scopes ?? [];
+  if (allowed.includes("accounting:read")) return new Set(["accounting:read"]);
+  return new Set(allowed.slice(0, 1));
+}
+
 function CreateModal({
   open,
   onClose,
@@ -353,8 +361,10 @@ function CreateModal({
   onCreated: () => Promise<void>;
 }) {
   const [name, setName] = useState("");
-  const [scopes, setScopes] = useState<Set<string>>(
-    new Set(meta.owner_allowed_scopes)
+  // Least privilege by default: start with the narrowest scope the owner has
+  // (read), not everything their role allows. Widening is a deliberate click.
+  const [scopes, setScopes] = useState<Set<string>>(() =>
+    defaultScopeSelection(meta)
   );
   const [wsScope, setWsScope] = useState<Set<string>>(new Set());
   const [ttl, setTtl] = useState<number>(meta.default_ttl_days);
@@ -365,7 +375,7 @@ function CreateModal({
 
   function reset() {
     setName("");
-    setScopes(new Set(meta.owner_allowed_scopes));
+    setScopes(defaultScopeSelection(meta));
     setWsScope(new Set());
     setTtl(meta.default_ttl_days);
     setSubmitting(false);
@@ -379,16 +389,21 @@ function CreateModal({
       setError("Name is required.");
       return;
     }
+    // Scopes are REQUIRED by the mint API — an omitted list is refused with a
+    // 400 rather than silently granting everything the owner's role allows.
+    if (scopes.size === 0) {
+      setError("Select at least one scope.");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
       const body: Record<string, unknown> = {
         name: name.trim(),
+        // Always explicit — never rely on a server-side default.
+        scopes: Array.from(scopes),
         ttl_days: ttl
       };
-      if (scopes.size > 0 && scopes.size < meta.owner_allowed_scopes.length) {
-        body.scopes = Array.from(scopes);
-      }
       if (wsScope.size > 0) {
         body.workspace_scope = Array.from(wsScope);
       }
@@ -424,12 +439,14 @@ function CreateModal({
     setTimeout(reset, 200);
   }
 
-  const ttlChoices: { value: number; label: string }[] = meta.ttl_choices_days.map(
-    (d) => ({
+  // Bounded lifetimes only. Any non-positive entry (the retired 0 = "never"
+  // sentinel) is dropped — the mint API refuses it with a 400.
+  const ttlChoices: { value: number; label: string }[] = meta.ttl_choices_days
+    .filter((d) => d > 0)
+    .map((d) => ({
       value: d,
-      label: d === 0 ? "Never" : d === 365 ? "1 year" : `${d} days`
-    })
-  );
+      label: d === 365 ? "1 year" : `${d} days`
+    }));
 
   return (
     <Dialog.Root

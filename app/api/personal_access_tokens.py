@@ -35,6 +35,7 @@ from app.security.pat import (
     DEFAULT_TTL_DAYS,
     MAX_ACTIVE_PATS_PER_USER,
     MAX_TTL_DAYS,
+    MintRequestError,
     PATRow,
     count_active_pats,
     create_pat,
@@ -251,8 +252,11 @@ class CreatePATRequest(BaseModel):
     scopes: list[str] | None = Field(
         default=None,
         description=(
-            "Subset of the owner's allowed scopes. Omit for the full set the "
-            "owner's role permits."
+            "REQUIRED. The explicit scopes this token may use — a subset of "
+            "the owner's allowed scopes. Omitting it, sending null, an empty "
+            "list, or only blank strings is refused with 400; it does NOT "
+            "fall back to the owner's full set. Requesting the owner's full "
+            "set is allowed, but must be spelled out."
         ),
     )
     workspace_scope: list[str] | None = Field(
@@ -267,8 +271,10 @@ class CreatePATRequest(BaseModel):
         ge=0,
         le=MAX_TTL_DAYS,
         description=(
-            f"Lifetime in days. 0 = never expires. Default = {DEFAULT_TTL_DAYS}, "
-            f"max = {MAX_TTL_DAYS}."
+            f"Lifetime in days, 1..{MAX_TTL_DAYS}. Default = "
+            f"{DEFAULT_TTL_DAYS} when omitted. 0 (the old 'never expires' "
+            "sentinel) and null are refused with 400 — every newly minted "
+            "token expires."
         ),
     )
 
@@ -334,6 +340,13 @@ async def mint_pat(
         )
     try:
         scopes = validate_scopes(body.scopes, owner_allowed)
+    except MintRequestError as exc:
+        # Missing / blank scope list — a malformed request, not a privilege
+        # problem. 400 so the caller fixes the body instead of assuming they
+        # lack permission.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
@@ -458,7 +471,9 @@ async def pat_meta(
     return {
         "all_scopes": list(_ALL_SCOPES),
         "owner_allowed_scopes": sorted(owner_allowed),
-        "ttl_choices_days": [30, 60, 90, 365, 0],  # 0 = never
+        # Bounded lifetimes only. The old 0 ("never") choice is gone — the
+        # mint path refuses it (app.security.pat.resolve_ttl).
+        "ttl_choices_days": [30, 60, 90, 365],
         "default_ttl_days": DEFAULT_TTL_DAYS,
         "max_ttl_days": MAX_TTL_DAYS,
         "max_active_pats": MAX_ACTIVE_PATS_PER_USER,
