@@ -14,7 +14,8 @@ export default async function PersonalAccessTokensPage() {
   const fallbackMeta: PATMeta = {
     all_scopes: ["accounting:read", "accounting:write", "accounting:admin"],
     owner_allowed_scopes: [],
-    ttl_choices_days: [30, 60, 90, 365, 0],
+    // Bounded lifetimes only — the mint API refuses 0 ("never") with a 400.
+    ttl_choices_days: [30, 60, 90, 365],
     default_ttl_days: 90,
     max_ttl_days: 365,
     max_active_pats: 20,

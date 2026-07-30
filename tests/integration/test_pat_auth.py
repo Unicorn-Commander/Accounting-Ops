@@ -306,3 +306,39 @@ async def test_pat_cannot_mint_pat(
     assert "personal access tokens cannot" in r.json().get("detail", "").lower(), (
         r.json()
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — BACKWARD COMPAT: a legacy NULL-expiry, full-scope PAT still works
+#
+# The mint path no longer issues never-expiring tokens (app.security.pat
+# .resolve_ttl refuses ttl_days 0/null). Verification is deliberately
+# untouched, so the ones already in production must keep authenticating.
+# A NOT NULL constraint, an expires_at backfill, or treating NULL as expired
+# would all turn this test red — and would silently revoke live credentials.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_legacy_never_expiring_pat_still_authenticates(
+    db: asyncpg.Pool, pat_user: uuid.UUID, seeded_workspace: StackConfig
+) -> None:
+    raw = generate_secret()
+    await _seed_pat(
+        db,
+        owner_user_id=pat_user,
+        name="itest-legacy-never-expires",
+        raw_secret=raw,
+        # Exactly what the pre-fix mint path produced: every scope the owner's
+        # role allowed, no workspace restriction, and NO expiry at all.
+        scopes=["accounting:read", "accounting:write", "accounting:admin"],
+        workspace_scope=None,
+        expires_at=None,
+    )
+
+    async with _asgi_client(raw) as c:
+        r = await c.get("/api/me/workspaces")
+    assert r.status_code == 200, (
+        "a live NULL-expiry PAT must keep working — the mint-side fix must "
+        f"not revoke already-issued credentials: {r.status_code} {r.text}"
+    )

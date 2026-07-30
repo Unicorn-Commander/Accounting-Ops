@@ -6,8 +6,11 @@ storage layer + auth chain depend on.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,7 +19,11 @@ from app.security.pat import (
     MAX_TTL_DAYS,
     PAT_PREFIX,
     PREFIX_DISPLAY_LEN,
+    MintRequestError,
+    PATRow,
     constant_time_eq,
+    count_active_pats,
+    find_active_pat_by_token,
     generate_secret,
     hash_secret,
     looks_like_pat,
@@ -156,10 +163,16 @@ class TestConstantTimeEq:
 
 
 class TestValidateScopes:
-    def test_none_returns_owner_set(self):
-        owner = {"accounting:read", "accounting:write"}
-        out = validate_scopes(None, owner)
-        assert set(out) == owner
+    def test_none_is_refused(self):
+        """Omitting scopes must NOT inherit everything the owner can do.
+
+        Regression for the mint-side privilege default: a request with no
+        scope list is a malformed request (MintRequestError -> 400), not an
+        implicit grant of the owner's full role set.
+        """
+        owner = {"accounting:read", "accounting:write", "accounting:admin"}
+        with pytest.raises(MintRequestError):
+            validate_scopes(None, owner)
 
     def test_subset_allowed(self):
         owner = {"accounting:read", "accounting:write", "accounting:admin"}
@@ -189,13 +202,35 @@ class TestValidateScopes:
         )
         assert out == ("accounting:read", "accounting:write")
 
-    def test_empty_list_returns_empty(self):
-        """An explicit empty list is a degenerate-but-legal request — the
-        token will be useless but it's still consistent with 'no scopes
-        granted'."""
+    def test_empty_list_is_refused(self):
+        """An empty list grants nothing useful and reads like a mistake —
+        refuse it rather than mint a dud token."""
         owner = {"accounting:read"}
-        out = validate_scopes([], owner)
-        assert out == ()
+        with pytest.raises(MintRequestError):
+            validate_scopes([], owner)
+
+    def test_whitespace_only_is_refused(self):
+        """Blank/whitespace entries are stripped; if nothing survives, refuse
+        instead of falling through to a permissive default."""
+        owner = {"accounting:read"}
+        with pytest.raises(MintRequestError):
+            validate_scopes(["", "   ", "\t"], owner)
+
+    def test_whitespace_is_stripped_from_real_scopes(self):
+        owner = {"accounting:read", "accounting:write"}
+        out = validate_scopes(["  accounting:read  ", ""], owner)
+        assert out == ("accounting:read",)
+
+    def test_explicit_full_owner_set_still_allowed(self):
+        """Max privilege remains available — it just has to be DELIBERATE.
+        The defect was the default, not the capability."""
+        owner = {"accounting:read", "accounting:write", "accounting:admin"}
+        out = validate_scopes(sorted(owner), owner)
+        assert set(out) == owner
+
+    def test_mint_request_error_is_a_value_error(self):
+        """Existing `except ValueError` handlers must keep catching it."""
+        assert issubclass(MintRequestError, ValueError)
 
 
 # ---------------------------------------------------------------------------
@@ -204,14 +239,29 @@ class TestValidateScopes:
 
 
 class TestResolveTTL:
-    def test_none_means_never(self):
-        assert resolve_ttl(None) is None
+    def test_none_is_refused(self):
+        """A null/omitted TTL must not mint an immortal credential."""
+        with pytest.raises(MintRequestError):
+            resolve_ttl(None)
 
-    def test_zero_means_never(self):
-        assert resolve_ttl(0) is None
+    def test_zero_is_refused(self):
+        """0 was the 'never expires' sentinel — mint-side it is now a 400."""
+        with pytest.raises(MintRequestError):
+            resolve_ttl(0)
+
+    def test_never_expiring_cannot_be_minted(self):
+        """No TTL input may produce a NULL expires_at. Belt-and-braces over
+        the two cases above: whatever resolve_ttl returns, it is a datetime."""
+        for ttl in (1, 30, DEFAULT_TTL_DAYS, MAX_TTL_DAYS):
+            out = resolve_ttl(ttl)
+            assert isinstance(out, datetime), ttl
+            assert out is not None, ttl
 
     def test_default_is_90_days(self):
         assert DEFAULT_TTL_DAYS == 90
+
+    def test_default_ttl_is_within_max(self):
+        assert 0 < DEFAULT_TTL_DAYS <= MAX_TTL_DAYS == 365
 
     def test_positive_returns_future(self):
         before = datetime.now(timezone.utc)
@@ -264,3 +314,110 @@ class TestRoundtrip:
         # At least 990 of the 1000 should be unique — anything tighter risks
         # legitimate-but-rare flakes.
         assert len(prefixes) >= 990, len(prefixes)
+
+
+# ---------------------------------------------------------------------------
+# BACKWARD-COMPATIBILITY GUARD — legacy credentials must keep verifying
+#
+# The mint path no longer issues never-expiring, full-scope PATs. VERIFICATION
+# is deliberately untouched: tokens already in production that carry a NULL
+# expires_at and the owner's whole scope set must keep authenticating
+# byte-for-byte. If a future change adds a NOT NULL constraint, backfills
+# expires_at, or flips NULL to "expired", these tests go red.
+# ---------------------------------------------------------------------------
+
+
+def _legacy_row(raw_secret: str, *, revoked: bool = False):
+    """A DB row exactly as a pre-fix mint would have written it: NULL
+    expires_at (never expires) + the full owner scope set."""
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        owner_user_id=uuid.uuid4(),
+        name="legacy-never-expires",
+        secret_hash=hash_secret(raw_secret),
+        secret_prefix=secret_prefix(raw_secret),
+        scopes=["accounting:read", "accounting:write", "accounting:admin"],
+        workspace_scope=None,  # NULL = all workspaces (legacy shape)
+        expires_at=None,  # NULL = never expires (legacy shape)
+        created_at=datetime.now(timezone.utc) - timedelta(days=400),
+        last_used_at=None,
+        revoked_at=datetime.now(timezone.utc) if revoked else None,
+        owner_uc_uid="legacy-owner-uc-uid",
+    )
+
+
+class _FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _FakeSession:
+    """Minimal stand-in for AsyncSession.execute() used by the lookup path."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def execute(self, _stmt, _params=None):
+        return _FakeResult(self._rows)
+
+
+class TestLegacyNullExpiryStillVerifies:
+    def test_null_expiry_row_is_not_expired(self):
+        row = _legacy_row(generate_secret())
+        pat = PATRow(
+            id=row.id,
+            owner_user_id=row.owner_user_id,
+            name=row.name,
+            secret_prefix=row.secret_prefix,
+            scopes=tuple(row.scopes),
+            workspace_scope=None,
+            expires_at=None,
+            created_at=row.created_at,
+            last_used_at=None,
+            revoked_at=None,
+        )
+        assert pat.is_expired is False
+        assert pat.is_active is True
+
+    async def test_null_expiry_full_scope_pat_still_authenticates(self):
+        """The exact credential the old mint path produced — no expiry, every
+        scope, no workspace restriction — must still resolve on verification."""
+        raw = generate_secret()
+        session = _FakeSession([_legacy_row(raw)])
+
+        found = await find_active_pat_by_token(session, raw)  # type: ignore[arg-type]
+
+        assert found is not None, "a live NULL-expiry PAT must still verify"
+        pat, owner_user_id, owner_uc_uid = found
+        assert pat.expires_at is None
+        assert pat.workspace_scope is None
+        assert set(pat.scopes) == {
+            "accounting:read",
+            "accounting:write",
+            "accounting:admin",
+        }
+        assert owner_uc_uid == "legacy-owner-uc-uid"
+        assert owner_user_id == pat.owner_user_id
+
+    async def test_revoked_legacy_pat_still_rejected(self):
+        """Revocation still beats the NULL-expiry allowance."""
+        raw = generate_secret()
+        session = _FakeSession([_legacy_row(raw, revoked=True)])
+        assert await find_active_pat_by_token(session, raw) is None  # type: ignore[arg-type]
+
+    async def test_finite_expiry_in_the_past_still_rejected(self):
+        raw = generate_secret()
+        row = _legacy_row(raw)
+        row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        session = _FakeSession([row])
+        assert await find_active_pat_by_token(session, raw) is None  # type: ignore[arg-type]
+
+    def test_count_query_still_treats_null_expiry_as_live(self):
+        """The SQL predicate that decides 'is this token still active' must
+        keep the `expires_at IS NULL` arm — dropping it would retroactively
+        kill every legacy token."""
+        src = inspect.getsource(count_active_pats)
+        assert "expires_at IS NULL OR expires_at > now()" in src
