@@ -50,7 +50,9 @@ def _set_auth(ctx: AuthContext | None):
 
 def _membership(role: str, entity_scope=None):
     """Fake _resolve_membership: member of WS_A only, with the given role/scope."""
-    async def _fake(uc_uid, workspace_id):
+    async def _fake(uc_uid, workspace_id, *, autoprovision=False):
+        # ``autoprovision`` threads AuthContext.may_autoprovision (identity-
+        # orphan hardening); accepted here to match the real signature.
         if workspace_id != WS_A:
             raise HTTPException(status_code=403, detail="No active membership")
         return role, entity_scope, False, "ws-a"

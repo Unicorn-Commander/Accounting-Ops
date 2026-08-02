@@ -108,6 +108,19 @@ class AuthContext:
     # This flag is NEVER set by the service-token or Brigade paths — only
     # by the Keycloak JWT path after audience + azp allow-list validation.
     is_trusted_m2m: bool = False
+    # True only for identity paths that may legitimately CREATE a
+    # public.user_account row on first sight: the Keycloak login path (which
+    # bind-or-provisions at auth time and keeps downstream provisioning as its
+    # documented DB-blip fallback) and CE local mode (docs/USER-GUIDE.md: the
+    # single admin is auto-provisioned on first request). Service tokens,
+    # PATs, Brigade and M2M callers leave this False — their identity must
+    # already exist. Auto-provisioning for them mints a memberships-less ghost
+    # identity, and every membership-filtered surface then returns [] with no
+    # error (live incident 2026-07-22, and the stale-service-token orphaning
+    # that followed the verified-email re-key). Downstream helpers
+    # (app.tenancy._ensure_user_account) thread this flag; they fail closed
+    # with 403 when it is False and no row exists.
+    may_autoprovision: bool = False
 
 
 # JWKS cache: avoid refetching Keycloak's signing keys on every request.
@@ -522,6 +535,10 @@ def _try_authenticate_local(token: str) -> AuthContext | None:
         agent_id=None,
         scopes=scope,
         claims=claims,
+        # CE local mode: the single admin's user_account row is auto-
+        # provisioned on first request (docs/USER-GUIDE.md) — local mode has
+        # no bind/re-key mechanism, so ghost-orphaning cannot occur here.
+        may_autoprovision=True,
     )
     _stamp_audit_actor(ctx)
     return ctx
@@ -557,6 +574,37 @@ async def authenticate_token(token: str) -> AuthContext:
         if wsids is not None or eids is not None or floor is not None:
             scope = ServiceScope(
                 workspace_ids=wsids, entity_ids=eids, role_floor=floor
+            )
+        # Identity-orphan guard: the env-mapped uc_uid MUST resolve to an
+        # EXISTING public.user_account row. After the verified-email bind
+        # (d064c20) re-keys a row's uc_uid to the Keycloak sub, a stale
+        # ACCTOPS_SERVICE_TOKENS mapping would otherwise impersonate a
+        # brand-new ghost identity: auth succeeds, but every membership-
+        # filtered surface (list_my_workspaces first among them) silently
+        # returns []. Fail loud instead. A DB blip (None) proceeds — this
+        # guard is a tripwire, not the authz gate; downstream membership
+        # resolution fails closed on its own.
+        exists = await _user_account_exists(service_ident["uc_uid"])
+        if exists is False:
+            _log.error(
+                "[acctops.auth] service_token_identity_orphaned: agent_id=%r "
+                "uc_uid=%r matches no public.user_account row — the "
+                "ACCTOPS_SERVICE_TOKENS mapping is stale (identity re-keyed "
+                "by the verified-email bind?) or the user was never "
+                "provisioned. Re-register the token with the identity's "
+                "current uc_uid.",
+                service_ident["agent_id"],
+                service_ident["uc_uid"],
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Service token identity is orphaned: its configured "
+                    "uc_uid matches no user account. The token's mapping is "
+                    "stale (identity re-keyed) or the user was never "
+                    "provisioned — re-register the token with the current "
+                    "uc_uid."
+                ),
             )
         ctx = AuthContext(
             uc_uid=service_ident["uc_uid"],
@@ -794,6 +842,11 @@ async def authenticate_token(token: str) -> AuthContext:
         scopes=scope,
         claims=claims,
         is_trusted_m2m=is_trusted_m2m,
+        # Keycloak login is the ONLY remote path that may auto-provision
+        # (bind-or-provision already ran above; downstream provisioning stays
+        # as its documented DB-blip fallback). Trusted-M2M synthetic
+        # identities (m2m:<azp>) must never mint user_account rows.
+        may_autoprovision=not is_trusted_m2m,
     )
     _stamp_audit_actor(ctx)
     return ctx
@@ -1005,6 +1058,41 @@ async def _ensure_keycloak_user_identity(
             exc.__class__.__name__,
         )
         return
+
+
+async def _user_account_exists(uc_uid: str) -> bool | None:
+    """Definitive row-presence check for the service-token identity guard.
+
+    Returns True/False when the database answered, None on a DB blip (the
+    caller proceeds — the guard is an early tripwire, not the authz gate;
+    downstream membership resolution fails closed on its own, and when the
+    DB is down nothing works anyway).
+
+    Deliberately mirrors the lookup ``_ensure_user_account`` performs (no
+    ``is_active`` filter): this guard detects ORPHANED mappings only.
+    Deactivation is a separate concern and adding it here would change reach
+    for existing-but-inactive identities, which this hardening must not do.
+    """
+    from sqlalchemy import text
+
+    from app.db import SessionLocal
+
+    try:
+        async with SessionLocal() as session:
+            row = (
+                await session.execute(
+                    text("SELECT 1 FROM public.user_account WHERE uc_uid = :uc"),
+                    {"uc": uc_uid},
+                )
+            ).first()
+        return row is not None
+    except Exception as exc:  # pragma: no cover - DB blip → indeterminate
+        _log.warning(
+            "[acctops.auth] service-token identity check skipped (db error "
+            "%s) — proceeding; downstream resolution fails closed",
+            exc.__class__.__name__,
+        )
+        return None
 
 
 async def _uc_uid_for_email(email: str) -> str | None:
