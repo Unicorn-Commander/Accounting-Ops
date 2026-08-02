@@ -12,6 +12,7 @@ the role applies to.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Iterable
 from uuid import UUID
@@ -21,6 +22,8 @@ from sqlalchemy import text
 
 from app.auth import AuthContext, validate_bearer_token
 from app.db import SessionLocal
+
+_log = logging.getLogger("acctops.tenancy")
 
 
 @dataclass(frozen=True)
@@ -245,10 +248,32 @@ def require_role(ctx: WorkspaceContext, minimum: str) -> None:
         )
 
 
-async def _ensure_user_account(uc_uid: str) -> UUID:
-    """Auto-provision a public.user_account row on first sight of a uc_uid.
+_IDENTITY_UNPROVISIONED_DETAIL = (
+    "Caller identity is not provisioned: no user account exists for this "
+    "token's uc_uid. If this is a service token, PAT, or federated caller, "
+    "its stored uc_uid is stale (identity re-keyed) or the user was never "
+    "provisioned — re-register it against the identity's current uc_uid."
+)
 
-    Returns the user_account.id. Idempotent.
+
+async def _ensure_user_account(uc_uid: str, *, autoprovision: bool = False) -> UUID:
+    """Resolve ``uc_uid`` to its ``public.user_account`` id.
+
+    ``autoprovision=True`` — first-sight INSERT (the historical behavior).
+    Only identity paths that legitimately mint accounts may pass it: the
+    Keycloak login path (which bind-or-provisions at auth time and keeps this
+    as its documented DB-blip fallback) and CE local mode (the single admin is
+    auto-provisioned on first request, docs/USER-GUIDE.md). Thread
+    ``AuthContext.may_autoprovision`` — never hardcode ``True`` at a call
+    site.
+
+    ``autoprovision=False`` (default) — resolve-or-403. Service tokens, PATs,
+    Brigade and M2M callers must already exist. Minting a row here created
+    memberships-less GHOST identities: auth succeeded and every membership-
+    filtered query silently returned [] (the 2026-07 ``list_my_workspaces``
+    regression — the verified-email bind of d064c20 re-keyed the real row
+    while the env-mapped service identity kept the old uc_uid and
+    ghost-provisioned here). Failing loud beats ghost-empty.
     """
     async with SessionLocal() as session:
         async with session.begin():
@@ -260,6 +285,19 @@ async def _ensure_user_account(uc_uid: str) -> UUID:
             ).first()
             if row:
                 return row.id
+            if not autoprovision:
+                _log.error(
+                    "[acctops.tenancy] caller_identity_unprovisioned: "
+                    "uc_uid=%r matches no public.user_account row and this "
+                    "caller class may not auto-provision — stale "
+                    "service-token/PAT/Brigade identity mapping (re-keyed by "
+                    "the verified-email bind?) or never-provisioned user",
+                    uc_uid,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=_IDENTITY_UNPROVISIONED_DETAIL,
+                )
             result = await session.execute(
                 text(
                     """
@@ -274,13 +312,16 @@ async def _ensure_user_account(uc_uid: str) -> UUID:
 
 
 async def _resolve_membership(
-    user_uc_uid: str, workspace_id: UUID
+    user_uc_uid: str, workspace_id: UUID, *, autoprovision: bool = False
 ) -> tuple[str, tuple[UUID, ...] | None, bool, str]:
     """Look up the (role, entity_scope, hipaa_protected, workspace_slug) for this user+workspace.
 
     Returns (role, entity_scope, hipaa_protected, slug) or raises 403/404.
+    ``autoprovision`` threads ``AuthContext.may_autoprovision`` through to
+    ``_ensure_user_account`` — non-Keycloak/local callers resolve-or-403
+    instead of ghost-provisioning.
     """
-    user_id = await _ensure_user_account(user_uc_uid)
+    user_id = await _ensure_user_account(user_uc_uid, autoprovision=autoprovision)
     async with SessionLocal() as session:
         async with session.begin():
             row = (
@@ -365,7 +406,9 @@ async def resolve_workspace(
     raises 403 — independent of what the impersonated user is allowed.
     """
     workspace_id = _extract_workspace_id(request, workspace_id_header, auth.claims)
-    role, entity_scope, hipaa, slug = await _resolve_membership(auth.uc_uid, workspace_id)
+    role, entity_scope, hipaa, slug = await _resolve_membership(
+        auth.uc_uid, workspace_id, autoprovision=auth.may_autoprovision
+    )
 
     # ---- H2: apply service-token scope, if any ----
     if auth.service_scope is not None:

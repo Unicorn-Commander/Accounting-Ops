@@ -583,15 +583,19 @@ def _slugify(value: str) -> str:
     return s[:80] or "client"
 
 
-async def _caller_account(uc_uid: str) -> tuple[UUID, str | None, list[str]]:
+async def _caller_account(
+    uc_uid: str, *, autoprovision: bool = False
+) -> tuple[UUID, str | None, list[str]]:
     """Return (user_id, email, distinct_roles_held) for the caller.
 
-    Ensures a ``user_account`` row exists (JIT) so a freshly-federated CPA who
-    has never hit a workspace endpoint can still be resolved.
+    JIT-provisions a ``user_account`` row only for caller classes allowed to
+    auto-provision (``AuthContext.may_autoprovision``: Keycloak login / CE
+    local). Other callers (service tokens, PATs, Brigade) resolve-or-403 —
+    a ghost row here would have no roles anyway.
     """
     from app.api.workspaces import _ensure_user_account
 
-    user_id = await _ensure_user_account(uc_uid)
+    user_id = await _ensure_user_account(uc_uid, autoprovision=autoprovision)
     async with SessionLocal() as session:
         async with session.begin():
             email_row = (
@@ -631,7 +635,9 @@ async def my_persona(
     a practitioner-or-owner role somewhere (the gate POST /api/me/clients
     enforces).
     """
-    _user_id, _email, roles = await _caller_account(auth.uc_uid)
+    _user_id, _email, roles = await _caller_account(
+        auth.uc_uid, autoprovision=auth.may_autoprovision
+    )
     role_set = set(roles)
     if "platform_admin" in role_set:
         persona = "platform_admin"
@@ -688,7 +694,9 @@ async def add_client(
     from app.mailer import send_email
     from scripts.provision_workspace import provision_workspace
 
-    user_id, caller_email, roles = await _caller_account(auth.uc_uid)
+    user_id, caller_email, roles = await _caller_account(
+        auth.uc_uid, autoprovision=auth.may_autoprovision
+    )
     if not (set(roles) & set(_PRACTITIONER_ROLES)):
         raise HTTPException(
             status_code=403,

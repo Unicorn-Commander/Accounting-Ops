@@ -204,7 +204,9 @@ async def ebay_oauth_start(
     """
     # Manually resolve membership/role since the path has no {workspace_id}.
     from app.tenancy import _resolve_membership, role_at_least
-    role, entity_scope, _hipaa, _slug = await _resolve_membership(auth.uc_uid, workspace_id)
+    role, entity_scope, _hipaa, _slug = await _resolve_membership(
+        auth.uc_uid, workspace_id, autoprovision=auth.may_autoprovision
+    )
     if not role_at_least(role, "admin"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

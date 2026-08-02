@@ -147,7 +147,7 @@ def _patch_resolve_membership_raises(monkeypatch):
     """Patch _resolve_membership to raise 403 (no membership row) — simulates
     what happens when a non-member calls the normal membership path."""
 
-    async def _no_membership(user_uc_uid, workspace_id):
+    async def _no_membership(user_uc_uid, workspace_id, *, autoprovision=False):
         raise HTTPException(status_code=403, detail="No active membership for this workspace")
 
     monkeypatch.setattr(tenancy_module, "_resolve_membership", _no_membership)
