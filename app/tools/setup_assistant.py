@@ -22,6 +22,7 @@ import uuid
 from typing import Any
 from uuid import UUID
 
+from fastapi import HTTPException
 from sqlalchemy import text
 
 from app.db import SessionLocal
@@ -225,7 +226,16 @@ async def create_workspace(
 
     # Verify the caller has ANY owner+ role somewhere
     from app.api.workspaces import _ensure_user_account
-    user_id = await _ensure_user_account(auth.uc_uid)
+
+    try:
+        user_id = await _ensure_user_account(
+            auth.uc_uid, autoprovision=auth.may_autoprovision
+        )
+    except HTTPException as exc:
+        # Transport-neutral denial for the MCP channel (mirrors
+        # authorize_workspace): unprovisioned caller identity → clean tool
+        # error, never a ghost-provisioned row.
+        raise PermissionError(str(exc.detail)) from exc
     async with SessionLocal() as session:
         async with session.begin():
             row = (
