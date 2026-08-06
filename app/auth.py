@@ -555,8 +555,11 @@ async def authenticate_token(token: str) -> AuthContext:
 
     Auth strategy chain (first match wins; same AuthContext result type):
       1. Service token (fast-path; shared-secret for internal workers)
-      2. Keycloak-issued bearer (the user/agent flow)
-      3. Brigade-issued JWT (federated MCP gateway; ed25519 / RS256)
+      2. Personal Access Token (aops_pat_*)
+      3. UC API key (uc_*) — customer agent path via Ops-Center validate-key
+      4. Local self-host token (CE)
+      5. Brigade-issued JWT (federated MCP gateway; ed25519 / RS256)
+      6. Keycloak-issued bearer (the user/agent flow)
 
     Raises HTTPException(401) on any failure (so the FastAPI wrapper propagates
     it unchanged; the MCP middleware translates the status into a JSON 401).
@@ -636,6 +639,61 @@ async def authenticate_token(token: str) -> AuthContext:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or revoked personal access token",
         )
+
+    # UC API key path: customer-minted keys from unicorncommander.ai Account.
+    # Resolved via Ops-Center POST /api/v1/auth/validate-key (same resolution
+    # surface as the LLM gateway's get_user_id) with required_permission
+    # mcp:accounting-ops. Prefix-match fails closed — never fall through to
+    # JWT with a uc_ body.
+    from app.security.uc_api_key import looks_like_uc_key, resolve_uc_api_key
+
+    if looks_like_uc_key(token):
+        uc_ident = await resolve_uc_api_key(token)
+        if uc_ident is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    "Invalid UC API key, expired key, or key lacks "
+                    "mcp:accounting-ops (mint a key with MCP scope from "
+                    "https://unicorncommander.ai account API keys)"
+                ),
+            )
+        # Identity must already exist in AO (no ghost auto-provision for
+        # machine credentials — same rule as PATs / service tokens).
+        exists = await _user_account_exists(uc_ident.uc_uid)
+        if exists is False:
+            _log.warning(
+                "[acctops.auth] uc_ key identity not provisioned in AO: "
+                "uc_uid=%r — user must sign in to Accounting-Ops once so a "
+                "user_account + membership exist.",
+                uc_ident.uc_uid,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "UC API key is valid but this user has no Accounting-Ops "
+                    "account yet. Sign in once at "
+                    "https://accounting-ops.unicorncommander.ai/?app=1 then retry."
+                ),
+            )
+        ctx = AuthContext(
+            uc_uid=uc_ident.uc_uid,
+            agent_id=None,  # human-minted key, not an RFC 8693 act agent
+            scopes=uc_ident.permissions,
+            claims={
+                "sub": uc_ident.uc_uid,
+                "uc_uid": uc_ident.uc_uid,
+                "uc_key_id": uc_ident.key_id,
+                "uc_key": True,
+                # Stash the raw bearer so MCP middleware can meter without
+                # re-reading the Authorization header (contextvar carries claims).
+                "_uc_bearer": token,
+            },
+            service_scope=None,
+            may_autoprovision=False,
+        )
+        _stamp_audit_actor(ctx)
+        return ctx
 
     # Local self-host token branch (Community Edition — AO_AUTH_MODE=local).
     # No-op in keycloak mode (returns None immediately). When it validates, we
