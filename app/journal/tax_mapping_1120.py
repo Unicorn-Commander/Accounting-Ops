@@ -70,6 +70,33 @@ class F1120Mapping:
 # ---------------------------------------------------------------------------
 
 CATEGORY_TO_1120: dict[str, F1120Mapping] = {
+    "eBay Resale · Intercompany Due to MU": F1120Mapping(
+        section="excluded", line="L", label="Balance sheet — intercompany payable (Schedule L)",
+        confidence="high",
+        notes="COA 2600 Due to MU Inc — intercompany payable for contractor+shipping the parent fronted. Balance-sheet only (Schedule L), NOT a page-1 income/deduction; excluded from income + deduction totals. CPA confirms intercompany treatment.",
+    ),
+    # --- Listing-Ops division eBay-resale categories (in sync with
+    #     CATEGORY_TO_ACCOUNT). Lines mirror each account's declared tax line.
+    "eBay Resale · Revenue": F1120Mapping(
+        section="income", line="1a", label="Gross receipts or sales",
+        confidence="high",
+        notes="eBay resale gross receipts (COA 4150) — principal-trade sales, Form 1120 line 1a; returns/allowances → 1b.",
+    ),
+    "eBay Resale · Marketplace Fees": F1120Mapping(
+        section="income", line="2", label="Cost of goods sold (Form 1125-A)",
+        confidence="medium",
+        notes="eBay final-value/selling fees (COA 5020, COGS-typed). Line 2 to match the account; a CPA may instead place selling fees on line 26. Subtractive, not positive income.",
+    ),
+    "eBay Resale · Shipping": F1120Mapping(
+        section="income", line="2", label="Cost of goods sold (Form 1125-A)",
+        confidence="medium",
+        notes="Outbound shipping labels (COA 5030, COGS-typed). Line 2 to match the account; CPA may treat as line 26 selling expense. Subtractive.",
+    ),
+    "eBay Resale · Contractor 1099-NEC": F1120Mapping(
+        section="deductions", line="26", label="Other deductions",
+        confidence="medium",
+        notes="Contributor share paid to Daniel Tran as a 1099-NEC contractor (COA 5630). Line 26 Other deductions; 1099-NEC issued at year-end. CPA may reclassify to COGS.",
+    ),
     # ------------------------------------------------------------------
     # REVENUE
     # ------------------------------------------------------------------
