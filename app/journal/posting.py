@@ -492,6 +492,7 @@ async def post_journal_entry(
     posted_by_uc_uid: str,
     posted_by_agent_id: str | None = None,
     user_confirmed: bool = False,
+    approving_human_uc_uid: str | None = None,
     reasoning_trace: str = "",
     rule_version_applied: UUID | None = None,
     model_version: str = "",
@@ -502,6 +503,14 @@ async def post_journal_entry(
 
     Materiality gate is consulted FIRST. If it refuses, we log to
     posting_log and return a PostingRefusal — no journal_entry row created.
+
+    TRUST CONTRACT: ``user_confirmed=True`` asserts that a HUMAN attested
+    this post. Only callers that verified the attestation themselves may set
+    it: the HTTP route (the authenticated human IS the caller), the approval
+    decide path (an admin decision row exists), or the MCP tool layer after
+    it has matched an APPROVED approval_queue row. It must never be plumbed
+    through from an agent-supplied argument. ``approving_human_uc_uid``, when
+    given, stamps that human as the approver instead of the posting identity.
     """
     # ---- 1. Materiality gate ----
     verdict = evaluate(
@@ -661,7 +670,10 @@ async def post_journal_entry(
         reasoning_trace=reasoning_trace,
         model_version=model_version,
         identity=posted_by_uc_uid,
-        approving_uid=posted_by_uc_uid if user_confirmed else None,
+        approving_uid=(
+            approving_human_uc_uid
+            or (posted_by_uc_uid if user_confirmed else None)
+        ),
         receipt_link_id=receipt_link_id,
     )
     if isinstance(insert_outcome, _ChainInsertIdempotent):

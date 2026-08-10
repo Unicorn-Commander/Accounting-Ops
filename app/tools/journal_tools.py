@@ -390,6 +390,51 @@ async def list_closed_periods(
 # ---------------------------------------------------------------------------
 
 
+async def _verified_confirmation(
+    session,
+    *,
+    entity_id: UUID,
+    source_external_id: str,
+    amount_cents: int,
+) -> str | None:
+    """Resolve a claimed human confirmation to the human who actually decided.
+
+    A tool argument can be set by the model, so ``user_confirmed=True`` on the
+    MCP surface is a CLAIM, not an attestation. The only server-verifiable
+    evidence of a human decision is an APPROVED approval_queue row for this
+    exact transaction (entity + source_external_id + amount). Returns the
+    deciding human's uc_uid, or None when no such row exists.
+
+    Amount is matched as its canonical string to avoid cast errors on
+    malformed legacy payloads (a non-matching or missing amount simply fails
+    the match — fail closed).
+    """
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT decided_by_uc_uid
+                FROM approval_queue
+                WHERE entity_id = :eid
+                  AND subject_type = 'bank_transaction_import'
+                  AND status = 'approved'
+                  AND payload->>'source_external_id' = :ext
+                  AND payload->>'amount_cents' = :amt
+                  AND decided_by_uc_uid IS NOT NULL
+                ORDER BY decided_at DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "eid": str(entity_id),
+                "ext": source_external_id,
+                "amt": str(int(amount_cents)),
+            },
+        )
+    ).first()
+    return row.decided_by_uc_uid if row else None
+
+
 async def post_journal_entry(
     workspace_id: UUID,
     entity_id: UUID,
@@ -412,8 +457,10 @@ async def post_journal_entry(
     """Atomically post a transaction to the journal (full materiality gate).
 
     Mirrors POST /api/workspaces/{wid}/journal-entries. The post is idempotent
-    on (entity_id, source, source_external_id). A material (M/H) post without
-    user_confirmed=True queues for human attestation instead of auto-applying.
+    on (entity_id, source, source_external_id). A material (M/H) post queues
+    for human attestation instead of auto-applying; ``user_confirmed`` is
+    honored only after server-side verification against the approval queue
+    (see the arg docs below).
 
     Args:
         workspace_id: Workspace UUID.
@@ -433,7 +480,12 @@ async def post_journal_entry(
             account id) for cash-side resolution.
         receipt_link_id: Optional UUID of a recon_link if a receipt is already
             attached.
-        user_confirmed: True to bypass the materiality re-gate (human attested).
+        user_confirmed: Claim that a human attested this post. NOT trusted as
+            given: the server honors it only when an APPROVED approval_queue
+            row exists for this exact (entity, source_external_id, amount) —
+            otherwise the full materiality gate applies as if False. To get a
+            material entry posted, let it queue and have a human decide it
+            (decide_approval / the reconciliation queue).
         reasoning_trace: Free-text reasoning from the agent.
         model_version: Identifier for the agent/model issuing the post.
 
@@ -489,6 +541,17 @@ async def post_journal_entry(
             ).first()
             entity_mapped = row is not None
 
+        # user_confirmed is agent-supplied on this surface — derive the real
+        # attestation from the approval queue instead of trusting the flag.
+        approving_human: str | None = None
+        if user_confirmed:
+            approving_human = await _verified_confirmation(
+                session,
+                entity_id=entity_id,
+                source_external_id=source_external_id,
+                amount_cents=int(amount_cents),
+            )
+
         result = await _journal_post(
             session,
             workspace_id=str(workspace_id),
@@ -509,7 +572,8 @@ async def post_journal_entry(
             receipt_link_id=receipt_uuid,
             posted_by_uc_uid=ctx.user_uc_uid,
             posted_by_agent_id=ctx.agent_id,
-            user_confirmed=bool(user_confirmed),
+            user_confirmed=approving_human is not None,
+            approving_human_uc_uid=approving_human,
             reasoning_trace=reasoning_trace,
             model_version=model_version,
         )
@@ -523,10 +587,19 @@ async def post_journal_entry(
             "reason": result.materiality.reason,
         }
     assert isinstance(result, PostingRefusal)
+    reason = result.reason
+    if user_confirmed and approving_human is None:
+        reason += (
+            " (user_confirmed was supplied but is not trusted from tool"
+            " arguments: confirmation is derived server-side from an approved"
+            " approval-queue record, and none matched this transaction. Let"
+            " the entry queue and have a human decide it via decide_approval"
+            " or the reconciliation queue.)"
+        )
     return {
         "ok": False,
         "outcome": result.outcome,
-        "reason": result.reason,
+        "reason": reason,
         "existing_entry_id": (
             str(result.existing_entry_id) if result.existing_entry_id else None
         ),
