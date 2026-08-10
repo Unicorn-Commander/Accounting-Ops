@@ -15,35 +15,21 @@ from sqlalchemy import text
 
 from app.auth import AuthContext, validate_bearer_token
 from app.db import SessionLocal
-from app.tenancy import WorkspaceContext, canonical_role, resolve_workspace
+
+# Re-exported for the existing importers (app.tools.connectors,
+# app.tools.setup_assistant, app.api.clients). This module used to carry a
+# byte-identical private copy; the two copies were exactly how the
+# ghost-provisioning hole survived d064c20 — one implementation now lives in
+# app.tenancy with the autoprovision guard.
+from app.tenancy import (  # noqa: F401  (re-export)
+    WorkspaceContext,
+    _ensure_user_account,
+    canonical_role,
+    resolve_workspace,
+)
 from app.workspace_session import workspace_session
 
 router = APIRouter(tags=["workspaces"])
-
-
-async def _ensure_user_account(uc_uid: str) -> UUID:
-    """Auto-provision a user_account row on first sight of a uc_uid."""
-    async with SessionLocal() as session:
-        async with session.begin():
-            row = (
-                await session.execute(
-                    text("SELECT id FROM public.user_account WHERE uc_uid = :uc"),
-                    {"uc": uc_uid},
-                )
-            ).first()
-            if row:
-                return row.id
-            result = await session.execute(
-                text(
-                    """
-                    INSERT INTO public.user_account (id, uc_uid, is_active, created_at)
-                    VALUES (gen_random_uuid(), :uc, true, now())
-                    RETURNING id
-                    """
-                ),
-                {"uc": uc_uid},
-            )
-            return result.scalar_one()
 
 
 @router.get("/api/me/workspaces")
@@ -64,7 +50,9 @@ async def list_my_workspaces(
     WorkspaceSwitcher); `role_canonical` is added additively so federation
     consumers get the canonical role without breaking the existing UI contract.
     """
-    user_id = await _ensure_user_account(auth.uc_uid)
+    user_id = await _ensure_user_account(
+        auth.uc_uid, autoprovision=auth.may_autoprovision
+    )
     async with SessionLocal() as session:
         async with session.begin():
             rows = (

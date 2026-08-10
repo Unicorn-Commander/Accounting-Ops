@@ -183,7 +183,7 @@ async def authorize_workspace(
 
     try:
         role, entity_scope, hipaa, slug = await _resolve_membership(
-            auth.uc_uid, workspace_id
+            auth.uc_uid, workspace_id, autoprovision=auth.may_autoprovision
         )
         ctx = WorkspaceContext(
             workspace_id=workspace_id,

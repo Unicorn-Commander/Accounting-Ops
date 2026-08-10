@@ -118,7 +118,9 @@ async def provision_first_workspace(
             detail=f"isolation_tier must be one of {sorted(_VALID_TIERS)}",
         )
 
-    user_id = await _ensure_user_account(auth.uc_uid)
+    user_id = await _ensure_user_account(
+        auth.uc_uid, autoprovision=auth.may_autoprovision
+    )
 
     # This path is ONLY for a user's first workspace. If they already have one,
     # hand it back rather than minting a duplicate (idempotent under retry).
