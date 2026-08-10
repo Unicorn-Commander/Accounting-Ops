@@ -73,7 +73,11 @@ def evaluate(
             ),
         )
 
-    # User explicitly confirmed (clicked Confirm) → post at any tier.
+    # Human attested → post at any tier. TRUST CONTRACT: callers may only set
+    # user_confirmed after verifying the attestation themselves (HTTP route:
+    # the authenticated human is the caller; decide path: an admin decision
+    # row exists; MCP tool: a matching APPROVED approval_queue row was found).
+    # Never plumb an agent-supplied argument into this flag.
     if user_confirmed:
         return MaterialityVerdict(
             tier=tier,
