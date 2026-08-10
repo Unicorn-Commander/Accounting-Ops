@@ -92,12 +92,12 @@ logger = logging.getLogger("chunker")
 
 # Hard upper bound on any single chunk passed to Infinity. Infinity's
 # documented limit is 122_880 chars; we leave generous headroom.
-MAX_CHUNK_CHARS = 100_000
+MAX_CHUNK_CHARS = int(os.getenv("TAXKB_MAX_CHUNK_CHARS", "8000"))
 
 # Overlap (in chars) between consecutive chunks. Roughly 5K chars covers a
 # few paragraphs of context, which is enough for cosine-similarity to pull a
 # chunk back even if the matching phrase straddles the boundary.
-OVERLAP_CHARS = 5_000
+OVERLAP_CHARS = int(os.getenv("TAXKB_OVERLAP_CHARS", "800"))
 
 # Threshold at which we start chunking. Anything <= this stays as a single
 # row. Set equal to MAX_CHUNK_CHARS so that documents at exactly the boundary
