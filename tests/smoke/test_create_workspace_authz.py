@@ -123,22 +123,66 @@ async def test_empty_pat_scopes_fail_closed(provisioned):
 # ---------------------------------------------------------------------------
 
 
-async def test_admin_scoped_pat_still_provisions(provisioned, monkeypatch):
-    """The claude-code-mcp PAT shape: owner membership + accounting:admin.
+@pytest.fixture
+def provisioner_stub(monkeypatch):
+    """Intercept the provisioner AND the owner-membership write.
 
-    It must reach the provisioner — proven by the tool getting past the gate and
-    failing only where it tries to actually build the schema (no DB here).
+    These tests assert the gate LETS a legitimate caller through. Letting the
+    call fall through would have it build a schema and INSERT a membership row
+    against whatever database the environment happens to point at, and "it
+    raised something that wasn't PermissionError" is a weak stand-in for "it
+    got there" — a typo raising AttributeError would satisfy it just as well.
+    Stub both writes and assert the provisioner was actually reached.
     """
-    with pytest.raises(Exception) as excinfo:
-        await _create(_pat("accounting:read", "accounting:write", "accounting:admin"))
-    assert not isinstance(excinfo.value, PermissionError)
+    calls: list[tuple] = []
+
+    async def _fake_provision(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "books_stub", None
+
+    import scripts.provision_workspace as pw
+
+    monkeypatch.setattr(pw, "provision_workspace", _fake_provision)
+
+    class _FakeSession:
+        async def execute(self, *a, **k):
+            return None
+
+        def begin(self):
+            return _FakeCtx()
+
+    class _FakeCtx:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakeSessionMaker:
+        def __call__(self):
+            return _FakeSessionCtx()
+
+    class _FakeSessionCtx:
+        async def __aenter__(self):
+            return _FakeSession()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(setup_assistant, "SessionLocal", _FakeSessionMaker())
+    return calls
 
 
-async def test_keycloak_session_owner_still_provisions(provisioned):
+async def test_admin_scoped_pat_still_provisions(provisioned, provisioner_stub):
+    """The claude-code-mcp PAT shape: owner membership + accounting:admin."""
+    await _create(_pat("accounting:read", "accounting:write", "accounting:admin"))
+    assert provisioner_stub, "gate blocked a caller that should provision"
+
+
+async def test_keycloak_session_owner_still_provisions(provisioned, provisioner_stub):
     """No pat_id, no service_scope → the scope gates are skipped entirely."""
-    with pytest.raises(Exception) as excinfo:
-        await _create(_auth(scopes=(), claims={"sub": "owner-user"}))
-    assert not isinstance(excinfo.value, PermissionError)
+    await _create(_auth(scopes=(), claims={"sub": "owner-user"}))
+    assert provisioner_stub, "gate blocked a Keycloak owner session"
 
 
 async def test_scoped_pat_is_not_denied_by_candidate_row_order(monkeypatch):
