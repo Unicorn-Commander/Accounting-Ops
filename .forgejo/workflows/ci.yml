@@ -64,6 +64,11 @@ jobs:
   # ---------------------------------------------------------------------------
   integration:
     runs-on: docker
+    # Only on main and on pull requests. This job stands up a real compose
+    # stack, so letting it fire on every push to a feat/** or fix/** branch
+    # would run several of them concurrently on one runner for what is usually
+    # a work-in-progress commit. The unit job above still gates every branch.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     # Use a docker-capable image. The CLI + compose plugin are installed in the
     # first step if the base image doesn't ship them.
     container:
