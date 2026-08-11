@@ -41,6 +41,16 @@ class AccountPair:
 # when this category is posted. The OTHER side of the entry is always the
 # cash/credit-card account the txn came from.
 CATEGORY_TO_ACCOUNT: dict[str, str] = {
+    "eBay Resale · Intercompany Due to MU": "2600",  # intercompany payable (MU Inc fronted contractor+shipping)
+    # --- Listing-Ops division (Magic Unicorn Inc — Listing-Ops eBay resale).
+    #     Additive keys → this entity's purpose-built eBay-resale COA
+    #     (4150/5020/5030/5630). Distinct names → no collision with the
+    #     generic revenue/contractor keys below. Consumed by the Listing-Ops
+    #     AO-sync emitter (source="listing-ops").
+    "eBay Resale · Revenue": "4150",
+    "eBay Resale · Marketplace Fees": "5020",
+    "eBay Resale · Shipping": "5030",
+    "eBay Resale · Contractor 1099-NEC": "5630",
     # Revenue
     "Revenue · Marketplace": "4010",
     "Revenue · Music": "4020",

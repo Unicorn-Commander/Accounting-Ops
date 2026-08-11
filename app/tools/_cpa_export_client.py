@@ -36,6 +36,38 @@ _DRAFT_NOTICE = (
     "Do not file without CPA sign-off."
 )
 
+# Env var names that may carry the outbound cpa-export transport bearer, in
+# precedence order. THE ONE PLACE this list lives — every cpa-export caller
+# must resolve through resolve_cpa_export_bearer() so a deployment that sets a
+# different-but-reasonable name cannot silently lose auth on one call site.
+#
+# 2026-08-11 incident: legacy1 (.ai prod) set ONLY CPA_EXPORT_SERVICE_TOKEN —
+# the name the cpa-export SIDECAR reads — while the app read only
+# ACCTOPS_SERVICE_TOKEN / CPA_EXPORT_TOKEN. Result: every app -> cpa-export
+# request went out with NO Authorization header and the sidecar answered
+# 401 "Missing bearer token", so the 1120 / 1120-S / 1065 export path was dead
+# in production while healthchecks stayed green. Accepting the sidecar's own
+# variable name as an alias makes the mismatch unrepresentable.
+_CPA_EXPORT_BEARER_ENV_VARS: tuple[str, ...] = (
+    "ACCTOPS_SERVICE_TOKEN",
+    "CPA_EXPORT_TOKEN",
+    "CPA_EXPORT_SERVICE_TOKEN",
+)
+
+
+def resolve_cpa_export_bearer() -> str | None:
+    """Resolve the outbound bearer for the cpa-export sidecar.
+
+    Returns the first non-empty value among _CPA_EXPORT_BEARER_ENV_VARS, or
+    None when none is configured (callers then send no Authorization header,
+    exactly as before — this helper never invents a credential).
+    """
+    for name in _CPA_EXPORT_BEARER_ENV_VARS:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
+
 
 async def fetch_return_package(
     *,
@@ -74,7 +106,7 @@ async def fetch_return_package(
             # token, and logs loudly that identity forwarding is unavailable.
             pass
 
-    service_token = os.getenv("ACCTOPS_SERVICE_TOKEN") or os.getenv("CPA_EXPORT_TOKEN")
+    service_token = resolve_cpa_export_bearer()
     if service_token:
         headers["Authorization"] = f"Bearer {service_token}"
 
@@ -110,4 +142,4 @@ async def fetch_return_package(
     return data
 
 
-__all__ = ("fetch_return_package",)
+__all__ = ("fetch_return_package", "resolve_cpa_export_bearer")

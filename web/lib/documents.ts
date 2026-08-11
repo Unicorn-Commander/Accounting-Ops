@@ -31,6 +31,48 @@ export type DocumentList = {
   total: number;
 };
 
+// A generated tax work product (filled 1040 / W-4P / ST-3 / CP504 …) — the
+// document the platform PRODUCES. Listed under /documents so finished tax
+// paperwork is downloadable from the same surface as uploaded documents.
+export type WorkProductSummary = {
+  id: string;
+  kind: string;
+  tax_year: number | null;
+  title: string | null;
+  status: string; // draft | self_approved | pro_approved | …
+  created_at: string;
+  updated_at: string | null;
+};
+
+export async function getWorkProducts(
+  workspaceId: string,
+  entityId: string,
+  opts: { limit?: number } = {}
+): Promise<WorkProductSummary[] | null> {
+  const session = await auth();
+  if (!session?.accessToken) return null;
+  const qs = new URLSearchParams();
+  if (opts.limit) qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  try {
+    const res = await fetch(
+      `${INTERNAL_BASE}/api/workspaces/${workspaceId}/entities/${entityId}/work-products${suffix}`,
+      {
+        headers: {
+          Authorization: `Bearer ${session.accessToken}`,
+          Accept: "application/json",
+        },
+        cache: "no-store",
+      }
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { items?: WorkProductSummary[] };
+    return data.items ?? [];
+  } catch {
+    return null;
+  }
+}
+
 export async function getDocuments(
   workspaceId: string,
   entityId: string,

@@ -86,6 +86,10 @@ class PATRow:
 
     @property
     def is_expired(self) -> bool:
+        # NULL expires_at = a legacy never-expiring PAT. The mint path no
+        # longer issues these (see resolve_ttl), but VERIFICATION must keep
+        # honouring the ones already in the wild — flipping NULL to "expired"
+        # here would silently revoke live production credentials.
         if self.expires_at is None:
             return False
         return self.expires_at <= datetime.now(timezone.utc)
@@ -140,36 +144,69 @@ def constant_time_eq(a: bytes, b: bytes) -> bool:
 # ---------------------------------------------------------------------------
 
 
+class MintRequestError(ValueError):
+    """The mint REQUEST is malformed (missing/blank required field).
+
+    Distinct from a plain ``ValueError`` (= "you asked for more than you have",
+    which the router maps to 403) so the router can answer 400 Bad Request.
+    Subclasses ValueError so existing ``except ValueError`` handlers still fire.
+    """
+
+
 def validate_scopes(
     requested: list[str] | None, owner_allowed: set[str]
 ) -> tuple[str, ...]:
     """A PAT may only grant scopes the OWNER has via their workspace membership.
 
-    Returns the requested subset that overlaps with ``owner_allowed``. If
-    ``requested`` is None, returns the full owner_allowed set (a fresh PAT
-    inherits everything the user can do). If the request asks for a scope the
-    user lacks, raises ``ValueError`` — fail loud rather than silently widen.
+    The scope list is REQUIRED and must be explicit. ``None``, ``[]``, or a
+    list whose entries are all blank/whitespace raises ``MintRequestError`` —
+    an omitted field is never silently upgraded into "everything the owner
+    has". Least privilege is the default; maximum privilege has to be typed
+    out. (Asking for the owner's full set is still perfectly legal — it just
+    has to be a deliberate, explicit request.)
+
+    If the request asks for a scope the user lacks, raises ``ValueError`` —
+    fail loud rather than silently widen.
     """
     if requested is None:
-        return tuple(sorted(owner_allowed))
-    extras = [s for s in requested if s not in owner_allowed]
+        raise MintRequestError(
+            "scopes is required: list the scopes this token may use "
+            "(e.g. ['accounting:read']). Omitting it no longer grants the "
+            "owner's full scope set."
+        )
+    cleaned = sorted({s.strip() for s in requested if isinstance(s, str) and s.strip()})
+    if not cleaned:
+        raise MintRequestError(
+            "scopes must contain at least one non-blank scope "
+            "(e.g. ['accounting:read'])."
+        )
+    extras = [s for s in cleaned if s not in owner_allowed]
     if extras:
         raise ValueError(
             f"Cannot grant scopes the owner lacks: {sorted(extras)!r}"
         )
-    return tuple(sorted({s for s in requested if s}))
+    return tuple(cleaned)
 
 
-def resolve_ttl(ttl_days: int | None) -> datetime | None:
-    """Map a TTL request (in days) to a UTC expires_at.
+def resolve_ttl(ttl_days: int | None) -> datetime:
+    """Map a TTL request (in days) to a bounded UTC expires_at.
 
-    ``None`` or 0 → ``None`` (never expires; reserved for power users who
-    accept the staleness risk). Negative → ValueError. Capped at MAX_TTL_DAYS.
+    Every newly minted PAT expires. ``None`` (or an explicit 0, the old
+    "never" sentinel) raises ``MintRequestError`` — non-expiring credentials
+    are no longer issued. Negative → error. Capped at MAX_TTL_DAYS.
+
+    NOTE: this is MINT-side only. Already-issued PATs with a NULL expires_at
+    keep verifying exactly as before (see ``PATRow.is_expired`` and the
+    ``expires_at IS NULL OR expires_at > now()`` predicates below).
     """
     if ttl_days is None or ttl_days == 0:
-        return None
+        raise MintRequestError(
+            f"ttl_days is required and must be between 1 and {MAX_TTL_DAYS} — "
+            "non-expiring personal access tokens are no longer issued. Omit "
+            f"ttl_days to accept the {DEFAULT_TTL_DAYS}-day default."
+        )
     if ttl_days < 0:
-        raise ValueError("ttl_days must be >= 0 (0 = never expires)")
+        raise MintRequestError(f"ttl_days must be between 1 and {MAX_TTL_DAYS}")
     if ttl_days > MAX_TTL_DAYS:
         raise ValueError(f"ttl_days exceeds maximum ({MAX_TTL_DAYS})")
     return datetime.now(timezone.utc) + timedelta(days=ttl_days)
@@ -412,6 +449,7 @@ __all__ = (
     "DEFAULT_TTL_DAYS",
     "MAX_TTL_DAYS",
     "MAX_ACTIVE_PATS_PER_USER",
+    "MintRequestError",
     "MintedPAT",
     "PATRow",
     "generate_secret",

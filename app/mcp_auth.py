@@ -114,6 +114,33 @@ class MCPAuthMiddleware:
             await self.app(scope, receive, send)
         finally:
             _current_auth.reset(reset)
+            # Best-effort credit metering for customer uc_ keys only. Never
+            # blocks or fails the response (already sent). Service tokens /
+            # PATs / Keycloak sessions are billed elsewhere or unmetered here.
+            try:
+                if ctx.claims.get("uc_key") and ctx.claims.get("_uc_bearer"):
+                    from app.security.uc_api_key import meter_uc_mcp_call
+                    import asyncio
+
+                    # Fire-and-forget: tool name is not available at the ASGI
+                    # gate without buffering the body; meter as a generic call.
+                    # Tool-level metering can be added later inside tools that
+                    # care; this ensures every authenticated uc_ MCP request
+                    # hits the shared credit ledger at least once.
+                    path = scope.get("path", "") or ""
+                    tool_hint = "mcp_request"
+                    if "tools/call" in path:
+                        tool_hint = "tools_call"
+                    elif path.rstrip("/").endswith("/mcp") or path.rstrip("/").endswith("mcp"):
+                        tool_hint = "mcp_http"
+                    asyncio.create_task(
+                        meter_uc_mcp_call(
+                            token=str(ctx.claims["_uc_bearer"]),
+                            tool=tool_hint,
+                        )
+                    )
+            except Exception:  # pragma: no cover - never break the response path
+                pass
 
     @staticmethod
     async def _deny(scope, receive, send, detail: str) -> None:

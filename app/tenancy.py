@@ -35,6 +35,13 @@ class WorkspaceContext:
     agent_id: str | None
     entity_scope: tuple[UUID, ...] | None  # None = role applies to all entities
     hipaa_protected: bool
+    # PAT scope gate. None = this request was NOT authenticated by a PAT
+    # (Keycloak session, service token, local admin, trusted M2M, …) — the
+    # scope check is skipped entirely. A non-None value (including the empty
+    # tuple) means a PAT authenticated the request and the listed scopes are
+    # the ONLY capabilities it may exercise. Empty scopes fail closed.
+    # Distinguish carefully: missing PAT ≠ empty PAT grants.
+    pat_scopes: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -128,12 +135,116 @@ def role_at_least(role: str, minimum: str) -> bool:
     return _ROLE_RANK.get(role, -1) >= _ROLE_RANK.get(minimum, 99)
 
 
+# ---------------------------------------------------------------------------
+# PAT scope enforcement (AND-gate with require_role)
+# ---------------------------------------------------------------------------
+# Personal access tokens carry an explicit scopes list that was intersected
+# against the owner's role grants at mint time. Until this gate, that list
+# was decorative: authentication populated AuthContext.scopes and nothing
+# consulted it for authorization. require_role is the chokepoint (~214 call
+# sites) — extend it so a PAT must satisfy BOTH the workspace role floor AND
+# the scope its token carries. Non-PAT callers (pat_scopes is None) are
+# byte-for-byte unchanged.
+#
+# Required scope is derived from _ROLE_RANK thresholds so it cannot drift
+# from a second hand-copied table. Semantics match _ROLE_GRANTS in
+# app.api.personal_access_tokens:
+#   rank 0-2 (viewer / client_user / bookkeeper)  -> accounting:read
+#   rank 3   (accountant / cpa)                   -> accounting:write
+#   rank >=4 (admin / owner / client_owner / …)   -> accounting:admin
+# Unknown minimum -> None (caller fails closed).
+
+_SCOPE_RANK: dict[str, int] = {
+    "accounting:read": 0,
+    "accounting:write": 1,
+    "accounting:admin": 2,
+}
+
+
+def required_scope_for_role_minimum(minimum: str) -> str | None:
+    """Map a ``require_role`` minimum to the PAT scope that floor demands.
+
+    Derived solely from ``_ROLE_RANK`` so adding a role at an existing rank
+    automatically inherits the correct scope. Returns None for unknown
+    minima — callers MUST deny rather than default to allow.
+    """
+    rank = _ROLE_RANK.get(minimum)
+    if rank is None:
+        return None
+    if rank >= 4:
+        return "accounting:admin"
+    if rank >= 3:
+        return "accounting:write"
+    if rank >= 0:
+        return "accounting:read"
+    return None
+
+
+def _pat_holds_scope(pat_scopes: tuple[str, ...], required: str) -> bool:
+    """True if the PAT's scopes satisfy ``required``.
+
+    Higher scopes imply lower ones (admin ⊇ write ⊇ read), matching the
+    cumulative grant shape in ``_ROLE_GRANTS``. Unknown required scopes
+    fail closed.
+    """
+    req_rank = _SCOPE_RANK.get(required)
+    if req_rank is None:
+        return False
+    return any(_SCOPE_RANK.get(s, -1) >= req_rank for s in pat_scopes)
+
+
+def _pat_scopes_from_auth(auth: AuthContext) -> tuple[str, ...] | None:
+    """Extract PAT scopes for WorkspaceContext, or None if not a PAT request.
+
+    PATs are identified by the ``pat_id`` claim set in ``_try_authenticate_pat``.
+    Service tokens (scopes==("service",)), Keycloak sessions, and local admin
+    tokens never set that claim, so they return None and skip the scope gate.
+    """
+    if auth.claims.get("pat_id") is None:
+        return None
+    return tuple(auth.scopes)
+
+
 def require_role(ctx: WorkspaceContext, minimum: str) -> None:
-    """Raise 403 if the workspace role doesn't meet the minimum."""
+    """Raise 403 if the workspace role OR (when PAT) the token scope is short.
+
+    Two independent gates, both must pass for PAT-authenticated requests:
+
+      1. Role floor — the caller's workspace membership role must be at least
+         ``minimum`` (unchanged pre-existing behaviour).
+      2. PAT scope  — only when ``ctx.pat_scopes is not None``. The token must
+         hold the scope demanded by ``minimum`` (see
+         ``required_scope_for_role_minimum``). Non-PAT callers skip this gate
+         entirely: ``pat_scopes is None`` is NOT the same as an empty grant.
+
+    Failure messages are intentionally distinct so operators can tell a role
+    shortfall from a scope shortfall without guessing.
+    """
     if not role_at_least(ctx.role, minimum):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"role '{ctx.role}' insufficient (needs '{minimum}')",
+        )
+
+    if ctx.pat_scopes is None:
+        # Not a PAT-authenticated request — role check alone is the gate.
+        return
+
+    required = required_scope_for_role_minimum(minimum)
+    if required is None:
+        # Fail closed: an unknown minimum must never default to allow.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"token scope insufficient (cannot determine required scope "
+                f"for role '{minimum}')"
+            ),
+        )
+    if not _pat_holds_scope(ctx.pat_scopes, required):
+        held = ", ".join(ctx.pat_scopes) if ctx.pat_scopes else "(none)"
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"token scope '{held}' insufficient (needs {required})",
         )
 
 
@@ -335,6 +446,7 @@ async def resolve_workspace(
         agent_id=auth.agent_id,
         entity_scope=entity_scope,
         hipaa_protected=hipaa,
+        pat_scopes=_pat_scopes_from_auth(auth),
     )
 
 
@@ -454,6 +566,7 @@ async def resolve_workspace_for_federation(
         agent_id=auth.agent_id,
         entity_scope=None,
         hipaa_protected=hipaa,
+        pat_scopes=_pat_scopes_from_auth(auth),
     )
 
 

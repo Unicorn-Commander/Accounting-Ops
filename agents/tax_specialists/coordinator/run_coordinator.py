@@ -27,16 +27,24 @@ Usage::
 
 Environment variables:
 
-    ACCTOPS_SERVICE_TOKEN   Bearer token with at least "viewer" scope.  Required.
-    ACCTOPS_MCP_URL         Override the MCP endpoint base URL.
-                            Default: http://localhost:8000/mcp
-    ANTHROPIC_API_KEY       Anthropic API key.  Required unless --backend is set.
+    ACCTOPS_SERVICE_TOKEN     Bearer token with at least "viewer" scope.  Required.
+    ACCTOPS_MCP_URL           Override the MCP endpoint base URL.
+                              Default: http://localhost:8000/mcp
+    ANTHROPIC_API_KEY         Anthropic API key.  Required for --backend anthropic.
+    CPATEAM_LLM_ENDPOINT_URL  OpenAI-compatible gateway base URL (--backend openai).
+    CPATEAM_LLM_MODEL         Gateway model name (--backend openai).
+    CPATEAM_LLM_API_KEY       Gateway virtual key (--backend openai).
 
 Notes:
 
-- The coordinator uses the Anthropic Python SDK's native MCP client integration
-  (``anthropic.beta.messages.create`` with ``mcp_servers`` parameter), which
-  requires ``anthropic >= 0.44.0`` and the ``mcp`` extra.
+- Backend "anthropic" uses the Anthropic Python SDK's native MCP client
+  integration (``anthropic.beta.messages.create`` with ``mcp_servers``), which
+  requires ``anthropic >= 0.44.0`` and the ``mcp`` extra. Backend "openai"
+  (the fleet default — ALL LLM calls ride the LiteLLM gateway) performs the
+  coordinator's own two steps (entity sanity check + memo write) as DIRECT MCP
+  tool calls — they are deterministic plumbing, not language tasks — while the
+  specialist subprocesses do their synthesis through the gateway
+  (CPATEAM_LLM_* config).
 - Specialist subprocesses are launched via ``uv run python <runner_path>`` using
   the same Python environment. The service token, MCP URL, and LLM backend flags
   are propagated to every subprocess.
@@ -50,9 +58,11 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -63,21 +73,15 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# Dependency check
+# Dependency check — soft, per backend (mirrors the specialist runners).
+# The anthropic SDK is only required for --backend anthropic; the gateway
+# (openai) path needs the openai + mcp packages instead.
 # ---------------------------------------------------------------------------
 
 try:
     import anthropic
 except ImportError:
-    print(
-        "ERROR: 'anthropic' package not found.\n"
-        "Install the tax-agent extras:\n"
-        "    uv pip install accounting-ops[tax-agents]\n"
-        "or:\n"
-        "    uv pip install 'anthropic>=0.44.0'",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+    anthropic = None  # type: ignore[assignment]
 
 # The dispatch_plan module lives in the same package directory.
 _HERE = pathlib.Path(__file__).parent
@@ -88,6 +92,7 @@ from agents.tax_specialists.coordinator.dispatch_plan import (
     DispatchStep,
     build_dispatch_plan,
 )
+from agents._shared.cpateam_llm import resolve_cpateam_llm
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -216,6 +221,46 @@ def _parse_ids_from_draft(draft_text: str) -> tuple[str, list[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Direct MCP tool calls for the Coordinator's own two steps (openai backend).
+#
+# Doctrine: ALL LLM calls ride the LiteLLM gateway. The coordinator's own two
+# steps — the entity sanity check (call get_form_1120_data, see if data comes
+# back) and the summary memo write (call draft_memo with text the coordinator
+# has ALREADY composed) — are deterministic plumbing, not language tasks.
+# Using an LLM as the relay made them nondeterministic (a model can refuse or
+# paraphrase, corrupting the memo id). On the openai/gateway backend they are
+# therefore DIRECT MCP tool calls: reliable, free, and auditable. The real
+# LLM work (the specialists' synthesis) rides the gateway via the specialist
+# subprocesses (CPATEAM_LLM_* config). The Anthropic backend keeps the SDK's
+# hosted mcp_servers integration unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _mcp_call_tool_sync(
+    mcp_url: str,
+    service_token: str,
+    tool_name: str,
+    args: dict[str, Any],
+) -> tuple[bool, str]:
+    """Call one MCP tool directly (no LLM). Returns (is_error, response_text)."""
+    import asyncio
+
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    async def _run() -> tuple[bool, str]:
+        headers = {"Authorization": f"Bearer {service_token}"}
+        async with streamablehttp_client(mcp_url, headers=headers) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                res = await session.call_tool(tool_name, args)
+                text = "".join(getattr(c, "text", "") for c in res.content)
+                return bool(res.isError), text
+
+    return asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
 # Specialist subprocess runner (called in worker process)
 # ---------------------------------------------------------------------------
 
@@ -229,15 +274,25 @@ def _run_specialist_subprocess(
     model_key: str,
     backend: str | None,
     llm_endpoint_url: str | None,
+    llm_model: str | None,
     verbose: bool,
 ) -> tuple[bool, str]:
     """Launch a specialist runner as a subprocess.
 
     Returns (success: bool, error_message: str).
     On success, error_message is "".
+
+    Uses ``uv run python`` when uv is on PATH (host dev flow) and falls back to
+    the current interpreter otherwise (the app container has no uv — the old
+    hard-coded ``uv`` invocation could never launch a specialist in-container).
     """
+    if shutil.which("uv"):
+        interpreter: list[str] = ["uv", "run", "python"]
+    else:
+        interpreter = [sys.executable]
+
     cmd: list[str] = [
-        "uv", "run", "python",
+        *interpreter,
         str(repo_root / step.runner_path),
         "--workspace-id", step.workspace_id,
         "--entity-id",    step.entity_id,
@@ -252,6 +307,8 @@ def _run_specialist_subprocess(
         cmd += ["--backend", backend]
     if llm_endpoint_url:
         cmd += ["--llm-endpoint-url", llm_endpoint_url]
+    if llm_model:
+        cmd += ["--llm-model", llm_model]
 
     env = os.environ.copy()
     env["ACCTOPS_SERVICE_TOKEN"] = service_token
@@ -284,8 +341,71 @@ def _run_specialist_subprocess(
 # Coordinator MCP call — sanity check + draft_memo
 # ---------------------------------------------------------------------------
 
+class CoordinatorLLM:
+    """The coordinator's own step runtime — Anthropic-direct OR openai/gateway.
+
+    ``backend`` is "anthropic" or "openai". The anthropic path keeps the SDK's
+    hosted mcp_servers integration for the two coordinator steps; the openai
+    path performs those steps as DIRECT MCP tool calls (see the section
+    comment above _mcp_call_tool_sync) while the specialists ride the gateway.
+    """
+
+    def __init__(
+        self,
+        backend: str,
+        *,
+        workspace_id: str,
+        endpoint_url: str = "",
+        model: str = "",
+        api_key: str = "",
+        verbose: bool = False,
+    ) -> None:
+        self.backend = backend
+        self.workspace_id = workspace_id
+        self.endpoint_url = endpoint_url
+        self.model = model
+        self.api_key = api_key
+        self.verbose = verbose
+        self._anthropic_client: Any = None
+        if backend == "anthropic":
+            if anthropic is None:
+                print(
+                    "ERROR: 'anthropic' package not found (required for "
+                    "--backend anthropic).\n"
+                    "    uv pip install 'anthropic>=0.44.0'",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            self._anthropic_client = anthropic.Anthropic()
+
+    def run_task(
+        self,
+        *,
+        system: str,
+        user_msg: str,
+        mcp_url: str,
+        service_token: str,
+        max_tokens: int,
+    ) -> str:
+        """Run one MCP-tool-using LLM task (ANTHROPIC BACKEND ONLY)."""
+        if self.backend != "anthropic":
+            raise RuntimeError(
+                "run_task is anthropic-only; the openai backend performs the "
+                "coordinator's steps as direct MCP tool calls."
+            )
+        response = self._anthropic_client.beta.messages.create(
+            model=self.model or _MODEL_MAP["sonnet"],
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user_msg}],
+            mcp_servers=[_mcp_server_config(mcp_url, service_token)],
+            betas=["mcp-client-2025-04-04"],
+        )
+        return _extract_text(response)
+
+
 def _sanity_check_entity(
-    client: anthropic.Anthropic,
+    llm: CoordinatorLLM,
     entity_id: str,
     tax_year: int,
     mcp_url: str,
@@ -304,15 +424,27 @@ def _sanity_check_entity(
     user_msg = f"entity_id={entity_id} tax_year={tax_year}"
 
     try:
-        response = client.beta.messages.create(
-            model=_MODEL_MAP["sonnet"],  # Always use sonnet for sanity check
-            max_tokens=64,
+        if llm.backend == "openai":
+            # Deterministic: call the tool directly — data came back iff the
+            # payload echoes the requested tax_year (an error payload doesn't).
+            is_err, text = _mcp_call_tool_sync(
+                mcp_url,
+                service_token,
+                "get_form_1120_data",
+                {
+                    "workspace_id": llm.workspace_id,
+                    "entity_id": entity_id,
+                    "tax_year": tax_year,
+                },
+            )
+            return (not is_err) and '"tax_year"' in text
+        text = llm.run_task(
             system=system,
-            messages=[{"role": "user", "content": user_msg}],
-            mcp_servers=[_mcp_server_config(mcp_url, service_token)],
-            betas=["mcp-client-2025-04-04"],
-        )
-        text = _extract_text(response).strip()
+            user_msg=user_msg,
+            mcp_url=mcp_url,
+            service_token=service_token,
+            max_tokens=256,
+        ).strip()
         return "ENTITY_OK" in text
     except Exception as exc:
         print(f"[coordinator] WARNING: sanity check failed: {exc}", file=sys.stderr)
@@ -320,7 +452,7 @@ def _sanity_check_entity(
 
 
 def _write_coordinator_memo(
-    client: anthropic.Anthropic,
+    llm: CoordinatorLLM,
     entity_id: str,
     tax_year: int,
     workspace_id: str,
@@ -374,7 +506,7 @@ def _write_coordinator_memo(
         "Review each specialist DRAFT at the file paths listed in the dispatch plan above.",
         "Resolve all CPA-flagged items (see flag IDs above) before return preparation.",
     ]
-    if any(s.slug == "sc_state_specialist" for s in plan.available_steps()):
+    if any(s.specialist_slug == "sc_state_specialist" for s in plan.available_steps()):
         next_steps.append(
             "SC State Specialist output depends on federal 1120 data — confirm federal "
             "positions before finalizing SC1120."
@@ -427,6 +559,35 @@ def _write_coordinator_memo(
     # Citations = list of output file paths
     citations = [str(r.output_path) for r in results if r.output_path]
 
+    if llm.backend == "openai":
+        # Deterministic: the memo text is already composed above — write it
+        # via a direct draft_memo call instead of asking a model to relay it
+        # verbatim (a model can refuse or paraphrase, corrupting the memo id;
+        # observed live with sonnet-4.6: "I need to pause before executing
+        # this request."). The citation file paths already appear in the memo's
+        # dispatch table.
+        is_err, text = _mcp_call_tool_sync(
+            mcp_url,
+            service_token,
+            "draft_memo",
+            {
+                "workspace_id": workspace_id,
+                "entity_id": entity_id,
+                "tax_year": tax_year,
+                "topic": "coordinator_summary",
+                "content": memo_content,
+                "confidence": "high",
+            },
+        )
+        if is_err:
+            raise RuntimeError(f"draft_memo failed: {text[:400]}")
+        m = re.search(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            text,
+            re.IGNORECASE,
+        )
+        return m.group(0) if m else text[:64]
+
     system = _load_system_prompt()
     user_msg = textwrap.dedent(f"""\
         Write the coordinator summary memo for this run.
@@ -449,16 +610,16 @@ def _write_coordinator_memo(
         After calling draft_memo, output ONLY the returned memo_id UUID. No other text.
     """)
 
-    response = client.beta.messages.create(
-        model=_MODEL_MAP["sonnet"],
-        max_tokens=512,
+    text = llm.run_task(
         system=system,
-        messages=[{"role": "user", "content": user_msg}],
-        mcp_servers=[_mcp_server_config(mcp_url, service_token)],
-        betas=["mcp-client-2025-04-04"],
-    )
-
-    text = _extract_text(response).strip()
+        user_msg=user_msg,
+        mcp_url=mcp_url,
+        service_token=service_token,
+        # The model reproduces the full memo text inside the draft_memo tool
+        # call, so the output budget must cover the memo body — 512 tokens
+        # (the old cap) silently truncated longer memos.
+        max_tokens=8192,
+    ).strip()
     # Extract UUID from response
     m = re.search(
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
@@ -633,6 +794,8 @@ def run(
     service_token: str,
     backend: str | None,
     llm_endpoint_url: str | None,
+    llm_model: str | None = None,
+    llm_api_key: str | None = None,
     *,
     dry_run: bool = False,
     verbose: bool = False,
@@ -702,12 +865,36 @@ def run(
         )
 
     # Step 2 — Sanity check entity via get_form_1120_data (coordinator's own MCP call)
-    client = anthropic.Anthropic()
+    effective_backend = backend or "anthropic"
+    if effective_backend == "openai":
+        # Gateway path: resolve endpoint/model/key (CLI > CPATEAM_LLM_* env >
+        # defaults) exactly like the specialist runners.
+        endpoint, model, api_key = resolve_cpateam_llm(
+            cli_endpoint=llm_endpoint_url,
+            cli_model=llm_model,
+            cli_key=llm_api_key,
+        )
+        llm = CoordinatorLLM(
+            "openai",
+            workspace_id=workspace_id,
+            endpoint_url=endpoint,
+            model=model,
+            api_key=api_key,
+            verbose=verbose,
+        )
+        print(
+            f"[coordinator] LLM backend: openai — specialists via gateway "
+            f"{endpoint} model {model}; coordinator steps = direct MCP calls"
+        )
+    else:
+        llm = CoordinatorLLM("anthropic", workspace_id=workspace_id, verbose=verbose)
+        print("[coordinator] LLM backend: anthropic (direct SDK)")
+
     if verbose:
         print("[coordinator] Sanity-checking entity via get_form_1120_data...")
 
     entity_ok = _sanity_check_entity(
-        client=client,
+        llm=llm,
         entity_id=entity_id,
         tax_year=tax_year,
         mcp_url=mcp_url,
@@ -772,6 +959,7 @@ def run(
                 model_key=model_key,
                 backend=backend,
                 llm_endpoint_url=llm_endpoint_url,
+                llm_model=llm_model,
                 verbose=verbose,
             )
             elapsed = time.monotonic() - t0
@@ -807,7 +995,7 @@ def run(
     print("[coordinator] Writing coordinator memo...")
     try:
         coordinator_memo_id = _write_coordinator_memo(
-            client=client,
+            llm=llm,
             entity_id=entity_id,
             tax_year=tax_year,
             workspace_id=workspace_id,
@@ -937,13 +1125,30 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
+        choices=["anthropic", "openai"],
         default=None,
-        help='LLM backend for specialist runners (e.g. "openai" for local vLLM)',
+        help=(
+            "LLM backend for the coordinator AND specialist runners: "
+            "'anthropic' (direct SDK, default when ANTHROPIC_API_KEY set) or "
+            "'openai' (OpenAI-compatible gateway, default when "
+            "CPATEAM_LLM_ENDPOINT_URL set)."
+        ),
     )
     parser.add_argument(
         "--llm-endpoint-url",
         default=None,
-        help="LLM endpoint URL for specialist runners (e.g. http://<host>:8088/v1)",
+        help=(
+            "OpenAI-compatible endpoint URL (default: $CPATEAM_LLM_ENDPOINT_URL). "
+            "Propagated to specialist runners."
+        ),
+    )
+    parser.add_argument(
+        "--llm-model",
+        default=None,
+        help=(
+            "Model name at the OpenAI-compatible endpoint "
+            "(default: $CPATEAM_LLM_MODEL). Propagated to specialist runners."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -956,6 +1161,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Stream subprocess output and config details to stdout",
     )
     return parser.parse_args(argv)
+
+
+def _resolve_backend(args: argparse.Namespace) -> str:
+    """Determine the backend from flags + env (same heuristic as specialists).
+
+    Priority: explicit --backend > ANTHROPIC_API_KEY (anthropic) >
+    CPATEAM_LLM_ENDPOINT_URL / LLM_ENDPOINT_URL (openai) > anthropic.
+    """
+    if args.backend:
+        return args.backend
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    if os.environ.get("CPATEAM_LLM_ENDPOINT_URL") or os.environ.get("LLM_ENDPOINT_URL"):
+        return "openai"
+    return "anthropic"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -971,10 +1191,13 @@ def main(argv: list[str] | None = None) -> None:
         )
         sys.exit(1)
 
-    if not os.environ.get("ANTHROPIC_API_KEY") and not args.backend and not args.dry_run:
+    backend = _resolve_backend(args)
+
+    if backend == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY") and not args.dry_run:
         print(
-            "ERROR: ANTHROPIC_API_KEY environment variable is required "
-            "(or use --backend with a self-hosted LLM).",
+            "ERROR: ANTHROPIC_API_KEY environment variable is required for "
+            "--backend anthropic (or use --backend openai with the gateway: "
+            "CPATEAM_LLM_ENDPOINT_URL / CPATEAM_LLM_MODEL / CPATEAM_LLM_API_KEY).",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1001,8 +1224,9 @@ def main(argv: list[str] | None = None) -> None:
         model_key=args.model,
         mcp_url=mcp_url,
         service_token=service_token or "dry-run",
-        backend=args.backend,
+        backend=backend,
         llm_endpoint_url=args.llm_endpoint_url,
+        llm_model=args.llm_model,
         dry_run=args.dry_run,
         verbose=args.verbose,
     )
