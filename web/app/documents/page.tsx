@@ -10,13 +10,26 @@
 // review. NOTHING is auto-posted to the ledger.
 
 import Link from "next/link";
-import { ArrowRight, FileText, Image as ImageIcon, Inbox, Receipt } from "lucide-react";
+import {
+  ArrowRight,
+  Download,
+  FileCheck2,
+  FileText,
+  Image as ImageIcon,
+  Inbox,
+  Receipt,
+} from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { DocumentUploader } from "@/components/document-uploader";
 import { EntitySelector } from "@/components/entity-selector";
 import { Card, EmptyState, PageShell, SectionHeader, StatusChip } from "@/components/primitives";
 import { getActiveContext } from "@/lib/active-context";
-import { getDocuments, type UploadedDocument } from "@/lib/documents";
+import {
+  getDocuments,
+  getWorkProducts,
+  type UploadedDocument,
+  type WorkProductSummary,
+} from "@/lib/documents";
 
 export const dynamic = "force-dynamic";
 
@@ -46,10 +59,14 @@ export default async function DocumentsPage() {
     );
   }
 
-  const docList = entity
-    ? await getDocuments(workspace.id, entity.id, { limit: 50 })
-    : null;
+  const [docList, workProducts] = entity
+    ? await Promise.all([
+        getDocuments(workspace.id, entity.id, { limit: 50 }),
+        getWorkProducts(workspace.id, entity.id, { limit: 100 }),
+      ])
+    : [null, null];
   const documents = docList?.documents ?? [];
+  const generated = workProducts ?? [];
 
   // Brand-new workspace with no entities yet: there's nothing to file documents
   // under. Send the user through the Setup Assistant to create their first
@@ -110,6 +127,66 @@ export default async function DocumentsPage() {
           />
         )}
 
+        {/* Generated tax documents (work products) — the paperwork the platform
+            PRODUCES (filled 1040 / W-4P / ST-3 / notice responses …). Listed
+            here so finished tax documents are downloadable from the same place
+            uploaded documents live. Download = the existing re-render-on-demand
+            work-product PDF route (watermarked by status). */}
+        {entity && (
+          <div id="generated-documents" className="mt-8 scroll-mt-6">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-ink-tertiary">
+                Generated tax documents
+              </h2>
+              <Link
+                href="/taxes/forms"
+                className="inline-flex items-center gap-1 text-xs text-ink-secondary hover:text-ink-primary"
+              >
+                Prepare a form <ArrowRight size={12} />
+              </Link>
+            </div>
+
+            {generated.length === 0 ? (
+              <Card>
+                <p className="text-sm text-ink-secondary">
+                  No generated tax documents yet for this business. Prepare one
+                  under{" "}
+                  <Link href="/taxes/forms" className="text-brand-400 hover:underline">
+                    Taxes → Forms
+                  </Link>{" "}
+                  — the finished, downloadable PDF will appear here.
+                </p>
+              </Card>
+            ) : (
+              <Card padded={false}>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[640px] text-sm">
+                    <thead className="text-[10px] uppercase tracking-wider text-ink-tertiary">
+                      <tr className="border-b border-subtle">
+                        <th className="px-5 py-2.5 text-left font-medium">Document</th>
+                        <th className="px-2 py-2.5 text-left font-medium">Tax year</th>
+                        <th className="px-2 py-2.5 text-left font-medium">Status</th>
+                        <th className="px-2 py-2.5 text-left font-medium">Created</th>
+                        <th className="px-5 py-2.5 text-right font-medium">Download</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {generated.map((wp) => (
+                        <WorkProductRow
+                          key={wp.id}
+                          wp={wp}
+                          workspaceId={workspace.id}
+                          entityId={entity.id}
+                        />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            )}
+          </div>
+        )}
+
         {/* Uploaded documents list */}
         {entity && (
           <div id="uploaded-documents" className="mt-8 scroll-mt-6">
@@ -167,6 +244,67 @@ export default async function DocumentsPage() {
       </PageShell>
     </AppShell>
   );
+}
+
+function WorkProductRow({
+  wp,
+  workspaceId,
+  entityId,
+}: {
+  wp: WorkProductSummary;
+  workspaceId: string;
+  entityId: string;
+}) {
+  const pdfHref =
+    `/api/workspaces/${encodeURIComponent(workspaceId)}` +
+    `/entities/${encodeURIComponent(entityId)}` +
+    `/work-products/${encodeURIComponent(wp.id)}/document.pdf?disposition=attachment`;
+  const label = wp.title || wp.kind.toUpperCase();
+
+  return (
+    <tr className="border-b border-subtle/60 last:border-b-0 hover:bg-white/[0.02]">
+      <td className="px-5 py-3">
+        <Link
+          href={`/taxes/work-products/${encodeURIComponent(wp.id)}`}
+          className="flex items-center gap-2.5 hover:text-ink-primary"
+        >
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-elevated text-ink-tertiary">
+            <FileCheck2 size={13} />
+          </span>
+          <span className="text-xs font-medium text-ink-secondary">{label}</span>
+        </Link>
+      </td>
+      <td className="px-2 py-3 font-mono text-xs tabular-nums text-ink-secondary">
+        {wp.tax_year ?? "—"}
+      </td>
+      <td className="px-2 py-3">
+        <WorkProductStatusChip status={wp.status} />
+      </td>
+      <td className="px-2 py-3 font-mono text-[11px] text-ink-tertiary">
+        {wp.created_at
+          ? new Date(wp.created_at).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+            })
+          : "—"}
+      </td>
+      <td className="px-5 py-3 text-right">
+        <a
+          href={pdfHref}
+          className="inline-flex items-center gap-1 rounded-lg bg-brand-500/15 px-2.5 py-1 text-xs font-medium text-brand-400 transition hover:bg-brand-500/25"
+        >
+          <Download size={12} /> PDF
+        </a>
+      </td>
+    </tr>
+  );
+}
+
+function WorkProductStatusChip({ status }: { status: string }) {
+  if (status === "pro_approved") return <StatusChip tone="credit">CPA approved</StatusChip>;
+  if (status === "self_approved") return <StatusChip tone="credit">Self-attested</StatusChip>;
+  if (status === "draft") return <StatusChip tone="pending">Draft</StatusChip>;
+  return <StatusChip tone="ink">{status}</StatusChip>;
 }
 
 function DocRow({ doc }: { doc: UploadedDocument }) {
