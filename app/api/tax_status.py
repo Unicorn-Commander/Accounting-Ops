@@ -276,6 +276,48 @@ async def _bulk_approval_summary(
     return out
 
 
+async def _bulk_journal_summary(
+    session: Any, entity_ids: list[str], tax_years: list[int]
+) -> dict[tuple[str, int], int]:
+    """One SQL pass returning the POSTED journal-entry count per (entity, year).
+
+    Keyed on ``effective_date`` — the date the transaction actually belongs to
+    — not on when the row was created. This is what ``books_status`` reads.
+
+    Reversal/recategorization sources are counted: they are real postings, and
+    the question here is only "does this year have books", not "what do they
+    total".
+    """
+    out: dict[tuple[str, int], int] = {
+        (eid, yr): 0 for eid in entity_ids for yr in tax_years
+    }
+    if not entity_ids or not tax_years:
+        return out
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT
+                    entity_id::text                        AS entity_id,
+                    EXTRACT(YEAR FROM effective_date)::int AS yr,
+                    count(*)::int                          AS cnt
+                FROM journal_entry
+                WHERE entity_id = ANY(CAST(:eids AS uuid[]))
+                  AND EXTRACT(YEAR FROM effective_date) = ANY(CAST(:yrs AS int[]))
+                  AND status = 'posted'
+                GROUP BY entity_id, EXTRACT(YEAR FROM effective_date)
+                """
+            ),
+            {"eids": entity_ids, "yrs": tax_years},
+        )
+    ).mappings().all()
+    for r in rows:
+        key = (r["entity_id"], int(r["yr"]))
+        if key in out:
+            out[key] = int(r["cnt"] or 0)
+    return out
+
+
 async def _bulk_last_specialist_run(
     session: Any, entity_ids: list[str], tax_years: list[int]
 ) -> dict[tuple[str, int], dict | None]:
@@ -350,12 +392,35 @@ def _filing_status(
     return "draft"
 
 
-def _books_status(approval: dict[str, int]) -> str:
-    if approval["total"] == 0:
-        return "no_data"
-    if approval["pending"] > 0:
+def _books_status(approval: dict[str, int], journal: int) -> str:
+    """Whether the books for this entity-year hold anything, and whether the
+    intake queue is drained.
+
+    ``journal`` is the count of POSTED journal entries whose effective_date
+    falls in the tax year — i.e. the actual books.
+
+    This used to be derived from approval-queue counts ALONE, which produced a
+    flatly false answer in the ordinary case.  Two compounding reasons:
+
+      1. An approval row is consumed when it is decided, so a fully reconciled
+         year ends with an empty queue and reported ``no_data`` — exactly
+         backwards.
+      2. ``_bulk_approval_summary`` buckets by ``EXTRACT(YEAR FROM
+         created_at)``, the row's INGEST date, not the transaction date.  Magic
+         Unicorn Inc's 827 bank imports were all ingested on 2026-05-28, so
+         every year from 2022 to 2025 counted zero approvals no matter what
+         the books contained.
+
+    Net effect: Magic Unicorn Inc TY2023 reported ``no_data`` while holding 438
+    posted journal entries, and every reader — human and agent — concluded the
+    books were empty. The journal is the source of truth for "is there data".
+    """
+    if journal > 0:
+        return "in_progress" if approval["pending"] > 0 else "complete"
+    # Nothing posted yet. Rows waiting in the queue still mean work in flight.
+    if approval["total"] > 0:
         return "in_progress"
-    return "complete"
+    return "no_data"
 
 
 # ---------------------------------------------------------------------------
@@ -404,11 +469,15 @@ async def get_tax_status(
                         legal_name,
                         kind                  AS entity_type,
                         country_code,
-                        -- entity.incorporated_at was planned but the column
-                        -- doesn't exist yet on either tenant schema.  Until a
-                        -- migration adds it, the short-year detection below
-                        -- treats every year as a full year (the safe default).
-                        NULL::date            AS incorporated_at,
+                        -- entity.incorporated_at DOES exist and IS populated
+                        -- (Magic Unicorn Inc = 2022-05-11).  This used to be
+                        -- hardcoded `NULL::date` behind a comment claiming the
+                        -- column was never added, which meant short-year
+                        -- detection could never fire and the QSBS §1202
+                        -- milestone was fed a null — while Sentinel's own
+                        -- checks (agents/sentinel/checks/_helpers.py) read the
+                        -- real column and saw a different answer.
+                        incorporated_at,
                         status
                     FROM entity
                     ORDER BY display_name
@@ -433,6 +502,7 @@ async def get_tax_status(
         visible_entity_ids = [r["id"] for r in entity_rows]
         bulk_queue = await _bulk_queue_summary(session, visible_entity_ids, TAX_YEARS)
         bulk_approval = await _bulk_approval_summary(session, visible_entity_ids, TAX_YEARS)
+        bulk_journal = await _bulk_journal_summary(session, visible_entity_ids, TAX_YEARS)
         bulk_specialist = await _bulk_last_specialist_run(
             session, visible_entity_ids, TAX_YEARS
         )
@@ -491,7 +561,7 @@ async def get_tax_status(
 
                 # Derived statuses
                 f_status = _filing_status(q_summary, deadline, today)
-                b_status = _books_status(appr)
+                b_status = _books_status(appr, bulk_journal.get(key, 0))
 
                 years_out.append(
                     {
@@ -499,6 +569,9 @@ async def get_tax_status(
                         "is_short_year": is_short_year,
                         "short_year_start": short_year_start,
                         "books_status": b_status,
+                        # The evidence behind books_status, so a reader never
+                        # has to take the derived word for it again.
+                        "posted_journal_entries": bulk_journal.get(key, 0),
                         "pending_approvals": appr["pending"],
                         "filing_status": f_status,
                         "federal_filing_deadline": deadline_str,
