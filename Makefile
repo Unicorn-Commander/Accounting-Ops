@@ -1,6 +1,6 @@
 # Accounting-Ops — test + CI targets.
 #
-#   make test              unit/smoke tests (no stack needed)
+#   make test              the whole suite (no stack needed — see below)
 #   make integration       stand up the stack, provision it, run integration tests, tear down
 #   make integration-keep  same, but leave the stack running afterwards
 #   make integration-up / integration-down   manage the stack by hand
@@ -20,9 +20,12 @@ else
 CPA_FLAG :=
 endif
 
+# Same invocation the CI unit job runs — no explicit path, so `testpaths` in
+# pyproject.toml is the single place that decides what "the suite" means and
+# local and CI cannot drift apart.
 .PHONY: test
 test:
-	$(PYTEST) tests/smoke -v
+	$(PYTEST) -v
 
 # ---------------------------------------------------------------------------
 # Community Edition self-host

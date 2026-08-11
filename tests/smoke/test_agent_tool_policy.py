@@ -18,7 +18,6 @@ import json
 
 import pytest
 
-from app import agent_tool_policy
 from app.agent_tool_policy import (
     ENV_VAR,
     enforce_tool_policy,

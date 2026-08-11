@@ -454,7 +454,6 @@ async def test_resolve_denied_out_of_scope_entity(
     db: asyncpg.Pool, seeded_workspace: StackConfig
 ) -> None:
     """A member scoped to a different entity cannot resolve an out-of-scope item."""
-    from tests.conftest import TEST_WORKSPACE_B_ENTITY_ID
 
     base, token = seeded_workspace.base_url, seeded_workspace.token
     item_id = await _seed_queue_item(db)

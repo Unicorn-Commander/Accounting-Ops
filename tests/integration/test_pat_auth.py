@@ -15,8 +15,6 @@ mirroring the H2 service-token scope tests.
 """
 from __future__ import annotations
 
-import hashlib
-import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
@@ -26,7 +24,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from app.security.pat import PAT_PREFIX, generate_secret, hash_secret, secret_prefix
+from app.security.pat import generate_secret, hash_secret, secret_prefix
 from tests.conftest import StackConfig
 
 pytestmark = pytest.mark.integration
@@ -164,7 +162,7 @@ async def test_valid_pat_authenticates(
 ) -> None:
     """A live PAT bearer is accepted and resolves to the owner's identity."""
     raw = generate_secret()
-    pat_id = await _seed_pat(
+    await _seed_pat(
         db,
         owner_user_id=pat_user,
         name="itest-valid",
