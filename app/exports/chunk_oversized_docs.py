@@ -90,13 +90,20 @@ logger = logging.getLogger("chunker")
 # Tuning
 # ---------------------------------------------------------------------------
 
-# Hard upper bound on any single chunk passed to Infinity. Infinity's
-# documented limit is 122_880 chars; we leave generous headroom.
+# Hard upper bound on any single chunk passed to the embedder.
+# Retuned 2026-07-25 for Qwen3-Embedding-0.6B. The old 100_000 was sized
+# for bge-large via Infinity, but the Qwen3 embed path caps input well
+# below that, so 100k chunks were being silently truncated -- only 20.9%
+# of the corpus was actually reaching the model.
+# 8k is comfortably inside Qwen3's window (measured OK at 64k) AND is a
+# better retrieval unit: one vector over 100k chars dilutes the signal so
+# far that a matching phrase barely moves the embedding.
+# Env-overridable so a ring can retune without a rebuild; the default is
+# the value above.
 MAX_CHUNK_CHARS = int(os.getenv("TAXKB_MAX_CHUNK_CHARS", "8000"))
 
-# Overlap (in chars) between consecutive chunks. Roughly 5K chars covers a
-# few paragraphs of context, which is enough for cosine-similarity to pull a
-# chunk back even if the matching phrase straddles the boundary.
+# Overlap between consecutive chunks, ~10% of chunk size. Scaled down with
+# MAX_CHUNK_CHARS: 5_000 of overlap on an 8_000 chunk would be 62% duplication.
 OVERLAP_CHARS = int(os.getenv("TAXKB_OVERLAP_CHARS", "800"))
 
 # Threshold at which we start chunking. Anything <= this stays as a single
