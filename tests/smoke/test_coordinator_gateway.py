@@ -47,6 +47,9 @@ def test_openai_path_resolves_via_cpateam_config():
     CPATEAM_LLM_* resolver (never the vision LLM_* knobs)."""
     src = pathlib.Path(rc.__file__.replace(".pyc", ".py")).read_text(encoding="utf-8")
     assert "resolve_cpateam_llm(" in src
+    # The coordinator's own two steps are deterministic direct MCP tool calls
+    # on the openai backend (never an LLM relay of already-composed text).
+    assert "_mcp_call_tool_sync(" in src
 
 
 def test_openai_runtime_needs_no_anthropic_sdk_or_key(monkeypatch):
