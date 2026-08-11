@@ -27,8 +27,10 @@ from agents.sentinel.checks._helpers import (
     days_until,
     estimated_tax_due_dates,
     federal_1120_deadline,
+    federal_return_deadline,
     form_7004_deadline,
     list_active_entities,
+    return_form_for_kind,
     sc1120_deadline,
 )
 
@@ -120,42 +122,45 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
         #   For a C/S corp incorporated 2023, in May 2026 we care about 2025 returns
         #   (due 4/15/2026). Compute tax_year as "the most recent year for which a
         #   return is or recently was due".
-        if ent.kind in CORP_KINDS:
+        return_form = return_form_for_kind(ent.kind)
+        if return_form:
             candidate_years = []
             for ty in (today.year - 2, today.year - 1, today.year):
                 if ent.incorporated_at and ent.incorporated_at.year > ty:
                     continue
                 candidate_years.append(ty)
             for tax_year in candidate_years:
-                # 1120
-                fed_due = federal_1120_deadline(tax_year)
+                # Federal return — 1120 / 1120-S / 1065 / 1040 by entity kind.
+                # Flow-throughs are due a month earlier than 1120 and 1040 filers.
+                fed_due = federal_return_deadline(tax_year, ent.kind)
                 d = days_until(fed_due, today)
                 if 0 <= d <= DEADLINE_WINDOW_DAYS_TAX:
                     res = await _flag_deadline(
-                        ctx, ent, form="1120", due=fed_due, days=d,
+                        ctx, ent, form=return_form, due=fed_due, days=d,
                         severity="high" if d <= 14 else "medium",
                     )
                     findings += 1
                     if res.get("ok"):
                         actions += 1
 
-                # Form 7004 extension (same date)
-                ext_due = form_7004_deadline(tax_year)
-                d_ext = days_until(ext_due, today)
-                if 0 <= d_ext <= DEADLINE_WINDOW_DAYS_EXTENSION:
-                    res = await _flag_deadline(
-                        ctx, ent, form="7004", due=ext_due, days=d_ext,
-                        severity="medium",
-                        extra={"note": "File 7004 if 1120 won't be ready."},
-                    )
-                    findings += 1
-                    if res.get("ok"):
-                        actions += 1
+                # Form 7004 extension (business returns only; 1040 filers use 4868)
+                if return_form != "1040":
+                    ext_due = form_7004_deadline(tax_year, ent.kind)
+                    d_ext = days_until(ext_due, today)
+                    if 0 <= d_ext <= DEADLINE_WINDOW_DAYS_EXTENSION:
+                        res = await _flag_deadline(
+                            ctx, ent, form="7004", due=ext_due, days=d_ext,
+                            severity="medium",
+                            extra={"note": f"File 7004 if {return_form} won't be ready."},
+                        )
+                        findings += 1
+                        if res.get("ok"):
+                            actions += 1
 
                 # SC1120 — only if SC-registered (proxy: country_code US and entity has SC presence)
                 # For Acme (SC C-Corp), this fires. Other US C-Corps without
                 # SC presence get a false positive; future: add jurisdiction column.
-                if ent.country_code == "US":
+                if ent.country_code == "US" and ent.kind == "c_corp":
                     sc_due = sc1120_deadline(tax_year)
                     d_sc = days_until(sc_due, today)
                     if 0 <= d_sc <= DEADLINE_WINDOW_DAYS_TAX:
@@ -168,8 +173,12 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
                         if res.get("ok"):
                             actions += 1
 
-            # Estimated tax dates for the CURRENT year
-            for est_due in estimated_tax_due_dates(today.year):
+            # Estimated tax dates for the CURRENT year. Entity-level obligation
+            # for corporations; for flow-throughs the owners pay personally, so
+            # do not flag it against the partnership/LLC itself.
+            for est_due in (
+                estimated_tax_due_dates(today.year) if ent.kind in CORP_KINDS else []
+            ):
                 d_est = days_until(est_due, today)
                 if 0 <= d_est <= DEADLINE_WINDOW_DAYS_EST:
                     res = await _flag_deadline(
