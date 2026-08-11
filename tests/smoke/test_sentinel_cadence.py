@@ -191,7 +191,7 @@ async def test_fresh_workspace_runs_everything_on_first_cycle(monkeypatch):
     cfg = _config(last_run_at=None)
     ran = _install_runner_fakes(monkeypatch, config=cfg, check_state={})
 
-    result = await run_sentinel.run_workspace_cycle(cfg.workspace_id, "New Co")
+    result = await run_sentinel.run_workspace_cycle(cfg.workspace_id, "New Co", now=NOW)
 
     assert set(ran) == set(cfg.enabled_checks)
     assert result["checks_run"] == 3
@@ -208,7 +208,7 @@ async def test_cadence_gates_checks_between_runs(monkeypatch):
     }
     ran = _install_runner_fakes(monkeypatch, config=cfg, check_state=state)
 
-    result = await run_sentinel.run_workspace_cycle(cfg.workspace_id, "Acme")
+    result = await run_sentinel.run_workspace_cycle(cfg.workspace_id, "Acme", now=NOW)
 
     assert ran == ["regulatory_updates"]
     assert result["checks_run"] == 1
@@ -223,7 +223,7 @@ async def test_workspace_interval_skips_the_whole_cycle(monkeypatch):
     cfg = _config(check_interval_minutes=7 * 24 * 60, last_run_at=_ago(hours=6))
     ran = _install_runner_fakes(monkeypatch, config=cfg, check_state={})
 
-    result = await run_sentinel.run_workspace_cycle(cfg.workspace_id, "Weekly Co")
+    result = await run_sentinel.run_workspace_cycle(cfg.workspace_id, "Weekly Co", now=NOW)
 
     assert ran == []
     assert result["skipped"] == "workspace_not_due"
@@ -237,7 +237,7 @@ async def test_force_bypasses_both_gates(monkeypatch):
     ran = _install_runner_fakes(monkeypatch, config=cfg, check_state=state)
 
     result = await run_sentinel.run_workspace_cycle(
-        cfg.workspace_id, "Acme", force=True
+        cfg.workspace_id, "Acme", force=True, now=NOW
     )
 
     assert set(ran) == set(cfg.enabled_checks)
@@ -249,7 +249,7 @@ async def test_autonomy_off_still_short_circuits(monkeypatch):
     cfg = _config(autonomy_level=AutonomyLevel.OFF)
     ran = _install_runner_fakes(monkeypatch, config=cfg, check_state={})
 
-    result = await run_sentinel.run_workspace_cycle(cfg.workspace_id, "Off Co")
+    result = await run_sentinel.run_workspace_cycle(cfg.workspace_id, "Off Co", now=NOW)
 
     assert ran == []
     assert result["skipped"] == "autonomy_off"
@@ -264,7 +264,7 @@ async def test_missing_check_state_table_falls_back_to_running_everything(monkey
     cfg = _config(last_run_at=_ago(hours=7))
     ran = _install_runner_fakes(monkeypatch, config=cfg, check_state={})
 
-    result = await run_sentinel.run_workspace_cycle(cfg.workspace_id, "Acme")
+    result = await run_sentinel.run_workspace_cycle(cfg.workspace_id, "Acme", now=NOW)
 
     assert set(ran) == set(cfg.enabled_checks)
     assert result["checks_deferred"] == 0
