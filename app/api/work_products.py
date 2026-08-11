@@ -213,7 +213,7 @@ async def get_work_product_pdf(
     filename = f"{row['kind']}-{row.get('tax_year') or ''}.pdf".replace("--", "-")
     headers = {"Content-Disposition": f'{disp}; filename="{filename}"'}
     if row["status"] == "draft":
-        headers["X-Draft-Notice"] = "DRAFT — review required before signing"
+        headers["X-Draft-Notice"] = "DRAFT - review required before signing"
     return Response(content=pdf_bytes, media_type=content_type, headers=headers)
 
 
