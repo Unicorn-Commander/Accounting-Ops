@@ -61,14 +61,48 @@ async def list_active_entities(session: AsyncSession) -> list[EntitySummary]:
     return out
 
 
-def federal_1120_deadline(tax_year: int) -> dt.date:
-    """Federal Form 1120 deadline: April 15 of (tax_year + 1), advance off weekends."""
-    d = dt.date(tax_year + 1, 4, 15)
+def _roll_off_weekend(d: dt.date) -> dt.date:
     if d.weekday() == 5:
         d += dt.timedelta(days=2)
     elif d.weekday() == 6:
         d += dt.timedelta(days=1)
     return d
+
+
+# Calendar-year federal return due dates, by entity kind. Flow-throughs
+# (1120-S / 1065) are due a full month before 1120 and 1040 filers.
+RETURN_FORM_BY_KIND = {
+    "c_corp": "1120",
+    "s_corp": "1120-S",
+    "partnership": "1065",
+    "llc": "1065",
+    "sole_proprietorship": "1040",
+    "personal": "1040",
+}
+
+_RETURN_DUE_MONTH = {"1120": 4, "1120-S": 3, "1065": 3, "1040": 4}
+
+
+def return_form_for_kind(kind: str) -> str | None:
+    """Federal return a given entity kind files, or None if we do not prepare one."""
+    return RETURN_FORM_BY_KIND.get((kind or "").lower())
+
+
+def federal_return_deadline(tax_year: int, kind: str) -> dt.date | None:
+    """Federal return deadline for a calendar-year filer of this entity kind.
+
+    Returns None for kinds we do not prepare a return for (nonprofit, trust,
+    estate, other) rather than implying a date we cannot stand behind.
+    """
+    form = return_form_for_kind(kind)
+    if form is None:
+        return None
+    return _roll_off_weekend(dt.date(tax_year + 1, _RETURN_DUE_MONTH[form], 15))
+
+
+def federal_1120_deadline(tax_year: int) -> dt.date:
+    """Federal Form 1120 deadline: April 15 of (tax_year + 1), advance off weekends."""
+    return _roll_off_weekend(dt.date(tax_year + 1, 4, 15))
 
 
 def sc1120_deadline(tax_year: int) -> dt.date:
@@ -86,9 +120,9 @@ def estimated_tax_due_dates(year: int) -> list[dt.date]:
     ]
 
 
-def form_7004_deadline(tax_year: int) -> dt.date:
-    """Form 7004 (automatic extension request) — same date as 1120 deadline."""
-    return federal_1120_deadline(tax_year)
+def form_7004_deadline(tax_year: int, kind: str = "c_corp") -> dt.date:
+    """Form 7004 (automatic extension) — due on the return's own original due date."""
+    return federal_return_deadline(tax_year, kind) or federal_1120_deadline(tax_year)
 
 
 def days_until(target: dt.date, today: dt.date | None = None) -> int:
@@ -101,7 +135,10 @@ __all__ = [
     "days_until",
     "estimated_tax_due_dates",
     "federal_1120_deadline",
+    "federal_return_deadline",
     "form_7004_deadline",
     "list_active_entities",
+    "return_form_for_kind",
     "sc1120_deadline",
+    "RETURN_FORM_BY_KIND",
 ]

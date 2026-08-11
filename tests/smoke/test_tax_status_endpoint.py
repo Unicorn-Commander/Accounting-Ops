@@ -168,15 +168,91 @@ def test_filing_status_all_reviewed():
 
 
 def test_books_status_no_data():
+    """Nothing posted AND nothing queued is the only real 'no data'."""
     mod = _load()
-    assert mod._books_status({"pending": 0, "total": 0}) == "no_data"
+    assert mod._books_status({"pending": 0, "total": 0}, 0) == "no_data"
 
 
 def test_books_status_in_progress():
     mod = _load()
-    assert mod._books_status({"pending": 3, "total": 10}) == "in_progress"
+    assert mod._books_status({"pending": 3, "total": 10}, 120) == "in_progress"
 
 
 def test_books_status_complete():
     mod = _load()
-    assert mod._books_status({"pending": 0, "total": 7}) == "complete"
+    assert mod._books_status({"pending": 0, "total": 7}, 120) == "complete"
+
+
+# --- regression: books_status must read the JOURNAL, not the queue ---------
+#
+# Magic Unicorn Inc TY2023 holds 438 posted journal entries and an EMPTY
+# approval queue (every row was decided in July 2026). The old
+# queue-only derivation reported "no_data" for it, and that single wrong word
+# is why multiple readers concluded Aaron's books were empty while four years
+# of reconciled history sat in the ledger.
+
+
+def test_reconciled_year_with_drained_queue_is_complete_not_no_data():
+    mod = _load()
+    assert mod._books_status({"pending": 0, "total": 0}, 438) == "complete"
+
+
+def test_posted_entries_outrank_an_empty_queue_even_with_pending():
+    mod = _load()
+    assert mod._books_status({"pending": 3, "total": 3}, 438) == "in_progress"
+
+
+def test_queued_but_unposted_year_is_in_progress():
+    """Rows waiting to be decided are work in flight, not 'no data'."""
+    mod = _load()
+    assert mod._books_status({"pending": 12, "total": 12}, 0) == "in_progress"
+
+
+# ---------------------------------------------------------------------------
+# 5b. incorporated_at must come from the real column
+# ---------------------------------------------------------------------------
+
+
+def test_entity_query_selects_the_real_incorporated_at_column():
+    """The entity SELECT must not hardcode NULL for incorporated_at.
+
+    It did for a long time, behind a comment claiming the column had never
+    been added. The column exists and is populated (Magic Unicorn Inc =
+    2022-05-11); hardcoding NULL made short-year detection dead code and fed
+    the QSBS §1202 milestone check a null from the API path.
+    """
+    import inspect
+
+    mod = _load()
+    src = inspect.getsource(mod.get_tax_status)
+    assert "NULL::date            AS incorporated_at" not in src
+    assert "NULL::date AS incorporated_at" not in src
+    assert "incorporated_at," in src
+
+
+def test_short_year_detection_fires_for_a_mid_year_incorporation():
+    """A company incorporated 2022-05-11 has a SHORT first tax year."""
+    mod = _load()
+    inc = dt.date(2022, 5, 11)
+    # This mirrors the expression in get_tax_status.
+    is_short = bool(inc and inc.year == 2022 and inc > dt.date(2022, 1, 1))
+    assert is_short is True
+    # ...and a full year for every subsequent year.
+    assert bool(inc and inc.year == 2023 and inc > dt.date(2023, 1, 1)) is False
+
+
+def test_bulk_journal_summary_exists_and_is_keyed_on_effective_date():
+    """books_status must bucket by the transaction date, not the ingest date.
+
+    _bulk_approval_summary buckets on created_at, so Magic Unicorn Inc's 827
+    bank imports — all ingested on 2026-05-28 — counted zero for every year
+    from 2022 to 2025. The journal helper must not repeat that.
+    """
+    import inspect
+
+    mod = _load()
+    assert hasattr(mod, "_bulk_journal_summary")
+    src = inspect.getsource(mod._bulk_journal_summary)
+    assert "effective_date" in src
+    assert "created_at" not in src
+    assert "'posted'" in src
