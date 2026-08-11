@@ -25,17 +25,15 @@ load-bearing for correctness.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import date
-from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.journal.posting import (
     PostingOutcome,
-    PostingRefusal,
     _MAX_CHAIN_RETRIES,
     _ChainInsertExhausted,
     _ChainInsertIdempotent,
@@ -353,10 +351,6 @@ def test_post_journal_entry_succeeds_after_one_chain_race(monkeypatch):
 # ---------------------------------------------------------------------------
 # Test fake session for the chain-insert helper
 # ---------------------------------------------------------------------------
-
-
-import contextlib
-from unittest.mock import MagicMock
 
 
 class _FakeChainSession:

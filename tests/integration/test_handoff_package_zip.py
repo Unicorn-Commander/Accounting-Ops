@@ -17,8 +17,6 @@ also checks that the returned bytes start with PK (ZIP magic).
 from __future__ import annotations
 
 import io
-import os
-import tempfile
 import zipfile
 from pathlib import Path
 

@@ -113,12 +113,10 @@ import logging
 import os
 import sys
 import time
-from collections import Counter, defaultdict
 from dataclasses import dataclass, asdict
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
 from uuid import UUID, uuid4
 
 # ---------------------------------------------------------------------------
@@ -131,11 +129,16 @@ sys.path.insert(0, str(WORKTREE_ROOT))
 # ---------------------------------------------------------------------------
 # Platform modules (pure / no DB for categorization+materiality)
 # ---------------------------------------------------------------------------
-from app.categorization.engine import categorize_transaction_async
-from app.categorization.llm import LLMCategorizer
-from app.config import get_settings
-from app.journal.materiality import evaluate, SECTION_274D_CATEGORIES
-from app.journal.posting import CATEGORY_TO_ACCOUNT, post_journal_entry, PostingOutcome, PostingRefusal
+from app.categorization.engine import categorize_transaction_async  # noqa: E402
+from app.categorization.llm import LLMCategorizer  # noqa: E402
+from app.config import get_settings  # noqa: E402
+from app.journal.materiality import evaluate  # noqa: E402
+from app.journal.posting import (  # noqa: E402
+    CATEGORY_TO_ACCOUNT,
+    post_journal_entry,
+    PostingOutcome,
+    PostingRefusal,
+)
 
 # ---------------------------------------------------------------------------
 # Logging

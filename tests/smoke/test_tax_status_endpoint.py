@@ -232,7 +232,6 @@ def test_entity_query_selects_the_real_incorporated_at_column():
 
 def test_short_year_detection_fires_for_a_mid_year_incorporation():
     """A company incorporated 2022-05-11 has a SHORT first tax year."""
-    mod = _load()
     inc = dt.date(2022, 5, 11)
     # This mirrors the expression in get_tax_status.
     is_short = bool(inc and inc.year == 2022 and inc > dt.date(2022, 1, 1))

@@ -73,7 +73,7 @@ def test_check_registry_complete():
 def test_autonomy_level_enum_values():
     from agents.sentinel.config import AutonomyLevel
 
-    assert {l.value for l in AutonomyLevel} == {
+    assert {a.value for a in AutonomyLevel} == {
         "off", "watch_only", "draft_and_flag", "fully_autonomous"
     }
 

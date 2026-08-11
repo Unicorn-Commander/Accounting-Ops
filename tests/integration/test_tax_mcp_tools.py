@@ -22,11 +22,7 @@ Skips cleanly when the stack isn't reachable.
 """
 from __future__ import annotations
 
-import json
-import uuid
-
 import asyncpg
-import httpx
 import pytest
 
 from tests.conftest import (

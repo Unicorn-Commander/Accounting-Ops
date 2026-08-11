@@ -45,7 +45,6 @@ from tests.conftest import (
 from tests.integration.conftest import (
     ENTITY_B_ID,
     ENTITY_B_EXTERNAL_ACCOUNT,
-    ENTITY_B_SLUG,
     _ensure_entity_b,
     _ensure_entity_b_mapping,
     _set_membership,

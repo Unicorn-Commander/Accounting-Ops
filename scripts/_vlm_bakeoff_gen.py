@@ -251,7 +251,8 @@ def doc4():
         d.text((W - 24 - d.textlength(ps, font=mono), yy), ps, font=mono, fill="black")
         yy += 26
     yy += 6
-    center("------------------------------", yy, f(MONO, 12)); yy += 24
+    center("------------------------------", yy, f(MONO, 12))
+    yy += 24
 
     subtotal = 28.00
     tax = 1.96
@@ -265,7 +266,8 @@ def doc4():
         d.text((W - 24 - d.textlength(vs, font=ff), yy), vs, font=ff, fill="black")
         yy += 28
     yy += 8
-    center("VISA ****1187   APPROVED", yy, f(MONO, 11)); yy += 30
+    center("VISA ****1187   APPROVED", yy, f(MONO, 11))
+    yy += 30
     center("Thank you!", yy, f(FONT, 13))
 
     save(img, "doc4_receipt_cafe", {
@@ -361,5 +363,9 @@ def doc5():
 
 
 if __name__ == "__main__":
-    doc1(); doc2(); doc3(); doc4(); doc5()
+    doc1()
+    doc2()
+    doc3()
+    doc4()
+    doc5()
     print("DONE generating", OUTDIR)

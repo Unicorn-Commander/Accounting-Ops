@@ -133,7 +133,14 @@ def test_computed_summary_matches_the_form_lines(payload: dict) -> None:
 
 def test_end_to_end_compute_then_render(payload: dict) -> None:
     """The full path: assets -> engine -> provenance guard -> filled PDF."""
-    from app.exports.f4562_fill import render_4562
+    from app.exports.f4562_fill import _f4562_form_path, render_4562
+
+    # The IRS PDFs are gitignored, so a fresh checkout (CI included) has none.
+    # Same guard as tests/unit/test_form_4562_render.py — the provenance
+    # assertions above are the point of this module and still run.
+    source = _f4562_form_path(2024)
+    if not source.exists():
+        pytest.skip(f"{source.name} not present — run scripts/download_irs_forms.sh 4562")
 
     _assert_provenance(payload["inputs"])
     pdf_bytes, content_type = render_4562(2024, WatermarkMode.DRAFT, payload["inputs"])

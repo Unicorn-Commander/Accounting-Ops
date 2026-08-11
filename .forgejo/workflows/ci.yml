@@ -5,12 +5,15 @@ on:
     branches:
       - main
       - "feat/**"
+      - "fix/**"
   pull_request:
     types: [opened, synchronize, reopened]
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Unit / smoke tier — no docker needed. Always-green baseline + lint + collect.
+  # Unit / smoke tier — no docker needed. Lint + every test that runs without a
+  # stack. The lint step is blocking and runs first, so it has to stay clean or
+  # nothing below it executes.
   # ---------------------------------------------------------------------------
   unit:
     runs-on: docker
@@ -33,13 +36,17 @@ jobs:
         # gating CI so this test foundation stays green on day one.
         run: ruff check app || true
 
-      - name: Smoke tests
-        run: pytest tests/smoke -v
-
-      - name: Collect integration tests (syntax + import check)
-        # Proves the integration tests are importable/collectable even though
-        # they won't run here (no stack) — they self-skip on collection.
-        run: pytest -m integration --collect-only -q tests/integration
+      - name: Test suite (no stack)
+        # No explicit path: `testpaths = ["tests"]` in pyproject.toml decides
+        # the set, so a tier added under tests/ is gated the day it lands
+        # instead of waiting for someone to widen this line. tests/smoke was
+        # the only path here before, which left tests/unit and the ~17
+        # stack-free tests under tests/integration gating nothing.
+        #
+        # The stack-bound integration tests self-skip when no compose stack is
+        # reachable, and importing them here is the same syntax/import check
+        # the old --collect-only step gave us.
+        run: pytest -v
 
   # ---------------------------------------------------------------------------
   # Integration tier — builds the images and runs the real pipeline against a
@@ -57,6 +64,11 @@ jobs:
   # ---------------------------------------------------------------------------
   integration:
     runs-on: docker
+    # Only on main and on pull requests. This job stands up a real compose
+    # stack, so letting it fire on every push to a feat/** or fix/** branch
+    # would run several of them concurrently on one runner for what is usually
+    # a work-in-progress commit. The unit job above still gates every branch.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     # Use a docker-capable image. The CLI + compose plugin are installed in the
     # first step if the base image doesn't ship them.
     container:

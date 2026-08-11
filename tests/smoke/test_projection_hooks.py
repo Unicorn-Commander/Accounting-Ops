@@ -85,8 +85,8 @@ def test_project_journal_entry_posted_with_source_hash_adds_link(recorder):
         source_document_hash="abc123",
     )
     labels = [c["label"] for c in recorder]
-    assert any(l.startswith("journal_entry:") for l in labels)
-    assert any(l.startswith("je_supported_by:") for l in labels)
+    assert any(label.startswith("journal_entry:") for label in labels)
+    assert any(label.startswith("je_supported_by:") for label in labels)
 
 
 def test_project_recategorization_schedules_reversal_and_restatement(recorder):
@@ -103,8 +103,8 @@ def test_project_recategorization_schedules_reversal_and_restatement(recorder):
         effective_date=date(2025, 2, 2), payee="p",
     )
     labels = [c["label"] for c in recorder]
-    assert any(l.startswith("recat_reversal:") for l in labels)
-    assert any(l.startswith("recat_restated:") for l in labels)
+    assert any(label.startswith("recat_reversal:") for label in labels)
+    assert any(label.startswith("recat_restated:") for label in labels)
     assert len(recorder) == 2
 
 
