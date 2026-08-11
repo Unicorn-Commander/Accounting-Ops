@@ -222,9 +222,8 @@ async def test_analyze_pending_approvals_creates_recommendations(
         # call it directly via the DB to exercise the recommendation table logic.
         if r_analyze.status_code == 404:
             # Direct invocation: call the tool module synchronously
-            import asyncio
             from app.tools.analyze_pending_approvals import analyze_pending_approvals
-            from unittest.mock import patch, AsyncMock, MagicMock
+            from unittest.mock import patch, AsyncMock
             from app.tenancy import WorkspaceContext
 
             mock_ctx = WorkspaceContext(

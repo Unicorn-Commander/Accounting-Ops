@@ -1,13 +1,17 @@
 # Accounting-Ops — test + CI targets.
 #
-#   make test              unit/smoke tests (no stack needed)
+#   make test              the whole suite (what CI runs; see the caveat below)
+#   make test-fast         stack-free tiers only (smoke + unit)
 #   make integration       stand up the stack, provision it, run integration tests, tear down
 #   make integration-keep  same, but leave the stack running afterwards
 #   make integration-up / integration-down   manage the stack by hand
 #   make knowledge-refresh run the Tax Knowledge Curator (requires running app container)
 #
 # Integration tests require Docker. They SKIP cleanly when the stack is not up,
-# so `make test` is always safe on a bare machine.
+# so `make test` is safe on a bare machine. It is NOT read-only when a stack IS
+# up: the integration tier seeds and mutates the stack's database, so on a
+# machine with the stack running, `make test` writes to it. Use `make test-fast`
+# for the stack-free tiers only.
 
 PY ?= python3
 PYTEST ?= $(PY) -m pytest
@@ -20,9 +24,18 @@ else
 CPA_FLAG :=
 endif
 
+# Same invocation the CI unit job runs — no explicit path, so `testpaths` in
+# pyproject.toml is the single place that decides what "the suite" means and
+# local and CI cannot drift apart.
 .PHONY: test
 test:
-	$(PYTEST) tests/smoke -v
+	$(PYTEST) -v
+
+# The stack-free tiers only. Identical to what CI's `unit` job runs, and the
+# one to reach for when a stack happens to be up and you do not want the
+# integration tier writing to it.
+test-fast:
+	$(PYTEST) -v tests/smoke tests/unit
 
 # ---------------------------------------------------------------------------
 # Community Edition self-host

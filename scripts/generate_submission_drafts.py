@@ -34,7 +34,6 @@ sys.path.insert(0, str(ROOT))
 
 from app.exports.cover_sheet import (  # noqa: E402
     CoverSheetData,
-    DEFAULT_RETURN_ADDRESS,
     generate_cover_sheet_pdf,
 )
 from app.exports.form_prefill import generate_form_pdf  # noqa: E402
@@ -200,7 +199,7 @@ def generate_for_entity_year(
             "SC1120-V payment voucher ($25.00 license fee)",
             "Check for $25.00, payable to South Carolina Department of Revenue",
             "Form SC2848 Power of Attorney designating the entity's CPA"
-            if tax_year == 2023 else f"Form SC2848 POA (if not already on file)",
+            if tax_year == 2023 else "Form SC2848 POA (if not already on file)",
             "Reasonable-cause cure letter (signed by the entity's CPA)"
             if tax_year == 2023 else None,
         ],
