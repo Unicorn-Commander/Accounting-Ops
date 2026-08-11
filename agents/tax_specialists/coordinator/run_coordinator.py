@@ -40,9 +40,11 @@ Notes:
 - Backend "anthropic" uses the Anthropic Python SDK's native MCP client
   integration (``anthropic.beta.messages.create`` with ``mcp_servers``), which
   requires ``anthropic >= 0.44.0`` and the ``mcp`` extra. Backend "openai"
-  (the fleet default — ALL LLM calls ride the LiteLLM gateway) uses an
-  OpenAI-compatible client with a manual MCP tool loop, for the coordinator's
-  own calls AND the specialist subprocesses.
+  (the fleet default — ALL LLM calls ride the LiteLLM gateway) performs the
+  coordinator's own two steps (entity sanity check + memo write) as DIRECT MCP
+  tool calls — they are deterministic plumbing, not language tasks — while the
+  specialist subprocesses do their synthesis through the gateway
+  (CPATEAM_LLM_* config).
 - Specialist subprocesses are launched via ``uv run python <runner_path>`` using
   the same Python environment. The service token, MCP URL, and LLM backend flags
   are propagated to every subprocess.
@@ -219,140 +221,43 @@ def _parse_ids_from_draft(draft_text: str) -> tuple[str, list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# OpenAI-compatible (gateway) path for the Coordinator's OWN LLM calls.
+# Direct MCP tool calls for the Coordinator's own two steps (openai backend).
 #
-# Doctrine: ALL LLM calls go through the LiteLLM gateway. The Anthropic SDK's
-# hosted mcp_servers integration is Anthropic-direct by design, so the gateway
-# path implements the same manual MCP tool-call loop the specialist runners
-# use (mcp.client.streamable_http + an OpenAI-compatible client). Endpoint /
-# model / key resolve via resolve_cpateam_llm (CPATEAM_LLM_* env).
+# Doctrine: ALL LLM calls ride the LiteLLM gateway. The coordinator's own two
+# steps — the entity sanity check (call get_form_1120_data, see if data comes
+# back) and the summary memo write (call draft_memo with text the coordinator
+# has ALREADY composed) — are deterministic plumbing, not language tasks.
+# Using an LLM as the relay made them nondeterministic (a model can refuse or
+# paraphrase, corrupting the memo id). On the openai/gateway backend they are
+# therefore DIRECT MCP tool calls: reliable, free, and auditable. The real
+# LLM work (the specialists' synthesis) rides the gateway via the specialist
+# subprocesses (CPATEAM_LLM_* config). The Anthropic backend keeps the SDK's
+# hosted mcp_servers integration unchanged.
 # ---------------------------------------------------------------------------
 
-# Maximum tool-call iterations for the coordinator's own (tiny) LLM tasks.
-_MAX_OWN_LOOP_ITERATIONS = 8
 
-
-def _mcp_tool_to_openai_function(tool: Any) -> dict[str, Any]:
-    """Convert an MCP ``Tool`` descriptor to an OpenAI function-calling schema."""
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description or "",
-            "parameters": (
-                tool.inputSchema
-                if tool.inputSchema
-                else {"type": "object", "properties": {}}
-            ),
-        },
-    }
-
-
-async def _openai_mcp_task(
-    *,
-    system: str,
-    user_msg: str,
+def _mcp_call_tool_sync(
     mcp_url: str,
     service_token: str,
-    llm_endpoint_url: str,
-    llm_model: str,
-    llm_api_key: str,
-    max_tokens: int,
-    workspace_id: str,
-    verbose: bool = False,
-) -> str:
-    """Run one bounded LLM task with MCP tool access via the gateway.
+    tool_name: str,
+    args: dict[str, Any],
+) -> tuple[bool, str]:
+    """Call one MCP tool directly (no LLM). Returns (is_error, response_text)."""
+    import asyncio
 
-    Connects to the /mcp endpoint, exposes the coordinator's _ALLOWED_TOOLS as
-    OpenAI functions, loops until the model produces a final text answer, and
-    returns that text. Mirrors the specialists' _run_openai_path but sized for
-    the coordinator's two small tasks (sanity check + draft_memo).
-    """
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
 
-    from app.llm_client import FailoverAsyncClient
+    async def _run() -> tuple[bool, str]:
+        headers = {"Authorization": f"Bearer {service_token}"}
+        async with streamablehttp_client(mcp_url, headers=headers) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                res = await session.call_tool(tool_name, args)
+                text = "".join(getattr(c, "text", "") for c in res.content)
+                return bool(res.isError), text
 
-    headers = {"Authorization": f"Bearer {service_token}"}
-
-    async with streamablehttp_client(mcp_url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-
-            tools_response = await session.list_tools()
-            allowed = [t for t in tools_response.tools if t.name in _ALLOWED_TOOLS]
-            openai_tools = [_mcp_tool_to_openai_function(t) for t in allowed]
-
-            client = FailoverAsyncClient(
-                base_url=llm_endpoint_url,
-                api_key=llm_api_key,
-                model=llm_model,
-                op="coordinator.chat.completions",
-                user=str(workspace_id),
-            )
-
-            messages: list[dict[str, Any]] = [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_msg},
-            ]
-
-            for _iteration in range(_MAX_OWN_LOOP_ITERATIONS):
-                response = await client.chat.completions.create(
-                    model=llm_model,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    tools=openai_tools,
-                    tool_choice="auto",
-                )
-                choice = response.choices[0]
-
-                if choice.finish_reason == "tool_calls":
-                    tool_calls = choice.message.tool_calls or []
-                    messages.append(choice.message.model_dump())
-                    for tc in tool_calls:
-                        try:
-                            tool_args = json.loads(tc.function.arguments or "{}")
-                        except json.JSONDecodeError:
-                            tool_args = {}
-                        try:
-                            mcp_result = await session.call_tool(
-                                tc.function.name, tool_args
-                            )
-                            result_payload = json.dumps({
-                                "content": [
-                                    item.model_dump()
-                                    if hasattr(item, "model_dump")
-                                    else str(item)
-                                    for item in mcp_result.content
-                                ]
-                            })
-                        except Exception as exc:  # noqa: BLE001 — surface to model
-                            result_payload = json.dumps({"error": str(exc)})
-                        if verbose:
-                            print(
-                                f"[coordinator]   [tool] {tc.function.name} -> "
-                                f"{result_payload[:160]}"
-                            )
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result_payload,
-                        })
-                    continue
-
-                return choice.message.content or ""
-
-    raise RuntimeError(
-        f"coordinator LLM task did not converge within "
-        f"{_MAX_OWN_LOOP_ITERATIONS} iterations"
-    )
-
-
-def _run_openai_task_sync(**kwargs: Any) -> str:
-    """Synchronous wrapper for _openai_mcp_task (the coordinator is sync code)."""
-    import asyncio
-
-    return asyncio.run(_openai_mcp_task(**kwargs))
+    return asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -437,11 +342,12 @@ def _run_specialist_subprocess(
 # ---------------------------------------------------------------------------
 
 class CoordinatorLLM:
-    """The coordinator's own LLM runtime — Anthropic-direct OR gateway (openai).
+    """The coordinator's own step runtime — Anthropic-direct OR openai/gateway.
 
     ``backend`` is "anthropic" or "openai". The anthropic path keeps the SDK's
-    hosted mcp_servers integration; the openai path routes through the LiteLLM
-    gateway with a manual MCP tool loop (_openai_mcp_task).
+    hosted mcp_servers integration for the two coordinator steps; the openai
+    path performs those steps as DIRECT MCP tool calls (see the section
+    comment above _mcp_call_tool_sync) while the specialists ride the gateway.
     """
 
     def __init__(
@@ -481,29 +387,21 @@ class CoordinatorLLM:
         service_token: str,
         max_tokens: int,
     ) -> str:
-        """Run one bounded MCP-tool-using LLM task; return the final text."""
-        if self.backend == "anthropic":
-            response = self._anthropic_client.beta.messages.create(
-                model=self.model or _MODEL_MAP["sonnet"],
-                max_tokens=max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": user_msg}],
-                mcp_servers=[_mcp_server_config(mcp_url, service_token)],
-                betas=["mcp-client-2025-04-04"],
+        """Run one MCP-tool-using LLM task (ANTHROPIC BACKEND ONLY)."""
+        if self.backend != "anthropic":
+            raise RuntimeError(
+                "run_task is anthropic-only; the openai backend performs the "
+                "coordinator's steps as direct MCP tool calls."
             )
-            return _extract_text(response)
-        return _run_openai_task_sync(
-            system=system,
-            user_msg=user_msg,
-            mcp_url=mcp_url,
-            service_token=service_token,
-            llm_endpoint_url=self.endpoint_url,
-            llm_model=self.model,
-            llm_api_key=self.api_key,
+        response = self._anthropic_client.beta.messages.create(
+            model=self.model or _MODEL_MAP["sonnet"],
             max_tokens=max_tokens,
-            workspace_id=self.workspace_id,
-            verbose=self.verbose,
+            system=system,
+            messages=[{"role": "user", "content": user_msg}],
+            mcp_servers=[_mcp_server_config(mcp_url, service_token)],
+            betas=["mcp-client-2025-04-04"],
         )
+        return _extract_text(response)
 
 
 def _sanity_check_entity(
@@ -526,6 +424,20 @@ def _sanity_check_entity(
     user_msg = f"entity_id={entity_id} tax_year={tax_year}"
 
     try:
+        if llm.backend == "openai":
+            # Deterministic: call the tool directly — data came back iff the
+            # payload echoes the requested tax_year (an error payload doesn't).
+            is_err, text = _mcp_call_tool_sync(
+                mcp_url,
+                service_token,
+                "get_form_1120_data",
+                {
+                    "workspace_id": llm.workspace_id,
+                    "entity_id": entity_id,
+                    "tax_year": tax_year,
+                },
+            )
+            return (not is_err) and '"tax_year"' in text
         text = llm.run_task(
             system=system,
             user_msg=user_msg,
@@ -646,6 +558,35 @@ def _write_coordinator_memo(
 
     # Citations = list of output file paths
     citations = [str(r.output_path) for r in results if r.output_path]
+
+    if llm.backend == "openai":
+        # Deterministic: the memo text is already composed above — write it
+        # via a direct draft_memo call instead of asking a model to relay it
+        # verbatim (a model can refuse or paraphrase, corrupting the memo id;
+        # observed live with sonnet-4.6: "I need to pause before executing
+        # this request."). The citation file paths already appear in the memo's
+        # dispatch table.
+        is_err, text = _mcp_call_tool_sync(
+            mcp_url,
+            service_token,
+            "draft_memo",
+            {
+                "workspace_id": workspace_id,
+                "entity_id": entity_id,
+                "tax_year": tax_year,
+                "topic": "coordinator_summary",
+                "content": memo_content,
+                "confidence": "high",
+            },
+        )
+        if is_err:
+            raise RuntimeError(f"draft_memo failed: {text[:400]}")
+        m = re.search(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            text,
+            re.IGNORECASE,
+        )
+        return m.group(0) if m else text[:64]
 
     system = _load_system_prompt()
     user_msg = textwrap.dedent(f"""\
@@ -941,7 +882,10 @@ def run(
             api_key=api_key,
             verbose=verbose,
         )
-        print(f"[coordinator] LLM backend: openai (gateway {endpoint}, model {model})")
+        print(
+            f"[coordinator] LLM backend: openai — specialists via gateway "
+            f"{endpoint} model {model}; coordinator steps = direct MCP calls"
+        )
     else:
         llm = CoordinatorLLM("anthropic", workspace_id=workspace_id, verbose=verbose)
         print("[coordinator] LLM backend: anthropic (direct SDK)")
