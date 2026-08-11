@@ -326,7 +326,11 @@ async def run_one_check(
 
 
 async def run_workspace_cycle(
-    workspace_id: UUID, workspace_label: str, *, force: bool = False
+    workspace_id: UUID,
+    workspace_label: str,
+    *,
+    force: bool = False,
+    now: dt.datetime | None = None,
 ) -> dict[str, Any]:
     """Run one Sentinel cycle for a single workspace.
 
@@ -334,12 +338,18 @@ async def run_workspace_cycle(
     trigger (POST /sentinel/run) and ``--once --force``: when a human
     explicitly asks for a run, "not due yet" is the wrong answer. Scheduled
     daemon ticks never force.
+
+    ``now`` overrides the clock read. ``agents/sentinel/cadence.py`` is pure
+    arithmetic over an explicit ``now``, but this runner read the wall clock
+    directly, which left cadence behaviour untestable at a fixed instant —
+    tests pinned to a hardcoded date silently changed meaning as real time
+    moved past it. Production callers pass nothing and get the real clock.
     """
     if kill_switch_active():
         _log.warning("Sentinel kill switch active; skipping workspace %s", workspace_id)
         return {"workspace_id": str(workspace_id), "skipped": "kill_switch"}
 
-    now = dt.datetime.now(tz=dt.timezone.utc)
+    now = now or dt.datetime.now(tz=dt.timezone.utc)
 
     # Load config + per-check cadence state inside one session.
     async with workspace_session(SessionLocal, workspace_id) as session:
