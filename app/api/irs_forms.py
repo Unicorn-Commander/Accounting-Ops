@@ -59,6 +59,7 @@ from app.authz import assert_entity_in_scope
 from app.config import get_settings
 from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
+from app.tools._cpa_export_client import resolve_cpa_export_bearer
 from app.workspace_session import workspace_session
 
 router = APIRouter(tags=["irs-forms"])
@@ -86,7 +87,7 @@ async def _fetch_cpa_package(
     gracefully on None.
     """
     settings = get_settings()
-    service_token = os.getenv("ACCTOPS_SERVICE_TOKEN") or os.getenv("CPA_EXPORT_TOKEN")
+    service_token = resolve_cpa_export_bearer()
     headers: dict[str, str] = {}
     if service_token:
         headers["Authorization"] = f"Bearer {service_token}"
