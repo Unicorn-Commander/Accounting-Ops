@@ -392,6 +392,66 @@ def _extract_entity_id(
         ) from exc
 
 
+def apply_service_scope(
+    auth: AuthContext,
+    workspace_id: UUID,
+    *,
+    role: str,
+    entity_scope: tuple[UUID, ...] | None,
+) -> tuple[str, tuple[UUID, ...] | None]:
+    """Intersect a service token's declared scope with a resolved membership.
+
+    THE single implementation of the H2 service-token gates. It must be called
+    by EVERY surface that authorizes a caller, immediately after membership
+    resolution and before the role check — otherwise that surface hands out the
+    impersonated user's full rights and the token's declared limits mean
+    nothing.
+
+    That is not hypothetical: this logic used to live inline in
+    ``resolve_workspace``, so it applied on HTTP and nowhere else. The MCP
+    surface — which is reachable from the public internet — never consulted
+    ``service_scope`` at all, and a token declaring one workspace and one
+    entity could read any workspace and any entity its impersonated user could,
+    at the user's full role rather than the token's ``role_floor``. Extracting
+    it here is what makes that class of divergence impossible rather than
+    merely fixed once.
+
+    Returns the (possibly capped) role and the (possibly narrowed) entity
+    scope. Raises 403 when the token is used outside its declared scope,
+    independent of what the impersonated user is allowed.
+    """
+    if auth.service_scope is None:
+        return role, entity_scope
+
+    ss = auth.service_scope
+    # 1. Workspace gate. If the token declared a workspace allow-list and
+    #    this workspace isn't in it, 403 regardless of membership.
+    if ss.workspace_ids is not None and workspace_id not in ss.workspace_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Service token is not scoped to this workspace.",
+        )
+    # 2. Entity scope intersection. The service-token entity_ids further
+    #    restricts the membership entity_scope (None on either side = all).
+    if ss.entity_ids is not None:
+        if entity_scope is None:
+            # Membership had no constraint → take the token's restriction.
+            entity_scope = tuple(ss.entity_ids)
+        else:
+            intersection = tuple(e for e in entity_scope if e in ss.entity_ids)
+            if not intersection:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Service token entity scope has no overlap with membership.",
+                )
+            entity_scope = intersection
+    # 3. Role cap. min(membership_role, role_floor) in _ROLE_ORDER.
+    if ss.role_floor is not None:
+        role = _cap_role(role, ss.role_floor)
+
+    return role, entity_scope
+
+
 async def resolve_workspace(
     request: Request,
     auth: AuthContext = Depends(validate_bearer_token),
@@ -411,32 +471,9 @@ async def resolve_workspace(
     )
 
     # ---- H2: apply service-token scope, if any ----
-    if auth.service_scope is not None:
-        ss = auth.service_scope
-        # 1. Workspace gate. If the token declared a workspace allow-list and
-        #    this workspace isn't in it, 403 regardless of membership.
-        if ss.workspace_ids is not None and workspace_id not in ss.workspace_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Service token is not scoped to this workspace.",
-            )
-        # 2. Entity scope intersection. The service-token entity_ids further
-        #    restricts the membership entity_scope (None on either side = all).
-        if ss.entity_ids is not None:
-            if entity_scope is None:
-                # Membership had no constraint → take the token's restriction.
-                entity_scope = tuple(ss.entity_ids)
-            else:
-                intersection = tuple(e for e in entity_scope if e in ss.entity_ids)
-                if not intersection:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Service token entity scope has no overlap with membership.",
-                    )
-                entity_scope = intersection
-        # 3. Role cap. min(membership_role, role_floor) in _ROLE_ORDER.
-        if ss.role_floor is not None:
-            role = _cap_role(role, ss.role_floor)
+    role, entity_scope = apply_service_scope(
+        auth, workspace_id, role=role, entity_scope=entity_scope
+    )
 
     return WorkspaceContext(
         workspace_id=workspace_id,

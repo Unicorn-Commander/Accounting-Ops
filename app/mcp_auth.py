@@ -32,7 +32,12 @@ from starlette.responses import JSONResponse
 
 from app.auth import AuthContext, authenticate_token, validate_bearer_token
 from app.authz import assert_entity_in_scope
-from app.tenancy import WorkspaceContext, _resolve_membership, require_role
+from app.tenancy import (
+    WorkspaceContext,
+    _resolve_membership,
+    apply_service_scope,
+    require_role,
+)
 
 # Set per-request by MCPAuthMiddleware; read by authorize_workspace. Defaults to
 # None so a tool invoked outside the middleware (e.g. a stdio transport) fails
@@ -211,6 +216,14 @@ async def authorize_workspace(
     try:
         role, entity_scope, hipaa, slug = await _resolve_membership(
             auth.uc_uid, workspace_id, autoprovision=auth.may_autoprovision
+        )
+        # A service token's declared scope must bind here exactly as it does on
+        # HTTP. Applied BEFORE the WorkspaceContext is built so require_role
+        # sees the capped role and assert_entity_in_scope sees the narrowed
+        # entity scope — the same helper the HTTP dependency calls, so the two
+        # surfaces cannot drift apart again.
+        role, entity_scope = apply_service_scope(
+            auth, workspace_id, role=role, entity_scope=entity_scope
         )
         ctx = WorkspaceContext(
             workspace_id=workspace_id,
