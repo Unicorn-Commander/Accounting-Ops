@@ -34,7 +34,9 @@ from app.journal import (
     post_journal_entry as _journal_post,
 )
 from app.journal.hash_chain import chain_summary, verify_chain
+from app.journal.posting import CATEGORY_TO_ACCOUNT
 from app.mcp_auth import authorize_workspace
+from app.tools._audit import project_decision_audit, write_decision_audit
 from app.workspace_session import workspace_session
 
 
@@ -435,6 +437,125 @@ async def _verified_confirmation(
     return row.decided_by_uc_uid if row else None
 
 
+# Account types whose normal balance implies a direction for the category side.
+# Anything not listed (asset, liability, equity, ...) is legitimately signed
+# either way — an owner contribution and a distribution both hit equity — so we
+# never call those a mismatch.
+_OUTFLOW_ACCOUNT_TYPES = frozenset({"expense", "other_expense", "cogs", "tax"})
+_INFLOW_ACCOUNT_TYPES = frozenset({"revenue", "other_income"})
+
+
+async def _derived_sign_matched(
+    session,
+    *,
+    entity_id: UUID,
+    category: str,
+    amount_cents: int,
+) -> bool:
+    """Decide server-side whether the amount's sign fits the category.
+
+    ``sign_matched`` feeds the tier-L auto-post trust check, and the agent is
+    the wrong authority on it — the server knows the category's account type.
+    Resolve the category to its COA account and compare the normal balance to
+    the sign: an expense must be an outflow, revenue an inflow.
+
+    Returns True when the direction fits OR when the account type is
+    genuinely ambiguous / the account cannot be resolved (an unresolvable
+    account blocks the post later on its own; a missing lookup must not
+    manufacture a spurious mismatch). Callers AND this with the agent's claim,
+    so a caller can only ever make the gate stricter.
+    """
+    account_number = CATEGORY_TO_ACCOUNT.get(category)
+    if not account_number:
+        return True  # unknown category is blocked downstream, not here
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT account_type
+                FROM chart_of_account
+                WHERE entity_id = :eid
+                  AND account_number = :num
+                  AND is_active = true
+                LIMIT 1
+                """
+            ),
+            {"eid": str(entity_id), "num": account_number},
+        )
+    ).first()
+    if row is None or not row.account_type:
+        return True
+    account_type = str(row.account_type).strip().lower()
+    if account_type in _OUTFLOW_ACCOUNT_TYPES:
+        return amount_cents < 0
+    if account_type in _INFLOW_ACCOUNT_TYPES:
+        return amount_cents > 0
+    return True
+
+
+# Structural sanity bound on a single posted amount ($1B). This is a guard
+# against a malformed or hallucinated magnitude, NOT a business policy — the
+# materiality gate is what decides whether a plausible amount needs a human.
+MAX_ABS_AMOUNT_CENTS = 100_000_000_000
+
+
+def _validate_post_arguments(
+    *,
+    source: str,
+    source_external_id: str,
+    description: str,
+    category: str,
+    category_status: str,
+    amount_cents: int,
+    payee: str | None,
+    model_version: str,
+) -> None:
+    """Enforce on the MCP surface what ``PostRequest`` enforces over HTTP.
+
+    The HTTP route validates through a pydantic model; the MCP tool took bare
+    type hints, so an agent could send an unbounded string or an absurd
+    magnitude that the HTTP caller could not. Same limits, same failure.
+
+    ``payee`` and ``model_version`` are bounded here even though the HTTP model
+    also omits them: their columns are VARCHAR(256)/VARCHAR(128), so an
+    overlong value is a DB DataError surfacing as a 500 rather than a usable
+    validation message.
+    """
+    if category_status not in ("auto", "suggest", "unknown"):
+        raise ValueError("category_status must be 'auto', 'suggest', or 'unknown'")
+
+    for name, value, limit in (
+        ("source", source, 64),
+        ("source_external_id", source_external_id, 256),
+        ("description", description, 512),
+        ("category", category, 64),
+    ):
+        if not value:
+            raise ValueError(f"{name} is required and must be non-empty")
+        if len(value) > limit:
+            raise ValueError(
+                f"{name} exceeds max length {limit} (got {len(value)} chars)"
+            )
+
+    for name, value, limit in (
+        ("payee", payee, 256),
+        ("model_version", model_version, 128),
+    ):
+        if value is not None and len(value) > limit:
+            raise ValueError(
+                f"{name} exceeds max length {limit} (got {len(value)} chars)"
+            )
+
+    if amount_cents == 0:
+        raise ValueError("amount_cents must be non-zero")
+    if abs(amount_cents) > MAX_ABS_AMOUNT_CENTS:
+        raise ValueError(
+            f"amount_cents magnitude {amount_cents} exceeds the sanity bound "
+            f"{MAX_ABS_AMOUNT_CENTS} (${MAX_ABS_AMOUNT_CENTS / 100:,.0f}). "
+            "Re-check the units — this field is CENTS, not dollars."
+        )
+
+
 async def post_journal_entry(
     workspace_id: UUID,
     entity_id: UUID,
@@ -505,8 +626,16 @@ async def post_journal_entry(
     """
     ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")
 
-    if category_status not in ("auto", "suggest", "unknown"):
-        raise ValueError("category_status must be 'auto', 'suggest', or 'unknown'")
+    _validate_post_arguments(
+        source=source,
+        source_external_id=source_external_id,
+        description=description,
+        category=category,
+        category_status=category_status,
+        amount_cents=int(amount_cents),
+        payee=payee,
+        model_version=model_version,
+    )
 
     try:
         eff_date = dt.date.fromisoformat(effective_date)
@@ -552,6 +681,15 @@ async def post_journal_entry(
                 amount_cents=int(amount_cents),
             )
 
+        # Likewise sign_matched: the server owns the category's expected
+        # direction. AND with the caller's claim so a caller can only tighten.
+        effective_sign_matched = bool(sign_matched) and await _derived_sign_matched(
+            session,
+            entity_id=entity_id,
+            category=category,
+            amount_cents=int(amount_cents),
+        )
+
         result = await _journal_post(
             session,
             workspace_id=str(workspace_id),
@@ -566,7 +704,7 @@ async def post_journal_entry(
             category=category,
             category_status=category_status,
             entity_mapped=entity_mapped,
-            sign_matched=bool(sign_matched),
+            sign_matched=effective_sign_matched,
             external_account_id=external_account_id,
             has_receipt_link=receipt_uuid is not None,
             receipt_link_id=receipt_uuid,
@@ -577,6 +715,59 @@ async def post_journal_entry(
             reasoning_trace=reasoning_trace,
             model_version=model_version,
         )
+
+        posted = isinstance(result, PostingOutcome)
+        entry_id = str(result.journal_entry_id) if posted else None
+        audit_outcome = "posted" if posted else result.outcome
+
+        # The append-only agent-decision trail. Posting is the highest-stakes
+        # agent write, so it belongs here alongside categorize/link_receipt —
+        # and REFUSALS are recorded too: a blocked post is exactly the signal
+        # an operator reviewing agent behavior needs to see. Same transaction
+        # as the post, so the entry and its provenance commit together.
+        audit_id = await write_decision_audit(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            ctx=ctx,
+            tool_name="post_journal_entry",
+            request_payload={
+                "source": source,
+                "source_external_id": source_external_id,
+                "effective_date": effective_date,
+                "amount_cents": int(amount_cents),
+                "description": description,
+                "payee": payee,
+                "category": category,
+                "category_status": category_status,
+                "external_account_id": external_account_id,
+                "sign_matched_claimed": bool(sign_matched),
+                "sign_matched_effective": effective_sign_matched,
+                "user_confirmed_claimed": bool(user_confirmed),
+                "confirmation_verified": approving_human is not None,
+            },
+            response_payload={
+                "outcome": audit_outcome,
+                "journal_entry_id": entry_id,
+                "materiality_tier": result.materiality.tier if posted else None,
+                "reason": result.materiality.reason if posted else result.reason,
+                "approving_human_uc_uid": approving_human,
+            },
+            reasoning=(reasoning_trace or "")[:1000],
+            outcome=audit_outcome,
+        )
+
+    # Post-commit, best-effort graph mirror (never affects the request).
+    project_decision_audit(
+        workspace_id=workspace_id,
+        entity_id=entity_id,
+        audit_id=audit_id,
+        ctx=ctx,
+        tool_name="post_journal_entry",
+        outcome=audit_outcome,
+        reasoning=(reasoning_trace or "")[:1000],
+        subject_id=entry_id,
+    )
 
     if isinstance(result, PostingOutcome):
         return {
