@@ -25,8 +25,16 @@ from uuid import UUID
 from fastapi import HTTPException
 from sqlalchemy import text
 
+from app.auth import AuthContext
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace, current_auth
+from app.tenancy import (
+    WorkspaceContext,
+    _pat_scopes_from_auth,
+    _resolve_membership,
+    apply_service_scope,
+    require_role,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +200,84 @@ def _slugify(value: str) -> str:
     return s[:96] or "workspace"
 
 
+async def _admin_candidate_workspaces(user_id: UUID) -> list[UUID]:
+    """Workspaces where this account holds an admin+ membership.
+
+    The status predicates mirror ``_resolve_membership`` exactly, so a workspace
+    nominated here is never one the resolver would then refuse. Without them a
+    membership on an ARCHIVED workspace — or a suspended/revoked membership —
+    still counted as a provisioning grant.
+    """
+    async with SessionLocal() as session:
+        async with session.begin():
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT m.workspace_id
+                        FROM public.workspace_membership m
+                        JOIN public.workspace w ON w.id = m.workspace_id
+                        WHERE m.user_id = :user_id
+                          AND m.role IN ('owner', 'client_owner', 'platform_admin', 'admin')
+                          AND m.status = 'active'
+                          AND w.status = 'active'
+                        ORDER BY m.created_at
+                        """
+                    ),
+                    {"user_id": user_id},
+                )
+            ).all()
+    return [row[0] for row in rows]
+
+
+async def _authorize_provisioning(auth: AuthContext, user_id: UUID) -> WorkspaceContext:
+    """Authorize the caller for provisioning through the normal write chokepoint.
+
+    There is no target workspace yet, so the caller is authorized against the
+    strongest workspace this TOKEN can still reach: each admin+ candidate is run
+    through ``apply_service_scope`` + ``require_role`` exactly as
+    ``authorize_workspace`` does for every other write tool, and the first that
+    survives becomes the context.
+
+    The membership probe on its own is NOT the gate. It answers only "is this
+    ACCOUNT an admin somewhere", which is all the inline check used to do — so a
+    read-only PAT or a viewer-floored service token belonging to an owner could
+    provision a workspace, the most privileged operation in the system, while the
+    same token was refused a journal line. ``require_role`` is the gate; it sees
+    ``pat_scopes`` and the role the token's ``role_floor`` capped it to.
+
+    Candidates are walked rather than taken with LIMIT 1 because a PAT carrying
+    ``workspace_scope`` is refused outright on every workspace outside its
+    allow-list: taking one row would deny a legitimately-scoped token depending on
+    which row Postgres returned first.
+    """
+    denial = "create_workspace requires admin/owner on at least one existing workspace"
+    for workspace_id in await _admin_candidate_workspaces(user_id):
+        try:
+            role, entity_scope, hipaa, slug = await _resolve_membership(
+                auth.uc_uid, workspace_id, autoprovision=auth.may_autoprovision
+            )
+            role, entity_scope = apply_service_scope(
+                auth, workspace_id, role=role, entity_scope=entity_scope
+            )
+            ctx = WorkspaceContext(
+                workspace_id=workspace_id,
+                workspace_slug=slug,
+                role=role,
+                user_uc_uid=auth.uc_uid,
+                agent_id=auth.agent_id,
+                entity_scope=entity_scope,
+                hipaa_protected=hipaa,
+                pat_scopes=_pat_scopes_from_auth(auth),
+            )
+            require_role(ctx, "admin")
+        except HTTPException as exc:
+            denial = str(exc.detail)
+            continue
+        return ctx
+    raise PermissionError(denial)
+
+
 async def create_workspace(
     display_name: str,
     slug: str | None = None,
@@ -218,13 +304,13 @@ async def create_workspace(
         ``{"workspace_id": "<uuid>", "slug": "...", "display_name": "...",
            "schema": "...", "status": "active"}``
 
-    Role floor: owner on any workspace OR platform_admin.
+    Role floor: admin on an existing workspace the caller's TOKEN can reach —
+    PAT scopes and a service token's role_floor bind here as on any other write.
     """
     auth = current_auth()
     if auth is None:
         raise PermissionError("No authenticated caller for this MCP request")
 
-    # Verify the caller has ANY owner+ role somewhere
     from app.api.workspaces import _ensure_user_account
 
     try:
@@ -236,26 +322,8 @@ async def create_workspace(
         # authorize_workspace): unprovisioned caller identity → clean tool
         # error, never a ghost-provisioned row.
         raise PermissionError(str(exc.detail)) from exc
-    async with SessionLocal() as session:
-        async with session.begin():
-            row = (
-                await session.execute(
-                    text(
-                        """
-                        SELECT 1 FROM public.workspace_membership
-                        WHERE user_id = :user_id
-                          AND role IN ('owner', 'client_owner', 'platform_admin', 'admin')
-                        LIMIT 1
-                        """
-                    ),
-                    {"user_id": user_id},
-                )
-            ).first()
-            if not row:
-                raise PermissionError(
-                    "create_workspace requires admin/owner on at least one "
-                    "existing workspace"
-                )
+
+    await _authorize_provisioning(auth, user_id)
 
     # Provision
     from scripts.provision_workspace import provision_workspace
