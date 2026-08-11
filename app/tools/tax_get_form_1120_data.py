@@ -33,6 +33,7 @@ from app.config import get_settings
 from app.mcp_auth import authorize_workspace, current_auth
 from app.security.crypto import get_crypto
 from app.security.internal_assertion import sign_assertion
+from app.tools._cpa_export_client import resolve_cpa_export_bearer
 
 
 async def get_form_1120_data(
@@ -83,7 +84,7 @@ async def get_form_1120_data(
     # Bearer transport handshake: required so a random caller can't reach the
     # sidecar at all. Identity authorization is in the X-Internal-Assertion
     # header above (when present); this just opens the door.
-    service_token = os.getenv("ACCTOPS_SERVICE_TOKEN") or os.getenv("CPA_EXPORT_TOKEN")
+    service_token = resolve_cpa_export_bearer()
     if service_token:
         headers["Authorization"] = f"Bearer {service_token}"
 
