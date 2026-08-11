@@ -2,11 +2,14 @@
 # and the Accounting-Ops contributors.
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import asyncio
+import functools
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from app.agent_tool_policy import enforce_tool_policy
 from app.config import get_settings
+from app.mcp_auth import current_auth
 from app.tools import (
     add_specialty_rule,
     analyze_pending_approvals,
@@ -85,6 +88,42 @@ from app.tools import (
 )
 
 
+def _install_agent_tool_policy(server) -> None:
+    """Make every ``server.tool()`` registration enforce the per-agent allow-list.
+
+    Wrapping the registrar (rather than editing ~73 call sites) means a tool
+    added later is covered automatically — a policy you can forget to apply is
+    a policy that will eventually be forgotten.
+
+    ``functools.wraps`` is load-bearing here, not cosmetic: FastMCP builds each
+    tool's JSON schema by introspecting the function, so the wrapper must carry
+    the original ``__annotations__``, ``__doc__``, ``__name__`` and
+    ``__wrapped__`` or every tool's schema would silently degrade to
+    ``(*args, **kwargs)``. ``tests/smoke/test_agent_tool_policy.py`` pins the
+    resulting schemas against an unwrapped build so that can never regress
+    unnoticed.
+    """
+    raw_tool = server.tool
+
+    def tool_with_policy(*t_args, **t_kwargs):
+        register = raw_tool(*t_args, **t_kwargs)
+
+        def decorate(fn):
+            tool_name = getattr(fn, "__name__", "<anonymous>")
+
+            @functools.wraps(fn)
+            async def guarded(*args, **kwargs):
+                auth = current_auth()
+                enforce_tool_policy(getattr(auth, "agent_id", None), tool_name)
+                return await fn(*args, **kwargs)
+
+            return register(guarded)
+
+        return decorate
+
+    server.tool = tool_with_policy
+
+
 def build_server():
     try:
         from mcp.server.fastmcp import FastMCP
@@ -121,6 +160,12 @@ def build_server():
             "can reach before calling entity-scoped tools."
         ),
     )
+
+    # Every tool registration below goes through ``server.tool()``, so wrapping
+    # it here is the single choke point that covers all of them — including the
+    # ones declared with the ``@server.tool()`` decorator form further down.
+    # See app/agent_tool_policy.py for what the policy does and why.
+    _install_agent_tool_policy(server)
 
     # =====================================================================
     # Discovery (workspace + entity enumeration the caller can reach)
