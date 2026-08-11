@@ -594,7 +594,7 @@ def _write_coordinator_memo(
         "Review each specialist DRAFT at the file paths listed in the dispatch plan above.",
         "Resolve all CPA-flagged items (see flag IDs above) before return preparation.",
     ]
-    if any(s.slug == "sc_state_specialist" for s in plan.available_steps()):
+    if any(s.specialist_slug == "sc_state_specialist" for s in plan.available_steps()):
         next_steps.append(
             "SC State Specialist output depends on federal 1120 data — confirm federal "
             "positions before finalizing SC1120."
