@@ -127,8 +127,15 @@ def _migration_source() -> str:
 
 
 def test_tenant_tree_has_exactly_one_head() -> None:
+    """One head — the value of this test is the COUNT, not the name.
+
+    Pinning the literal head made every added migration look like a failure
+    and invited whoever hit it to edit the assertion without thinking about
+    whether the tree had actually forked. What must never happen is two heads,
+    which is what silently breaks `alembic upgrade head`.
+    """
     heads = list(_tenant_script_dir().get_heads())
-    assert heads == [ENTITY_OWNER_REVISION], f"expected a single head, got {heads}"
+    assert len(heads) == 1, f"tenant migration tree has forked: {heads}"
 
 
 def test_entity_owner_chains_back_to_the_force_rls_migration() -> None:

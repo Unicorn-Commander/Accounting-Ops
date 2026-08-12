@@ -17,7 +17,6 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import context, op
-from sqlalchemy.dialects import postgresql
 
 revision: str = "0002_account_mappings"
 down_revision: str | None = "0001_tenant_initial"
