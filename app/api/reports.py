@@ -994,7 +994,20 @@ async def trial_balance(
 # Act raises it to $2,000 starting with TY2026 (inflation-indexed thereafter);
 # if/when the IRS form instructions adopt that, make NEC_THRESHOLD year-aware.
 
-CONTRACT_LABOR_ACCOUNTS: tuple[str, ...] = ("6300",)
+#   Widened 2026-08-12. "6300" alone matched only the oldest COA template, and
+#   the numbering the platform now provisions puts contractor spend elsewhere —
+#   so a real, posted $7,542.29 of 1099-NEC payments to a named individual on
+#   account 5630 was invisible on every 1099 surface, which is a missed filing,
+#   not a cosmetic gap. Every EXPENSE-side contractor account present across the
+#   live charts is listed here:
+#       5220  Contract Labor (1099-NEC)
+#       5630  Contractor · 1099-NEC
+#       5635  Subcontractor Services
+#       6300  Contractor · 1099-NEC   (original template)
+#   4020 "Self-employment Income (1099-NEC)" is deliberately ABSENT: it is a
+#   REVENUE account — NEC the entity RECEIVES, reported to it on someone else's
+#   form, never money it paid out.
+CONTRACT_LABOR_ACCOUNTS: tuple[str, ...] = ("5220", "5630", "5635", "6300")
 NEC_THRESHOLD = Decimal("600")
 
 # Substrings in a counterparty name that suggest a credit-card / third-party
