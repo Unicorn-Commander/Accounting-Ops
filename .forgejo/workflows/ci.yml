@@ -32,6 +32,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Fetch IRS form PDFs
+        # The form-fill tests assert against the real IRS PDFs. Those are
+        # gitignored on purpose (.gitignore:32 — "downloaded by
+        # scripts/download_irs_forms.sh"), so a fresh checkout has none and
+        # five test modules fail rather than skip: they are meant to run for
+        # real, not to quietly pass on an absent file. Downloading them here is
+        # the workflow the script exists for.
+        #
+        # This does put irs.gov on the critical path of every run. That is the
+        # deliberate trade: a form whose field map has drifted is the failure
+        # this suite exists to catch, and skipping on a missing file would hide
+        # exactly that. `|| true` is NOT wanted here — if the forms cannot be
+        # fetched, the tests below are not meaningful and should say so.
+        run: |
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
+          bash scripts/download_irs_forms.sh
+
       - name: Ruff lint (test + CI surface — blocking)
         run: ruff check tests scripts
 
