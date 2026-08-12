@@ -52,9 +52,10 @@ DECLARE
     v_month INT;
     v_amount_cents BIGINT;
 BEGIN
-    -- Every POSTED row is bucketed, corrections included. A reversal and its
-    -- restatement are real movements: excluding them leaves the superseded
-    -- original standing and the aggregate disagrees with the journal.
+    -- Every POSTED row is bucketed, corrections included. A correction's
+    -- reversal and restatement legs are real movements: skipping them leaves
+    -- the superseded original standing and the aggregate disagrees with the
+    -- journal.
     IF NEW.status <> 'posted' THEN
         RETURN NEW;
     END IF;
@@ -67,25 +68,29 @@ BEGIN
     v_amount_cents := (NEW.amount * 100)::bigint;
 
     IF NEW.debit_account_number IS NOT NULL THEN
-        INSERT INTO "{schema}".monthly_account_balance
-            (workspace_id, entity_id, account_number, year, month,
-             debit_cents, credit_cents)
+        INSERT INTO "{schema}".monthly_account_balance (
+            workspace_id, entity_id, account_number,
+            year, month, debit_total_cents, credit_total_cents
+        )
         VALUES (NEW.workspace_id, NEW.entity_id, NEW.debit_account_number,
                 v_year, v_month, v_amount_cents, 0)
-        ON CONFLICT (workspace_id, entity_id, account_number, year, month)
-        DO UPDATE SET debit_cents =
-            "{schema}".monthly_account_balance.debit_cents + EXCLUDED.debit_cents;
+        ON CONFLICT (entity_id, account_number, year, month) DO UPDATE
+        SET debit_total_cents = "{schema}".monthly_account_balance.debit_total_cents
+                                + EXCLUDED.debit_total_cents,
+            updated_at = now();
     END IF;
 
     IF NEW.credit_account_number IS NOT NULL THEN
-        INSERT INTO "{schema}".monthly_account_balance
-            (workspace_id, entity_id, account_number, year, month,
-             debit_cents, credit_cents)
+        INSERT INTO "{schema}".monthly_account_balance (
+            workspace_id, entity_id, account_number,
+            year, month, debit_total_cents, credit_total_cents
+        )
         VALUES (NEW.workspace_id, NEW.entity_id, NEW.credit_account_number,
                 v_year, v_month, 0, v_amount_cents)
-        ON CONFLICT (workspace_id, entity_id, account_number, year, month)
-        DO UPDATE SET credit_cents =
-            "{schema}".monthly_account_balance.credit_cents + EXCLUDED.credit_cents;
+        ON CONFLICT (entity_id, account_number, year, month) DO UPDATE
+        SET credit_total_cents = "{schema}".monthly_account_balance.credit_total_cents
+                                 + EXCLUDED.credit_total_cents,
+            updated_at = now();
     END IF;
 
     RETURN NEW;
@@ -102,6 +107,7 @@ WITH debit_side AS (
            SUM((amount * 100)::bigint) AS debit_cents
     FROM "{schema}".journal_entry
     WHERE status = 'posted' AND debit_account_number IS NOT NULL
+      AND workspace_id = :wid
     GROUP BY 1,2,3,4,5
 ),
 credit_side AS (
@@ -112,10 +118,13 @@ credit_side AS (
            SUM((amount * 100)::bigint) AS credit_cents
     FROM "{schema}".journal_entry
     WHERE status = 'posted' AND credit_account_number IS NOT NULL
+      AND workspace_id = :wid
     GROUP BY 1,2,3,4,5
 )
-INSERT INTO "{schema}".monthly_account_balance
-    (workspace_id, entity_id, account_number, year, month, debit_cents, credit_cents)
+INSERT INTO "{schema}".monthly_account_balance (
+    workspace_id, entity_id, account_number,
+    year, month, debit_total_cents, credit_total_cents
+)
 SELECT
     COALESCE(d.workspace_id, c.workspace_id),
     COALESCE(d.entity_id, c.entity_id),
@@ -126,14 +135,15 @@ SELECT
     COALESCE(c.credit_cents, 0)
 FROM debit_side d
 FULL OUTER JOIN credit_side c
-  ON  d.workspace_id = c.workspace_id
-  AND d.entity_id = c.entity_id
-  AND d.account_number = c.account_number
-  AND d.year = c.year
-  AND d.month = c.month
-ON CONFLICT (workspace_id, entity_id, account_number, year, month)
-DO UPDATE SET debit_cents = EXCLUDED.debit_cents,
-              credit_cents = EXCLUDED.credit_cents;
+  ON  c.workspace_id   = d.workspace_id
+  AND c.entity_id      = d.entity_id
+  AND c.account_number = d.account_number
+  AND c.year           = d.year
+  AND c.month          = d.month
+ON CONFLICT (entity_id, account_number, year, month) DO UPDATE
+SET debit_total_cents  = EXCLUDED.debit_total_cents,
+    credit_total_cents = EXCLUDED.credit_total_cents,
+    updated_at         = now();
 """
 
 
@@ -143,19 +153,21 @@ def upgrade() -> None:
 
     bind.execute(sa.text(_TRIGGER_FN.format(schema=schema)))
 
-    # Which workspaces actually have buckets or postings.
+    # Discover workspaces from public.workspace, which carries NO RLS.
+    # Reading the books.* tables here instead is the trap this migration
+    # documents: FORCE RLS applies before any app.current_workspace is set, so
+    # the discovery query itself returns zero rows, the loop below never runs,
+    # and the migration stamps as applied having changed nothing. That is
+    # exactly what the first version of this file did.
     workspaces = [
         r[0]
-        for r in bind.execute(
-            sa.text(
-                f"""
-                SELECT DISTINCT workspace_id FROM "{schema}".journal_entry
-                UNION
-                SELECT DISTINCT workspace_id FROM "{schema}".monthly_account_balance
-                """
-            )
-        )
+        for r in bind.execute(sa.text("SELECT id FROM public.workspace"))
     ]
+    if not workspaces:
+        raise RuntimeError(
+            "0030: public.workspace returned no rows — refusing to stamp a "
+            "migration that would silently rebuild nothing."
+        )
 
     for wid in workspaces:
         # FORCE RLS applies to the owner too; without this the statements below
@@ -171,7 +183,7 @@ def upgrade() -> None:
             ),
             {"wid": str(wid)},
         )
-        bind.execute(sa.text(_REBUILD.format(schema=schema)))
+        bind.execute(sa.text(_REBUILD.format(schema=schema)), {"wid": str(wid)})
 
         # Verify, per workspace, that the buckets now equal the journal. A
         # silent no-op under RLS is exactly the failure this guards against, so
@@ -185,7 +197,7 @@ def upgrade() -> None:
                     WHERE status = 'posted' AND workspace_id = :wid
                       AND debit_account_number IS NOT NULL
                 ), mab AS (
-                    SELECT COALESCE(SUM(debit_cents), 0) AS cents
+                    SELECT COALESCE(SUM(debit_total_cents), 0) AS cents
                     FROM "{schema}".monthly_account_balance
                     WHERE workspace_id = :wid
                 )
@@ -224,10 +236,7 @@ def downgrade() -> None:
         )
     )
     workspaces = [
-        r[0]
-        for r in bind.execute(
-            sa.text(f'SELECT DISTINCT workspace_id FROM "{schema}".journal_entry')
-        )
+        r[0] for r in bind.execute(sa.text("SELECT id FROM public.workspace"))
     ]
     rebuild = _REBUILD.replace(
         "WHERE status = 'posted' AND debit_account_number IS NOT NULL",
@@ -250,4 +259,4 @@ def downgrade() -> None:
             ),
             {"wid": str(wid)},
         )
-        bind.execute(sa.text(rebuild.format(schema=schema)))
+        bind.execute(sa.text(rebuild.format(schema=schema)), {"wid": str(wid)})
