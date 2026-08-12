@@ -1145,8 +1145,7 @@ async def form_1099_nec(
                     -- unfilable. Real case: 37 postings totalling $7,542.29,
                     -- all with counterparty_id NULL and the name sitting in
                     -- journal_entry.payee the whole time.
-                    GROUP BY c.id, c.display_name,
-                             CASE WHEN c.id IS NULL THEN s.payee_text END
+                    GROUP BY c.id, coalesce(c.display_name, s.payee_text, 'Unknown Payee')
                     HAVING SUM(s.debit) - SUM(s.credit) >= :threshold
                     ORDER BY net_amount DESC
                     """
