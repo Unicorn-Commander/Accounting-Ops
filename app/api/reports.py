@@ -974,9 +974,12 @@ async def trial_balance(
 #   expense side. Revenue (4xxx credits), transfers, and refunds therefore can
 #   never inflate the number.
 #
-# AGGREGATION — by counterparty:
-#   Payee == counterparty.display_name. We JOIN counterparty on counterparty_id
-#   and GROUP BY the counterparty, then apply the $600 threshold via HAVING.
+# AGGREGATION — by counterparty, falling back to the ledger's payee text:
+#   Payee == counterparty.display_name where the entry carries a counterparty_id.
+#   Where it does not, we group on journal_entry.payee instead. Grouping on the
+#   counterparty alone collapsed every counterparty-less payment into a single
+#   "Unknown Payee" row — the total was correct and the form was unfilable.
+#   The $600 threshold is applied per resulting payee via HAVING.
 #
 # WHAT WE DO **NOT** AUTO-EXCLUDE (left to human review, per mission):
 #   - Payments to corporations are generally exempt (legal-services fees to a
@@ -1107,6 +1110,7 @@ async def form_1099_nec(
                     WITH nec_sides AS (
                         SELECT
                             je.counterparty_id AS counterparty_id,
+                            je.payee           AS payee_text,
                             je.amount          AS debit,
                             0::numeric         AS credit
                         FROM journal_entry je
@@ -1118,6 +1122,7 @@ async def form_1099_nec(
                         UNION ALL
                         SELECT
                             je.counterparty_id AS counterparty_id,
+                            je.payee           AS payee_text,
                             0::numeric         AS debit,
                             je.amount          AS credit
                         FROM journal_entry je
@@ -1128,12 +1133,19 @@ async def form_1099_nec(
                           {entity_clause}
                     )
                     SELECT
-                        coalesce(c.display_name, 'Unknown Payee') AS payee,
-                        SUM(s.debit) - SUM(s.credit)              AS net_amount,
-                        COUNT(*)                                  AS posting_count
+                        coalesce(c.display_name, s.payee_text, 'Unknown Payee') AS payee,
+                        SUM(s.debit) - SUM(s.credit)                            AS net_amount,
+                        COUNT(*)                                                AS posting_count
                     FROM nec_sides s
                     LEFT JOIN counterparty c ON c.id = s.counterparty_id
-                    GROUP BY c.id, c.display_name
+                    -- Fall back to the ledger's own payee text when the entry
+                    -- carries no counterparty_id. Grouping on the counterparty
+                    -- alone collapsed every such payment into one "Unknown
+                    -- Payee" row: the amount was right and the form was
+                    -- unfilable. Real case: 37 postings totalling $7,542.29,
+                    -- all with counterparty_id NULL and the name sitting in
+                    -- journal_entry.payee the whole time.
+                    GROUP BY c.id, coalesce(c.display_name, s.payee_text, 'Unknown Payee')
                     HAVING SUM(s.debit) - SUM(s.credit) >= :threshold
                     ORDER BY net_amount DESC
                     """
@@ -1161,7 +1173,8 @@ async def form_1099_nec(
         "total_payees": len(payees),
         "total_paid": str(sum((Decimal(p["total_amount"]) for p in payees), Decimal("0"))),
         "note": "Nonemployee compensation = payments for contractor services "
-                "(GL account 6300). This report does not auto-determine "
+                f"(GL accounts {', '.join(CONTRACT_LABOR_ACCOUNTS)}). "
+                "This report does not auto-determine "
                 "corporate status or payment-method exclusions: payments to "
                 "corporations are generally exempt (legal fees excepted), and "
                 "credit-card / third-party-network payments belong on 1099-K, "
