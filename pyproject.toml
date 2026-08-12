@@ -54,7 +54,14 @@ dependencies = [
 dev = [
   "pytest>=8.3.3",
   "pytest-asyncio>=0.24.0",
-  "ruff>=0.6.9",
+  # PINNED EXACTLY, and a linter is the one dependency where this is not
+  # optional: its verdict IS the gate, so an open range means CI's answer
+  # depends on when pip last resolved it. Left open, this tree linted clean on
+  # 0.15.13 locally while CI installed 0.16.2 and failed with 519 errors —
+  # a red pipeline caused entirely by a version drift, not by the code.
+  # Bumping ruff is a deliberate change: raise this pin, run `ruff check`, and
+  # deal with whatever the new rules surface in that same commit.
+  "ruff==0.15.13",
 ]
 # Cross-replica rate limiting (app/rate_limit.py). NOT needed for the default
 # deployment: the limiter's in-process backend is exact while `app` runs a
