@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.tenancy import WorkspaceContext, resolve_workspace
+from tests.route_introspection import methods_for
 
 WS_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 SLUG = "acme-books"
@@ -124,10 +125,7 @@ def test_destructive_erasure_is_post_only():
     could erase a customer's workspace.
     """
     path = "/api/workspaces/{workspace_id}/data-rights/erasure"
-    methods: set[str] = set()
-    for route in app.routes:
-        if getattr(route, "path", None) == path:
-            methods |= set(route.methods or set())
+    methods = methods_for(app, path)
     assert methods == {"GET", "POST"}, methods
     # And the mutating verb is POST — never GET, PUT-as-create, or DELETE.
     assert "DELETE" not in methods

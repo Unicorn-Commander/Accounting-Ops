@@ -29,6 +29,7 @@ import pytest
 
 import app.tools.entity_owners as mod
 from app.models.ledger import EntityOwner
+from tests.route_introspection import methods_for
 
 _OWNERS_PATH = "/api/workspaces/{workspace_id}/entities/{entity_id}/owners"
 
@@ -178,10 +179,7 @@ def test_discovery_metadata_present_with_correct_floors():
 def test_http_owner_routes_registered_get_and_post():
     import app.main as m
 
-    methods: set[str] = set()
-    for r in m.app.routes:
-        if getattr(r, "path", None) == _OWNERS_PATH:
-            methods |= set(getattr(r, "methods", set()) or set())
+    methods = methods_for(m.app, _OWNERS_PATH)
     assert "GET" in methods, f"GET {_OWNERS_PATH} not registered"
     assert "POST" in methods, f"POST {_OWNERS_PATH} not registered"
 
