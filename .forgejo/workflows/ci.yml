@@ -22,10 +22,18 @@ jobs:
     # repo looks like it has CI when it has none. Sibling repos that do run
     # (accounting-ops-simplefin-mcp) use ubuntu-latest; match them.
     runs-on: ubuntu-latest
-    container:
-      image: python:3.12-slim
+    # Deliberately NO `container:` override. python:3.12-slim ships neither git
+    # nor node, and actions/checkout is a node action that shells out to git —
+    # so the job died three seconds in, before a single step of our own ran.
+    # The runner's default image (catthehacker/ubuntu:act-22.04) has both, and
+    # is what the sibling repos that do run on this runner use. It carries
+    # Python 3.10, hence setup-python below: this package requires >= 3.12.
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Install package + dev deps
         run: |
@@ -40,14 +48,13 @@ jobs:
         # real, not to quietly pass on an absent file. Downloading them here is
         # the workflow the script exists for.
         #
-        # This does put irs.gov on the critical path of every run. That is the
+        # curl and ca-certificates are already in the runner image. This does
+        # put irs.gov on the critical path of every run. That is the
         # deliberate trade: a form whose field map has drifted is the failure
         # this suite exists to catch, and skipping on a missing file would hide
         # exactly that. `|| true` is NOT wanted here — if the forms cannot be
         # fetched, the tests below are not meaningful and should say so.
-        run: |
-          apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
-          bash scripts/download_irs_forms.sh
+        run: bash scripts/download_irs_forms.sh
 
       - name: Ruff lint (test + CI surface — blocking)
         run: ruff check tests scripts
