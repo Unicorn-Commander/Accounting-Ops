@@ -425,7 +425,15 @@ async def _main_async(args: argparse.Namespace) -> int:
             "STRIPE_SYNC_ENABLED=1 to turn it on; see the module docstring for "
             "why it ships off."
         )
-        return 0
+        if not args.loop:
+            return 0
+        # Under --loop the process is supervised by a restart policy, so
+        # returning here would exit, get restarted, log, exit ... — a crash
+        # loop that spams the log every couple of seconds and reads as a
+        # broken container. Idle quietly instead, re-checking each cycle so
+        # flipping the env var and restarting is all it takes to enable.
+        while not _ingestion_enabled():
+            await asyncio.sleep(max(60, args.interval_s))
     if not args.loop:
         results = await _sync_all_workspaces(workspace_filter)
         if not results:
