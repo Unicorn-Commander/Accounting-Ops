@@ -461,6 +461,13 @@ async def _main_async(args: argparse.Namespace) -> int:
         except ValueError:
             _log.error("--workspace must be a UUID: %s", args.workspace)
             return 2
+    if not _ingestion_enabled():
+        _log.warning(
+            "ebay_sync_disabled — discovery works but ingestion is OFF. Set "
+            "EBAY_SYNC_ENABLED=1 to turn it on; see the module docstring for "
+            "why it ships off."
+        )
+        return 0
     if not args.loop:
         results = await _sync_all_workspaces(workspace_filter)
         if not results:
@@ -474,6 +481,26 @@ async def _main_async(args: argparse.Namespace) -> int:
         except Exception:
             _log.exception("ebay_sync_loop_failure (will retry)")
         await asyncio.sleep(interval)
+
+
+
+def _ingestion_enabled() -> bool:
+    """Whether this worker may write to the ledger.
+
+    Ships OFF. The discovery bug above meant this worker had never posted
+    anything, so switching it on is a first-time ingestion into live books, not
+    a resumption — and for eBay specifically there is a live conflict: the
+    Listing-Ops app already syncs eBay sales into the
+    magic-unicorn-inc-listing-ops entity, while _entity_for_credential here
+    resolves to the OLDEST active entity (magic-unicorn-inc). Same economic
+    activity, two entities, and different `source` labels so the
+    (entity, source, source_external_id) idempotency key cannot dedupe them:
+    consolidated revenue would be counted twice.
+
+    Deciding which system owns eBay-to-ledger is an accounting call, not a
+    code one. Until it is made, discovery being fixed must not imply posting.
+    """
+    return os.getenv("EBAY_SYNC_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 
 
 def main() -> None:

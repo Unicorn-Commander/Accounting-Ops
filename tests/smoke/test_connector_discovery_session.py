@@ -89,3 +89,37 @@ def test_empty_discovery_warns_on_every_cycle(script: str):
         "only from the one-shot CLI path"
     )
     assert "_log.warning" in body, f"{script}: log it at WARNING, not INFO"
+
+
+@pytest.mark.parametrize("script", SCRIPTS)
+def test_ingestion_is_off_by_default(script: str, monkeypatch):
+    """Fixing discovery must not, by itself, start writing to live books.
+
+    For eBay there is a concrete conflict: Listing-Ops already posts eBay sales
+    into magic-unicorn-inc-listing-ops, while _entity_for_credential resolves to
+    the OLDEST active entity (magic-unicorn-inc). Different `source` labels mean
+    the (entity, source, source_external_id) idempotency key cannot dedupe them,
+    so consolidated revenue would double-count.
+    """
+    src = _source(script)
+    assert "_ingestion_enabled" in src, f"{script}: no ingestion gate"
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(f"_gate_{script}", ROOT / script)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:  # pragma: no cover - heavy imports; fall back to source
+        env = "EBAY_SYNC_ENABLED" if "ebay" in script else "STRIPE_SYNC_ENABLED"
+        assert f'os.getenv("{env}", "")' in src
+        return
+
+    env = "EBAY_SYNC_ENABLED" if "ebay" in script else "STRIPE_SYNC_ENABLED"
+    monkeypatch.delenv(env, raising=False)
+    assert mod._ingestion_enabled() is False, "must default to OFF"
+    monkeypatch.setenv(env, "1")
+    assert mod._ingestion_enabled() is True
+    monkeypatch.setenv(env, "no")
+    assert mod._ingestion_enabled() is False
