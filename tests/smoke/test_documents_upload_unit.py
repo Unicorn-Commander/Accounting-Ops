@@ -26,6 +26,7 @@ from app.api.documents import (
     _summary_message,
 )
 from app.categorization.receipt_vlm import ReceiptExtraction
+from tests.route_introspection import registered_paths
 
 
 def _extraction(**kw) -> ReceiptExtraction:
@@ -157,7 +158,7 @@ def test_summary_message_per_tier():
 def test_router_registered_with_entity_scoped_paths():
     import app.main as m
 
-    paths = {r.path for r in m.app.routes if hasattr(r, "path")}
+    paths = registered_paths(m.app)
     assert (
         "/api/workspaces/{workspace_id}/entities/{entity_id}/documents/upload"
         in paths
