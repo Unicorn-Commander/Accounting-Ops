@@ -16,7 +16,12 @@ jobs:
   # nothing below it executes.
   # ---------------------------------------------------------------------------
   unit:
-    runs-on: docker
+    # The fleet's only Forgejo runner (uc-forgejo-runner on bigboy) advertises
+    # ubuntu-latest and ubuntu-22.04. It does NOT advertise "docker", so a job
+    # asking for that label is never picked up — it queues indefinitely and the
+    # repo looks like it has CI when it has none. Sibling repos that do run
+    # (accounting-ops-simplefin-mcp) use ubuntu-latest; match them.
+    runs-on: ubuntu-latest
     container:
       image: python:3.12-slim
     steps:
@@ -63,7 +68,12 @@ jobs:
   # / ACCTOPS_TEST_DSN at the dind host instead.
   # ---------------------------------------------------------------------------
   integration:
-    runs-on: docker
+    # Same label constraint as the unit job. This one also needs the host
+    # docker socket, which uc-forgejo-runner does mount — but note it shares
+    # bigboy with the inference stack, so this job stands a compose stack up on
+    # a box that is usually busy. That is the other reason it is gated to main
+    # and pull requests below rather than every branch push.
+    runs-on: ubuntu-latest
     # Only on main and on pull requests. This job stands up a real compose
     # stack, so letting it fire on every push to a feat/** or fix/** branch
     # would run several of them concurrently on one runner for what is usually

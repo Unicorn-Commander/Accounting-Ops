@@ -120,3 +120,30 @@ def test_fix_branches_trigger_ci(workflow: dict):
     # `on` parses as the YAML boolean True, not the string "on".
     triggers = workflow.get("on", workflow.get(True))
     assert "fix/**" in triggers["push"]["branches"]
+
+
+# Labels the fleet's Forgejo runner (uc-forgejo-runner on bigboy) actually
+# advertises. A job asking for anything else is never picked up: Forgejo queues
+# it forever and reports no failure, so the repo looks like it has CI when it
+# has none. That is exactly the state this workflow sat in.
+RUNNER_LABELS = {"ubuntu-latest", "ubuntu-22.04"}
+
+
+def test_every_job_targets_a_label_the_runner_advertises(workflow: dict):
+    mismatched = {
+        name: job.get("runs-on")
+        for name, job in workflow["jobs"].items()
+        if job.get("runs-on") not in RUNNER_LABELS
+    }
+    assert not mismatched, (
+        f"these jobs would queue forever, never run, and never fail: {mismatched}. "
+        f"The runner advertises {sorted(RUNNER_LABELS)}."
+    )
+
+
+def test_the_stack_job_does_not_run_on_every_branch_push(workflow: dict):
+    """The integration job stands a compose stack up on the inference box."""
+    cond = workflow["jobs"]["integration"].get("if", "")
+    assert "refs/heads/main" in cond and "pull_request" in cond, (
+        f"integration job is not gated to main/PR: {cond!r}"
+    )
