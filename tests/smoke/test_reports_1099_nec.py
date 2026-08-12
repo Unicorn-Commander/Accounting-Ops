@@ -74,7 +74,43 @@ def test_processor_payees_flagged_for_human_review():
 def test_amounts_stringified_two_decimal_threshold():
     out = reports.form_1099_nec  # noqa: F841 — referenced so import is exercised
     assert reports.NEC_THRESHOLD == Decimal("600")
-    assert reports.CONTRACT_LABOR_ACCOUNTS == ("6300",)
+
+
+def test_basis_covers_the_contractor_accounts_actually_in_use():
+    """The basis must cover every contractor account the live charts carry.
+
+    Pinning the literal ("6300",) is exactly what let this rot: DEFAULT_COA in
+    app/journal/accounts.py declares only 6300, but the charts the platform
+    actually provisions also carry 5220, 5630 and 5635 — created outside that
+    template — and $7,542.29 of real payments to a named individual sat on 5630,
+    invisible on every 1099 surface.
+
+    So this list cannot be derived from DEFAULT_COA; deriving it from there
+    would produce a test that passes against the broken basis (it did). It is
+    pinned deliberately, with the provenance recorded, and the accompanying
+    query is the way to re-check it:
+
+        SELECT DISTINCT account_number, canonical_form, account_type
+        FROM books.chart_of_account
+        WHERE canonical_form ILIKE '%contractor%'
+           OR canonical_form ILIKE '%1099%';
+
+    If that query returns an EXPENSE account not listed below, the 1099 report
+    is under-reporting and this test should fail until it is added.
+    """
+    known_in_use = {
+        "5220",  # Contract Labor (1099-NEC)
+        "5630",  # Contractor · 1099-NEC        <- carried the missed $7,542.29
+        "5635",  # Subcontractor Services
+        "6300",  # Contractor · 1099-NEC (DEFAULT_COA)
+    }
+    missing = known_in_use - set(reports.CONTRACT_LABOR_ACCOUNTS)
+    assert not missing, f"contractor accounts absent from the 1099 basis: {missing}"
+
+
+def test_basis_never_includes_a_revenue_account():
+    """4020 is NEC RECEIVED. Including it would invent payments never made."""
+    assert "4020" not in reports.CONTRACT_LABOR_ACCOUNTS
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +230,7 @@ def test_handler_shape_and_threshold_passthrough():
 
     assert result["year"] == "2025"
     assert result["threshold"] == "600.00"
-    assert result["basis_accounts"] == ["6300"]
+    assert result["basis_accounts"] == list(reports.CONTRACT_LABOR_ACCOUNTS)
     assert result["total_payees"] == 2
     assert result["total_paid"] == "12900.00"
     # Highest first; processor name flagged.
