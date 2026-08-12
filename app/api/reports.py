@@ -837,7 +837,6 @@ async def trial_balance(
                         WHERE je.status = 'posted'
                           AND je.effective_date >= :partial_start
                           AND je.effective_date <= :as_of
-                          AND je.source NOT IN ('reversal', 'recategorization')
                           AND je.debit_account_number IS NOT NULL
                           {entity_clause}
                         GROUP BY je.debit_account_number
@@ -850,7 +849,6 @@ async def trial_balance(
                         WHERE je.status = 'posted'
                           AND je.effective_date >= :partial_start
                           AND je.effective_date <= :as_of
-                          AND je.source NOT IN ('reversal', 'recategorization')
                           AND je.credit_account_number IS NOT NULL
                           {entity_clause}
                         GROUP BY je.credit_account_number

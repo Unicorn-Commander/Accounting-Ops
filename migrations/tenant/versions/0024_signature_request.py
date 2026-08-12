@@ -35,7 +35,6 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import context, op
-from sqlalchemy.dialects import postgresql
 
 revision: str = "0024_signature_request"
 down_revision: str | None = "0023_professional_substitute"
