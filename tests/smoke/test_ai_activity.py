@@ -20,6 +20,7 @@ from app.api.ai_activity import (
     label_for,
     reversibility_for,
 )
+from tests.route_introspection import paths_containing
 
 
 def test_reversibility_table_known_tools():
@@ -137,8 +138,5 @@ def test_main_app_wires_ai_activity_router():
     """Sanity: the FastAPI app exposes ai-activity routes."""
     from app.main import app
 
-    paths = {
-        r.path for r in app.routes
-        if hasattr(r, "path") and "ai-activity" in r.path
-    }
+    paths = paths_containing(app, "ai-activity")
     assert len(paths) >= 4, f"expected >=4 ai-activity routes, got {paths!r}"
