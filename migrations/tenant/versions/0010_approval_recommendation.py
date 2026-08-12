@@ -37,7 +37,6 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import context, op
-from sqlalchemy.dialects import postgresql
 
 revision: str = "0010_approval_recommendation"
 down_revision: str | None = "0009_specialist_run"
