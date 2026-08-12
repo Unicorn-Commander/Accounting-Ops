@@ -44,6 +44,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.connectors.ebay import EbayApiError, EbayFinancesClient, load_ebay_credential
 from app.connectors.ebay.mapper import (
@@ -70,9 +71,43 @@ DEFAULT_LOOP_INTERVAL_S = int(os.getenv("EBAY_SYNC_INTERVAL_S", "3600"))
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Cross-workspace discovery session
+# ---------------------------------------------------------------------------
+#
+# Discovery has to look ACROSS workspaces, and app.db.SessionLocal connects as
+# the runtime role. public.tenant_credentials has RLS enabled (not forced) with
+# a workspace_isolation policy keyed on app.current_workspace — a GUC a
+# cross-workspace query has no single value for. The runtime role therefore
+# matched zero rows and discovery returned [] on a database that plainly held
+# the credential: the worker looked healthy and did nothing, for months.
+#
+# accounting_ops_admin OWNS that table and the table is not FORCE RLS, so the
+# owner is exempt and sees every workspace's row. Per-workspace work below still
+# goes through workspace_session() as the runtime role, which is what actually
+# enforces isolation — only this one discovery query is privileged.
+_ADMIN_SESSIONMAKER = None
+
+
+def _admin_sessionmaker():
+    """Sessionmaker bound to ADMIN_DATABASE_URL (falls back to DATABASE_URL)."""
+    global _ADMIN_SESSIONMAKER
+    if _ADMIN_SESSIONMAKER is None:
+        url = os.getenv("ADMIN_DATABASE_URL") or os.getenv("DATABASE_URL")
+        if not url:
+            raise SystemExit(
+                "ebay_sync: neither ADMIN_DATABASE_URL nor DATABASE_URL is set"
+            )
+        _ADMIN_SESSIONMAKER = async_sessionmaker(
+            create_async_engine(url, pool_pre_ping=True),
+            expire_on_commit=False,
+        )
+    return _ADMIN_SESSIONMAKER
+
+
 async def _workspaces_with_ebay() -> list[dict[str, Any]]:
     """Find every workspace that has at least one ebay_finances credential."""
-    async with SessionLocal() as session:
+    async with _admin_sessionmaker()() as session:
         async with session.begin():
             rows = (
                 await session.execute(
@@ -376,6 +411,16 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
 
 async def _sync_all_workspaces(workspace_filter: UUID | None = None) -> list[dict[str, Any]]:
     workspaces = await _workspaces_with_ebay()
+    if not workspaces:
+        # Loud on EVERY cycle, not just the one-shot path. An empty discovery
+        # is indistinguishable from "nothing to do" in the logs, which is
+        # exactly how this worker sat healthy and idle while a credential was
+        # configured the whole time.
+        _log.warning(
+            "ebay_sync_no_workspaces_with_credential — discovery returned 0 "
+            "workspaces. If a ebay credential IS configured, this is a fault, "
+            "not an idle cycle."
+        )
     out = []
     for w in workspaces:
         wid = UUID(w["workspace_id"])
@@ -416,6 +461,13 @@ async def _main_async(args: argparse.Namespace) -> int:
         except ValueError:
             _log.error("--workspace must be a UUID: %s", args.workspace)
             return 2
+    if not _ingestion_enabled():
+        _log.warning(
+            "ebay_sync_disabled — discovery works but ingestion is OFF. Set "
+            "EBAY_SYNC_ENABLED=1 to turn it on; see the module docstring for "
+            "why it ships off."
+        )
+        return 0
     if not args.loop:
         results = await _sync_all_workspaces(workspace_filter)
         if not results:
@@ -429,6 +481,26 @@ async def _main_async(args: argparse.Namespace) -> int:
         except Exception:
             _log.exception("ebay_sync_loop_failure (will retry)")
         await asyncio.sleep(interval)
+
+
+
+def _ingestion_enabled() -> bool:
+    """Whether this worker may write to the ledger.
+
+    Ships OFF. The discovery bug above meant this worker had never posted
+    anything, so switching it on is a first-time ingestion into live books, not
+    a resumption — and for eBay specifically there is a live conflict: the
+    Listing-Ops app already syncs eBay sales into the
+    magic-unicorn-inc-listing-ops entity, while _entity_for_credential here
+    resolves to the OLDEST active entity (magic-unicorn-inc). Same economic
+    activity, two entities, and different `source` labels so the
+    (entity, source, source_external_id) idempotency key cannot dedupe them:
+    consolidated revenue would be counted twice.
+
+    Deciding which system owns eBay-to-ledger is an accounting call, not a
+    code one. Until it is made, discovery being fixed must not imply posting.
+    """
+    return os.getenv("EBAY_SYNC_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 
 
 def main() -> None:
