@@ -33,7 +33,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import context, op
 
-revision: str = "0030_monthly_balance_include_corrections"
+revision: str = "0030_mab_include_corrections"
 down_revision: str | None = "0029_entity_owner"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
