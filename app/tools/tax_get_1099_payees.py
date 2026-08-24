@@ -4,40 +4,27 @@ Used by the 1120 Preparer specialist to identify potential 1099-NEC filing
 obligations and to support the contractor/professional-services deduction
 lines on Form 1120.
 
-Aggregates posted journal entries by ``payee`` (or ``description`` when payee
-is null) for contractor-like categories. Returns payees with cumulative
-payments at or above the threshold (default $600 = 60,000 cents).
+Delegates to the canonical ``form_1099_nec`` report (app/api/reports.py) for
+aggregation: it sums the DEBIT side of posted journal entries booked to the
+contract-labor GL accounts, NETS refunds (credits back to those accounts)
+DOWN, and groups by counterparty. This is the SAME basis + netting rule the
+HTTP report and ``app/tools/reports_extra.py::get_1099_nec_report`` use, so the
+two 1099-NEC surfaces can never disagree (no more SUM(ABS) inflation, and a
+payee with a NULL counterparty_id still groups into a single row via the
+ledger's payee text instead of splitting per descriptor).
 
-Categories considered contractor-like (canonical platform names):
-  - "Contractor · 1099-NEC"
-  - "Contractor · Other"
-  - "Legal · Services"
-  - "Professional · Services"
-
-These map to Form 1120 line 26 (Other deductions) per tax_mapping_1120.py.
+Returns payees with cumulative NETTED payments at or above the threshold
+(default $600 = 60,000 cents).
 
 DRAFT LABEL: Results carry ``_draft_notice``.
 """
 from __future__ import annotations
 
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
-
-from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace
-from app.workspace_session import entity_session
-
-# Canonical category names that indicate contractor / professional-services
-# payments requiring 1099-NEC analysis.  Kept as a module-level constant so
-# the specialist (and tests) can reference the exact set without hard-coding.
-CONTRACTOR_CATEGORIES: tuple[str, ...] = (
-    "Contractor · 1099-NEC",
-    "Contractor · Other",
-    "Legal · Services",
-    "Professional · Services",
-)
 
 
 def _b(value: Any) -> Any:
@@ -49,6 +36,22 @@ def _b(value: Any) -> Any:
     return str(value)
 
 
+def _dollars_to_cents(amount: Any) -> int:
+    """Convert a decimal-dollars value (str/Decimal/number) to integer cents.
+
+    ``form_1099_nec`` returns each payee's netted total as a decimal-dollars
+    STRING (e.g. "7542.29"); this tool's contract is integer cents. Use Decimal
+    so the money stays exact, and round half-up to the nearest cent.
+    """
+    if amount is None:
+        return 0
+    try:
+        cents = (Decimal(str(amount)) * 100).to_integral_value(rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return 0
+    return int(cents)
+
+
 async def get_1099_payees(
     workspace_id: UUID,
     entity_id: UUID,
@@ -57,9 +60,26 @@ async def get_1099_payees(
 ) -> dict[str, Any]:
     """Aggregate contractor payees at or above the 1099-NEC threshold.
 
-    Scans posted journal entries in the given tax year for contractor-like
-    categories and returns each payee (or description fallback) whose total
-    payments reach or exceed ``threshold_cents`` (default 60,000 = $600).
+    Delegates to ``form_1099_nec`` for aggregation (debit side of the
+    contract-labor GL accounts, refunds netted down, grouped by counterparty).
+    Returns each payee whose NETTED total payments reach or exceed
+    ``threshold_cents`` (default 60,000 = $600). Because the netting is shared
+    with the canonical report, a contractor refund reduces that contractor's
+    total (no SUM(ABS) inflation) and a payee is reported ONCE even when its
+    journal entries carry a NULL counterparty_id.
+
+    Note:
+        The shared ``form_1099_nec`` path always filters at the $600 (60,000
+        cents) threshold. If ``threshold_cents`` is ABOVE 60,000 this tool
+        post-filters the netted rows up to it. If ``threshold_cents`` is BELOW
+        60,000 the shared path has already dropped the sub-$600 payees, so the
+        tool cannot surface them — the delegated basis does not support
+        sub-$600 thresholds.
+
+        # VERIFY-AT-GATE: form_1099_nec hard-filters at $600 (NEC_THRESHOLD),
+        # so a threshold_cents below 60,000 cannot surface sub-$600 payees
+        # through this delegated path. Accepted: the 1099-NEC obligation itself
+        # begins at $600, so a lower threshold has no filing meaning here.
 
     Returns:
         {
@@ -71,98 +91,74 @@ async def get_1099_payees(
                     "payee_name": "Acme Consulting",
                     "total_amount_cents": 250000,
                     "entry_count": 5,
-                    "first_payment_date": "2023-02-01",
-                    "last_payment_date": "2023-11-15",
-                    "categories_seen": ["Contractor · 1099-NEC"]
+                    "first_payment_date": null,
+                    "last_payment_date": null,
+                    "categories_seen": [],
+                    "requires_human_review": false
                 },
                 ...
             ],
-            "categories_checked": [...],
+            "categories_checked": ["5220", "5630", "5635", "6300"],
             "_draft_notice": "..."
         }
 
-    DRAFT — for CPA review only. The payee aggregation is a heuristic based on
-    category labels; the CPA must verify actual filing obligations.
+    ``first_payment_date`` / ``last_payment_date`` / ``categories_seen`` are
+    retained for return-shape compatibility but are not carried by the shared
+    report (which groups by GL account + counterparty, not by date or category);
+    they are null / empty. ``categories_checked`` now reflects the contract-labor
+    GL accounts that define the basis. ``requires_human_review`` flags a payee
+    whose name matches a known payment processor (likely 1099-K, not 1099-NEC).
+
+    DRAFT — for CPA review only. The aggregation identifies filing CANDIDATES;
+    the CPA must verify actual obligations (corporate-status and payment-method
+    exemptions are not applied here).
 
     Role floor: viewer.
     """
-    await authorize_workspace(workspace_id, entity_id, min_role="viewer")
+    # Keep the tool's existing authorization as-is, but CAPTURE the authorized
+    # context. form_1099_nec re-checks the role, enforces entity scope, and
+    # opens its DB session from ``workspace.workspace_id`` — so it needs the
+    # real WorkspaceContext (passing None crashes it). This mirrors
+    # app/tools/reports_extra.py::get_1099_nec_report, the working reference.
+    workspace = await authorize_workspace(workspace_id, entity_id, min_role="viewer")
 
-    # Date range: full calendar year for tax_year
-    # asyncpg requires actual date objects; passing strings yields
-    # 'invalid input for query argument' DataError.
-    from datetime import date as _date
-    start_date = _date(tax_year, 1, 1)
-    end_date = _date(tax_year, 12, 31)
+    from app.api.reports import form_1099_nec as _http_1099_nec
 
-    # Build category filter as positional placeholders.
-    # We use ILIKE for resilience against minor capitalization differences, but
-    # also include exact match — use IN for performance (exact match on indexed
-    # column is fast; ILIKE would disable index use).
-    # The categories are controlled constants so injection is not a concern, but
-    # we use SQLAlchemy bound params anyway for the habit.
-    cat_params = {f"cat_{i}": c for i, c in enumerate(CONTRACTOR_CATEGORIES)}
-    cat_placeholders = ", ".join(f":cat_{i}" for i in range(len(CONTRACTOR_CATEGORIES)))
-
-    params: dict[str, Any] = {
-        "entity_id": str(entity_id),
-        "start_date": start_date,
-        "end_date": end_date,
-        "threshold": float(threshold_cents) / 100.0,
-        **cat_params,
-    }
-
-    # Aggregate by payee (COALESCE to description when payee is null).
-    # amount is stored as DECIMAL(19,2) in dollars; multiply by 100 → cents.
-    # We use ABS because outflows are stored as negative amounts; the 1099
-    # threshold applies to the absolute payment amount.
-    sql = text(
-        f"""
-        SELECT
-            COALESCE(NULLIF(TRIM(payee), ''), TRIM(description), 'Unknown') AS payee_name,
-            ROUND(SUM(ABS(amount)) * 100)::bigint AS total_amount_cents,
-            COUNT(*)::int AS entry_count,
-            MIN(effective_date)::text AS first_payment_date,
-            MAX(effective_date)::text AS last_payment_date,
-            array_agg(DISTINCT category ORDER BY category) AS categories_seen
-        FROM journal_entry
-        WHERE entity_id = :entity_id
-          AND status = 'posted'
-          AND effective_date >= :start_date
-          AND effective_date <= :end_date
-          AND category IN ({cat_placeholders})
-        GROUP BY COALESCE(NULLIF(TRIM(payee), ''), TRIM(description), 'Unknown')
-        HAVING SUM(ABS(amount)) >= :threshold
-        ORDER BY SUM(ABS(amount)) DESC
-        """
+    result = await _http_1099_nec(
+        workspace_id=workspace_id,
+        year=str(tax_year),
+        entity_id=str(entity_id),
+        workspace=workspace,
     )
 
-    async with entity_session(SessionLocal, workspace_id, entity_id) as (session, _eid):
-        rows = (await session.execute(sql, params)).mappings().all()
-
-    payees = []
-    for r in rows:
-        cats = r["categories_seen"]
-        # asyncpg returns arrays as Python lists; normalize to list[str]
-        if isinstance(cats, list):
-            cats_list = [str(c) for c in cats if c is not None]
-        else:
-            cats_list = [str(cats)] if cats else []
-        payees.append({
-            "payee_name": _b(r["payee_name"]),
-            "total_amount_cents": int(r["total_amount_cents"]) if r["total_amount_cents"] is not None else 0,
-            "entry_count": int(r["entry_count"]),
-            "first_payment_date": _b(r["first_payment_date"]),
-            "last_payment_date": _b(r["last_payment_date"]),
-            "categories_seen": cats_list,
-        })
+    # form_1099_nec payee rows use keys: payee, total_amount (decimal-dollars
+    # STRING), posting_count, requires_human_review. Map them into this tool's
+    # documented shape (integer cents), preserving the report's descending order.
+    form_payees = result.get("payees", [])
+    payees: list[dict[str, Any]] = []
+    for p in form_payees:
+        total_cents = _dollars_to_cents(p.get("total_amount"))
+        if total_cents >= threshold_cents:
+            payees.append(
+                {
+                    "payee_name": _b(p.get("payee")),
+                    "total_amount_cents": total_cents,
+                    "entry_count": int(p.get("posting_count", 0) or 0),
+                    "first_payment_date": None,
+                    "last_payment_date": None,
+                    "categories_seen": [],
+                    "requires_human_review": bool(p.get("requires_human_review", False)),
+                }
+            )
 
     return {
         "entity_id": str(entity_id),
         "tax_year": tax_year,
         "threshold_cents": threshold_cents,
         "payees": payees,
-        "categories_checked": list(CONTRACTOR_CATEGORIES),
+        # Basis is now the shared report's contract-labor GL accounts, not the
+        # old category-name heuristic.
+        "categories_checked": list(result.get("basis_accounts", [])),
         "_draft_notice": (
             "DRAFT — for CPA review only. "
             "Payee aggregation is heuristic (category-based). "
