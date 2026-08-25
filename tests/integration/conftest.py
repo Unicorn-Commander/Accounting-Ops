@@ -40,7 +40,12 @@ from tests.conftest import (
     StackConfig,
 )
 
-_SCHEMA = f"accounting_ops_{str(TEST_WORKSPACE_ID).replace('-', '_')}"
+# Shared-schema model (tenant/0025+0026): every workspace's rows live in the ONE
+# fixed `books` schema, isolated by FORCE RLS on workspace_id — the old
+# per-workspace `accounting_ops_<uuid>` schema is gone. Mirrors
+# app.workspace_session.SHARED_SCHEMA; the seed/tamper helpers below still SET
+# search_path to it explicitly so the OWNER pool lands in `books`.
+_SCHEMA = "books"
 
 # ---------------------------------------------------------------------------
 # Shared second-entity constants (reused across test_tenant_isolation.py and
@@ -67,7 +72,7 @@ async def _ensure_entity_b(pool: "asyncpg.Pool") -> None:
                     $1, $2, $3, 'Isolation Entity B', CAST('llc' AS entity_type),
                     'US', 'USD', 'active'
                 )
-                ON CONFLICT (slug) DO NOTHING
+                ON CONFLICT (workspace_id, slug) DO NOTHING
                 """,
                 str(ENTITY_B_ID),
                 str(TEST_WORKSPACE_ID),
@@ -89,7 +94,7 @@ async def _ensure_entity_b_mapping(pool: "asyncpg.Pool") -> None:
                     gen_random_uuid(), $1, $2, $3, $4,
                     'Isolation B Bank', 'Isolation B Checking (0002)', true
                 )
-                ON CONFLICT (source, external_account_id) DO NOTHING
+                ON CONFLICT (workspace_id, source, external_account_id) DO NOTHING
                 """,
                 str(TEST_WORKSPACE_ID),
                 str(ENTITY_B_ID),
@@ -282,7 +287,7 @@ async def _ensure_account_mapping(pool: "asyncpg.Pool") -> None:
                     gen_random_uuid(), $1, $2, $3, $4,
                     'Integration Test Bank', 'Integration Checking (0001)', true
                 )
-                ON CONFLICT (source, external_account_id) DO NOTHING
+                ON CONFLICT (workspace_id, source, external_account_id) DO NOTHING
                 """,
                 str(TEST_WORKSPACE_ID),
                 str(TEST_ENTITY_ID),

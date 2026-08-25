@@ -37,7 +37,9 @@ from tests.integration.test_mcp_write_tools import _membership_as
 
 pytestmark = pytest.mark.integration
 
-_SCHEMA = f"accounting_ops_{str(TEST_WORKSPACE_ID).replace('-', '_')}"
+# Shared-schema model (tenant/0025+0026): rows live in the fixed `books` schema
+# (was per-workspace accounting_ops_<uuid>). Mirrors app.workspace_session.SHARED_SCHEMA.
+_SCHEMA = "books"
 
 
 # ---------------------------------------------------------------------------

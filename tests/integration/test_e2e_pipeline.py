@@ -116,7 +116,9 @@ async def test_full_pipeline(
 
     # ---- 3. A journal_entry row was actually persisted (verify via DB) ----
     async with db.acquire() as conn:
-        schema = f"accounting_ops_{str(wid).replace('-', '_')}"
+        # Shared-schema model (tenant/0025+0026): rows live in the fixed `books`
+        # schema (was per-workspace accounting_ops_<uuid>). Mirrors SHARED_SCHEMA.
+        schema = "books"
         async with conn.transaction():
             await conn.execute(f'SET LOCAL search_path = "{schema}", public')
             row = await conn.fetchrow(

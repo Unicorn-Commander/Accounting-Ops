@@ -37,7 +37,7 @@ from tests.conftest import (
 
 pytestmark = pytest.mark.integration
 
-_SCHEMA = f"accounting_ops_{str(TEST_WORKSPACE_ID).replace('-', '_')}"
+_SCHEMA = "books"  # shared-schema model (was per-workspace accounting_ops_<uuid>); mirrors app.workspace_session.SHARED_SCHEMA
 _EFFECTIVE_DATE = dt.date(2024, 3, 15).isoformat()  # 2024 so year filter works
 
 

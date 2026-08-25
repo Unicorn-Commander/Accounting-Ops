@@ -52,7 +52,7 @@ from tests.integration.conftest import (
 
 pytestmark = pytest.mark.integration
 
-_SCHEMA = f"accounting_ops_{str(TEST_WORKSPACE_ID).replace('-', '_')}"
+_SCHEMA = "books"  # shared-schema model (was per-workspace accounting_ops_<uuid>); mirrors app.workspace_session.SHARED_SCHEMA
 
 PERIOD_YEAR = 2026
 EFFECTIVE_DATE = dt.date(PERIOD_YEAR, 2, 14).isoformat()
