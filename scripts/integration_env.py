@@ -39,7 +39,20 @@ TEST_WORKSPACE_SLUG = "integration-ci"
 TEST_WORKSPACE_ID = uuid.uuid5(uuid.NAMESPACE_DNS, f"accounting-ops:{TEST_WORKSPACE_SLUG}")
 TEST_ENTITY_NAME = "Integration Test Co"
 TEST_ENTITY_KIND = "c_corp"
-SCHEMA = f"accounting_ops_{str(TEST_WORKSPACE_ID).replace('-', '_')}"
+# Shared-schema model (tenant/0025+0026): every workspace's rows live in the ONE
+# fixed `books` schema, isolated by FORCE RLS on workspace_id — there is no
+# per-workspace schema any more. Mirrors app.workspace_session.SHARED_SCHEMA.
+SHARED_SCHEMA = "books"
+
+# The last SCHEMA-ONLY tenant revision. The next one, 0030_mab_include_corrections,
+# is a DATA migration: it rebuilds monthly_account_balance per workspace and
+# RAISES if public.workspace is empty ("refusing to stamp a migration that would
+# silently rebuild nothing"). A fresh throwaway stack has no workspaces when the
+# tenant schema is first built, so we migrate to this revision, provision the
+# workspaces (making public.workspace non-empty), THEN finish the upgrade to head
+# so 0030 has data to rebuild. It adds no tables/columns, so provisioning against
+# this revision has the full schema it needs.
+TENANT_PRE_DATA_REVISION = "0029_entity_owner"
 
 # A SECOND, fully separate workspace (its own schema) — the cross-tenant target
 # for the RLS-backstop proof. Provisioned the same way as workspace A.
@@ -96,8 +109,21 @@ def _write_secrets_and_env(with_cpa: bool) -> None:
         SECRET_FILE.write_bytes(secrets.token_bytes(32))
         SECRET_FILE.chmod(0o600)
 
+    # H2 / audit 2026-05-31 Bug 7: the app REJECTS a service token that declares
+    # NONE of workspace_ids / entity_ids / role_floor (unless the dev escape
+    # hatch ACCTOPS_ALLOW_UNSCOPED_SERVICE_TOKEN is set) — see app/auth.py
+    # _load_service_tokens. Declare role_floor="owner": a real scope field that
+    # satisfies the loader WITHOUT constraining the token's reach. The
+    # impersonated test-service user is provisioned as workspace OWNER, and role
+    # cap is min(membership_role, role_floor); since nothing in the suite ever
+    # assigns test-service a role above owner, the cap is a no-op and the token's
+    # effective role always equals its membership role. Crucially we do NOT set
+    # workspace_ids, so cross-tenant denials still fire at the MEMBERSHIP layer
+    # (workspace B has no membership row) — preserving the "no active membership"
+    # / "permission" error the isolation tests assert.
     service_tokens = (
-        '{"%s": {"uc_uid": "%s", "agent_id": "integration-test"}}'
+        '{"%s": {"uc_uid": "%s", "agent_id": "integration-test", '
+        '"role_floor": "owner"}}'
         % (SERVICE_TOKEN, SERVICE_UC_UID)
     )
     lines = [
@@ -221,6 +247,49 @@ def cmd_up(with_cpa: bool) -> None:
     print("[integration] running public-schema migrations", file=sys.stderr)
     _exec_app("alembic", "-c", "alembic-public.ini", "upgrade", "head")
 
+    # --- One-time tenant bootstrap (shared-schema model) -------------------
+    # provision_workspace is rows-only: it inserts the workspace registry row +
+    # seed entities and assumes the fixed `books` schema and its tables ALREADY
+    # exist. The tenant migrations create those tables but do NOT create the
+    # schema itself (migrations/tenant/env.py only sets search_path), and no
+    # migration issues CREATE SCHEMA. On a throwaway stack nothing else creates
+    # `books`, so without this step provisioning fails with
+    # `relation "entity" does not exist`. Create the schema (owner-owned) then
+    # run the tenant migrations into it — the deploy-time equivalent of
+    # `CREATE SCHEMA books` + `alembic -c alembic-tenant.ini -x tenant=books
+    # upgrade head` (tenant/0005 also grants the runtime role USAGE + the
+    # least-privilege table grants, so the app can connect afterwards).
+    #
+    # We stop ONE revision short of head (at TENANT_PRE_DATA_REVISION): the head
+    # migration 0030 is a data-backfill that refuses to run against an empty
+    # public.workspace. The schema is fully built here; 0030 is finished after
+    # the workspaces are provisioned (below), so it has data to rebuild.
+    print("[integration] creating shared tenant schema `books`", file=sys.stderr)
+    _psql_owner("CREATE SCHEMA IF NOT EXISTS books AUTHORIZATION accounting_ops")
+    print(
+        f"[integration] running tenant-schema (books) migrations -> {TENANT_PRE_DATA_REVISION}",
+        file=sys.stderr,
+    )
+    _exec_app(
+        "alembic", "-c", "alembic-tenant.ini", "-x", f"tenant={SHARED_SCHEMA}",
+        "upgrade", TENANT_PRE_DATA_REVISION,
+    )
+
+    # --- Drop the stale UNIQUE(workspace.postgres_schema) constraint --------
+    # public/0001 put a UNIQUE constraint on workspace.postgres_schema from the
+    # per-workspace-schema era. In the shared-schema model
+    # create_workspace_record writes postgres_schema='books' for EVERY
+    # workspace, so seeding workspace B collides on that constraint
+    # (workspace_postgres_schema_key). The column is no longer unique by design;
+    # drop the obsolete constraint on the throwaway stack so multi-workspace
+    # seeding works. (The production fix is a public migration dropping it,
+    # tracked separately — this harness must not depend on that landing first.)
+    print("[integration] dropping stale UNIQUE(workspace.postgres_schema)", file=sys.stderr)
+    _psql_owner(
+        "ALTER TABLE public.workspace "
+        "DROP CONSTRAINT IF EXISTS workspace_postgres_schema_key"
+    )
+
     print(f"[integration] provisioning workspace {TEST_WORKSPACE_ID}", file=sys.stderr)
     _exec_app(
         "python", "-m", "scripts.provision_workspace",
@@ -235,6 +304,16 @@ def cmd_up(with_cpa: bool) -> None:
         str(TEST_WORKSPACE_B_ID), TEST_WORKSPACE_B_ENTITY_NAME,
         "--slug", TEST_WORKSPACE_B_SLUG,
         "--entity", f"{TEST_WORKSPACE_B_ENTITY_NAME}:{TEST_ENTITY_KIND}",
+    )
+
+    # Finish the tenant upgrade now that public.workspace is non-empty: the head
+    # migration 0030 rebuilds monthly_account_balance per workspace and verifies
+    # zero drift (both freshly-provisioned workspaces have empty journals, so the
+    # rebuild is a clean no-op that stamps correctly instead of raising).
+    print("[integration] finishing tenant-schema (books) migrations -> head", file=sys.stderr)
+    _exec_app(
+        "alembic", "-c", "alembic-tenant.ini", "-x", f"tenant={SHARED_SCHEMA}",
+        "upgrade", "head",
     )
     print("[integration] stack ready.", file=sys.stderr)
     print("[integration] now run:  eval \"$(python scripts/integration_env.py env"
