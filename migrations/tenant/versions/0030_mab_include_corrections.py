@@ -164,10 +164,23 @@ def upgrade() -> None:
         for r in bind.execute(sa.text("SELECT id FROM public.workspace"))
     ]
     if not workspaces:
-        raise RuntimeError(
-            "0030: public.workspace returned no rows — refusing to stamp a "
-            "migration that would silently rebuild nothing."
-        )
+        # Fresh install: there are genuinely zero workspaces yet, so there is
+        # nothing to rebuild. The corrected trigger installed above will bucket
+        # every FUTURE posting correctly once workspaces + journals exist, so a
+        # brand-new empty database migrates to head cleanly. Return (skip the
+        # backfill) instead of raising.
+        #
+        # This is safe precisely because the discovery query reads
+        # public.workspace, which carries NO RLS: an empty result here means
+        # "no workspaces provisioned", never "RLS filtered them out". The
+        # RLS-silent-no-op trap this migration documents can only occur when
+        # workspaces DO exist but the per-workspace rebuild reads zero rows, and
+        # the per-workspace drift check in the loop below still guards against
+        # exactly that. (Earlier this raised RuntimeError, which made a first
+        # deploy on an empty DB impossible — `alembic upgrade head` could never
+        # reach 0030. Prod is already past 0030 with data, so its behaviour is
+        # unchanged: the loop below runs for every existing workspace.)
+        return
 
     for wid in workspaces:
         # FORCE RLS applies to the owner too; without this the statements below
