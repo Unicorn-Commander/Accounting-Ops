@@ -27,7 +27,12 @@ What one accepted quote turns into
     ``bill`` (accounts payable, A12) from the delivery partner to the vendor of
     record — hosting lines to the partner in full when ``hosting_to_partner``
     (regardless of ``kind``), ``percent_net`` of the fixed scope after
-    ``direct_costs_total_cents`` (or the flat ``fee_cents``);
+    ``direct_costs_total_cents`` (or the flat ``fee_cents``), and — Amendment
+    06 / A32 — ``percent_net`` of every NON-hosting recurring line per period,
+    net of that period's recurring direct costs
+    (``recurring_direct_costs_cents[interval]``), apportioned exactly across
+    the lines of that interval; period 1 rides the acceptance bill, later
+    periods are billed by the runner;
   * a NEW accepted version of the same quote number voids the prior versions'
     still-unissued drafts (invoices, bills) and retires their schedules before
     creating its own paper; issued/paid paper is left alone and reported.
@@ -65,13 +70,13 @@ from __future__ import annotations
 import calendar
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from typing import Any, Literal, Sequence
 from uuid import UUID, uuid4
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -244,7 +249,27 @@ class SplitRule(BaseModel):
     )
     # kind=fee: the flat partner fee (v1 named the kind but no amount field).
     fee_cents: int | None = Field(default=None, ge=0)
+    # A32: per-PERIOD totals of the quote_costs of kind ai_usage|third_party that
+    # are flagged recurring, keyed by interval ({"month": 5000}); netted against
+    # the non-hosting recurring lines of that interval every period. Still only
+    # totals (A3) — nothing itemised travels. Alias: ``recurring_direct_costs``.
+    recurring_direct_costs_cents: dict[str, int] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("recurring_direct_costs_cents", "recurring_direct_costs"),
+    )
     notes: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("recurring_direct_costs_cents")
+    @classmethod
+    def _check_recurring_costs(cls, value: dict[str, int]) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for k, v in (value or {}).items():
+            if k not in _MONTHS_PER_PERIOD:
+                raise ValueError(f"recurring_direct_costs_cents: interval must be month|quarter|year, got {k!r}")
+            if int(v) < 0:
+                raise ValueError("recurring_direct_costs_cents: amounts must be >= 0")
+            out[k] = int(v)
+        return out
 
 
 class QuoteAcceptedPayload(BaseModel):
@@ -307,7 +332,9 @@ class PlannedSchedule:
     term_months: int | None
     periods_total: int | None
     is_hosting: bool
-    partner_amount_cents: int = 0   # the partner's share of ONE period (H3)
+    partner_amount_cents: int = 0        # the partner's share of ONE period (H3 / A32)
+    partner_basis: str = ""              # human-readable basis of that share
+    direct_cost_share_cents: int = 0     # this line's share of the period's recurring direct costs
 
 
 @dataclass(frozen=True)
@@ -465,6 +492,68 @@ def periods_for_term(term_months: int | None, cadence: str) -> int | None:
     return max(1, -(-int(term_months) // per))  # ceil
 
 
+def apportion_cents(total: int, weights: Sequence[int]) -> list[int]:
+    """Split ``total`` integer cents across ``weights`` by largest-remainder — exact sum, no negatives."""
+    total = int(total)
+    if not weights:
+        return []
+    wsum = sum(int(w) for w in weights)
+    if wsum <= 0:
+        out = [0] * len(weights)
+        out[-1] = total
+        return out
+    raw = [Decimal(total) * int(w) / Decimal(wsum) for w in weights]
+    floors = [int(r.to_integral_value(rounding=ROUND_FLOOR)) for r in raw]
+    remainder = total - sum(floors)
+    order = sorted(range(len(raw)), key=lambda i: (-(raw[i] - floors[i]), i))
+    for i in order[:remainder]:
+        floors[i] += 1
+    return floors
+
+
+def apportion_recurring_partner_share(
+    schedules: Sequence[PlannedSchedule], rule: SplitRule, currency: str
+) -> list[PlannedSchedule]:
+    """Set each schedule's per-period partner share (v1 §3 + Amendment 06 / A32).
+
+      hosting lines      -> in full when ``hosting_to_partner`` (else 0);
+      non-hosting lines  -> ``percent_net`` of (the interval's non-hosting recurring
+                            amount − that interval's recurring direct costs), computed
+                            per interval and apportioned exactly across its lines by
+                            amount; ``fee`` and ``none`` share nothing recurring.
+    """
+    out: dict[int, PlannedSchedule] = {}
+    pct = Decimal(rule.percent) if (rule.kind == "percent_net" and rule.percent is not None) else None
+    for s in schedules:
+        if s.is_hosting:
+            if rule.hosting_to_partner:
+                out[s.position] = replace(s, partner_amount_cents=s.amount_cents,
+                                          partner_basis="hosting passed through in full each period")
+            else:
+                out[s.position] = replace(s, partner_amount_cents=0, partner_basis="hosting stays with the vendor")
+        elif pct is None:
+            out[s.position] = replace(s, partner_amount_cents=0,
+                                      partner_basis=f"no recurring share (split_rule.kind={rule.kind})")
+    for cadence in _MONTHS_PER_PERIOD:
+        pool = [s for s in schedules if s.cadence == cadence and not s.is_hosting and pct is not None]
+        if not pool:
+            continue
+        amount_c = sum(s.amount_cents for s in pool)
+        cost_c = min(int(rule.recurring_direct_costs_cents.get(cadence, 0) or 0), amount_c)
+        net_c = amount_c - cost_c
+        share_c = _round_half_up_cents(Decimal(net_c) * pct / Decimal(100))
+        weights = [s.amount_cents for s in pool]
+        shares = apportion_cents(share_c, weights)
+        costs = apportion_cents(cost_c, weights)
+        for s, sh, co in zip(pool, shares, costs):
+            basis = (
+                f"{fmt_pct(pct)}% of ({_fmt_money(s.amount_cents, currency)} - recurring direct costs "
+                f"{_fmt_money(co, currency)}) per {cadence} = {_fmt_money(sh, currency)}"
+            )
+            out[s.position] = replace(s, partner_amount_cents=sh, partner_basis=basis, direct_cost_share_cents=co)
+    return [out[s.position] for s in schedules]
+
+
 def _fmt_money(cents: int, currency: str) -> str:
     sign = "-" if cents < 0 else ""
     whole, frac = divmod(abs(int(cents)), 100)
@@ -478,15 +567,19 @@ def compute_partner_share(
     fixed_total_cents: int,
     hosting_lines: Sequence[tuple[str, int]],
     currency: str,
+    recurring_shares: Sequence[tuple[str, int, str]] = (),
 ) -> PartnerPlan | None:
-    """The partner's share per ``split_rule`` (v1 §3 "Partner split").
+    """The partner's ACCEPTANCE-TIME share per ``split_rule`` (v1 §3 + A32).
 
-      hosting lines  -> to the partner IN FULL when ``hosting_to_partner``
-                        (period 1 here; the runner bills later periods) — this
-                        is independent of ``kind`` (review H2);
-      the rest       -> ``percent_net`` of the fixed scope (one-time + milestone
-                        lines) after ``direct_costs_total_cents``; or the flat
-                        ``fee_cents`` for kind=fee; nothing for kind=none.
+      hosting lines     -> to the partner IN FULL when ``hosting_to_partner``
+                           (period 1 here; the runner bills later periods) — this
+                           is independent of ``kind`` (review H2);
+      the fixed scope   -> ``percent_net`` of (one-time + milestone lines) after
+                           ``direct_costs_total_cents``; or the flat ``fee_cents``
+                           for kind=fee; nothing for kind=none;
+      recurring_shares  -> the period-1 ``percent_net`` share of each non-hosting
+                           recurring line net of its recurring direct costs
+                           (A32; computed by ``apportion_recurring_partner_share``).
 
     Returns None when the rule yields nothing to bill — the caller records
     ``partner: skipped`` with the reason.
@@ -525,6 +618,12 @@ def compute_partner_share(
             if cents > 0:
                 lines.append(PartnerLine(f"Hosting passed through in full — {label} (period 1)", int(cents)))
         basis_parts.append("hosting to partner in full")
+    # A32: non-hosting recurring lines share per period; period 1 rides this bill.
+    for label, cents, basis in recurring_shares:
+        if cents > 0:
+            lines.append(PartnerLine(f"Delivery partner share (period 1) — {label}: {basis}", int(cents)))
+    if any(cents > 0 for _, cents, _ in recurring_shares):
+        basis_parts.append("recurring lines shared per period net of recurring direct costs")
     total = sum(pl.amount_cents for pl in lines)
     if total <= 0:
         return None
@@ -651,18 +750,18 @@ def plan_quote_billing(payload: QuoteAcceptedPayload) -> BillingPlan:
                 "split_rule.hosting_to_partner is set but no recurring line is flagged is_hosting "
                 "(or labelled 'hosting')",
             )
-        if rule.hosting_to_partner:
-            schedules = [
-                s if not s.is_hosting else
-                PlannedSchedule(**{**asdict(s), "partner_amount_cents": s.amount_cents})
-                for s in schedules
-            ]
+        schedules = apportion_recurring_partner_share(schedules, rule, currency)
         hosting_lines = [(s.label, s.amount_cents) for s in schedules if s.is_hosting]
+        recurring_shares = [
+            (s.label, s.partner_amount_cents, s.partner_basis)
+            for s in schedules if not s.is_hosting and s.partner_amount_cents > 0
+        ]
         partner = compute_partner_share(
             split_rule=rule,
             fixed_total_cents=one_time_total + milestone_total,
             hosting_lines=hosting_lines,
             currency=currency,
+            recurring_shares=recurring_shares,
         )
         if partner is None:
             partner_skipped = (
@@ -1341,7 +1440,8 @@ async def apply_quote_acceptance(
                 "hosting_to_partner": rule.hosting_to_partner,
                 "is_hosting": s.is_hosting,
                 "partner_name": partner_name,
-                "basis": "hosting passed through in full each period",
+                "basis": s.partner_basis,
+                "direct_cost_share_cents": s.direct_cost_share_cents,
             }
         sched_id = str(uuid4())
         await session.execute(
@@ -1665,6 +1765,11 @@ async def generate_due_schedule_invoices(
         for n in range(billed + 1, periods_generated + 1):
             p_date = period_date(anchor, cadence, n)
             ref = f"{r['quote_ref']}:partner:recurring:{int(r['line_position'])}:{n}"
+            when = f"({period_label.lower()} {n}{of_n}, {p_date.isoformat()})"
+            if split.get("is_hosting"):
+                line_desc = f"Hosting passed through in full — {r['description']} {when}"
+            else:
+                line_desc = f"Delivery partner share — {r['description']} {when}: {split.get('basis') or ''}".rstrip(": ")
             try:
                 async with session.begin_nested():
                     row, created = await _ensure_bill_draft(
@@ -1672,11 +1777,7 @@ async def generate_due_schedule_invoices(
                         workspace_id=workspace_id, vendor_entity_id=vendor_eid, supplier_id=supplier_id,
                         actor_uc_uid=actor_uc_uid, external_ref=ref, quote_ref=str(r["quote_ref"]),
                         currency=str(r["currency"]), issue_date=p_date, net_terms=net_terms,
-                        lines=[PartnerLine(
-                            f"Hosting passed through in full — {r['description']} "
-                            f"({period_label.lower()} {n}{of_n}, {p_date.isoformat()})",
-                            partner_amount,
-                        )],
+                        lines=[PartnerLine(line_desc[:512], partner_amount)],
                         notes=(
                             f"PARTNER SPLIT DRAFT — bill from {partner_name} (delivery partner) to the vendor "
                             f"of record for quote {r['quote_ref']}, {period_label.lower()} {n}{of_n}. "
@@ -1794,6 +1895,8 @@ __all__ = (
     "SplitRule",
     "advance_period",
     "apply_quote_acceptance",
+    "apportion_cents",
+    "apportion_recurring_partner_share",
     "compute_partner_share",
     "fmt_pct",
     "full_quote_ref",

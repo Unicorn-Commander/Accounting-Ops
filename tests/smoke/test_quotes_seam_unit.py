@@ -38,6 +38,8 @@ from app.ar.quotes_seam import (
     SplitRule,
     advance_period,
     apply_quote_acceptance,
+    apportion_cents,
+    apportion_recurring_partner_share,
     compute_partner_share,
     fmt_pct,
     full_quote_ref,
@@ -223,8 +225,8 @@ def test_plan_deposit_milestones_schedules_and_skips():
              for s in plan.schedules]
     assert sched == [
         (5, "month", 35_000, 12, True, 35_000),   # hosting passes through, every period
-        (6, "month", 5_000, 12, False, 0),
-        (7, "year", 120_000, 2, False, 0),
+        (6, "month", 5_000, 12, False, 2_500),    # A32: 50% of the AI allowance per month
+        (7, "year", 120_000, 2, False, 60_000),   # A32: 50% of the retainer per year
     ]
     assert sorted(s["position"] for s in plan.skipped_lines) == [8, 9, 10]
     assert plan.computed_totals == {
@@ -234,8 +236,9 @@ def test_plan_deposit_milestones_schedules_and_skips():
         "recurring": {"month": 40_000, "year": 120_000},
     }
     assert plan.partner is not None
-    assert plan.partner.total_cents == 285_000
-    assert [pl.amount_cents for pl in plan.partner.lines] == [250_000, 35_000]
+    # fixed 250,000 + hosting 35,000 + period-1 shares 2,500 (AI) + 60,000 (retainer)
+    assert plan.partner.total_cents == 347_500
+    assert [pl.amount_cents for pl in plan.partner.lines] == [250_000, 35_000, 2_500, 60_000]
     # H1: the human-readable basis says 50%, never 5E+1%.
     assert "50% of net fixed scope" in plan.partner.lines[0].description
     assert "E+" not in plan.partner.basis
@@ -695,10 +698,13 @@ async def test_apply_creates_drafts_only_and_never_posts():
     assert hosting["partner_supplier_id"] == res["partner_supplier_id"]
     assert hosting["partner_amount_cents"] == 35_000 and hosting["partner_periods_billed"] == 1
     ai = next(x for x in res["schedules"] if x["position"] == 6)
-    assert ai["partner_supplier_id"] is None and ai["partner_amount_cents"] == 0
+    assert ai["partner_supplier_id"] == res["partner_supplier_id"] and ai["partner_amount_cents"] == 2_500  # A32
     sched_row = s.schedules[(WID, "Q-2026-0001 v2", 5)]
     assert sched_row["vendor_entity_id"] == EID
     assert sched_row["partner_split"]["percent"] == "50" and sched_row["partner_split"]["is_hosting"] is True
+    ai_row = s.schedules[(WID, "Q-2026-0001 v2", 6)]
+    assert ai_row["partner_split"]["is_hosting"] is False
+    assert "50% of ($50.00 - recurring direct costs $0.00) per month = $25.00" in ai_row["partner_split"]["basis"]
     cust = s.counterparties[res["ar_customer_id"]]
     assert cust["name"] == "the apparel client" and cust["kind"] == "customer"
     assert cust["refs"]["contact_id"] == "co-2467436b"
@@ -706,7 +712,7 @@ async def test_apply_creates_drafts_only_and_never_posts():
     assert res["federated"] == {"accounting_ops": "done", "partner": "done", "reason": None}
     bill = s.bills[res["partner_invoice_id"]]
     assert bill["status"] == "draft" and bill["journal_entry_id"] is None
-    assert Decimal(str(bill["total"])) == Decimal("2850.00")
+    assert Decimal(str(bill["total"])) == Decimal("3475.00")   # 2,500 + 350 + 25 + 600
     assert bill["entity_id"] == EID and bill["bill_number"] == "BILL-2026-0001"
     # H1: no scientific notation anywhere on the AP document.
     assert "5E+1" not in bill["notes"] and "50% of net fixed scope" in bill["notes"]
@@ -714,7 +720,7 @@ async def test_apply_creates_drafts_only_and_never_posts():
     supplier = s.counterparties[res["partner_supplier_id"]]
     assert supplier["kind"] == "vendor" and supplier["refs"]["delivery_partner"] is True
     assert "PAYABLE" in bill["notes"] and "never AR" in bill["notes"]
-    assert res["partner_bill"]["total_cents"] == 285_000
+    assert res["partner_bill"]["total_cents"] == 347_500
     assert res["totals"]["deposit_cents"] == 275_000
     assert res["superseded"]["versions"] == [] and res["superseded"]["voided_invoice_ids"] == []
 
@@ -980,23 +986,32 @@ async def test_schedule_runner_bills_the_partner_for_every_generated_period():
     assert len(s.bills) == 1                      # the acceptance bill (fixed scope + period 1 hosting)
     res = await _run(s, date(2026, 12, 12))       # periods 2, 3, 4 due
     assert {g["period_no"] for g in res["generated"] if g["quote_ref"] == "Q-2026-0001 v2"} == {2, 3, 4}
-    hosting_bills = [b for b in res["partner_bills"]]
+    hosting_sched = s.schedules[(WID, "Q-2026-0001 v2", 5)]
+    ai_sched = s.schedules[(WID, "Q-2026-0001 v2", 6)]
+    hosting_bills = [b for b in res["partner_bills"] if b["schedule_id"] == hosting_sched["id"]]
+    ai_bills = [b for b in res["partner_bills"] if b["schedule_id"] == ai_sched["id"]]
     assert [b["period_no"] for b in hosting_bills] == [2, 3, 4]
     assert all(b["amount_cents"] == 35_000 for b in hosting_bills)
-    assert len(s.bills) == 4
+    assert [b["period_no"] for b in ai_bills] == [2, 3, 4]                # A32: the AI allowance shares too
+    assert all(b["amount_cents"] == 2_500 for b in ai_bills)
+    assert len(s.bills) == 7                                              # acceptance + 3 hosting + 3 AI
     for b in hosting_bills:
         row = s.bills[b["bill_id"]]
         assert row["status"] == "draft" and row["journal_entry_id"] is None
         assert row["entity_id"] == VENDOR_EID and row["supplier_counterparty_id"] == acc["partner_supplier_id"]
         assert row["external_ref"] == f"Q-2026-0001 v2:partner:recurring:5:{b['period_no']}"
         assert "PAYABLE" in row["notes"]
-    hosting = s.schedules[(WID, "Q-2026-0001 v2", 5)]
-    assert hosting["partner_periods_billed"] == 4 and len(hosting["generated_bill_ids"]) == 3
-    ai = s.schedules[(WID, "Q-2026-0001 v2", 6)]
-    assert ai["partner_periods_billed"] == 0 and ai["generated_bill_ids"] == []
+        assert row["lines"][0]["description"].startswith("Hosting passed through in full")
+    for b in ai_bills:
+        row = s.bills[b["bill_id"]]
+        assert row["external_ref"] == f"Q-2026-0001 v2:partner:recurring:6:{b['period_no']}"
+        assert row["lines"][0]["description"].startswith("Delivery partner share — AI allowance")
+        assert "50% of ($50.00 - recurring direct costs $0.00) per month = $25.00" in row["lines"][0]["description"]
+    assert hosting_sched["partner_periods_billed"] == 4 and len(hosting_sched["generated_bill_ids"]) == 3
+    assert ai_sched["partner_periods_billed"] == 4 and len(ai_sched["generated_bill_ids"]) == 3
     # Idempotent: a re-run bills nothing twice.
     res = await _run(s, date(2026, 12, 12))
-    assert res["partner_bills"] == [] and len(s.bills) == 4
+    assert res["partner_bills"] == [] and len(s.bills) == 7
     assert s.journal_entries == []
 
 
@@ -1010,13 +1025,141 @@ async def test_schedule_runner_partner_cursor_survives_a_closed_vendor_period():
     res = await _run(s, date(2026, 10, 12))
     assert {g["period_no"] for g in res["generated"]} == {2}        # AR side generated
     assert res["partner_bills"] == []
-    assert len(res["partner_skipped"]) == 1 and res["partner_skipped"][0]["reason"].startswith("PERIOD_CLOSED")
+    assert len(res["partner_skipped"]) == 2                          # hosting + AI allowance (A32)
+    assert all(x["reason"].startswith("PERIOD_CLOSED") for x in res["partner_skipped"])
     hosting = s.schedules[(WID, "Q-2026-0001 v2", 5)]
     assert hosting["periods_generated"] == 2 and hosting["partner_periods_billed"] == 1
     s.closed_through = {}
     res = await _run(s, date(2026, 11, 12))
-    assert [b["period_no"] for b in res["partner_bills"]] == [2, 3]  # caught up
+    assert [b["period_no"] for b in res["partner_bills"] if b["schedule_id"] == hosting["id"]] == [2, 3]  # caught up
     assert hosting["partner_periods_billed"] == 3
+
+
+def test_apportion_cents_exact_sum():
+    assert apportion_cents(67_500, [140_000]) == [67_500]
+    assert apportion_cents(100, [1, 1, 1]) == [34, 33, 33]
+    assert sum(apportion_cents(12_345, [70_000, 30_000, 12])) == 12_345
+    assert apportion_cents(5, [0, 0]) == [0, 5]
+    assert apportion_cents(0, [3, 4]) == [0, 0]
+
+
+def _a32_lines() -> list[dict[str, Any]]:
+    return [
+        {"kind": "one_time", "label": "Setup", "amount_cents": 100_000, "position": 1},
+        {"kind": "recurring", "label": "Improve it — package", "amount_cents": 140_000, "position": 2,
+         "recurring": {"interval": "month", "term_months": 12}},
+        {"kind": "recurring", "label": "Managed hosting", "amount_cents": 35_000, "position": 3,
+         "recurring": {"interval": "month", "term_months": 12}},
+    ]
+
+
+def test_a32_improve_it_package_shares_per_period_net_of_recurring_costs():
+    """Amendment 06 / A32 — the coordinator's worked case: Improve it $1,400/month, a $50/month
+    recurring AI cost, 50% net → partner $675 per period, plus hosting in full."""
+    payload = _payload(
+        lines=_a32_lines(), totals=None,
+        split_rule={"kind": "percent_net", "percent": 50, "hosting_to_partner": True,
+                    "direct_costs_total_cents": 0, "recurring_direct_costs_cents": {"month": 5_000}},
+    )
+    plan = plan_quote_billing(payload)
+    by_pos = {s.position: s for s in plan.schedules}
+    assert by_pos[2].partner_amount_cents == 67_500                    # 50% × (140,000 − 5,000)
+    assert by_pos[2].direct_cost_share_cents == 5_000
+    assert by_pos[2].partner_basis == "50% of ($1,400.00 - recurring direct costs $50.00) per month = $675.00"
+    assert by_pos[3].partner_amount_cents == 35_000 and by_pos[3].is_hosting
+    # Acceptance bill: 50% of the one-time 100,000 + hosting period 1 + Improve it period 1.
+    assert plan.partner is not None
+    assert [pl.amount_cents for pl in plan.partner.lines] == [50_000, 35_000, 67_500]
+    assert plan.partner.total_cents == 152_500
+    assert "Delivery partner share (period 1) — Improve it — package: 50% of ($1,400.00" in plan.partner.lines[2].description
+    # The v1 alias name is accepted too.
+    alias = _payload(lines=_a32_lines(), totals=None,
+                     split_rule={"kind": "percent_net", "percent": 50, "hosting_to_partner": True,
+                                 "recurring_direct_costs": {"month": 5_000}})
+    assert plan_quote_billing(alias).schedules[0].partner_amount_cents == 67_500
+
+
+@pytest.mark.asyncio
+async def test_a32_runner_bills_improve_it_share_every_period():
+    s = _SeamStubSession()
+    acc = await _apply(s, _payload(
+        lines=_a32_lines(), totals=None,
+        split_rule={"kind": "percent_net", "percent": 50, "hosting_to_partner": True,
+                    "recurring_direct_costs_cents": {"month": 5_000}},
+    ))
+    assert acc["partner_bill"]["total_cents"] == 152_500
+    improve = s.schedules[(WID, "Q-2026-0001 v2", 2)]
+    assert improve["partner_amount_cents"] == 67_500 and improve["partner_periods_billed"] == 1
+    res = await _run(s, date(2026, 11, 12))                              # periods 2 and 3
+    bills = [b for b in res["partner_bills"] if b["schedule_id"] == improve["id"]]
+    assert [(b["period_no"], b["amount_cents"]) for b in bills] == [(2, 67_500), (3, 67_500)]
+    for b in bills:
+        row = s.bills[b["bill_id"]]
+        assert row["status"] == "draft" and row["journal_entry_id"] is None
+        assert "Delivery partner share — Improve it — package" in row["lines"][0]["description"]
+        assert "$675.00" in row["lines"][0]["description"]
+    hosting = s.schedules[(WID, "Q-2026-0001 v2", 3)]
+    assert [b["amount_cents"] for b in res["partner_bills"] if b["schedule_id"] == hosting["id"]] == [35_000, 35_000]
+    assert s.journal_entries == []
+
+
+def test_a32_recurring_share_apportions_costs_across_lines_and_intervals():
+    lines = [
+        {"kind": "recurring", "label": "Package A", "amount_cents": 70_001, "position": 1,
+         "recurring": {"interval": "month"}},
+        {"kind": "recurring", "label": "Package B", "amount_cents": 30_000, "position": 2,
+         "recurring": {"interval": "month"}},
+        {"kind": "recurring", "label": "Annual retainer", "amount_cents": 120_000, "position": 3,
+         "recurring": {"interval": "year"}},
+        {"kind": "recurring", "label": "Managed hosting", "amount_cents": 35_000, "position": 4,
+         "recurring": {"interval": "month"}},
+    ]
+    rule = SplitRule(kind="percent_net", percent=Decimal("50"), hosting_to_partner=False,
+                     recurring_direct_costs_cents={"month": 10_001, "year": 20_000})
+    plan = plan_quote_billing(_payload(lines=lines, totals=None, split_rule=rule.model_dump()))
+    by_pos = {s.position: s for s in plan.schedules}
+    # month: (100,001 − 10,001) × 50% = 45,000 apportioned 70,001 : 30,000 → exact sum.
+    assert by_pos[1].partner_amount_cents + by_pos[2].partner_amount_cents == 45_000
+    assert by_pos[1].direct_cost_share_cents + by_pos[2].direct_cost_share_cents == 10_001
+    # year: (120,000 − 20,000) × 50% = 50,000 — intervals never mix.
+    assert by_pos[3].partner_amount_cents == 50_000
+    # hosting not passed through → nothing, and it is never in the percent pool.
+    assert by_pos[4].partner_amount_cents == 0 and by_pos[4].partner_basis == "hosting stays with the vendor"
+    # Costs exceeding the interval's amount net to zero, never negative.
+    rule2 = SplitRule(kind="percent_net", percent=Decimal("50"), recurring_direct_costs_cents={"month": 999_999})
+    plan2 = plan_quote_billing(_payload(lines=lines[:2], totals=None, split_rule=rule2.model_dump()))
+    assert all(s.partner_amount_cents == 0 for s in plan2.schedules)
+
+
+def test_a32_only_percent_net_shares_recurring_lines():
+    for rule in ({"kind": "fee", "fee_cents": 10_000, "hosting_to_partner": True},
+                 {"kind": "none", "hosting_to_partner": True}):
+        plan = plan_quote_billing(_payload(lines=_a32_lines(), totals=None, split_rule=rule))
+        by_pos = {s.position: s for s in plan.schedules}
+        assert by_pos[2].partner_amount_cents == 0 and "no recurring share" in by_pos[2].partner_basis
+        assert by_pos[3].partner_amount_cents == 35_000
+    with pytest.raises(ValueError, match="month|quarter|year"):
+        SplitRule.model_validate({"kind": "percent_net", "percent": 50, "recurring_direct_costs_cents": {"week": 1}})
+    with pytest.raises(ValueError):
+        SplitRule.model_validate({"kind": "percent_net", "percent": 50, "recurring_direct_costs_cents": {"month": -1}})
+
+
+def test_apportion_recurring_partner_share_is_pure_and_keeps_order():
+    from app.ar.quotes_seam import PlannedSchedule
+
+    scheds = [
+        PlannedSchedule(position=9, label="Hosting", cadence="month", amount_cents=35_000, term_months=None,
+                        periods_total=None, is_hosting=True),
+        PlannedSchedule(position=1, label="Pkg", cadence="month", amount_cents=140_000, term_months=None,
+                        periods_total=None, is_hosting=False),
+    ]
+    out = apportion_recurring_partner_share(
+        scheds, SplitRule(kind="percent_net", percent=Decimal("50"), hosting_to_partner=True,
+                          recurring_direct_costs_cents={"month": 5_000}), "USD",
+    )
+    assert [s.position for s in out] == [9, 1]
+    assert [s.partner_amount_cents for s in out] == [35_000, 67_500]
+    assert scheds[1].partner_amount_cents == 0   # inputs untouched
 
 
 @pytest.mark.asyncio

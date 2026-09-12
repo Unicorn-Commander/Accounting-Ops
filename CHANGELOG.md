@@ -12,8 +12,9 @@
   per remaining part ("Due on acceptance of <label>"), recurring schedules
   (`invoice_schedules`, anchored with month-end clamping) with a draft per period,
   and — with a delivery partner + split rule — a DRAFT accounts-payable **`bill`**
-  (new document class) for the fixed-scope share plus the hosting pass-through of
-  every period. Idempotent on `quote_ref + version`; a newer version voids the
+  (new document class) for the fixed-scope share, the hosting pass-through and,
+  per Amendment 06 / A32, the `percent_net` share of every non-hosting recurring
+  line net of that period's recurring direct costs, every period. Idempotent on `quote_ref + version`; a newer version voids the
   prior version's unissued drafts. Nothing posts a journal entry; a human issues.
   Tenant migration `0031_quotes_seam`: `invoice.quote_ref`, `invoice_schedules`,
   `bill`, `engagement_policy.invoice_net_terms` — FORCE RLS per-command policies,
