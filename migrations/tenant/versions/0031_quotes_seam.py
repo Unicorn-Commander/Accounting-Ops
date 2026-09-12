@@ -13,9 +13,28 @@ partner + split rule are present — a DRAFT partner BILL (accounts payable)
 in the vendor of record's books. Nothing here posts to the journal; a human
 issues.
 
-Four schema changes, all idempotent + re-runnable (review of PR #13 folded the
-partner-per-period, anchor-date, net-terms and supersede columns in here rather
-than a 0032 because 0031 had not been applied on any ring):
+Four schema changes, all idempotent + re-runnable on a FRESH database (review of
+PR #13 folded the partner-per-period, anchor-date, net-terms and supersede
+columns in here rather than a 0032 because 0031 had not been applied on any
+ring).
+
+⚠️  NOT re-runnable on a database that already applied the FIRST shape of
+0031 (commit 700f5b7): the columns added by the review — ``anchor_date``,
+``net_terms``, the six partner columns (``partner_supplier_id``,
+``vendor_entity_id``, ``partner_amount_cents``, ``partner_split``,
+``partner_periods_billed``, ``generated_bill_ids``), ``bill.voided_at``,
+``bill.void_reason`` and ``uq_bill_entity_number`` — live inside
+``create_table`` behind ``_table_exists`` with an UNCHANGED revision id. Such a
+database is already stamped at ``0031_quotes_seam`` (head), ``upgrade head`` is
+a no-op, and the seam fails at runtime (``column "anchor_date" does not
+exist``). Fix on that database only:
+
+    alembic -c alembic-tenant.ini -x tenant=books downgrade 0030_mab_include_corrections
+    alembic -c alembic-tenant.ini -x tenant=books upgrade head
+
+or drop ``invoice_schedules`` and ``bill`` (both draft-only tables) and
+``upgrade head``. Fresh installs and every ring (none applied the first shape)
+are unaffected.
 
   invoice.quote_ref     nullable text "number + version" (e.g. ``Q-2026-0001 v2``)
                         stamped on every invoice the seam creates, so the

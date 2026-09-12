@@ -545,10 +545,19 @@ def apportion_recurring_partner_share(
         weights = [s.amount_cents for s in pool]
         shares = apportion_cents(share_c, weights)
         costs = apportion_cents(cost_c, weights)
+        # The basis is stated on the interval POOL (review 25 nit 2): a line's
+        # apportioned share can differ by a cent from its own line-level
+        # arithmetic, so the description names the pool figures and then this
+        # line's apportioned share — it always reads consistently.
+        pool_basis = (
+            f"{fmt_pct(pct)}% of net {cadence}ly recurring pool ({_fmt_money(amount_c, currency)} - "
+            f"recurring direct costs {_fmt_money(cost_c, currency)} = {_fmt_money(net_c, currency)}) "
+            f"= {_fmt_money(share_c, currency)}"
+        )
         for s, sh, co in zip(pool, shares, costs):
             basis = (
-                f"{fmt_pct(pct)}% of ({_fmt_money(s.amount_cents, currency)} - recurring direct costs "
-                f"{_fmt_money(co, currency)}) per {cadence} = {_fmt_money(sh, currency)}"
+                f"{pool_basis}; this line {_fmt_money(s.amount_cents, currency)} -> "
+                f"{_fmt_money(sh, currency)} (apportioned by amount)"
             )
             out[s.position] = replace(s, partner_amount_cents=sh, partner_basis=basis, direct_cost_share_cents=co)
     return [out[s.position] for s in schedules]
@@ -943,6 +952,19 @@ async def _ensure_draft(
     ``created`` is decided by a pre-insert probe AND the row's ``created_at``
     (review L15): a concurrent replay that lost the unique-index race gets the
     existing row back from the primitive and must report ``created=False``.
+
+    Why the 2-second ``created_at`` window is safe (review 25 nit 3): the flag
+    is INFORMATIONAL ONLY — it drives ``created``/``replayed`` and the 201-vs-200
+    status; what rows exist is decided by the partial unique index, never by
+    this flag. The window is consulted only when the pre-insert probe found
+    nothing, i.e. when a concurrent replay committed the row between our probe
+    and our insert. A row committed more than 2 s before our call is then
+    correctly reported as pre-existing; a row committed within those 2 s is
+    reported as ours (both concurrent callers answer 201 with the same ids).
+    The worst case is therefore one extra 201 on a sub-2-second concurrent
+    replay of the same quote — the same ids, no duplicate paper, nothing
+    posted. An exact marker (``created_at == transaction_timestamp()``) is a
+    one-line follow-up if the status code ever matters to a caller.
     """
     existing = await _fetch_invoice_row(
         session, workspace_id=workspace_id, external_source=QUOTES_SEAM_SOURCE, external_ref=external_ref,
@@ -1603,7 +1625,11 @@ async def generate_due_schedule_invoices(
 ) -> dict[str, Any]:
     """Generate the next period's DRAFT for every active schedule due by ``as_of``.
 
-    Two independent cursors per schedule:
+    Two independent cursors per schedule, both starting AFTER period 1: period
+    1's customer draft and partner share belong to the acceptance call
+    (``apply_quote_acceptance``) and are never backfilled here — a
+    ``partner: failed`` at acceptance is repaired by re-sending the same
+    acceptance call, not by running the schedules (review 25 nit 4).
 
       * customer side — ``periods_generated``: one draft per period from the
         anchor date (idempotent on ``<quote_ref>:recurring:<position>:<n>``);

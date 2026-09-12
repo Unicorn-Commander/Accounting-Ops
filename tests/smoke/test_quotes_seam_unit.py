@@ -704,7 +704,8 @@ async def test_apply_creates_drafts_only_and_never_posts():
     assert sched_row["partner_split"]["percent"] == "50" and sched_row["partner_split"]["is_hosting"] is True
     ai_row = s.schedules[(WID, "Q-2026-0001 v2", 6)]
     assert ai_row["partner_split"]["is_hosting"] is False
-    assert "50% of ($50.00 - recurring direct costs $0.00) per month = $25.00" in ai_row["partner_split"]["basis"]
+    assert ("50% of net monthly recurring pool ($50.00 - recurring direct costs $0.00 = $50.00) = $25.00; "
+            "this line $50.00 -> $25.00 (apportioned by amount)") == ai_row["partner_split"]["basis"]
     cust = s.counterparties[res["ar_customer_id"]]
     assert cust["name"] == "the apparel client" and cust["kind"] == "customer"
     assert cust["refs"]["contact_id"] == "co-2467436b"
@@ -1006,7 +1007,7 @@ async def test_schedule_runner_bills_the_partner_for_every_generated_period():
         row = s.bills[b["bill_id"]]
         assert row["external_ref"] == f"Q-2026-0001 v2:partner:recurring:6:{b['period_no']}"
         assert row["lines"][0]["description"].startswith("Delivery partner share — AI allowance")
-        assert "50% of ($50.00 - recurring direct costs $0.00) per month = $25.00" in row["lines"][0]["description"]
+        assert "net monthly recurring pool ($50.00 - recurring direct costs $0.00 = $50.00) = $25.00" in row["lines"][0]["description"]
     assert hosting_sched["partner_periods_billed"] == 4 and len(hosting_sched["generated_bill_ids"]) == 3
     assert ai_sched["partner_periods_billed"] == 4 and len(ai_sched["generated_bill_ids"]) == 3
     # Idempotent: a re-run bills nothing twice.
@@ -1065,13 +1066,16 @@ def test_a32_improve_it_package_shares_per_period_net_of_recurring_costs():
     by_pos = {s.position: s for s in plan.schedules}
     assert by_pos[2].partner_amount_cents == 67_500                    # 50% × (140,000 − 5,000)
     assert by_pos[2].direct_cost_share_cents == 5_000
-    assert by_pos[2].partner_basis == "50% of ($1,400.00 - recurring direct costs $50.00) per month = $675.00"
+    assert by_pos[2].partner_basis == (
+        "50% of net monthly recurring pool ($1,400.00 - recurring direct costs $50.00 = $1,350.00) = $675.00; "
+        "this line $1,400.00 -> $675.00 (apportioned by amount)"
+    )
     assert by_pos[3].partner_amount_cents == 35_000 and by_pos[3].is_hosting
     # Acceptance bill: 50% of the one-time 100,000 + hosting period 1 + Improve it period 1.
     assert plan.partner is not None
     assert [pl.amount_cents for pl in plan.partner.lines] == [50_000, 35_000, 67_500]
     assert plan.partner.total_cents == 152_500
-    assert "Delivery partner share (period 1) — Improve it — package: 50% of ($1,400.00" in plan.partner.lines[2].description
+    assert "Delivery partner share (period 1) — Improve it — package: 50% of net monthly recurring pool ($1,400.00" in plan.partner.lines[2].description
     # The v1 alias name is accepted too.
     alias = _payload(lines=_a32_lines(), totals=None,
                      split_rule={"kind": "percent_net", "percent": 50, "hosting_to_partner": True,
@@ -1120,6 +1124,10 @@ def test_a32_recurring_share_apportions_costs_across_lines_and_intervals():
     by_pos = {s.position: s for s in plan.schedules}
     # month: (100,001 − 10,001) × 50% = 45,000 apportioned 70,001 : 30,000 → exact sum.
     assert by_pos[1].partner_amount_cents + by_pos[2].partner_amount_cents == 45_000
+    # Nit 2: every line of the pool states the SAME pool basis, then its own apportioned share.
+    pool = "50% of net monthly recurring pool ($1,000.01 - recurring direct costs $100.01 = $900.00) = $450.00"
+    assert by_pos[1].partner_basis.startswith(pool) and by_pos[2].partner_basis.startswith(pool)
+    assert by_pos[1].partner_basis.endswith(f"this line $700.01 -> ${by_pos[1].partner_amount_cents / 100:,.2f} (apportioned by amount)")
     assert by_pos[1].direct_cost_share_cents + by_pos[2].direct_cost_share_cents == 10_001
     # year: (120,000 − 20,000) × 50% = 50,000 — intervals never mix.
     assert by_pos[3].partner_amount_cents == 50_000

@@ -126,12 +126,14 @@ class AuthContext:
     # tokens (no constraint — the user's full membership applies). Set when
     # the bearer matched a service token that declared scope fields.
     service_scope: ServiceScope | None = None
-    # True when the bearer is a Keycloak client-credentials JWT whose azp
-    # (authorized party) is in the ACCTOPS_TRUSTED_M2M_CALLERS allow-list.
-    # These callers have no workspace membership row; specific endpoints
-    # (P&L federation read) opt in via resolve_workspace_for_federation.
-    # This flag is NEVER set by the service-token or Brigade paths — only
-    # by the Keycloak JWT path after audience + azp allow-list validation.
+    # True when the bearer's client is in the ACCTOPS_TRUSTED_M2M_CALLERS
+    # allow-list: set by the Keycloak JWT path (azp, after audience validation)
+    # AND by the Brigade path (act.client_id) — see the module docstring, "the
+    # two doors". It does NOT by itself prove a machine token (m2m_proof does).
+    # These callers have no workspace membership row; specific endpoints opt in
+    # (read-only: resolve_workspace_for_federation; the quotes seam write route
+    # additionally requires m2m_proof == "keycloak-client-credentials"). Never
+    # set by the service-token, PAT or local-auth paths.
     is_trusted_m2m: bool = False
     # Which door set is_trusted_m2m and whether the token had MACHINE shape:
     # "keycloak-client-credentials" | "brigade-actor" | None. Write routes on
