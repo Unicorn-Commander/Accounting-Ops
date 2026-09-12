@@ -21,6 +21,7 @@ from app.tools import (
     create_coa_account,
     create_entity_with_coa,
     create_invoice_from_draft,
+    create_invoices_from_quote,
     create_workspace,
     decide_approval,
     detect_subscriptions_tool,
@@ -60,6 +61,7 @@ from app.tools import (
     list_closed_periods,
     list_credentials,
     list_entity_owners,
+    list_invoice_schedules,
     list_journal_entries,
     list_my_workspaces,
     list_pending_approvals,
@@ -76,6 +78,7 @@ from app.tools import (
     query_specialty_rules,
     record_payment,
     resolve_tax_review_item,
+    run_invoice_schedules,
     search_tax_knowledge,
     start_specialist_run,
     trigger_tax_narrative,
@@ -248,6 +251,10 @@ def build_server():
     server.tool()(get_invoice)
     server.tool()(void_invoice)
     server.tool()(record_payment)
+    # Quotes seam (Customer-Ops quote.accepted): DRAFT paper only, never posts.
+    server.tool()(create_invoices_from_quote)
+    server.tool()(run_invoice_schedules)
+    server.tool()(list_invoice_schedules)
 
     # =====================================================================
     # Connectors / mappings / overrides / credentials

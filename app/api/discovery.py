@@ -128,6 +128,10 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     "get_invoice":                   {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
     "void_invoice":                  {"min_role": "accountant", "read_only": False, "latency_ms": 700},
     "record_payment":                {"min_role": "accountant", "read_only": False, "latency_ms": 700},
+    # Quotes seam: DRAFT invoices/schedules/partner bill from an accepted quote (no posting).
+    "create_invoices_from_quote":    {"min_role": "accountant", "read_only": False, "latency_ms": 1200},
+    "run_invoice_schedules":         {"min_role": "accountant", "read_only": False, "latency_ms": 900},
+    "list_invoice_schedules":        {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
 
     # ----- Connectors / mappings / overrides / credentials -----------------
     "list_credentials":              {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
