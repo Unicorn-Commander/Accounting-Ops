@@ -29,11 +29,19 @@ from app.ar.quotes_seam import (
     apply_quote_acceptance,
     generate_due_schedule_invoices,
     list_invoice_schedules as _list_schedules,
+    quotes_enabled,
 )
 from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace
 from app.workspace_session import workspace_session
+
+
+def _assert_enabled() -> None:
+    """QUOTES_ENABLED fence: checked AFTER authorization so an unauthenticated
+    caller still gets the usual PermissionError, never a feature hint."""
+    if not quotes_enabled():
+        raise ValueError("QUOTES_DISABLED: the quotes seam is disabled on this deployment (set QUOTES_ENABLED=1)")
 
 
 def _parse_date(value: str | None, field: str) -> dt.date | None:
@@ -58,7 +66,7 @@ async def create_invoices_from_quote(
     split_rule: dict[str, Any] | None = None,
     vendor_entity_id: UUID | None = None,
     accepted_at: str | None = None,
-    net_terms: int = 30,
+    net_terms: int | None = None,
 ) -> dict[str, Any]:
     """Create the DRAFT paper an accepted quote implies. Idempotent on quote_ref + version.
 
@@ -90,7 +98,8 @@ async def create_invoices_from_quote(
             direct_costs_total_cents?, fee_cents?}.
         vendor_entity_id: Entity that OWES the partner bill (default entity_id).
         accepted_at: ISO date the quote was accepted (issue-date basis; default today).
-        net_terms: Net-N days for the drafts' due dates. Default 30.
+        net_terms: Net-N days for the drafts' due dates; omitted = the workspace default
+            (engagement_policy.invoice_net_terms) or 30.
 
     Returns: {ar_customer_id, deposit_invoice_id, milestone_invoice_ids[], schedule_ids[],
     partner_invoice_id, invoices[], schedules[], partner_bill, review_required, totals,
@@ -99,6 +108,7 @@ async def create_invoices_from_quote(
     Role floor: accountant.
     """
     ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")
+    _assert_enabled()
     wid = ctx.workspace_id
     if vendor_entity_id is not None:
         assert_entity_in_scope(ctx, vendor_entity_id)
@@ -153,11 +163,12 @@ async def run_invoice_schedules(
         as_of: ISO date; schedules due on or before it run (default today).
         limit: Max schedules per run (default 200).
 
-    Returns: {as_of, schedules_due, generated[], skipped[]}.
+    Returns: {as_of, schedules_due, generated[], skipped[], partner_bills[], partner_skipped[]}.
 
     Role floor: accountant.
     """
     ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")
+    _assert_enabled()
     wid = ctx.workspace_id
     scope = assert_entity_in_scope(ctx, entity_id)
     if scope is not None and entity_id is None:
@@ -176,6 +187,8 @@ async def run_invoice_schedules(
             "schedules_due": sum(r["schedules_due"] for r in results),
             "generated": [g for r in results for g in r["generated"]],
             "skipped": [s for r in results for s in r["skipped"]],
+            "partner_bills": [b for r in results for b in r["partner_bills"]],
+            "partner_skipped": [b for r in results for b in r["partner_skipped"]],
         }
     async with workspace_session(SessionLocal, wid) as session:
         return await generate_due_schedule_invoices(
@@ -206,6 +219,7 @@ async def list_invoice_schedules(
     Role floor: viewer.
     """
     ctx = await authorize_workspace(workspace_id, entity_id, min_role="viewer")
+    _assert_enabled()
     wid = ctx.workspace_id
     scope = assert_entity_in_scope(ctx, entity_id)
     async with workspace_session(SessionLocal, wid) as session:

@@ -304,6 +304,14 @@ class Settings(BaseModel):
     #   ACCTOPS_TRUSTED_M2M_CALLERS=tax-planning-ops
     trusted_m2m_callers: frozenset[str] = frozenset()
 
+    # ---- Quotes seam fence (QUOTES-CONTRACT-v1 lanes ship behind QUOTES_ENABLED) ----
+    # When False (default) the quotes seam endpoints answer 404 QUOTES_DISABLED and
+    # the create_invoices_from_quote / run_invoice_schedules / list_invoice_schedules
+    # tools refuse — nothing else in the app changes. Dogfood/prod set
+    # QUOTES_ENABLED=1 once Customer-Ops federates. The M2M rail additionally stays
+    # fail-closed until ACCTOPS_TRUSTED_M2M_CALLERS names customer-ops.
+    quotes_enabled: bool = False
+
     @property
     def is_community(self) -> bool:
         """True when running the open-core Community Edition (AO_EDITION=community)."""
@@ -436,6 +444,7 @@ def get_settings() -> Settings:
         .strip()
         .lower()
         in ("1", "true", "yes", "on"),
+        quotes_enabled=os.getenv("QUOTES_ENABLED", "").strip().lower() in ("1", "true", "yes", "on"),
         smart_gate_byok_bypass=os.getenv("AO_SMART_GATE_BYOK_BYPASS", "1")
         .strip()
         .lower()

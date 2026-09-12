@@ -12,9 +12,18 @@ wider in WHAT — it accepts exactly ONE actor and grants exactly ONE capability
 
   * WHO:  a Keycloak client-credentials JWT (signature + issuer + expiry +
           audience verified by ``validate_bearer_token``) whose ``azp`` is in
-          ``ACCTOPS_TRUSTED_M2M_CALLERS`` AND equals ``customer-ops``. Any other
-          trusted caller (tax-planning-ops, …) is refused with 403 — being on
-          the allow-list is necessary, not sufficient.
+          ``ACCTOPS_TRUSTED_M2M_CALLERS`` AND equals ``customer-ops`` AND that
+          carries MACHINE proof (``AuthContext.m2m_proof ==
+          "keycloak-client-credentials"``: no ``sid``/``session_state``,
+          ``clientId`` == ``azp``, a ``service-account-customer-ops`` identity —
+          see ``app.auth.keycloak_machine_proof``). A human who logged in
+          through the customer-ops client carries the same ``azp`` and is
+          refused (review H5). Any other trusted caller (tax-planning-ops, …)
+          is refused — being on the allow-list is necessary, not sufficient.
+          The Brigade-minted ``m2m:<client>`` door (``m2m_proof ==
+          "brigade-actor"``) is EXCLUDED from this write route (review H6).
+  * FENCE: ``QUOTES_ENABLED`` (config.quotes_enabled) must be on, else 404
+          ``QUOTES_DISABLED``. With it off the whole seam is inert.
   * RE-GATE: the path workspace must exist + be active, must not be HIPAA, and
           when the token carries a ``workspace_id`` claim it must equal the path
           workspace (a token scoped to one workspace cannot federate another).
@@ -45,6 +54,7 @@ from app.ar.quotes_seam import (
     apply_quote_acceptance,
     generate_due_schedule_invoices,
     list_invoice_schedules,
+    quotes_enabled,
 )
 from app.auth import AuthContext, validate_bearer_token
 from app.authz import assert_entity_in_scope
@@ -71,6 +81,20 @@ async def resolve_workspace_for_quotes_seam(
     """Write-capable M2M dependency for the quotes seam ONLY (see module docstring)."""
     if not auth.is_trusted_m2m:
         return await resolve_workspace(request, auth, workspace_id_header)
+
+    if auth.m2m_proof != "keycloak-client-credentials":
+        _log.warning(
+            "[acctops.quotes_seam] refused trusted M2M caller %r without machine proof (door=%s)",
+            auth.uc_uid,
+            auth.m2m_proof or "keycloak-without-client-credentials-shape",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "quotes seam: a Keycloak client-credentials (machine) token is required; "
+                "user sessions and Brigade-minted actors are refused on this write route"
+            ),
+        )
 
     expected_actor = f"m2m:{QUOTES_SEAM_ACTOR}"
     if auth.uc_uid != expected_actor:
@@ -115,6 +139,15 @@ async def resolve_workspace_for_quotes_seam(
     )
 
 
+def _assert_enabled() -> None:
+    """QUOTES_ENABLED fence (review L19): the seam is inert until an operator turns it on."""
+    if not quotes_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "QUOTES_DISABLED", "reason": "quotes seam is disabled (set QUOTES_ENABLED=1)"},
+        )
+
+
 def _failed_detail(code: str, reason: str) -> dict[str, Any]:
     """Error body shape: the caller stores ``federated`` per A7."""
     return {
@@ -139,6 +172,7 @@ async def quote_accepted(
     ``{code, reason, federated}`` so Customer-Ops can record the adapter status.
     Role floor: accountant (or the customer-ops M2M actor).
     """
+    _assert_enabled()
     require_role(workspace, "accountant")
     assert_entity_in_scope(workspace, entity_id)
     if body.vendor_entity_id:
@@ -171,6 +205,7 @@ async def get_invoice_schedules(
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict[str, Any]:
     """List recurring invoice schedules. Role floor: viewer."""
+    _assert_enabled()
     require_role(workspace, "viewer")
     scope = assert_entity_in_scope(workspace, entity_id)
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
@@ -198,6 +233,7 @@ async def run_invoice_schedules_route(
     Idempotent per period; closed periods are skipped and reported. Never posts.
     Role floor: accountant.
     """
+    _assert_enabled()
     require_role(workspace, "accountant")
     scope = assert_entity_in_scope(workspace, entity_id)
     entity_ids: list[str | None]
@@ -209,6 +245,8 @@ async def run_invoice_schedules_route(
         entity_ids = [None]
     generated: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    partner_bills: list[dict[str, Any]] = []
+    partner_skipped: list[dict[str, Any]] = []
     due = 0
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         for eid in entity_ids:
@@ -223,9 +261,13 @@ async def run_invoice_schedules_route(
             due += res["schedules_due"]
             generated.extend(res["generated"])
             skipped.extend(res["skipped"])
+            partner_bills.extend(res["partner_bills"])
+            partner_skipped.extend(res["partner_skipped"])
     return {
         "as_of": (as_of or date.today()).isoformat(),
         "schedules_due": due,
         "generated": generated,
         "skipped": skipped,
+        "partner_bills": partner_bills,
+        "partner_skipped": partner_skipped,
     }

@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- feat(ar): **Quotes seam** — Customer-Ops `quote.accepted` → Accounting-Ops DRAFT
+  paper (QUOTES-CONTRACT-v1 §3 + AMENDMENT-01). `POST
+  /api/workspaces/{wid}/entities/{eid}/quotes/accepted` (a write-capable M2M rail
+  restricted to the `customer-ops` Keycloak client-credentials actor with machine
+  proof; members ≥ accountant too) and MCP `create_invoices_from_quote` /
+  `run_invoice_schedules` / `list_invoice_schedules`, all behind
+  `QUOTES_ENABLED`. Creates the deposit draft (per-line `payment_split`), one draft
+  per remaining part ("Due on acceptance of <label>"), recurring schedules
+  (`invoice_schedules`, anchored with month-end clamping) with a draft per period,
+  and — with a delivery partner + split rule — a DRAFT accounts-payable **`bill`**
+  (new document class) for the fixed-scope share plus the hosting pass-through of
+  every period. Idempotent on `quote_ref + version`; a newer version voids the
+  prior version's unissued drafts. Nothing posts a journal entry; a human issues.
+  Tenant migration `0031_quotes_seam`: `invoice.quote_ref`, `invoice_schedules`,
+  `bill`, `engagement_policy.invoice_net_terms` — FORCE RLS per-command policies,
+  no DELETE grant. Additive `post_journal=False` on `create_invoice_from_draft`.
+  `AuthContext.m2m_proof` records whether a trusted M2M token is a Keycloak
+  client-credentials machine token (the read-only federation rail is unchanged).
+
 ## 0.7.1 - 2026-06-16
 
 - fix(journal): extend `CATEGORY_TO_ACCOUNT` with categories that were silently

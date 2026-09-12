@@ -1,12 +1,13 @@
-"""Quotes → money seam (Customer-Ops ``quote.accepted`` → AR drafts + schedules + partner bill).
+"""Quotes → money seam (Customer-Ops ``quote.accepted`` → AR drafts + schedules + partner bills).
 
 Contract: ``~/Projects/uc-quotes/QUOTES-CONTRACT-v1.md`` §3 "Accounting-Ops" +
 "Partner split", as amended by ``AMENDMENT-01`` (A5 deposit maths, A7 federated
 status, A12 partner invoice is a payable, A16 line kinds, A17 currency
-exponent). Everything this module creates is a DRAFT document. Nothing here
-posts to the journal — ``journal_entry_id`` stays NULL on every invoice and
-bill — so the hash chain, the materiality gate and the closed-period lock are
-never bypassed: a human issues, and issuing is what posts.
+exponent), and the PR #13 review (H1–H6, M7–M13, L15–L19). Everything this
+module creates is a DRAFT document. Nothing here posts to the journal —
+``journal_entry_id`` stays NULL on every invoice and bill — so the hash chain,
+the materiality gate and the closed-period lock are never bypassed: a human
+issues, and issuing is what posts.
 
 What one accepted quote turns into
 ==================================
@@ -18,39 +19,46 @@ What one accepted quote turns into
   * one MILESTONE draft per remaining payment part, memo
     ``"Due on acceptance of <line label>"``;
   * one ``invoice_schedules`` row per ``recurring`` line (cadence
-    ``month|quarter|year``) plus the FIRST period's draft; the runner
-    (``generate_due_schedule_invoices``) creates the later periods;
+    ``month|quarter|year``, anchored on the acceptance date) plus the FIRST
+    period's draft; the runner (``generate_due_schedule_invoices``) creates the
+    later periods — customer draft AND, when the line passes to the partner,
+    the per-period partner bill;
   * when ``delivery_partner`` + ``split_rule`` are present: a DRAFT partner
     ``bill`` (accounts payable, A12) from the delivery partner to the vendor of
-    record — hosting lines to the partner in full when ``hosting_to_partner``,
-    ``percent_net`` of the fixed scope after ``direct_costs_total_cents``.
+    record — hosting lines to the partner in full when ``hosting_to_partner``
+    (regardless of ``kind``), ``percent_net`` of the fixed scope after
+    ``direct_costs_total_cents`` (or the flat ``fee_cents``);
+  * a NEW accepted version of the same quote number voids the prior versions'
+    still-unissued drafts (invoices, bills) and retires their schedules before
+    creating its own paper; issued/paid paper is left alone and reported.
 
 Idempotency
 ===========
 Keyed by ``quote_ref + version`` (``"Q-2026-0001 v2"``). Every invoice carries
 ``external_source='customer-ops'`` and a deterministic ``external_ref``
 (``<quote_ref>:deposit``, ``<quote_ref>:part:<position>:<k>``,
-``<quote_ref>:recurring:<position>:<period>``, the bill ``<quote_ref>:partner``)
-so a replay finds every row it already created (the 0019 partial unique
-index is the arbiter) and creates nothing. Schedules are unique on
-``(workspace_id, quote_ref, line_position)``.
+``<quote_ref>:recurring:<position>:<period>``, bills ``<quote_ref>:partner`` and
+``<quote_ref>:partner:recurring:<position>:<period>``) so a replay finds every
+row it already created (the 0019 partial unique index is the arbiter) and
+creates nothing. Schedules are unique on ``(workspace_id, quote_ref,
+line_position)``.
 
 Federated status (A7)
 =====================
 The result carries ``federated = {accounting_ops: done|failed, partner:
 done|failed|skipped, reason}``. The partner step runs in its own savepoint:
-a partner failure (e.g. an unknown ``partner_supplier_id``) never loses the
-customer drafts, and "retry federation" (the same call) completes only what
-is missing.
+a partner failure (an unknown ``partner_supplier_id``, a closed period in the
+VENDOR entity's books, …) never loses the customer drafts, and "retry
+federation" (the same call) completes only what is missing.
 
 Materiality + closed periods
 ============================
 Drafts post nothing, so the gate is satisfied by construction; the tier for
 each draft's total is still computed and surfaced (``materiality_tier``,
-``review_required``) so a $10k deposit is visibly a high-value item. A draft
-whose issue date falls in a CLOSED period is refused (``PERIOD_CLOSED``) — a
-document dated into closed books would be issued into them later. The
-schedule runner skips (and reports) periods that fall in a closed window.
+``review_required``). A draft whose issue date falls in a CLOSED period of the
+AR entity is refused (``PERIOD_CLOSED``); the same check runs for the vendor
+entity before the partner bill (degrading to ``partner: failed``). The runner
+skips (and reports) periods that fall in a closed window on either side.
 """
 from __future__ import annotations
 
@@ -74,6 +82,7 @@ from app.ar.invoicing import (
     _invoice_view,
     create_invoice_from_draft,
     upsert_ar_customer,
+    void_invoice,
 )
 from app.journal.materiality import materiality_tier
 from app.journal.posting import assert_period_open
@@ -84,6 +93,8 @@ _log = logging.getLogger("acctops.ar.quotes_seam")
 QUOTES_SEAM_SOURCE = "customer-ops"
 #: The ONLY trusted M2M actor (Keycloak ``azp``) the seam endpoint accepts.
 QUOTES_SEAM_ACTOR = "customer-ops"
+#: Documented default Net-N when neither the payload nor the workspace says.
+DEFAULT_NET_TERMS = 30
 
 LineKind = Literal[
     "one_time", "milestone", "recurring", "hourly", "option", "included", "excluded"
@@ -91,6 +102,7 @@ LineKind = Literal[
 Cadence = Literal["month", "quarter", "year"]
 
 _MONTHS_PER_PERIOD: dict[str, int] = {"month": 1, "quarter": 3, "year": 12}
+_PERIOD_LABEL: dict[str, str] = {"month": "Month", "quarter": "Quarter", "year": "Year"}
 _DEFAULT_SPLIT: tuple[int, ...] = (50, 50)
 
 # ISO-4217 minor-unit exponents that are NOT 2. v1 supports 2-decimal
@@ -103,6 +115,14 @@ _NON_TWO_EXPONENT: dict[str, int] = {
     "BHD": 3, "IQD": 3, "JOD": 3, "KWD": 3, "LYD": 3, "OMR": 3, "TND": 3,
     "CLF": 4, "UYW": 4,
 }
+
+
+def quotes_enabled() -> bool:
+    """The QUOTES_ENABLED fence (config.quotes_enabled). Surfaces check it; the
+    service functions do not, so tests and operators can drive them directly."""
+    from app.config import get_settings
+
+    return bool(get_settings().quotes_enabled)
 
 
 class QuoteSeamError(Exception):
@@ -204,8 +224,8 @@ class DeliveryPartner(BaseModel):
     name: str = Field(min_length=1, max_length=256)
     contact_id: str | None = Field(default=None, max_length=128)
     # A12: explicit entity mapping. The AO counterparty id of the partner as a
-    # supplier. When absent the seam finds-or-creates a supplier counterparty
-    # (kind='vendor') from name + contact_id and returns the id to store.
+    # supplier (kind='vendor'). When absent the seam finds-or-creates one from
+    # name + contact_id and returns the id to store.
     partner_supplier_id: str | None = Field(default=None, max_length=64)
 
 
@@ -246,7 +266,8 @@ class QuoteAcceptedPayload(BaseModel):
     vendor_entity_id: str | None = Field(default=None, max_length=64)
     # Issue date basis for the drafts (the acceptance date). Default: today.
     accepted_at: date | None = None
-    net_terms: int = Field(default=30, ge=0, le=365)
+    # Net-N for every draft: payload -> workspace default -> 30 (M10).
+    net_terms: int | None = Field(default=None, ge=0, le=365)
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +307,7 @@ class PlannedSchedule:
     term_months: int | None
     periods_total: int | None
     is_hosting: bool
+    partner_amount_cents: int = 0   # the partner's share of ONE period (H3)
 
 
 @dataclass(frozen=True)
@@ -305,6 +327,8 @@ class PartnerPlan:
 @dataclass
 class BillingPlan:
     quote_ref: str
+    quote_number: str
+    version: int
     currency: str
     deposit_parts: list[PlannedPart]
     deposit_cents: int
@@ -325,6 +349,14 @@ def full_quote_ref(quote_ref: str, version: int) -> str:
     return f"{base}{suffix}"
 
 
+def parse_quote_ref(full: str) -> tuple[str, int | None]:
+    """``"Q-2026-0001 v2" -> ("Q-2026-0001", 2)``; no suffix -> (full, None)."""
+    base, sep, tail = full.rpartition(" v")
+    if sep and tail.isdigit():
+        return base, int(tail)
+    return full, None
+
+
 def validate_currency(code: str) -> str:
     """v1 supports 2-decimal currencies only (A17). Returns the upper-cased code."""
     cur = (code or "").strip().upper()
@@ -341,6 +373,18 @@ def validate_currency(code: str) -> str:
 
 def _round_half_up_cents(value: Decimal) -> int:
     return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def fmt_pct(value: Decimal | int | float | str) -> str:
+    """Render a percentage for humans: ``50 -> "50"``, ``33.5 -> "33.5"``,
+    ``33.333 -> "33.33"`` — never scientific notation (review H1: ``Decimal(50)
+    .normalize()`` prints ``5E+1``). Quantised to 2 decimals, trailing zeros
+    stripped by hand."""
+    q = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    s = f"{q:f}"
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or "0"
 
 
 def validate_payment_split(split: Sequence[int], *, label: str) -> tuple[int, ...]:
@@ -388,14 +432,30 @@ def split_parts(amount_cents: int, payment_split: Sequence[int], *, label: str =
     return [part0] + floors
 
 
-def advance_period(d: date, cadence: str) -> date:
-    """The same day-of-month one period later (clamped to the month's length)."""
+def _add_months(anchor: date, months: int) -> date:
+    y, m0 = divmod(anchor.month - 1 + months, 12)
+    year, month = anchor.year + y, m0 + 1
+    return date(year, month, min(anchor.day, calendar.monthrange(year, month)[1]))
+
+
+def period_date(anchor: date, cadence: str, period_no: int) -> date:
+    """Date of period ``period_no`` (1-based) for a schedule anchored on ``anchor``.
+
+    Always computed FROM THE ANCHOR with month-end clamping (review M9), so an
+    anchor of Jan 31 gives Feb 28, Mar 31, Apr 30 — never a permanent drift to
+    the 28th from a previously clamped date.
+    """
     months = _MONTHS_PER_PERIOD.get(cadence)
     if months is None:
         raise QuoteSeamError("INVALID_CADENCE", f"cadence must be month|quarter|year; got {cadence!r}")
-    y, m0 = divmod(d.month - 1 + months, 12)
-    year, month = d.year + y, m0 + 1
-    return date(year, month, min(d.day, calendar.monthrange(year, month)[1]))
+    if period_no < 1:
+        raise QuoteSeamError("INVALID_PERIOD", f"period_no must be >= 1; got {period_no}")
+    return _add_months(anchor, months * (period_no - 1))
+
+
+def advance_period(d: date, cadence: str) -> date:
+    """One period after ``d`` (clamped). Prefer ``period_date`` for schedules."""
+    return period_date(d, cadence, 2)
 
 
 def periods_for_term(term_months: int | None, cadence: str) -> int | None:
@@ -422,17 +482,17 @@ def compute_partner_share(
     """The partner's share per ``split_rule`` (v1 §3 "Partner split").
 
       hosting lines  -> to the partner IN FULL when ``hosting_to_partner``
-                        (the first period, matching the first-period draft);
+                        (period 1 here; the runner bills later periods) — this
+                        is independent of ``kind`` (review H2);
       the rest       -> ``percent_net`` of the fixed scope (one-time + milestone
                         lines) after ``direct_costs_total_cents``; or the flat
                         ``fee_cents`` for kind=fee; nothing for kind=none.
 
-    Returns None when the rule yields nothing to bill (kind=none, or a zero
-    share) — the caller records ``partner: skipped`` with the reason.
+    Returns None when the rule yields nothing to bill — the caller records
+    ``partner: skipped`` with the reason.
     """
-    if split_rule.kind == "none":
-        return None
     lines: list[PartnerLine] = []
+    basis_parts: list[str] = []
     base = max(0, int(fixed_total_cents) - int(split_rule.direct_costs_total_cents))
     if split_rule.kind == "percent_net":
         if split_rule.percent is None:
@@ -440,36 +500,42 @@ def compute_partner_share(
         pct = Decimal(split_rule.percent)
         share = _round_half_up_cents(Decimal(base) * pct / Decimal(100))
         basis = (
-            f"{pct.normalize()}% of net fixed scope: {_fmt_money(fixed_total_cents, currency)} "
+            f"{fmt_pct(pct)}% of net fixed scope: {_fmt_money(fixed_total_cents, currency)} "
             f"- direct costs {_fmt_money(split_rule.direct_costs_total_cents, currency)} "
             f"= {_fmt_money(base, currency)}"
         )
+        basis_parts.append(basis)
         if share > 0:
             lines.append(PartnerLine(f"Delivery partner share — {basis}", share))
     elif split_rule.kind == "fee":
         if split_rule.fee_cents is None:
             raise QuoteSeamError("PARTNER_RULE_INVALID", "split_rule.kind=fee requires fee_cents")
         basis = f"flat partner fee {_fmt_money(split_rule.fee_cents, currency)}"
+        basis_parts.append(basis)
         if split_rule.fee_cents > 0:
             lines.append(PartnerLine(f"Delivery partner fee — {basis}", int(split_rule.fee_cents)))
+    elif split_rule.kind == "none":
+        basis_parts.append("no share of the fixed scope (kind=none)")
     else:  # pragma: no cover - pydantic Literal already restricts this
         raise QuoteSeamError("PARTNER_RULE_INVALID", f"unknown split_rule.kind {split_rule.kind!r}")
 
+    # Hosting pass-through is a switch of its own — it applies for every kind.
     if split_rule.hosting_to_partner:
         for label, cents in hosting_lines:
             if cents > 0:
                 lines.append(PartnerLine(f"Hosting passed through in full — {label} (period 1)", int(cents)))
-        basis += "; hosting to partner in full"
+        basis_parts.append("hosting to partner in full")
     total = sum(pl.amount_cents for pl in lines)
     if total <= 0:
         return None
-    return PartnerPlan(kind=split_rule.kind, lines=lines, total_cents=total, basis=basis)
+    return PartnerPlan(kind=split_rule.kind, lines=lines, total_cents=total, basis="; ".join(basis_parts))
 
 
 def plan_quote_billing(payload: QuoteAcceptedPayload) -> BillingPlan:
     """Turn an accepted quote into the set of drafts/schedules to create. Pure."""
     currency = validate_currency(payload.currency)
     fq = full_quote_ref(payload.quote_ref, payload.version)
+    number, _ = parse_quote_ref(fq)
 
     deposit_parts: list[PlannedPart] = []
     milestone_drafts: list[PlannedDraft] = []
@@ -568,28 +634,46 @@ def plan_quote_billing(payload: QuoteAcceptedPayload) -> BillingPlan:
 
     partner: PartnerPlan | None = None
     partner_skipped: str | None = None
-    if payload.delivery_partner is None and payload.split_rule is None:
+    rule = payload.split_rule
+    if payload.delivery_partner is None and rule is None:
         partner_skipped = "no delivery partner on the quote"
     elif payload.delivery_partner is None:
         partner_skipped = "split_rule present but no delivery_partner"
-    elif payload.split_rule is None:
+    elif rule is None:
         partner_skipped = "delivery_partner present but no split_rule"
     else:
+        # L16: hosting_to_partner with recurring lines but none identifiable as
+        # hosting is almost certainly a missing is_hosting flag — refuse loudly
+        # rather than silently passing nothing through.
+        if rule.hosting_to_partner and schedules and not any(s.is_hosting for s in schedules):
+            raise QuoteSeamError(
+                "HOSTING_LINE_MISSING",
+                "split_rule.hosting_to_partner is set but no recurring line is flagged is_hosting "
+                "(or labelled 'hosting')",
+            )
+        if rule.hosting_to_partner:
+            schedules = [
+                s if not s.is_hosting else
+                PlannedSchedule(**{**asdict(s), "partner_amount_cents": s.amount_cents})
+                for s in schedules
+            ]
         hosting_lines = [(s.label, s.amount_cents) for s in schedules if s.is_hosting]
         partner = compute_partner_share(
-            split_rule=payload.split_rule,
+            split_rule=rule,
             fixed_total_cents=one_time_total + milestone_total,
             hosting_lines=hosting_lines,
             currency=currency,
         )
         if partner is None:
             partner_skipped = (
-                "split_rule.kind=none" if payload.split_rule.kind == "none"
+                "split_rule.kind=none and hosting stays with the vendor" if rule.kind == "none"
                 else "computed partner share is zero"
             )
 
     return BillingPlan(
         quote_ref=fq,
+        quote_number=number,
+        version=int(payload.version),
         currency=currency,
         deposit_parts=deposit_parts,
         deposit_cents=deposit_cents,
@@ -623,6 +707,18 @@ def _as_date(value: Any) -> date:
     return datetime.fromisoformat(str(value)).date()
 
 
+def _as_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        d = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
 def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -634,8 +730,23 @@ def _as_list(value: Any) -> list[Any]:
     return list(value)
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        try:
+            return dict(json.loads(value))
+        except ValueError:
+            return {}
+    return dict(value)
+
+
 def _utc_start(d: date) -> datetime:
     return datetime.combine(d, time.min, tzinfo=timezone.utc)
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 async def _assert_entity(session: AsyncSession, *, workspace_id: str, entity_id: str) -> None:
@@ -651,6 +762,34 @@ async def _assert_entity(session: AsyncSession, *, workspace_id: str, entity_id:
     ).first()
     if row is None:
         raise QuoteSeamError("ENTITY_NOT_FOUND", f"entity {entity_id} not found in this workspace", http_status=404)
+
+
+async def _assert_period_open_or_raise(
+    session: AsyncSession, *, entity_id: str, effective_date: date, what: str
+) -> None:
+    closed_end = await assert_period_open(session, entity_id=entity_id, effective_date=effective_date)
+    if closed_end is not None:
+        raise QuoteSeamError(
+            "PERIOD_CLOSED",
+            f"{what}: issue date {effective_date.isoformat()} falls in a closed period of entity "
+            f"{entity_id} (closed through {closed_end}); refusing to create paper dated into closed books",
+            http_status=409,
+        )
+
+
+async def resolve_net_terms(session: AsyncSession, *, workspace_id: str, requested: int | None) -> int:
+    """Net-N resolution (review M10): payload -> workspace default -> 30."""
+    if requested is not None:
+        return int(requested)
+    row = (
+        await session.execute(
+            text("SELECT invoice_net_terms FROM engagement_policy WHERE workspace_id = :wid LIMIT 1"),
+            {"wid": str(workspace_id)},
+        )
+    ).mappings().first()
+    if row is not None and row.get("invoice_net_terms") is not None:
+        return max(0, int(row["invoice_net_terms"]))
+    return DEFAULT_NET_TERMS
 
 
 async def _merge_counterparty_refs(session: AsyncSession, *, counterparty_id: str, refs: dict[str, Any]) -> None:
@@ -675,6 +814,8 @@ def _summarize_invoice(view: dict[str, Any], *, kind: str, memo: str | None, cre
         "status": view.get("status"),
         "external_ref": view.get("external_ref"),
         "quote_ref": view.get("quote_ref"),
+        "issue_date": str(view.get("issue_date")) if view.get("issue_date") is not None else None,
+        "due_date": str(view.get("due_date")) if view.get("due_date") is not None else None,
         "total_cents": total_cents,
         "materiality_tier": materiality_tier(total_cents),
         "journal_entry_id": view.get("journal_entry_id"),
@@ -698,12 +839,18 @@ async def _ensure_draft(
     notes: str,
     quote_ref: str,
 ) -> tuple[dict[str, Any], bool]:
-    """Find-or-create ONE draft invoice keyed by ``external_ref``. Never posts."""
+    """Find-or-create ONE draft invoice keyed by ``external_ref``. Never posts.
+
+    ``created`` is decided by a pre-insert probe AND the row's ``created_at``
+    (review L15): a concurrent replay that lost the unique-index race gets the
+    existing row back from the primitive and must report ``created=False``.
+    """
     existing = await _fetch_invoice_row(
         session, workspace_id=workspace_id, external_source=QUOTES_SEAM_SOURCE, external_ref=external_ref,
     )
     if existing is not None:
         return await _invoice_view(session, invoice_id=str(existing["id"])), False
+    t0 = datetime.now(tz=timezone.utc) - timedelta(seconds=2)
     view = await create_invoice_from_draft(
         session,
         workspace_id=workspace_id,
@@ -721,9 +868,9 @@ async def _ensure_draft(
         post_journal=False,
         quote_ref=quote_ref,
     )
-    # A concurrent replay may have won the unique-index race; the primitive then
-    # returns the existing row, which is what we want either way.
-    return view, str(view.get("external_ref")) == external_ref and view.get("journal_entry_id") is None
+    created_at = _as_datetime(view.get("created_at"))
+    created = True if created_at is None else created_at >= t0
+    return view, created
 
 
 async def _ensure_supplier(session: AsyncSession, *, workspace_id: str, partner: DeliveryPartner) -> tuple[str, bool]:
@@ -737,7 +884,7 @@ async def _ensure_supplier(session: AsyncSession, *, workspace_id: str, partner:
             ) from exc
         row = (
             await session.execute(
-                text("SELECT id::text AS id, display_name FROM counterparty WHERE id = :id LIMIT 1"),
+                text("SELECT id::text AS id, display_name, kind FROM counterparty WHERE id = :id LIMIT 1"),
                 {"id": str(partner.partner_supplier_id)},
             )
         ).mappings().first()
@@ -745,6 +892,12 @@ async def _ensure_supplier(session: AsyncSession, *, workspace_id: str, partner:
             raise QuoteSeamError(
                 "PARTNER_SUPPLIER_NOT_FOUND",
                 f"partner_supplier_id {partner.partner_supplier_id} is not a counterparty in this workspace",
+            )
+        if str(row.get("kind")) != "vendor":  # review M7: never make a customer payable
+            raise QuoteSeamError(
+                "PARTNER_SUPPLIER_NOT_VENDOR",
+                f"partner_supplier_id {partner.partner_supplier_id} is a {row.get('kind')!r} counterparty, "
+                "not a supplier (kind='vendor')",
             )
         return row["id"], False
 
@@ -802,7 +955,7 @@ async def _fetch_bill(session: AsyncSession, *, workspace_id: str, external_ref:
     row = (
         await session.execute(
             text(
-                "SELECT id::text AS id, bill_number, status, total, lines, notes "
+                "SELECT id::text AS id, bill_number, status, total, lines, notes, issue_date, due_date "
                 "FROM bill WHERE workspace_id = :wid AND external_source = :src AND external_ref = :ref LIMIT 1"
             ),
             {"wid": workspace_id, "src": QUOTES_SEAM_SOURCE, "ref": external_ref},
@@ -811,7 +964,7 @@ async def _fetch_bill(session: AsyncSession, *, workspace_id: str, external_ref:
     return dict(row) if row else None
 
 
-async def _ensure_partner_bill(
+async def _ensure_bill_draft(
     session: AsyncSession,
     *,
     workspace_id: str,
@@ -823,16 +976,29 @@ async def _ensure_partner_bill(
     currency: str,
     issue_date: date,
     net_terms: int,
-    partner: PartnerPlan,
-    partner_name: str,
+    lines: Sequence[PartnerLine],
+    notes: str,
 ) -> tuple[dict[str, Any], bool]:
-    """Find-or-create the DRAFT AP bill. Never posts (journal_entry_id NULL)."""
+    """Find-or-create ONE draft AP bill keyed by ``external_ref``. Never posts.
+
+    The vendor entity's closed-period lock applies (review H4). A bill_number
+    race trips ``uq_bill_entity_number`` (review M8): the savepoint rolls
+    back, the idempotency key is re-checked, otherwise the error propagates to
+    the partner step's savepoint (``partner: failed``, retry mints the next
+    number).
+    """
     existing = await _fetch_bill(session, workspace_id=workspace_id, external_ref=external_ref)
     if existing is not None:
         return existing, False
+    await _assert_period_open_or_raise(
+        session, entity_id=vendor_entity_id, effective_date=issue_date, what="partner bill (vendor entity)",
+    )
+    total_cents = sum(pl.amount_cents for pl in lines)
+    if total_cents <= 0:
+        raise QuoteSeamError("PARTNER_RULE_INVALID", "partner bill total must be positive")
+    total = _cents_to_amount(total_cents)
     bill_id = str(uuid4())
-    total = _cents_to_amount(partner.total_cents)
-    lines = [
+    line_rows = [
         {
             "line_number": i,
             "description": pl.description[:512],
@@ -840,33 +1006,15 @@ async def _ensure_partner_bill(
             "unit_price": str(_cents_to_amount(pl.amount_cents)),
             "amount": str(_cents_to_amount(pl.amount_cents)),
         }
-        for i, pl in enumerate(partner.lines, start=1)
+        for i, pl in enumerate(lines, start=1)
     ]
-    notes = (
-        f"PARTNER SPLIT DRAFT — bill from {partner_name} (delivery partner) to the vendor of record "
-        f"for quote {quote_ref}. Basis: {partner.basis}. Accounts PAYABLE for this entity, never AR. "
-        "Never auto-issued: review, then approve/post through the AP path."
-    )
     bill_number = await _next_bill_number(session, entity_id=vendor_entity_id, issue_date=issue_date)
     params = {
-        "id": bill_id,
-        "wid": workspace_id,
-        "eid": vendor_entity_id,
-        "sup": supplier_id,
-        "num": bill_number,
-        "cur": currency,
-        "issue": issue_date,
-        "due": issue_date + timedelta(days=int(net_terms)),
-        "subtotal": total,
-        "tax": Decimal("0"),
-        "total": total,
-        "balance": total,
-        "lines": json.dumps(lines),
-        "notes": notes,
-        "qr": quote_ref,
-        "src": QUOTES_SEAM_SOURCE,
-        "ref": external_ref,
-        "uid": actor_uc_uid,
+        "id": bill_id, "wid": workspace_id, "eid": vendor_entity_id, "sup": supplier_id, "num": bill_number,
+        "cur": currency, "issue": issue_date, "due": issue_date + timedelta(days=int(net_terms)),
+        "subtotal": total, "tax": Decimal("0"), "total": total, "balance": total,
+        "lines": json.dumps(line_rows), "notes": notes, "qr": quote_ref,
+        "src": QUOTES_SEAM_SOURCE, "ref": external_ref, "uid": actor_uc_uid,
     }
     try:
         async with session.begin_nested():
@@ -894,28 +1042,129 @@ async def _ensure_partner_bill(
             return existing, False
         raise
     return {
-        "id": bill_id,
-        "bill_number": bill_number,
-        "status": "draft",
-        "total": total,
-        "lines": lines,
-        "notes": notes,
+        "id": bill_id, "bill_number": bill_number, "status": "draft", "total": total,
+        "lines": line_rows, "notes": notes, "issue_date": issue_date,
+        "due_date": params["due"],
     }, True
 
 
-def _summarize_bill(row: dict[str, Any], *, partner: PartnerPlan, supplier_id: str, created: bool) -> dict[str, Any]:
+def _summarize_bill(row: dict[str, Any], *, lines: Sequence[PartnerLine], basis: str,
+                    supplier_id: str, vendor_entity_id: str, created: bool) -> dict[str, Any]:
     total_cents = _amount_to_cents(row.get("total") or 0)
     return {
         "id": str(row["id"]),
         "bill_number": row.get("bill_number"),
         "status": row.get("status"),
         "supplier_counterparty_id": supplier_id,
+        "vendor_entity_id": vendor_entity_id,
+        "issue_date": str(row.get("issue_date")) if row.get("issue_date") is not None else None,
         "total_cents": total_cents,
         "materiality_tier": materiality_tier(total_cents),
-        "lines": [asdict(pl) for pl in partner.lines],
-        "basis": partner.basis,
+        "lines": [asdict(pl) for pl in lines],
+        "basis": basis,
         "created": created,
     }
+
+
+# ---------------------------------------------------------------------------
+# Superseding an earlier accepted version (review M11 as directed)
+# ---------------------------------------------------------------------------
+
+
+async def _supersede_prior_versions(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    quote_number: str,
+    new_version: int,
+    new_ref: str,
+    actor_uc_uid: str,
+) -> dict[str, Any]:
+    """Void the still-unissued paper of every LOWER version of this quote number.
+
+    Draft invoices with no journal entry are voided (``void_invoice`` finds no
+    issue rows for a never-posted draft, so it only flips the status — nothing
+    reverses, nothing posts). Active schedules are retired. Draft bills are
+    voided. Issued / paid paper is never touched — it is reported in
+    ``left_open_invoice_ids`` for a human. Versions >= the incoming one are
+    left alone (an out-of-order replay of v1 after v2 must not touch v2).
+    """
+    pfx = _escape_like(quote_number) + " v%"
+    reason = f"Superseded by accepted quote {new_ref}"
+    out: dict[str, Any] = {
+        "versions": [], "voided_invoice_ids": [], "left_open_invoice_ids": [],
+        "retired_schedule_ids": [], "voided_bill_ids": [],
+    }
+    versions: set[int] = set()
+
+    inv_rows = (
+        await session.execute(
+            text(
+                "SELECT id::text AS id, quote_ref, status, journal_entry_id::text AS journal_entry_id "
+                "FROM invoice WHERE workspace_id = :wid AND external_source = :src "
+                "AND quote_ref LIKE :pfx ESCAPE '\\' ORDER BY invoice_number"
+            ),
+            {"wid": workspace_id, "src": QUOTES_SEAM_SOURCE, "pfx": pfx},
+        )
+    ).mappings().all()
+    for r in inv_rows:
+        number, ver = parse_quote_ref(str(r["quote_ref"] or ""))
+        if number != quote_number or ver is None or ver >= new_version:
+            continue
+        versions.add(ver)
+        if r["status"] == "draft" and r["journal_entry_id"] is None:
+            await void_invoice(
+                session, workspace_id=workspace_id, invoice_id=r["id"], actor_uc_uid=actor_uc_uid, reason=reason,
+            )
+            out["voided_invoice_ids"].append(r["id"])
+        elif r["status"] != "void":
+            out["left_open_invoice_ids"].append(r["id"])
+
+    sched_rows = (
+        await session.execute(
+            text(
+                "SELECT id::text AS id, quote_ref FROM invoice_schedules "
+                "WHERE workspace_id = :wid AND quote_ref LIKE :pfx ESCAPE '\\' AND active"
+            ),
+            {"wid": workspace_id, "pfx": pfx},
+        )
+    ).mappings().all()
+    for r in sched_rows:
+        number, ver = parse_quote_ref(str(r["quote_ref"] or ""))
+        if number != quote_number or ver is None or ver >= new_version:
+            continue
+        versions.add(ver)
+        await session.execute(
+            text("UPDATE invoice_schedules SET active = false, next_run_at = NULL WHERE id = :id"),
+            {"id": r["id"]},
+        )
+        out["retired_schedule_ids"].append(r["id"])
+
+    bill_rows = (
+        await session.execute(
+            text(
+                "SELECT id::text AS id, quote_ref FROM bill "
+                "WHERE workspace_id = :wid AND external_source = :src AND quote_ref LIKE :pfx ESCAPE '\\' "
+                "AND status = 'draft' AND journal_entry_id IS NULL"
+            ),
+            {"wid": workspace_id, "src": QUOTES_SEAM_SOURCE, "pfx": pfx},
+        )
+    ).mappings().all()
+    for r in bill_rows:
+        number, ver = parse_quote_ref(str(r["quote_ref"] or ""))
+        if number != quote_number or ver is None or ver >= new_version:
+            continue
+        versions.add(ver)
+        await session.execute(
+            text(
+                "UPDATE bill SET status = 'void', voided_at = now(), void_reason = :reason WHERE id = :id"
+            ),
+            {"reason": reason, "id": r["id"]},
+        )
+        out["voided_bill_ids"].append(r["id"])
+
+    out["versions"] = sorted(versions)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -942,7 +1191,6 @@ async def apply_quote_acceptance(
     fq = plan.quote_ref
     today = today or datetime.now(tz=timezone.utc).date()
     issue_date = payload.accepted_at or today
-    net_terms = int(payload.net_terms)
     currency = plan.currency
 
     workspace_id = str(workspace_id)
@@ -951,15 +1199,17 @@ async def apply_quote_acceptance(
     vendor_entity_id = str(payload.vendor_entity_id or entity_id)
     if vendor_entity_id != entity_id:
         await _assert_entity(session, workspace_id=workspace_id, entity_id=vendor_entity_id)
+    net_terms = await resolve_net_terms(session, workspace_id=workspace_id, requested=payload.net_terms)
 
-    closed_end = await assert_period_open(session, entity_id=entity_id, effective_date=issue_date)
-    if closed_end is not None:
-        raise QuoteSeamError(
-            "PERIOD_CLOSED",
-            f"issue date {issue_date.isoformat()} falls in a closed period (closed through {closed_end}); "
-            "refusing to create drafts dated into closed books",
-            http_status=409,
-        )
+    await _assert_period_open_or_raise(
+        session, entity_id=entity_id, effective_date=issue_date, what="customer drafts",
+    )
+
+    # ---- A new version voids the prior versions' unissued paper first ----
+    superseded = await _supersede_prior_versions(
+        session, workspace_id=workspace_id, quote_number=plan.quote_number,
+        new_version=plan.version, new_ref=fq, actor_uc_uid=actor_uc_uid,
+    )
 
     # ---- AR customer (thin Contact-Ops reference) ----
     cust_in = payload.customer
@@ -984,6 +1234,7 @@ async def apply_quote_acceptance(
         "email": cust_in.email,
         "billing_address": cust_in.billing_address,
     }
+    tax_note = "Amounts exclude tax; tax is applied on the invoice."
 
     invoices: list[dict[str, Any]] = []
     created_any = False
@@ -1006,8 +1257,7 @@ async def apply_quote_acceptance(
             workspace_id=workspace_id, entity_id=entity_id, actor_uc_uid=actor_uc_uid,
             external_ref=f"{fq}:deposit", customer=customer_dict, line_items=line_items,
             currency=currency, issue_date=issue_date, net_terms=net_terms,
-            notes=f"Deposit due on acceptance of quote {fq}. Amounts exclude tax; tax is applied on the invoice.",
-            quote_ref=fq,
+            notes=f"Deposit due on acceptance of quote {fq}. {tax_note}", quote_ref=fq,
         )
         created_any |= created
         deposit_invoice_id = str(view["id"])
@@ -1028,18 +1278,38 @@ async def apply_quote_acceptance(
             workspace_id=workspace_id, entity_id=entity_id, actor_uc_uid=actor_uc_uid,
             external_ref=f"{fq}:{d.external_suffix}", customer=customer_dict, line_items=line_items,
             currency=currency, issue_date=issue_date, net_terms=net_terms,
-            notes=f"{d.memo}. Quote {fq}. Amounts exclude tax; tax is applied on the invoice.",
-            quote_ref=fq,
+            notes=f"{d.memo}. Quote {fq}. {tax_note}", quote_ref=fq,
         )
         created_any |= created
         milestone_invoice_ids.append(str(view["id"]))
         invoices.append(_summarize_invoice(view, kind="milestone", memo=d.memo, created=created))
 
+    # ---- Partner supplier (resolved before the schedules so the rows can carry it) ----
+    partner_status = "skipped"
+    partner_reason = plan.partner_skipped_reason
+    partner_bill: dict[str, Any] | None = None
+    partner_supplier_id: str | None = None
+    partner_name = payload.delivery_partner.name if payload.delivery_partner else None
+    if plan.partner is not None and payload.delivery_partner is not None:
+        try:
+            async with session.begin_nested():
+                partner_supplier_id, _ = await _ensure_supplier(
+                    session, workspace_id=workspace_id, partner=payload.delivery_partner,
+                )
+        except Exception as exc:  # noqa: BLE001 - A7: report, never lose the customer drafts
+            _log.exception("quotes seam: partner supplier resolution failed for %s", fq)
+            partner_status = "failed"
+            partner_reason = (
+                f"{exc.code}: {exc.reason}" if isinstance(exc, QuoteSeamError)
+                else f"{exc.__class__.__name__}: {str(exc)[:400]}"
+            )
+
     # ---- Recurring schedules + first-period drafts ----
     schedule_ids: list[str] = []
     schedules_out: list[dict[str, Any]] = []
+    rule = payload.split_rule
     for s in plan.schedules:
-        period_label = {"month": "Month", "quarter": "Quarter", "year": "Year"}[s.cadence]
+        period_label = _PERIOD_LABEL[s.cadence]
         of_n = f" of {s.periods_total}" if s.periods_total else ""
         memo = f"{period_label} 1{of_n} — {s.label}"
         line_items = [{
@@ -1054,27 +1324,43 @@ async def apply_quote_acceptance(
             workspace_id=workspace_id, entity_id=entity_id, actor_uc_uid=actor_uc_uid,
             external_ref=f"{fq}:recurring:{s.position}:1", customer=customer_dict, line_items=line_items,
             currency=currency, issue_date=issue_date, net_terms=net_terms,
-            notes=f"{memo}. Quote {fq}. Recurring {s.cadence}ly. Amounts exclude tax; tax is applied on the invoice.",
-            quote_ref=fq,
+            notes=f"{memo}. Quote {fq}. Recurring {s.cadence}ly. {tax_note}", quote_ref=fq,
         )
         created_any |= created
         first_id = str(view["id"])
         invoices.append(_summarize_invoice(view, kind="recurring", memo=memo, created=created))
 
         done_after_first = s.periods_total is not None and s.periods_total <= 1
-        next_run = None if done_after_first else _utc_start(advance_period(issue_date, s.cadence))
+        next_run = None if done_after_first else _utc_start(period_date(issue_date, s.cadence, 2))
+        has_partner = bool(partner_supplier_id) and s.partner_amount_cents > 0
+        partner_split = None
+        if has_partner and rule is not None:
+            partner_split = {
+                "kind": rule.kind,
+                "percent": fmt_pct(rule.percent) if rule.percent is not None else None,
+                "hosting_to_partner": rule.hosting_to_partner,
+                "is_hosting": s.is_hosting,
+                "partner_name": partner_name,
+                "basis": "hosting passed through in full each period",
+            }
         sched_id = str(uuid4())
         await session.execute(
             text(
                 """
                 INSERT INTO invoice_schedules (
                     id, workspace_id, entity_id, quote_ref, ar_customer_id, line_position,
-                    cadence, amount_cents, currency, description, term_months, periods_total,
-                    periods_generated, next_run_at, generated_invoice_ids, active, created_by_uc_uid
+                    cadence, amount_cents, currency, description, anchor_date, net_terms,
+                    term_months, periods_total, periods_generated, next_run_at,
+                    generated_invoice_ids, active,
+                    partner_supplier_id, vendor_entity_id, partner_amount_cents, partner_split,
+                    partner_periods_billed, generated_bill_ids, created_by_uc_uid
                 ) VALUES (
                     :id, :wid, :eid, :qr, :cust, :pos,
-                    :cad, :amt, :cur, :desc, :term, :ptotal,
-                    1, :next, CAST(:ids AS jsonb), :active, :uid
+                    :cad, :amt, :cur, :desc, :anchor, :net,
+                    :term, :ptotal, 1, :next,
+                    CAST(:ids AS jsonb), :active,
+                    :psup, :veid, :pamt, CAST(:psplit AS jsonb),
+                    :pbilled, CAST('[]' AS jsonb), :uid
                 )
                 ON CONFLICT (workspace_id, quote_ref, line_position) DO NOTHING
                 """
@@ -1083,15 +1369,26 @@ async def apply_quote_acceptance(
                 "id": sched_id, "wid": workspace_id, "eid": entity_id, "qr": fq,
                 "cust": ar_customer_id, "pos": s.position, "cad": s.cadence,
                 "amt": s.amount_cents, "cur": currency, "desc": s.label[:512],
+                "anchor": issue_date, "net": net_terms,
                 "term": s.term_months, "ptotal": s.periods_total, "next": next_run,
-                "ids": json.dumps([first_id]), "active": not done_after_first, "uid": actor_uc_uid,
+                "ids": json.dumps([first_id]), "active": not done_after_first,
+                "psup": partner_supplier_id if has_partner else None,
+                "veid": vendor_entity_id if has_partner else None,
+                "pamt": s.partner_amount_cents if has_partner else None,
+                "psplit": json.dumps(partner_split) if partner_split else None,
+                # Period 1's pass-through is part of the acceptance bill below.
+                "pbilled": 1 if has_partner else 0,
+                "uid": actor_uc_uid,
             },
         )
         row = (
             await session.execute(
                 text(
-                    "SELECT id::text AS id, cadence, amount_cents, periods_total, periods_generated, "
-                    "next_run_at, generated_invoice_ids, active FROM invoice_schedules "
+                    "SELECT id::text AS id, cadence, amount_cents, anchor_date, net_terms, periods_total, "
+                    "periods_generated, next_run_at, generated_invoice_ids, active, "
+                    "partner_supplier_id::text AS partner_supplier_id, partner_amount_cents, "
+                    "partner_periods_billed, generated_bill_ids "
+                    "FROM invoice_schedules "
                     "WHERE workspace_id = :wid AND quote_ref = :qr AND line_position = :pos LIMIT 1"
                 ),
                 {"wid": workspace_id, "qr": fq, "pos": s.position},
@@ -1102,42 +1399,49 @@ async def apply_quote_acceptance(
         sched_created = str(row["id"]) == sched_id
         created_any |= sched_created
         schedule_ids.append(str(row["id"]))
+        nr = _as_datetime(row["next_run_at"])
         schedules_out.append({
             "id": str(row["id"]),
             "position": s.position,
             "label": s.label,
             "cadence": s.cadence,
             "amount_cents": int(row["amount_cents"]),
+            "anchor_date": str(row["anchor_date"]),
+            "net_terms": int(row["net_terms"]),
             "periods_total": row["periods_total"],
             "periods_generated": int(row["periods_generated"] or 0),
-            "next_run_at": row["next_run_at"].isoformat() if isinstance(row["next_run_at"], datetime) else row["next_run_at"],
+            "next_run_at": nr.isoformat() if nr else None,
             "active": bool(row["active"]),
             "is_hosting": s.is_hosting,
+            "partner_supplier_id": row["partner_supplier_id"],
+            "partner_amount_cents": int(row["partner_amount_cents"] or 0),
+            "partner_periods_billed": int(row["partner_periods_billed"] or 0),
             "first_invoice_id": first_id,
             "created": sched_created,
         })
 
     # ---- Partner bill (AP draft) — isolated so the customer drafts never depend on it ----
-    partner_status = "skipped"
-    partner_reason = plan.partner_skipped_reason
-    partner_bill: dict[str, Any] | None = None
-    partner_supplier_id: str | None = None
-    if plan.partner is not None and payload.delivery_partner is not None:
+    if plan.partner is not None and payload.delivery_partner is not None and partner_supplier_id:
         try:
             async with session.begin_nested():
-                partner_supplier_id, _ = await _ensure_supplier(
-                    session, workspace_id=workspace_id, partner=payload.delivery_partner,
+                notes = (
+                    f"PARTNER SPLIT DRAFT — bill from {partner_name} (delivery partner) to the vendor of "
+                    f"record for quote {fq}. Basis: {plan.partner.basis}. Accounts PAYABLE for this entity, "
+                    "never AR. Never auto-issued: review, then approve/post through the AP path. "
+                    "Later recurring periods are billed by the schedule runner."
                 )
-                row, created = await _ensure_partner_bill(
+                row, created = await _ensure_bill_draft(
                     session,
                     workspace_id=workspace_id, vendor_entity_id=vendor_entity_id,
                     supplier_id=partner_supplier_id, actor_uc_uid=actor_uc_uid,
                     external_ref=f"{fq}:partner", quote_ref=fq, currency=currency,
-                    issue_date=issue_date, net_terms=net_terms, partner=plan.partner,
-                    partner_name=payload.delivery_partner.name,
+                    issue_date=issue_date, net_terms=net_terms, lines=plan.partner.lines, notes=notes,
                 )
             created_any |= created
-            partner_bill = _summarize_bill(row, partner=plan.partner, supplier_id=partner_supplier_id, created=created)
+            partner_bill = _summarize_bill(
+                row, lines=plan.partner.lines, basis=plan.partner.basis,
+                supplier_id=partner_supplier_id, vendor_entity_id=vendor_entity_id, created=created,
+            )
             partner_status, partner_reason = "done", None
         except Exception as exc:  # noqa: BLE001 - A7: report, never lose the customer drafts
             _log.exception("quotes seam: partner bill failed for %s", fq)
@@ -1152,6 +1456,8 @@ async def apply_quote_acceptance(
     )
     return {
         "quote_ref": fq,
+        "quote_number": plan.quote_number,
+        "version": plan.version,
         "created": created_any,
         "replayed": not created_any,
         "ar_customer_id": ar_customer_id,
@@ -1164,9 +1470,11 @@ async def apply_quote_acceptance(
         "entity_id": entity_id,
         "currency": currency,
         "issue_date": issue_date.isoformat(),
+        "net_terms": net_terms,
         "invoices": invoices,
         "schedules": schedules_out,
         "partner_bill": partner_bill,
+        "superseded": superseded,
         "review_required": review_required,
         "skipped_lines": plan.skipped_lines,
         "totals": plan.computed_totals,
@@ -1179,7 +1487,7 @@ async def apply_quote_acceptance(
 
 
 # ---------------------------------------------------------------------------
-# Schedule runner — one DRAFT per due period
+# Schedule runner — one DRAFT per due period (+ the partner bill per period)
 # ---------------------------------------------------------------------------
 
 
@@ -1195,16 +1503,26 @@ async def generate_due_schedule_invoices(
 ) -> dict[str, Any]:
     """Generate the next period's DRAFT for every active schedule due by ``as_of``.
 
-    A schedule that fell several periods behind catches up (bounded). Each
-    period's draft is idempotent on ``<quote_ref>:recurring:<position>:<n>``.
-    Periods that fall inside a closed period are skipped and reported (the
-    schedule is left untouched so a re-run after the period reopens picks it
-    up). Never posts.
+    Two independent cursors per schedule:
+
+      * customer side — ``periods_generated``: one draft per period from the
+        anchor date (idempotent on ``<quote_ref>:recurring:<position>:<n>``);
+        a schedule that fell behind catches up (bounded); periods inside a
+        closed period of the AR entity are skipped and reported and the
+        schedule is left untouched;
+      * partner side — ``partner_periods_billed``: for a line that passes to
+        the partner, one DRAFT bill per generated period (idempotent on
+        ``<quote_ref>:partner:recurring:<position>:<n>``), in its own savepoint,
+        with the VENDOR entity's closed-period lock; a failure is reported and
+        the cursor stays, so the next run catches up (review H3/H4).
+
+    Never posts.
     """
+    workspace_id = str(workspace_id)
     as_of = as_of or datetime.now(tz=timezone.utc).date()
     cutoff = datetime.combine(as_of, time.max, tzinfo=timezone.utc)
-    where = ["s.active", "s.next_run_at IS NOT NULL", "s.next_run_at <= :cutoff"]
-    params: dict[str, Any] = {"cutoff": cutoff, "limit": max(1, min(int(limit), 1000))}
+    where = ["s.workspace_id = :wid", "s.active", "s.next_run_at IS NOT NULL", "s.next_run_at <= :cutoff"]
+    params: dict[str, Any] = {"wid": workspace_id, "cutoff": cutoff, "limit": max(1, min(int(limit), 1000))}
     if entity_id:
         where.append("s.entity_id = :eid")
         params["eid"] = str(entity_id)
@@ -1214,8 +1532,12 @@ async def generate_due_schedule_invoices(
                 f"""
                 SELECT s.id::text AS id, s.entity_id::text AS entity_id, s.quote_ref,
                        s.ar_customer_id::text AS ar_customer_id, s.line_position, s.cadence,
-                       s.amount_cents, s.currency, s.description, s.periods_total,
-                       s.periods_generated, s.next_run_at, s.generated_invoice_ids,
+                       s.amount_cents, s.currency, s.description, s.anchor_date, s.net_terms,
+                       s.periods_total, s.periods_generated, s.next_run_at, s.generated_invoice_ids,
+                       s.partner_supplier_id::text AS partner_supplier_id,
+                       s.vendor_entity_id::text AS vendor_entity_id,
+                       s.partner_amount_cents, s.partner_split, s.partner_periods_billed,
+                       s.generated_bill_ids,
                        c.display_name AS customer_name, c.external_refs AS customer_refs
                 FROM invoice_schedules s
                 JOIN counterparty c ON c.id = s.ar_customer_id
@@ -1230,13 +1552,10 @@ async def generate_due_schedule_invoices(
 
     generated: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    partner_bills: list[dict[str, Any]] = []
+    partner_skipped: list[dict[str, Any]] = []
     for r in rows:
-        refs = r["customer_refs"] or {}
-        if isinstance(refs, str):
-            try:
-                refs = json.loads(refs)
-            except ValueError:
-                refs = {}
+        refs = _as_dict(r["customer_refs"])
         customer = {
             "name": r["customer_name"],
             "contact_id": refs.get("contact_id"),
@@ -1246,24 +1565,28 @@ async def generate_due_schedule_invoices(
         periods_total = r["periods_total"]
         periods_generated = int(r["periods_generated"] or 0)
         ids = [str(x) for x in _as_list(r["generated_invoice_ids"])]
-        next_date = _as_date(r["next_run_at"])
+        anchor = _as_date(r["anchor_date"])
         cadence = str(r["cadence"])
+        net_terms = int(r["net_terms"] or DEFAULT_NET_TERMS)
+        period_label = _PERIOD_LABEL[cadence]
+        of_n = f" of {periods_total}" if periods_total else ""
         touched = False
+
+        # ---- customer side ----
         for _ in range(max_periods_per_schedule):
-            if next_date > as_of:
-                break
             if periods_total is not None and periods_generated >= int(periods_total):
                 break
-            closed_end = await assert_period_open(session, entity_id=r["entity_id"], effective_date=next_date)
+            period_no = periods_generated + 1
+            p_date = period_date(anchor, cadence, period_no)
+            if p_date > as_of:
+                break
+            closed_end = await assert_period_open(session, entity_id=r["entity_id"], effective_date=p_date)
             if closed_end is not None:
                 skipped.append({
-                    "schedule_id": r["id"], "quote_ref": r["quote_ref"], "period_date": next_date.isoformat(),
-                    "reason": f"period closed through {closed_end}",
+                    "schedule_id": r["id"], "quote_ref": r["quote_ref"], "period_no": period_no,
+                    "period_date": p_date.isoformat(), "reason": f"period closed through {closed_end}",
                 })
                 break
-            period_no = periods_generated + 1
-            period_label = {"month": "Month", "quarter": "Quarter", "year": "Year"}[cadence]
-            of_n = f" of {periods_total}" if periods_total else ""
             memo = f"{period_label} {period_no}{of_n} — {r['description']}"
             try:
                 view = await create_invoice_from_draft(
@@ -1282,8 +1605,8 @@ async def generate_due_schedule_invoices(
                         "source_ref": f"{r['quote_ref']}:line:{int(r['line_position'])}",
                     }],
                     currency=str(r["currency"]),
-                    issue_date=next_date,
-                    net_terms=30,
+                    issue_date=p_date,
+                    net_terms=net_terms,
                     notes=f"{memo}. Quote {r['quote_ref']}. Amounts exclude tax; tax is applied on the invoice.",
                     auto_send=False,
                     post_journal=False,
@@ -1291,8 +1614,8 @@ async def generate_due_schedule_invoices(
                 )
             except InvoiceError as exc:
                 skipped.append({
-                    "schedule_id": r["id"], "quote_ref": r["quote_ref"], "period_date": next_date.isoformat(),
-                    "reason": f"InvoiceError: {exc}",
+                    "schedule_id": r["id"], "quote_ref": r["quote_ref"], "period_no": period_no,
+                    "period_date": p_date.isoformat(), "reason": f"InvoiceError: {exc}",
                 })
                 break
             inv_id = str(view["id"])
@@ -1302,38 +1625,98 @@ async def generate_due_schedule_invoices(
             generated.append({
                 "schedule_id": r["id"], "quote_ref": r["quote_ref"], "invoice_id": inv_id,
                 "invoice_number": view.get("invoice_number"), "period_no": period_no,
-                "period_date": next_date.isoformat(), "amount_cents": int(r["amount_cents"]),
+                "period_date": p_date.isoformat(), "amount_cents": int(r["amount_cents"]),
                 "materiality_tier": materiality_tier(int(r["amount_cents"])),
             })
-            next_date = advance_period(next_date, cadence)
             touched = True
-        if not touched:
+        if touched:
+            done = periods_total is not None and periods_generated >= int(periods_total)
+            await session.execute(
+                text(
+                    """
+                    UPDATE invoice_schedules
+                    SET periods_generated = :pgen,
+                        generated_invoice_ids = CAST(:ids AS jsonb),
+                        next_run_at = :next,
+                        active = :active
+                    WHERE id = :id
+                    """
+                ),
+                {
+                    "pgen": periods_generated,
+                    "ids": json.dumps(ids),
+                    "next": None if done else _utc_start(period_date(anchor, cadence, periods_generated + 1)),
+                    "active": not done,
+                    "id": r["id"],
+                },
+            )
+
+        # ---- partner side (H3): one bill per generated period the partner has not been billed for ----
+        partner_amount = int(r["partner_amount_cents"] or 0)
+        supplier_id = r["partner_supplier_id"]
+        vendor_eid = r["vendor_entity_id"] or r["entity_id"]
+        if not supplier_id or partner_amount <= 0:
             continue
-        done = periods_total is not None and periods_generated >= int(periods_total)
-        await session.execute(
-            text(
-                """
-                UPDATE invoice_schedules
-                SET periods_generated = :pgen,
-                    generated_invoice_ids = CAST(:ids AS jsonb),
-                    next_run_at = :next,
-                    active = :active
-                WHERE id = :id
-                """
-            ),
-            {
-                "pgen": periods_generated,
-                "ids": json.dumps(ids),
-                "next": None if done else _utc_start(next_date),
-                "active": not done,
-                "id": r["id"],
-            },
-        )
+        billed = int(r["partner_periods_billed"] or 0)
+        bill_ids = [str(x) for x in _as_list(r["generated_bill_ids"])]
+        split = _as_dict(r["partner_split"])
+        partner_name = split.get("partner_name") or "delivery partner"
+        touched_partner = False
+        for n in range(billed + 1, periods_generated + 1):
+            p_date = period_date(anchor, cadence, n)
+            ref = f"{r['quote_ref']}:partner:recurring:{int(r['line_position'])}:{n}"
+            try:
+                async with session.begin_nested():
+                    row, created = await _ensure_bill_draft(
+                        session,
+                        workspace_id=workspace_id, vendor_entity_id=vendor_eid, supplier_id=supplier_id,
+                        actor_uc_uid=actor_uc_uid, external_ref=ref, quote_ref=str(r["quote_ref"]),
+                        currency=str(r["currency"]), issue_date=p_date, net_terms=net_terms,
+                        lines=[PartnerLine(
+                            f"Hosting passed through in full — {r['description']} "
+                            f"({period_label.lower()} {n}{of_n}, {p_date.isoformat()})",
+                            partner_amount,
+                        )],
+                        notes=(
+                            f"PARTNER SPLIT DRAFT — bill from {partner_name} (delivery partner) to the vendor "
+                            f"of record for quote {r['quote_ref']}, {period_label.lower()} {n}{of_n}. "
+                            "Accounts PAYABLE for this entity, never AR. Never auto-issued."
+                        ),
+                    )
+            except Exception as exc:  # noqa: BLE001 - report; the cursor stays so the next run retries
+                _log.exception("quotes seam runner: partner bill failed for %s period %s", r["quote_ref"], n)
+                partner_skipped.append({
+                    "schedule_id": r["id"], "quote_ref": r["quote_ref"], "period_no": n,
+                    "period_date": p_date.isoformat(),
+                    "reason": (f"{exc.code}: {exc.reason}" if isinstance(exc, QuoteSeamError)
+                               else f"{exc.__class__.__name__}: {str(exc)[:300]}"),
+                })
+                break
+            bid = str(row["id"])
+            if bid not in bill_ids:
+                bill_ids.append(bid)
+            billed = n
+            touched_partner = True
+            partner_bills.append({
+                "schedule_id": r["id"], "quote_ref": r["quote_ref"], "bill_id": bid,
+                "bill_number": row.get("bill_number"), "period_no": n, "period_date": p_date.isoformat(),
+                "amount_cents": partner_amount, "created": created,
+            })
+        if touched_partner:
+            await session.execute(
+                text(
+                    "UPDATE invoice_schedules SET partner_periods_billed = :pb, "
+                    "generated_bill_ids = CAST(:bids AS jsonb) WHERE id = :id"
+                ),
+                {"pb": billed, "bids": json.dumps(bill_ids), "id": r["id"]},
+            )
     return {
         "as_of": as_of.isoformat(),
         "schedules_due": len(rows),
         "generated": generated,
         "skipped": skipped,
+        "partner_bills": partner_bills,
+        "partner_skipped": partner_skipped,
     }
 
 
@@ -1363,8 +1746,12 @@ async def list_invoice_schedules(
                 SELECT s.id::text AS id, s.entity_id::text AS entity_id, s.quote_ref,
                        s.ar_customer_id::text AS ar_customer_id, c.display_name AS customer_name,
                        s.line_position, s.cadence, s.amount_cents, s.currency, s.description,
-                       s.term_months, s.periods_total, s.periods_generated, s.next_run_at,
-                       s.generated_invoice_ids, s.active, s.created_at
+                       s.anchor_date, s.net_terms, s.term_months, s.periods_total, s.periods_generated,
+                       s.next_run_at, s.generated_invoice_ids, s.active,
+                       s.partner_supplier_id::text AS partner_supplier_id,
+                       s.vendor_entity_id::text AS vendor_entity_id,
+                       s.partner_amount_cents, s.partner_split, s.partner_periods_billed,
+                       s.generated_bill_ids, s.created_at
                 FROM invoice_schedules s
                 LEFT JOIN counterparty c ON c.id = s.ar_customer_id
                 WHERE {" AND ".join(where)}
@@ -1379,15 +1766,21 @@ async def list_invoice_schedules(
     for r in rows:
         d = dict(r)
         d["generated_invoice_ids"] = [str(x) for x in _as_list(d.get("generated_invoice_ids"))]
+        d["generated_bill_ids"] = [str(x) for x in _as_list(d.get("generated_bill_ids"))]
+        d["partner_split"] = _as_dict(d.get("partner_split")) or None
         for k in ("next_run_at", "created_at"):
             if isinstance(d.get(k), datetime):
                 d[k] = d[k].isoformat()
+        if d.get("anchor_date") is not None:
+            d["anchor_date"] = str(d["anchor_date"])
         d["amount_cents"] = int(d["amount_cents"])
+        d["partner_amount_cents"] = int(d["partner_amount_cents"] or 0)
         out.append(d)
     return out
 
 
 __all__ = (
+    "DEFAULT_NET_TERMS",
     "QUOTES_SEAM_ACTOR",
     "QUOTES_SEAM_SOURCE",
     "BillingPlan",
@@ -1402,11 +1795,16 @@ __all__ = (
     "advance_period",
     "apply_quote_acceptance",
     "compute_partner_share",
+    "fmt_pct",
     "full_quote_ref",
     "generate_due_schedule_invoices",
     "list_invoice_schedules",
+    "parse_quote_ref",
+    "period_date",
     "periods_for_term",
     "plan_quote_billing",
+    "quotes_enabled",
+    "resolve_net_terms",
     "split_parts",
     "validate_currency",
 )
