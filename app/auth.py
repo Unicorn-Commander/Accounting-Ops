@@ -27,6 +27,31 @@ A service token WITHOUT these fields keeps full impersonation reach for
 backward compatibility — useful for trusted internal workers during the
 transition. New tokens SHOULD declare the minimum scope they need.
 
+Trusted M2M callers and the two doors (2026-09-12, quotes seam review H5/H6):
+``is_trusted_m2m`` is set by TWO verifiers — (1) the Keycloak path, when a
+uchub JWT's ``azp`` is in ``ACCTOPS_TRUSTED_M2M_CALLERS``; (2) the Brigade path,
+when a Brigade-issued JWT's ``act.client_id`` is in the same allow-list. Both
+synthesize ``uc_uid = m2m:<client>``. Neither check, by itself, proves the
+bearer is a MACHINE: Keycloak stamps ``azp = <client>`` on interactive user
+logins through that client too. That is acceptable for the READ-ONLY
+federation rail (``resolve_workspace_for_federation`` floors to viewer), and
+NOT acceptable for a write rail. So ``AuthContext.m2m_proof`` records WHICH
+door set the flag and whether the token carried client-credentials shape:
+
+  * ``"keycloak-client-credentials"`` — Keycloak path AND
+    ``keycloak_machine_proof`` held (no ``sid``/``session_state``, ``clientId``
+    (or ``client_id``) claim equals ``azp``, and a ``service-account-<azp>``
+    identity in ``sub`` or ``preferred_username``);
+  * ``"brigade-actor"`` — Brigade path (a delegated actor claim, not a
+    Keycloak service account; carries no such shape);
+  * ``None`` — not trusted M2M, or a trusted ``azp`` WITHOUT machine shape
+    (a human riding a trusted client; logged at WARNING).
+
+Write routes on the M2M rail (today: the quotes seam,
+``app/api/quotes_seam.py``) MUST require ``m2m_proof ==
+"keycloak-client-credentials"``; the Brigade door is excluded from write
+routes by construction. The read rail is unchanged.
+
 PATs (2026-05-31): Personal Access Tokens are user-minted long-lived bearers
 formatted ``aops_pat_<43 chars>``. They sit BEFORE the Keycloak JWT branch in
 the chain: prefix-match → sha256 hash compare → resolve owner uc_uid. PATs
@@ -101,13 +126,19 @@ class AuthContext:
     # tokens (no constraint — the user's full membership applies). Set when
     # the bearer matched a service token that declared scope fields.
     service_scope: ServiceScope | None = None
-    # True when the bearer is a Keycloak client-credentials JWT whose azp
-    # (authorized party) is in the ACCTOPS_TRUSTED_M2M_CALLERS allow-list.
-    # These callers have no workspace membership row; specific endpoints
-    # (P&L federation read) opt in via resolve_workspace_for_federation.
-    # This flag is NEVER set by the service-token or Brigade paths — only
-    # by the Keycloak JWT path after audience + azp allow-list validation.
+    # True when the bearer's client is in the ACCTOPS_TRUSTED_M2M_CALLERS
+    # allow-list: set by the Keycloak JWT path (azp, after audience validation)
+    # AND by the Brigade path (act.client_id) — see the module docstring, "the
+    # two doors". It does NOT by itself prove a machine token (m2m_proof does).
+    # These callers have no workspace membership row; specific endpoints opt in
+    # (read-only: resolve_workspace_for_federation; the quotes seam write route
+    # additionally requires m2m_proof == "keycloak-client-credentials"). Never
+    # set by the service-token, PAT or local-auth paths.
     is_trusted_m2m: bool = False
+    # Which door set is_trusted_m2m and whether the token had MACHINE shape:
+    # "keycloak-client-credentials" | "brigade-actor" | None. Write routes on
+    # the M2M rail require "keycloak-client-credentials" (module docstring).
+    m2m_proof: str | None = None
     # True only for identity paths that may legitimately CREATE a
     # public.user_account row on first sight: the Keycloak login path (which
     # bind-or-provisions at auth time and keeps downstream provisioning as its
@@ -194,6 +225,44 @@ def _parse_role_floor(value: Any) -> str | None:
     if value in _ROLE_ORDER:
         return value
     return None
+
+
+_MACHINE_PROOF_KC = "keycloak-client-credentials"
+_MACHINE_PROOF_BRIGADE = "brigade-actor"
+
+
+def keycloak_machine_proof(claims: dict[str, Any]) -> tuple[bool, str]:
+    """Is this VERIFIED Keycloak JWT a client-credentials (machine) token?
+
+    Positive evidence required, all three (a trusted ``azp`` alone is not
+    enough — a human who logged in through the same client carries it too):
+
+      1. no browser session: neither ``sid`` nor ``session_state`` is present
+         (Keycloak stamps both on interactive logins, never on the
+         client-credentials grant);
+      2. the ``clientId`` claim (Keycloak's service_account scope mapper; the
+         RFC 9068 ``client_id`` spelling is accepted too) equals ``azp``;
+      3. a service-account identity: ``sub`` OR ``preferred_username`` equals
+         ``service-account-<azp>`` (Keycloak names the service-account user
+         exactly that; ``sub`` carries it in the suite's test fixtures and
+         ``preferred_username`` carries it on a real realm).
+
+    Returns ``(ok, reason)``; pure, never raises.
+    """
+    azp = claims.get("azp") or claims.get("client_id")
+    if not azp:
+        return False, "no azp / client_id claim"
+    if claims.get("sid") or claims.get("session_state"):
+        return False, "token carries a browser session (sid/session_state)"
+    client_claim = claims.get("clientId") or claims.get("client_id")
+    if not client_claim or str(client_claim) != str(azp):
+        return False, "clientId claim missing or does not equal azp"
+    expected = f"service-account-{azp}"
+    sub = str(claims.get("sub") or "")
+    preferred = str(claims.get("preferred_username") or "")
+    if sub != expected and preferred != expected:
+        return False, f"no service-account identity ({expected}) in sub/preferred_username"
+    return True, "ok"
 
 
 def _allow_unscoped_service_token() -> bool:
@@ -769,6 +838,7 @@ async def authenticate_token(token: str) -> AuthContext:
                     scopes=b_scopes,
                     claims=brigade_claims,
                     is_trusted_m2m=b_is_m2m,
+                    m2m_proof=_MACHINE_PROOF_BRIGADE if b_is_m2m else None,
                 )
                 _stamp_audit_actor(ctx)
                 return ctx
@@ -884,9 +954,23 @@ async def authenticate_token(token: str) -> AuthContext:
     azp: str | None = claims.get("azp") or claims.get("client_id")
     trusted_callers = settings.trusted_m2m_callers
     is_trusted_m2m = bool(azp and azp in trusted_callers)
+    m2m_proof: str | None = None
     if is_trusted_m2m:
         # Synthetic uc_uid — never matches a real user_account row.
         uc_uid = f"m2m:{azp}"
+        # Machine proof (module docstring): the read rail tolerates a trusted
+        # azp without it; write rails require it. Log the miss loudly — it is
+        # a human (or a mis-configured client) riding a trusted client id.
+        proof_ok, proof_why = keycloak_machine_proof(claims)
+        if proof_ok:
+            m2m_proof = _MACHINE_PROOF_KC
+        else:
+            _log.warning(
+                "[acctops.auth] trusted M2M azp=%r WITHOUT machine proof (%s) — "
+                "read-only federation only; write rails will refuse it",
+                azp,
+                proof_why,
+            )
     else:
         # Keycloak-login only (NOT Brigade, NOT M2M): bind-or-provision so a
         # verified-email match re-keys an existing ACTIVE row instead of minting
@@ -900,6 +984,7 @@ async def authenticate_token(token: str) -> AuthContext:
         scopes=scope,
         claims=claims,
         is_trusted_m2m=is_trusted_m2m,
+        m2m_proof=m2m_proof,
         # Keycloak login is the ONLY remote path that may auto-provision
         # (bind-or-provision already ran above; downstream provisioning stays
         # as its documented DB-blip fallback). Trusted-M2M synthetic
@@ -1253,6 +1338,7 @@ async def _try_brigade(token: str) -> AuthContext | None:
         scopes=scopes,
         claims=claims,
         is_trusted_m2m=is_m2m,
+        m2m_proof=_MACHINE_PROOF_BRIGADE if is_m2m else None,
     )
     _stamp_audit_actor(ctx)
     return ctx

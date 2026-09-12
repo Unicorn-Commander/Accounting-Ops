@@ -47,6 +47,11 @@ from app.tools.journal_tools import (
     verify_journal_chain,
 )
 from app.tools.payments import propose_payment
+from app.tools.quotes_seam import (
+    create_invoices_from_quote,
+    list_invoice_schedules,
+    run_invoice_schedules,
+)
 from app.tools.receipts import link_receipt_to_transaction
 from app.tools.reporting import (
     get_consolidated_p_and_l,
@@ -100,6 +105,7 @@ __all__ = [
     "create_coa_account",
     "create_entity_with_coa",
     "create_invoice_from_draft",
+    "create_invoices_from_quote",
     "create_workspace",
     "decide_approval",
     "detect_subscriptions_tool",
@@ -139,6 +145,7 @@ __all__ = [
     "list_closed_periods",
     "list_credentials",
     "list_entity_owners",
+    "list_invoice_schedules",
     "list_journal_entries",
     "list_my_workspaces",
     "list_pending_approvals",
@@ -155,6 +162,7 @@ __all__ = [
     "query_specialty_rules",
     "record_payment",
     "resolve_tax_review_item",
+    "run_invoice_schedules",
     "search_tax_knowledge",
     "start_specialist_run",
     "trigger_tax_narrative",

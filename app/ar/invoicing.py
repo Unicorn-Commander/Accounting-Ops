@@ -696,12 +696,23 @@ async def create_invoice_from_draft(
     notes: str | None = None,
     po_number: str | None = None,
     auto_send: bool = False,
+    post_journal: bool = True,
+    quote_ref: str | None = None,
 ) -> dict[str, Any]:
     """Create + post an AR invoice. Idempotent on (external_source, external_ref).
 
     Posts (via the existing journal primitives) one balanced DR-AR/CR-Revenue row
     per distinct revenue account, plus one DR-AR/CR-Sales-Tax row if tax > 0.
     Returns the full invoice view including journal_entry_id.
+
+    ``post_journal=False`` (quotes seam, 2026-09-12): create the invoice + lines
+    as a pure DRAFT document and post NOTHING — ``journal_entry_id`` stays NULL
+    and the hash chain is untouched. Only valid with ``auto_send=False`` (a
+    deferred-posting invoice must be a draft). The default (``True``) keeps
+    every existing caller byte-for-byte unchanged. ``quote_ref`` (nullable,
+    "number + version") is stamped on the row for the quote → invoice link;
+    it is written by a separate UPDATE so the INSERT the existing callers
+    exercise is unchanged.
 
     NOTE: this is the NATIVE primitive. The entitlement gate for the cross-app
     (PO-originated) path is enforced by the CALLER (the MCP tool / HTTP route)
@@ -717,6 +728,8 @@ async def create_invoice_from_draft(
         due_date = issue_date + timedelta(days=terms)
     if due_date < issue_date:
         raise InvoiceError("due_date cannot precede issue_date")
+    if not post_journal and auto_send:
+        raise InvoiceError("post_journal=False requires a draft (auto_send must be False)")
 
     # ---- Idempotency pre-check (external_ref present) ----
     if external_ref:
@@ -853,6 +866,17 @@ async def create_invoice_from_draft(
                 "sref": li.source_ref,
             },
         )
+
+    # ---- Quote link (quotes seam) — separate UPDATE keeps the INSERT stable ----
+    if quote_ref:
+        await session.execute(
+            text("UPDATE invoice SET quote_ref = :qr WHERE id = :id"),
+            {"qr": str(quote_ref)[:160], "id": str(invoice_id)},
+        )
+
+    # ---- Draft-only (quotes seam): NO journal posting, journal_entry_id NULL ----
+    if not post_journal:
+        return await _invoice_view(session, invoice_id=str(invoice_id))
 
     # ---- Post the journal entry (DR AR / CR Revenue per account + tax row) ----
     # Group net-of-discount revenue by revenue account. We apply the (invoice-

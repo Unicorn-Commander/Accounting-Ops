@@ -44,6 +44,7 @@ from app.api.journal import router as journal_router
 from app.api.members import router as members_router
 from app.api.metrics import router as metrics_router
 from app.api.personal_access_tokens import router as personal_access_tokens_router
+from app.api.quotes_seam import router as quotes_seam_router
 from app.api.reports import router as reports_router
 from app.api.sentinel import router as sentinel_router
 from app.api.submission import router as submission_router
@@ -146,6 +147,9 @@ app.include_router(account_mappings_router)
 app.include_router(category_overrides_router)
 app.include_router(journal_router)
 app.include_router(invoices_router)
+# Quotes seam: Customer-Ops quote.accepted -> DRAFT invoices/schedules/partner bill.
+# Rides a write-capable M2M rail scoped to ONE actor (customer-ops); never posts.
+app.include_router(quotes_seam_router)
 app.include_router(approvals_router)
 app.include_router(approval_clusters_router)
 app.include_router(approval_recommendations_router)
