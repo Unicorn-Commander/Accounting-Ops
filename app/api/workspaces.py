@@ -25,7 +25,9 @@ from app.tenancy import (  # noqa: F401  (re-export)
     WorkspaceContext,
     _ensure_user_account,
     canonical_role,
+    require_role,
     resolve_workspace,
+    resolve_workspace_for_federation,
 )
 from app.workspace_session import workspace_session
 
@@ -137,9 +139,21 @@ async def get_workspace(
 @router.get("/api/workspaces/{workspace_id}/entities")
 async def list_workspace_entities(
     workspace_id: UUID,
-    workspace: WorkspaceContext = Depends(resolve_workspace),
+    workspace: WorkspaceContext = Depends(resolve_workspace_for_federation),
 ) -> list[dict[str, Any]]:
-    """Return all active entities in the workspace, filtered by entity_scope if set."""
+    """Return all active entities in the workspace, filtered by entity_scope if set.
+
+    Rides the read-only federation rail (``resolve_workspace_for_federation``):
+    a workspace member resolves exactly as before (membership row, entity_scope
+    honoured), and a trusted suite app (``azp`` / Brigade ``act.client_id`` in
+    ``ACCTOPS_TRUSTED_M2M_CALLERS``) is floored to ``viewer`` with no membership
+    row, full-workspace scope, and HIPAA workspaces refused. Customer-Ops reads
+    the vendor's legal identity here for the quote letterhead (QUOTES-SEAM.md);
+    the projection is the switcher's — id, slug, display_name, legal_name, kind,
+    country_code, functional_currency, hipaa_protected, status, created_at — no
+    tax ids, no banking, no owners. Writes stay on the membership path.
+    """
+    require_role(workspace, "viewer")
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         rows = (
             await session.execute(
