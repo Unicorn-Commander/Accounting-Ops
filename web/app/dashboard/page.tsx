@@ -55,8 +55,8 @@ export default async function DashboardPage() {
   const aiAgreement = ctx.activeWorkspace
     ? await fetchAiAgreement(ctx.activeWorkspace.id, { entityId: entityFilter })
     : null;
-  // Real recent agent decisions for the v2 "Agents at work" stream.
-  const aiActivity = V2_ENABLED && ctx.activeWorkspace
+  // Real scoped activity feeds both dashboard layouts.
+  const aiActivity = ctx.activeWorkspace
     ? await fetchAIActivity(ctx.activeWorkspace.id, { entityId: entityFilter, limit: 8 })
     : null;
   const initialDecisions = (aiActivity?.rows ?? []).map(activityRowToDecision);
@@ -538,7 +538,7 @@ export default async function DashboardPage() {
         </div>
 
         <div className="mt-8">
-          <AgentActivitySection />
+          <AgentActivitySection activity={aiActivity} workspaceId={ctx.activeWorkspace.id} entityId={entityFilter} />
         </div>
           </>
         )}

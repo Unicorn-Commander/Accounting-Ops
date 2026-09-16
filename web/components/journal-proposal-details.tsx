@@ -3,11 +3,24 @@ import type { ApprovalPayload } from "@/lib/approvals";
 
 export function canReviewJournalProposal(payload: ApprovalPayload): boolean {
   const r = payload.request;
-  return payload.version === 1 && !!r &&
+  if (!r || payload.version !== 1) return false;
+  const envelopeKeys = new Set(["version", "workspace_id", "entity_id", "request", "debit_account", "credit_account"]);
+  const requestKeys = new Set(["source", "source_external_id", "effective_date", "amount_cents", "description", "category", "category_status", "payee", "memo", "sign_matched", "external_account_id", "receipt_link_id", "reasoning_trace", "model_version"]);
+  const date = new Date(r.effective_date);
+  return Object.keys(payload).every(k => envelopeKeys.has(k)) &&
+    Object.keys(r).every(k => requestKeys.has(k)) &&
     [payload.workspace_id, payload.entity_id, payload.debit_account, payload.credit_account,
       r.source, r.source_external_id, r.effective_date, r.description, r.category,
       r.category_status, r.external_account_id].every(v => typeof v === "string" && v.trim().length > 0) &&
-    Number.isSafeInteger(r.amount_cents) && r.amount_cents !== 0 &&
+    [r.payee, r.memo, r.receipt_link_id, r.reasoning_trace, r.model_version]
+      .every(v => v == null || typeof v === "string") &&
+    /^\d{4}-\d{2}-\d{2}$/.test(r.effective_date) && !Number.isNaN(date.getTime()) &&
+    date.toISOString().slice(0, 10) === r.effective_date &&
+    ["auto", "suggest", "unknown"].includes(r.category_status) &&
+    r.source.length <= 64 && r.source_external_id.length <= 256 &&
+    r.description.length <= 512 && r.category.length <= 64 &&
+    (r.payee?.length ?? 0) <= 256 && (r.model_version?.length ?? 0) <= 128 &&
+    Number.isSafeInteger(r.amount_cents) && r.amount_cents !== 0 && Math.abs(r.amount_cents) <= 100_000_000_000 &&
     typeof r.sign_matched === "boolean";
 }
 

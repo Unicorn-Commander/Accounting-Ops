@@ -64,8 +64,9 @@ function ApprovalCard({
   const tier = (p.materiality_tier ?? "") as "L" | "M" | "H" | "";
   const isRecat = approval.subject_type === "journal_recategorization";
   const isJournal = approval.subject_type === "journal_entry_post";
+  const journalScopeMatches = p.workspace_id === workspaceId && p.entity_id === approval.entity_id;
   const journalReviewable = !isJournal || (
-    canReviewJournalProposal(p) && p.workspace_id === workspaceId && p.entity_id === approval.entity_id
+    canReviewJournalProposal(p) && journalScopeMatches
   );
 
   return (
@@ -114,8 +115,8 @@ function ApprovalCard({
             {approval.reasoning}
           </p>
 
-          {isJournal && <JournalProposalDetails payload={p} />}
-          {isJournal && (p.workspace_id !== workspaceId || p.entity_id !== approval.entity_id) &&
+          {isJournal && journalScopeMatches && <JournalProposalDetails payload={p} />}
+          {isJournal && !journalScopeMatches &&
             <p role="alert" className="mt-3 text-sm text-ink-secondary">This request's workspace or entity does not match the approval. Review is unavailable.</p>}
 
           <p className="mt-3 text-[11px] text-ink-tertiary">

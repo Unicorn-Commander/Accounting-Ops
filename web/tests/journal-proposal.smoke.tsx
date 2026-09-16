@@ -26,6 +26,11 @@ for (const invalid of [
   { ...payload, debit_account: undefined },
   { ...payload, request: { ...payload.request!, amount_cents: NaN } },
   { ...payload, request: { ...payload.request!, external_account_id: null } },
+  { ...payload, request: { ...payload.request!, effective_date: "2026-02-30" } },
+  { ...payload, request: { ...payload.request!, category_status: "invented" } },
+  { ...payload, request: { ...payload.request!, memo: { malicious: "object" } } } as unknown as ApprovalPayload,
+  { ...payload, request: { ...payload.request!, payee: ["object"] } } as unknown as ApprovalPayload,
+  { ...payload, request: { ...payload.request!, reasoning_trace: { hidden: "object" } } } as unknown as ApprovalPayload,
 ]) {
   assert.equal(canReviewJournalProposal(invalid), false);
   assert.ok(renderToStaticMarkup(<JournalProposalDetails payload={invalid} />).includes('role="alert"'));
