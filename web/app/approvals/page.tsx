@@ -226,6 +226,23 @@ export default async function ApprovalsPage({
 }) {
   const ctx = await getActiveContext();
   const workspace = ctx.activeWorkspace;
+  // Match the backend accountant floor, including its legacy role aliases.
+  const canReview = workspace && ["owner", "admin", "accountant", "cpa", "client_owner", "platform_admin"].includes(workspace.role);
+  if (workspace && !canReview) {
+    return (
+      <AppShell>
+        <PageShell>
+          <SectionHeader title="Pending approvals" subtitle="Approval review requires an accountant, admin, or owner role." />
+          <Card>
+            <p className="text-sm text-ink-secondary">
+              Your workspace role does not include access to the approval queue.
+              Ask a workspace owner if you need to review pending requests.
+            </p>
+          </Card>
+        </PageShell>
+      </AppShell>
+    );
+  }
   const entityId = ctx.isConsolidated ? undefined : ctx.activeEntity?.id;
   const sp = await searchParams;
   const activeTab: Tab =
@@ -286,10 +303,11 @@ export default async function ApprovalsPage({
         <SectionHeader
           title="Pending approvals"
           subtitle={
-            workspace
+            workspace && data
               ? `${totalPending} material ${
                   totalPending === 1 ? "action" : "actions"
                 } awaiting human attestation`
+              : workspace ? "The approval queue is unavailable. Try again shortly."
               : "Material actions an agent queued, waiting for a human to attest."
           }
           action={
@@ -303,6 +321,13 @@ export default async function ApprovalsPage({
           <Card>
             <p className="text-sm text-ink-tertiary">
               No active workspace. Pick one from the switcher above.
+            </p>
+          </Card>
+        ) : !data ? (
+          <Card>
+            <p role="alert" className="text-sm text-ink-secondary">
+              We could not load the approval queue. Pending counts are unavailable.
+              Refresh the page to try again.
             </p>
           </Card>
         ) : (
