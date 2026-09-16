@@ -169,3 +169,43 @@ async def test_redemption_wrong_authenticated_email_still_denied(monkeypatch):
     assert exc.value.status_code == 403
     assert len(session.calls) == 2
     mail.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 403, 404, 410])
+async def test_post_accept_reuses_get_authorization_and_errors(monkeypatch, status):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    result = {"status": "accepted", "workspace_id": "synthetic"}
+    handler = AsyncMock(return_value=result)
+    if status != 200:
+        handler.side_effect = HTTPException(status_code=status, detail="denied")
+    monkeypatch.setattr(members, "accept_invitation", handler)
+    app = FastAPI()
+    app.include_router(members.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/invitations/accept", json={"token": "synthetic-capability"},
+                                     headers={"Authorization": "Bearer synthetic-session"})
+    assert response.status_code == status
+    handler.assert_awaited_once()
+    request = handler.await_args.kwargs["request"]
+    assert request.headers["authorization"] == "Bearer synthetic-session"
+    assert request.url.query == ""
+    assert handler.await_args.kwargs["token"] == "synthetic-capability"
+    assert "synthetic-capability" not in response.text
+    assert "get" in app.openapi()["paths"]["/api/invitations/accept"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [{}, {"token": ""}, {"token": "short"}, {"token": "x" * 201}])
+async def test_post_accept_rejects_invalid_body_before_redemption(monkeypatch, body):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    handler = AsyncMock()
+    monkeypatch.setattr(members, "accept_invitation", handler)
+    app = FastAPI()
+    app.include_router(members.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/invitations/accept", json=body)
+    assert response.status_code == 422
+    handler.assert_not_awaited()
