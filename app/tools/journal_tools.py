@@ -465,22 +465,28 @@ async def _derived_sign_matched(
     manufacture a spurious mismatch). Callers AND this with the agent's claim,
     so a caller can only ever make the gate stricter.
     """
-    account_number = CATEGORY_TO_ACCOUNT.get(category)
-    if not account_number:
-        return True  # unknown category is blocked downstream, not here
+    from app.journal.posting import TEMPLATE_CATEGORY_ACCOUNTS, _resolve_category_account
+
+    if any(category in mapping for mapping in TEMPLATE_CATEGORY_ACCOUNTS.values()):
+        canonical = await _resolve_category_account(
+            session, entity_id=str(entity_id), category=category,
+        )
+        if canonical is None:
+            return True  # unresolved category is refused by the post itself
+        predicate = "canonical_form = :target"
+        target = canonical
+    else:
+        target = CATEGORY_TO_ACCOUNT.get(category)
+        if not target:
+            return True
+        predicate = "account_number = :target"
     row = (
         await session.execute(
             text(
-                """
-                SELECT account_type
-                FROM chart_of_account
-                WHERE entity_id = :eid
-                  AND account_number = :num
-                  AND is_active = true
-                LIMIT 1
-                """
+                "SELECT account_type FROM chart_of_account "
+                "WHERE entity_id = :eid AND " + predicate + " AND is_active = true LIMIT 1"
             ),
-            {"eid": str(entity_id), "num": account_number},
+            {"eid": str(entity_id), "target": target},
         )
     ).first()
     if row is None or not row.account_type:
