@@ -15,9 +15,31 @@ const INTERNAL_BASE =
 export type ApprovalSubjectType =
   | "journal_recategorization"
   | "compliance_rule"
+  | "journal_entry_post"
   | "bank_transaction_import";
 
 export type ApprovalPayload = {
+  version?: number;
+  workspace_id?: string;
+  entity_id?: string;
+  debit_account?: string;
+  credit_account?: string;
+  request?: {
+    source: string;
+    source_external_id: string;
+    effective_date: string;
+    amount_cents: number;
+    description: string;
+    category: string;
+    category_status: string;
+    payee?: string | null;
+    memo?: string | null;
+    external_account_id?: string | null;
+    receipt_link_id?: string | null;
+    sign_matched: boolean;
+    reasoning_trace?: string;
+    model_version?: string;
+  };
   action?: string;
   // recat
   original_entry_id?: string;

@@ -240,6 +240,8 @@ def _run_tool(
         patch.object(journal_tools, "authorize_workspace", AsyncMock(return_value=_Ctx())),
         patch.object(journal_tools, "workspace_session", fake_ws_session),
         patch.object(journal_tools, "_journal_post", journal_post),
+        patch("app.journal.pending_post.existing_proposal", AsyncMock(return_value=None)),
+        patch("app.journal.pending_post.enqueue", AsyncMock(return_value="proposal-id")),
         patch.object(journal_tools, "project_decision_audit", lambda **kw: None),
     ):
         return asyncio.run(journal_tools.post_journal_entry(**kwargs))
