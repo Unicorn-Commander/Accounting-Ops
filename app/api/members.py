@@ -39,7 +39,7 @@ import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -113,6 +113,10 @@ class InvitationCreate(BaseModel):
         description="Optional list of entity UUIDs; null = whole workspace",
     )
     ttl_days: int | None = Field(default=None, ge=1, le=MAX_INVITE_TTL_DAYS)
+    delivery_mode: Literal["email", "manual_link"] = Field(
+        default="email",
+        description="Email by default; owners may request a one-time manual link without sending mail.",
+    )
 
 
 class MemberPatch(BaseModel):
@@ -390,8 +394,12 @@ async def create_invitation(
     body: InvitationCreate,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict[str, Any]:
-    """Create a magic-link invitation. Sends email; queues on SMTP failure."""
+    """Create an invite; owners may explicitly retrieve a link without sending mail."""
+    if workspace_id != workspace.workspace_id:
+        raise HTTPException(status_code=403, detail="workspace mismatch")
     require_role(workspace, "admin")
+    if body.delivery_mode == "manual_link":
+        require_role(workspace, "owner")
     if body.role not in INVITEABLE_ROLES:
         raise HTTPException(status_code=400, detail=f"Unknown role: {body.role}")
     if body.role in ELEVATED_ROLES:
@@ -446,7 +454,7 @@ async def create_invitation(
                     "expires_at": existing.expires_at.isoformat(),
                     "status": "already_pending",
                     "delivery": {
-                        "status": "queued",
+                        "status": "already_pending" if body.delivery_mode == "manual_link" else "queued",
                         "detail": "An active invitation already exists for this email",
                     },
                 }
@@ -488,30 +496,35 @@ async def create_invitation(
                 },
             )
 
-            # Resolve the inviter's email for the body, best-effort.
-            inviter_row = (
-                await session.execute(
-                    text("SELECT email FROM public.user_account WHERE uc_uid = :uc"),
-                    {"uc": workspace.user_uc_uid},
-                )
-            ).first()
-            inviter_email = inviter_row.email if inviter_row else None
+            if body.delivery_mode == "manual_link":
+                # The raw capability is returned only at creation to the owner.
+                # No mailer call means no SMTP attempt and no queued outbox row.
+                delivery = {"status": "manual", "accept_url": _accept_url(raw_token)}
+            else:
+                # Resolve the inviter's email for the body, best-effort.
+                inviter_row = (
+                    await session.execute(
+                        text("SELECT email FROM public.user_account WHERE uc_uid = :uc"),
+                        {"uc": workspace.user_uc_uid},
+                    )
+                ).first()
+                inviter_email = inviter_row.email if inviter_row else None
 
-            text_body, html_body = _invite_email_body(
-                workspace_name=workspace_name,
-                inviter_email=inviter_email,
-                role=body.role,
-                accept_url=_accept_url(raw_token),
-                expires_at=expires_at,
-            )
-            delivery = await send_email(
-                session,
-                to_email=email,
-                subject=f"Invitation to join {workspace_name} on Accounting-Ops",
-                body_text=text_body,
-                body_html=html_body,
-                related_invitation_id=invitation_id,
-            )
+                text_body, html_body = _invite_email_body(
+                    workspace_name=workspace_name,
+                    inviter_email=inviter_email,
+                    role=body.role,
+                    accept_url=_accept_url(raw_token),
+                    expires_at=expires_at,
+                )
+                delivery = await send_email(
+                    session,
+                    to_email=email,
+                    subject=f"Invitation to join {workspace_name} on Accounting-Ops",
+                    body_text=text_body,
+                    body_html=html_body,
+                    related_invitation_id=invitation_id,
+                )
 
     return {
         "id": str(invitation_id),
