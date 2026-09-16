@@ -104,6 +104,68 @@ CATEGORY_TO_ACCOUNT: dict[str, str] = {
 }
 
 
+# Explicit semantic mappings for the three categories whose legacy/default
+# numbers conflict with Setup Assistant charts. Never infer from tax notes,
+# names, entity legal kind, or the presence of a similarly numbered account.
+TEMPLATE_CATEGORY_ACCOUNTS = {
+    kind: {"Payroll · Wages": "5660", "Rent · Facilities": "5720",
+           "Contractor · 1099-NEC": "5630"}
+    for kind in ("c_corp", "s_corp", "llc")
+}
+_TEMPLATE_CATEGORIES = frozenset(next(iter(TEMPLATE_CATEGORY_ACCOUNTS.values())))
+
+
+async def _category_resolution(
+    session: AsyncSession, *, entity_id: str, category: str
+) -> tuple[str | None, str | None]:
+    """Return (canonical, refusal reason), using recorded provisioning intent.
+
+    Legacy charts without Setup Assistant provenance keep CATEGORY_TO_ACCOUNT.
+    A recorded template is authoritative for these explicit categories, even
+    when an older default-number account also exists. Missing/ambiguous proof
+    or a modified/inactive template target refuses rather than guessing.
+    """
+    number = CATEGORY_TO_ACCOUNT.get(category)
+    if not number:
+        return None, f"Category '{category}' has no mapping (not in CATEGORY_TO_ACCOUNT)."
+    expected = None
+    if category in _TEMPLATE_CATEGORIES:
+        audits = (await session.execute(text("""
+            SELECT request_payload->>'coa_template' AS template
+            FROM decision_audit
+            WHERE entity_id = :eid AND tool_name = 'create_entity_with_coa'
+              AND outcome IN ('created', 'extended')
+        """), {"eid": entity_id})).mappings().all()
+        if audits:
+            kinds = {row["template"] for row in audits}
+            if len(kinds) != 1 or next(iter(kinds)) not in TEMPLATE_CATEGORY_ACCOUNTS:
+                return None, "Category resolution refused: ambiguous or unsupported recorded COA template."
+            kind = next(iter(kinds))
+            number = TEMPLATE_CATEGORY_ACCOUNTS[kind][category]
+            from agents._shared.coa_templates import get_accounts
+            matches = [a for a in get_accounts(kind) if a["number"] == number]
+            if len(matches) != 1:
+                return None, "Category resolution refused: template mapping is not unique."
+            expected = matches[0]
+    rows = (await session.execute(text("""
+        SELECT canonical_form, account_name, account_type, normal_balance
+        FROM chart_of_account
+        WHERE entity_id = :eid AND account_number = :num AND is_active = true
+        LIMIT 2
+    """), {"eid": entity_id, "num": number})).mappings().all()
+    if len(rows) != 1:
+        return None, f"Category '{category}' requires exactly one active account {number}; review this entity's chart."
+    row = rows[0]
+    if expected is not None:
+        from app.journal.accounts import canonical_form
+        if (row["account_name"] != expected["name"]
+                or row["account_type"] != expected["type"]
+                or row["normal_balance"] != expected["normal_balance"]
+                or row["canonical_form"] != canonical_form(number, expected["name"])):
+            return None, "Category resolution refused: active account does not match the recorded template target."
+    return row["canonical_form"], None
+
+
 async def resolve_accounts_for_txn(
     session: AsyncSession,
     *,
@@ -145,27 +207,12 @@ async def resolve_accounts_for_txn(
         return None
     cash_canonical = cash_row["canonical_form"]
 
-    # 2. Find the category side: the COA account whose number matches
-    #    CATEGORY_TO_ACCOUNT[category].
-    cat_number = CATEGORY_TO_ACCOUNT.get(category)
-    if not cat_number:
+    # 2. Resolve the category against explicit provisioning provenance.
+    cat_canonical, _reason = await _category_resolution(
+        session, entity_id=entity_id, category=category,
+    )
+    if cat_canonical is None:
         return None
-    cat_row = (
-        await session.execute(
-            text(
-                """
-                SELECT canonical_form
-                FROM chart_of_account
-                WHERE entity_id = :eid AND account_number = :num AND is_active = true
-                LIMIT 1
-                """
-            ),
-            {"eid": entity_id, "num": cat_number},
-        )
-    ).mappings().first()
-    if not cat_row:
-        return None
-    cat_canonical = cat_row["canonical_form"]
 
     # 3. Direction depends on sign:
     #    - Outflow (amount<0):  DR category (expense),  CR cash
@@ -205,33 +252,11 @@ async def _diagnose_resolution_failure(
             f"COA account to it (connector setup) before posting from this account.",
             "blocked_unmapped",
         )
-    num = CATEGORY_TO_ACCOUNT.get(category)
-    if not num:
-        return (
-            f"Category '{category}' has no chart-of-accounts mapping "
-            f"(not in CATEGORY_TO_ACCOUNT).",
-            "blocked_unknown_category",
-        )
-    cat = (
-        await session.execute(
-            text(
-                "SELECT 1 FROM chart_of_account WHERE entity_id = :eid "
-                "AND account_number = :num AND is_active = true LIMIT 1"
-            ),
-            {"eid": entity_id, "num": num},
-        )
-    ).first()
-    if not cat:
-        return (
-            f"Category '{category}' maps to account {num}, but this entity has no "
-            f"active chart-of-accounts row for {num} — create the account first.",
-            "blocked_unknown_category",
-        )
-    return (
-        f"Could not resolve accounts for category '{category}' "
-        f"(external_account_id '{external_account_id}').",
-        "blocked_unknown_category",
+    _canonical, reason = await _category_resolution(
+        session, entity_id=entity_id, category=category,
     )
+    return (reason or f"Could not resolve accounts for category '{category}'.",
+            "blocked_unknown_category")
 
 
 # ---------- Posting ----------------------------------------------------
@@ -868,28 +893,11 @@ class CorrectionQueued:
 async def _resolve_category_account(
     session: AsyncSession, *, entity_id: str, category: str
 ) -> str | None:
-    """canonical_form of the COA account a category posts to, or None.
-
-    Same resolution post path uses (CATEGORY_TO_ACCOUNT -> chart_of_account),
-    so a correction lands on exactly the account a fresh post of that category
-    would have used."""
-    cat_number = CATEGORY_TO_ACCOUNT.get(category)
-    if not cat_number:
-        return None
-    row = (
-        await session.execute(
-            text(
-                """
-                SELECT canonical_form
-                FROM chart_of_account
-                WHERE entity_id = :eid AND account_number = :num AND is_active = true
-                LIMIT 1
-                """
-            ),
-            {"eid": entity_id, "num": cat_number},
-        )
-    ).mappings().first()
-    return row["canonical_form"] if row else None
+    """Use the same template-aware resolution for corrections and fresh posts."""
+    canonical, _reason = await _category_resolution(
+        session, entity_id=entity_id, category=category,
+    )
+    return canonical
 
 
 async def _is_cash_side(
