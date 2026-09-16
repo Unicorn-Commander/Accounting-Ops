@@ -897,4 +897,18 @@ async def accept_invitation(
     }
 
 
+class InvitationAccept(BaseModel):
+    token: str = Field(..., min_length=10, max_length=200)
+
+
+@router.post("/api/invitations/accept")
+async def accept_invitation_post(request: Request, body: InvitationAccept) -> dict[str, Any]:
+    """Redeem without putting the capability in access-log URLs.
+
+    Reuse the GET handler's identity, email, expiry and membership checks.
+    Callers must not log the request body. Existing emailed links remain valid.
+    """
+    return await accept_invitation(request=request, token=body.token)
+
+
 __all__ = ("router",)
