@@ -18,6 +18,7 @@ import {
   StatusChip
 } from "@/components/primitives";
 import { ApprovalActions } from "@/components/approval-actions";
+import { JournalProposalDetails, canReviewJournalProposal } from "@/components/journal-proposal-details";
 import { BankTxnBatchPanel } from "@/components/bank-txn-batch-panel";
 import { RecommendationsView } from "@/app/approvals/recommendations-view";
 import { ClusterReview } from "@/components/approvals/cluster-review";
@@ -46,6 +47,7 @@ type Tab = "review" | "rows" | "recommendations" | "skipped";
 function subjectLabel(a: Approval): string {
   if (a.subject_type === "journal_recategorization") return "Recategorization";
   if (a.subject_type === "compliance_rule") return "Compliance rule";
+  if (a.subject_type === "journal_entry_post") return "Journal entry";
   return a.subject_type;
 }
 
@@ -61,6 +63,10 @@ function ApprovalCard({
   const p = approval.payload ?? {};
   const tier = (p.materiality_tier ?? "") as "L" | "M" | "H" | "";
   const isRecat = approval.subject_type === "journal_recategorization";
+  const isJournal = approval.subject_type === "journal_entry_post";
+  const journalReviewable = !isJournal || (
+    canReviewJournalProposal(p) && p.workspace_id === workspaceId && p.entity_id === approval.entity_id
+  );
 
   return (
     <Card>
@@ -108,6 +114,10 @@ function ApprovalCard({
             {approval.reasoning}
           </p>
 
+          {isJournal && <JournalProposalDetails payload={p} />}
+          {isJournal && (p.workspace_id !== workspaceId || p.entity_id !== approval.entity_id) &&
+            <p role="alert" className="mt-3 text-sm text-ink-secondary">This request's workspace or entity does not match the approval. Review is unavailable.</p>}
+
           <p className="mt-3 text-[11px] text-ink-tertiary">
             Requested by{" "}
             <span className="font-mono">{approval.requested_by_identity}</span>{" "}
@@ -116,11 +126,11 @@ function ApprovalCard({
         </div>
 
         <div className="shrink-0">
-          <ApprovalActions
+          {journalReviewable && <ApprovalActions
             workspaceId={workspaceId}
             approvalId={approval.id}
             canDecide={canDecide}
-          />
+          />}
         </div>
       </div>
     </Card>
