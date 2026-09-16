@@ -569,7 +569,7 @@ async def bulk_decide(
                     await session.execute(
                         text(
                             """
-                            SELECT entity_id::text AS entity_id, status
+                            SELECT entity_id::text AS entity_id, subject_type, status
                             FROM approval_queue
                             WHERE id = :id
                             FOR UPDATE
@@ -583,6 +583,11 @@ async def bulk_decide(
                     results.append({
                         "approval_id": aid, "ok": False, "error": "not_found"
                     })
+                    continue
+                if row["subject_type"] == "journal_entry_post":
+                    failed += 1
+                    results.append({"approval_id": aid, "ok": False,
+                        "error": "journal_proposal_requires_individual_review"})
                     continue
                 if row["status"] == "skipped":
                     already += 1

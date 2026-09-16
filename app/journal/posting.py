@@ -523,6 +523,7 @@ async def post_journal_entry(
     model_version: str = "",
     counterparty_id: UUID | None = None,
     event_id: UUID | None = None,
+    expected_account_pair: AccountPair | None = None,
 ) -> PostingOutcome | PostingRefusal:
     """Atomic post with materiality gate + hash chain advance.
 
@@ -605,6 +606,9 @@ async def post_journal_entry(
             amount_cents=amount_cents, category=category,
         )
         return PostingRefusal(outcome=refusal_outcome, reason=reason)
+
+    if expected_account_pair is not None and pair != expected_account_pair:
+        return PostingRefusal(outcome="blocked_unmapped", reason="Approved account pair changed")
 
     # ---- 3. Idempotency check (before chain compute) ----
     if source_external_id:

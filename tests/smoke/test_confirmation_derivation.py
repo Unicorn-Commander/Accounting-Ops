@@ -1,185 +1,65 @@
-"""Server-side confirmation derivation on the MCP posting tool.
+"""Agent confirmation claims never authorize a new journal posting.
 
-Pure-Python smoke tests, no DB — all DB calls are faked (same style as
-test_period_close.py). External report 2026-08-10: ``user_confirmed`` on the
-MCP surface is agent-supplied, so a prompt-injected agent could set it and
-bypass the materiality gate. The fix derives the attestation server-side: the
-flag is honored only when an APPROVED approval_queue row matches the exact
-(entity, source_external_id, amount), and the deciding human is stamped as
-the approver.
-
-Four scenarios:
-  1. user_confirmed=True with NO approved row -> primitive called with
-     user_confirmed=False / no approver; refusal reason explains derivation.
-  2. user_confirmed=True WITH an approved row -> primitive called with
-     user_confirmed=True and approving_human_uc_uid = the deciding human.
-  3. user_confirmed=False -> approval_queue is never even queried.
-  4. _verified_confirmation matches amount by canonical string and requires
-     status='approved' + a non-null decider (fail closed).
+Human decisions apply immutable proposals within the locked decision transaction;
+a legacy bank-import approval with matching amount/ID is not authority to post
+another source, category, date or account.
 """
-from __future__ import annotations
 
 import asyncio
-import contextlib
-from typing import Any
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
-from app.journal.materiality import MaterialityVerdict
-from app.journal.posting import PostingOutcome, PostingRefusal
+import pytest
+
+from app.journal.posting import PostingRefusal
 from app.tools import journal_tools
-from app.tools.journal_tools import _verified_confirmation
 
 
-class _Row:
-    def __init__(self, **kw: Any) -> None:
-        self.__dict__.update(kw)
+@pytest.mark.parametrize("claimed", [True, False])
+def test_claim_cannot_bypass_and_refusal_enqueues_atomically(claimed):
+    session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(first=lambda: None)))
+    ctx = SimpleNamespace(user_uc_uid="agent-owner", agent_id="agent")
 
-
-class _FakeResult:
-    def __init__(self, row: _Row | None) -> None:
-        self._row = row
-
-    def first(self) -> _Row | None:
-        return self._row
-
-
-class _FakeSession:
-    """Captures every execute; answers the approval_queue lookup."""
-
-    def __init__(self, approval_row: _Row | None = None) -> None:
-        self.approval_row = approval_row
-        self.executed: list[tuple[str, dict[str, Any] | None]] = []
-
-    async def execute(self, stmt: Any, params: dict[str, Any] | None = None) -> _FakeResult:
-        sql = str(stmt)
-        self.executed.append((sql, params))
-        if "approval_queue" in sql:
-            return _FakeResult(self.approval_row)
-        return _FakeResult(None)
-
-    def approval_queries(self) -> list[tuple[str, dict[str, Any] | None]]:
-        return [(s, p) for s, p in self.executed if "approval_queue" in s]
-
-
-class _Ctx:
-    user_uc_uid = "agent-caller"
-    agent_id = "test-agent"
-
-
-def _run_tool(
-    *,
-    session: _FakeSession,
-    journal_post: AsyncMock,
-    user_confirmed: bool,
-) -> dict[str, Any]:
-    @contextlib.asynccontextmanager
-    async def fake_ws_session(_factory: Any, _wid: Any):
+    @asynccontextmanager
+    async def ws(*args):
         yield session
 
     with (
-        patch.object(journal_tools, "authorize_workspace", AsyncMock(return_value=_Ctx())),
-        patch.object(journal_tools, "workspace_session", fake_ws_session),
-        patch.object(journal_tools, "_journal_post", journal_post),
+        patch.object(journal_tools, "authorize_workspace", AsyncMock(return_value=ctx)),
+        patch.object(journal_tools, "workspace_session", ws),
+        patch.object(journal_tools, "_derived_sign_matched", AsyncMock(return_value=True)),
+        patch.object(
+            journal_tools,
+            "_journal_post",
+            AsyncMock(
+                return_value=PostingRefusal(
+                    outcome="blocked_materiality", reason="Human confirmation required"
+                )
+            ),
+        ) as post,
+        patch("app.journal.pending_post.existing_proposal", AsyncMock(return_value=None)),
+        patch("app.journal.pending_post.enqueue", AsyncMock(return_value="proposal-id")) as enqueue,
+        patch.object(journal_tools, "write_decision_audit", AsyncMock(return_value=uuid4())),
+        patch.object(journal_tools, "project_decision_audit"),
     ):
-        return asyncio.run(
+        result = asyncio.run(
             journal_tools.post_journal_entry(
                 workspace_id=uuid4(),
                 entity_id=uuid4(),
-                source="bofa-statement",
-                source_external_id="txn-123",
-                effective_date="2026-08-01",
-                amount_cents=-250_000,
-                description="Wire transfer",
-                category="Software · SaaS",
-                user_confirmed=user_confirmed,
+                source="demo-seed",
+                source_external_id="exact-id",
+                effective_date="2026-09-15",
+                amount_cents=-200000,
+                description="Synthetic rent",
+                category="Rent",
+                external_account_id="demo-checking",
+                user_confirmed=claimed,
             )
         )
-
-
-def test_unverified_claim_is_not_honored() -> None:
-    session = _FakeSession(approval_row=None)
-    journal_post = AsyncMock(
-        return_value=PostingRefusal(
-            outcome="blocked_materiality",
-            reason="Amount ≥ $1,000.00 requires explicit human confirmation (not auto-postable).",
-        )
-    )
-    out = _run_tool(session=session, journal_post=journal_post, user_confirmed=True)
-
-    kwargs = journal_post.call_args.kwargs
-    assert kwargs["user_confirmed"] is False
-    assert kwargs["approving_human_uc_uid"] is None
-    assert out["ok"] is False
-    assert out["outcome"] == "blocked_materiality"
-    assert "derived server-side" in out["reason"]
-    assert len(session.approval_queries()) == 1
-
-
-def test_verified_claim_stamps_deciding_human() -> None:
-    session = _FakeSession(approval_row=_Row(decided_by_uc_uid="cfo-jane"))
-    journal_post = AsyncMock(
-        return_value=PostingOutcome(
-            journal_entry_id=uuid4(),
-            materiality=MaterialityVerdict(
-                tier="H", outcome="auto_post", reason="User explicitly confirmed the posting."
-            ),
-        )
-    )
-    out = _run_tool(session=session, journal_post=journal_post, user_confirmed=True)
-
-    kwargs = journal_post.call_args.kwargs
-    assert kwargs["user_confirmed"] is True
-    assert kwargs["approving_human_uc_uid"] == "cfo-jane"
-    assert out["ok"] is True
-    assert out["outcome"] == "posted"
-
-
-def test_no_claim_skips_approval_lookup() -> None:
-    session = _FakeSession(approval_row=_Row(decided_by_uc_uid="cfo-jane"))
-    journal_post = AsyncMock(
-        return_value=PostingRefusal(
-            outcome="queued_for_confirm",
-            reason="Amount in M tier ($75.00 - $1,000.00); awaits human confirm.",
-        )
-    )
-    out = _run_tool(session=session, journal_post=journal_post, user_confirmed=False)
-
-    kwargs = journal_post.call_args.kwargs
-    assert kwargs["user_confirmed"] is False
-    assert kwargs["approving_human_uc_uid"] is None
-    assert session.approval_queries() == []
-    assert "derived server-side" not in out["reason"]
-
-
-def test_verification_query_matches_exact_transaction() -> None:
-    session = _FakeSession(approval_row=_Row(decided_by_uc_uid="cfo-jane"))
-    eid = uuid4()
-    uid = asyncio.run(
-        _verified_confirmation(
-            session,
-            entity_id=eid,
-            source_external_id="txn-123",
-            amount_cents=-250_000,
-        )
-    )
-    assert uid == "cfo-jane"
-
-    [(sql, params)] = session.approval_queries()
-    assert params == {"eid": str(eid), "ext": "txn-123", "amt": "-250000"}
-    assert "status = 'approved'" in sql
-    assert "subject_type = 'bank_transaction_import'" in sql
-    assert "decided_by_uc_uid IS NOT NULL" in sql
-
-    # No matching row -> fail closed.
-    assert (
-        asyncio.run(
-            _verified_confirmation(
-                _FakeSession(approval_row=None),
-                entity_id=eid,
-                source_external_id="txn-123",
-                amount_cents=-250_000,
-            )
-        )
-        is None
-    )
+        assert post.call_args.kwargs["user_confirmed"] is False
+        assert post.call_args.kwargs["approving_human_uc_uid"] is None
+        assert enqueue.call_args.args[0] is session
+        assert result["outcome"] == "queued_for_confirm"
+        assert result["approval_id"] == "proposal-id"

@@ -392,51 +392,6 @@ async def list_closed_periods(
 # ---------------------------------------------------------------------------
 
 
-async def _verified_confirmation(
-    session,
-    *,
-    entity_id: UUID,
-    source_external_id: str,
-    amount_cents: int,
-) -> str | None:
-    """Resolve a claimed human confirmation to the human who actually decided.
-
-    A tool argument can be set by the model, so ``user_confirmed=True`` on the
-    MCP surface is a CLAIM, not an attestation. The only server-verifiable
-    evidence of a human decision is an APPROVED approval_queue row for this
-    exact transaction (entity + source_external_id + amount). Returns the
-    deciding human's uc_uid, or None when no such row exists.
-
-    Amount is matched as its canonical string to avoid cast errors on
-    malformed legacy payloads (a non-matching or missing amount simply fails
-    the match — fail closed).
-    """
-    row = (
-        await session.execute(
-            text(
-                """
-                SELECT decided_by_uc_uid
-                FROM approval_queue
-                WHERE entity_id = :eid
-                  AND subject_type = 'bank_transaction_import'
-                  AND status = 'approved'
-                  AND payload->>'source_external_id' = :ext
-                  AND payload->>'amount_cents' = :amt
-                  AND decided_by_uc_uid IS NOT NULL
-                ORDER BY decided_at DESC
-                LIMIT 1
-                """
-            ),
-            {
-                "eid": str(entity_id),
-                "ext": source_external_id,
-                "amt": str(int(amount_cents)),
-            },
-        )
-    ).first()
-    return row.decided_by_uc_uid if row else None
-
-
 # Account types whose normal balance implies a direction for the category side.
 # Anything not listed (asset, liability, equity, ...) is legitimately signed
 # either way — an owner contribution and a distribution both hit equity — so we
@@ -586,8 +541,8 @@ async def post_journal_entry(
     Mirrors POST /api/workspaces/{wid}/journal-entries. The post is idempotent
     on (entity_id, source, source_external_id). A material (M/H) post queues
     for human attestation instead of auto-applying; ``user_confirmed`` is
-    honored only after server-side verification against the approval queue
-    (see the arg docs below).
+    never accepted as human authority. A human applies the immutable pending
+    request through the authenticated approval decision route.
 
     Args:
         workspace_id: Workspace UUID.
@@ -607,12 +562,8 @@ async def post_journal_entry(
             account id) for cash-side resolution.
         receipt_link_id: Optional UUID of a recon_link if a receipt is already
             attached.
-        user_confirmed: Claim that a human attested this post. NOT trusted as
-            given: the server honors it only when an APPROVED approval_queue
-            row exists for this exact (entity, source_external_id, amount) —
-            otherwise the full materiality gate applies as if False. To get a
-            material entry posted, let it queue and have a human decide it
-            (decide_approval / the reconciliation queue).
+        user_confirmed: Deprecated agent claim; never grants posting authority.
+            A human must decide the immutable proposal using a verified session.
         reasoning_trace: Free-text reasoning from the agent.
         model_version: Identifier for the agent/model issuing the post.
 
@@ -651,8 +602,25 @@ async def post_journal_entry(
         ) from exc
 
     receipt_uuid = UUID(receipt_link_id) if receipt_link_id else None
+    from app.journal.pending_post import JournalRequest, existing_proposal, enqueue, validate_receipt
+    request = JournalRequest(
+        source=source, source_external_id=source_external_id, effective_date=effective_date,
+        amount_cents=amount_cents, description=description, category=category,
+        category_status=category_status, payee=payee, memo=memo, sign_matched=sign_matched,
+        external_account_id=external_account_id, receipt_link_id=receipt_link_id,
+        reasoning_trace=reasoning_trace, model_version=model_version,
+    ).checked()
+    approval_id = None
 
     async with workspace_session(SessionLocal, workspace_id) as session:
+        previous = await existing_proposal(session, workspace_id=workspace_id,
+            entity_id=entity_id, request=request)
+        if previous:
+            return {"ok": False, "outcome": "approval_" + previous["status"],
+                "approval_id": previous["id"], "reason": "Exact immutable proposal already exists"}
+
+        await validate_receipt(session, workspace_id=workspace_id, entity_id=entity_id, request=request)
+
         # Entity-mapping check (same as HTTP)
         entity_mapped = False
         if external_account_id:
@@ -679,13 +647,9 @@ async def post_journal_entry(
         # user_confirmed is agent-supplied on this surface — derive the real
         # attestation from the approval queue instead of trusting the flag.
         approving_human: str | None = None
-        if user_confirmed:
-            approving_human = await _verified_confirmation(
-                session,
-                entity_id=entity_id,
-                source_external_id=source_external_id,
-                amount_cents=int(amount_cents),
-            )
+        # A prior bank-import decision is not authority for an arbitrary journal
+        # request. New journal proposals apply only inside the locked decision
+        # transaction; exact retries above never post again.
 
         # Likewise sign_matched: the server owns the category's expected
         # direction. AND with the caller's claim so a caller can only tighten.
@@ -722,9 +686,15 @@ async def post_journal_entry(
             model_version=model_version,
         )
 
+        if isinstance(result, PostingRefusal) and result.outcome in {
+            "queued_for_confirm", "blocked_materiality"
+        }:
+            approval_id = await enqueue(session, workspace_id=workspace_id, entity_id=entity_id,
+                request=request, actor=ctx.user_uc_uid, reason=result.reason)
+
         posted = isinstance(result, PostingOutcome)
         entry_id = str(result.journal_entry_id) if posted else None
-        audit_outcome = "posted" if posted else result.outcome
+        audit_outcome = "posted" if posted else ("queued_for_confirm" if approval_id else result.outcome)
 
         # The append-only agent-decision trail. Posting is the highest-stakes
         # agent write, so it belongs here alongside categorize/link_receipt —
@@ -754,6 +724,7 @@ async def post_journal_entry(
             },
             response_payload={
                 "outcome": audit_outcome,
+                "approval_id": approval_id,
                 "journal_entry_id": entry_id,
                 "materiality_tier": result.materiality.tier if posted else None,
                 "reason": result.materiality.reason if posted else result.reason,
@@ -788,14 +759,13 @@ async def post_journal_entry(
     if user_confirmed and approving_human is None:
         reason += (
             " (user_confirmed was supplied but is not trusted from tool"
-            " arguments: confirmation is derived server-side from an approved"
-            " approval-queue record, and none matched this transaction. Let"
-            " the entry queue and have a human decide it via decide_approval"
-            " or the reconciliation queue.)"
+            " arguments. Have a human review the immutable proposal in the"
+            " reconciliation queue using their authenticated session.)"
         )
     return {
         "ok": False,
-        "outcome": result.outcome,
+        "outcome": "queued_for_confirm" if approval_id else result.outcome,
+        "approval_id": approval_id,
         "reason": reason,
         "existing_entry_id": (
             str(result.existing_entry_id) if result.existing_entry_id else None

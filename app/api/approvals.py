@@ -38,7 +38,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from app.auth import AuthContext, validate_bearer_token
 from app.authz import assert_entity_in_scope
+from app.config import get_settings
 from app.db import SessionLocal
 import datetime as dt
 
@@ -182,6 +184,7 @@ async def decide_approval(
     approval_id: UUID,
     body: DecideRequest,
     workspace: WorkspaceContext = Depends(resolve_workspace),
+    auth: AuthContext = Depends(validate_bearer_token),
 ) -> dict:
     """Approve or reject a pending approval. APPROVE applies the held action.
 
@@ -248,6 +251,18 @@ async def decide_approval(
         # workspace_session below commits (best-effort, never blocks the request).
         applied: dict = {}
 
+        if subject_type == "journal_entry_post":
+            if (not isinstance(auth, AuthContext) or not auth.may_autoprovision
+                    or auth.agent_id is not None or auth.is_trusted_m2m
+                    or auth.uc_uid != workspace.user_uc_uid
+                    or auth.claims.get("azp") != get_settings().keycloak_client_id
+                    or "clientId" in auth.claims or "client_id" in auth.claims
+                    or type(auth.claims.get("auth_time")) is not int
+                    or auth.claims.get("auth_time", 0) <= 0
+                    or not (auth.claims.get("sid") or auth.claims.get("session_state"))
+                    or str(auth.claims.get("preferred_username", "")).startswith("service-account-")):
+                raise HTTPException(status_code=403, detail="Journal proposal requires a human session")
+
         # ---------------- REJECT ----------------
         if decision == "reject":
             await _mark_decided(
@@ -298,6 +313,19 @@ async def decide_approval(
                     subject_id=subject_id,
                     payload=payload,
                 )
+            elif subject_type == "journal_entry_post":
+                # These values come from authenticated workspace resolution, not
+                # the decision body. Agent/PAT authority is not human attestation.
+                if workspace.agent_id is not None or workspace.pat_scopes is not None:
+                    raise HTTPException(status_code=403, detail="Journal proposal requires a human session")
+                if body.category_override is not None:
+                    raise HTTPException(status_code=422, detail="Journal proposal payload is immutable")
+                from app.journal.pending_post import apply_proposal
+                try:
+                    applied = await apply_proposal(session, workspace_id=workspace_id,
+                        entity_id=entity_id, payload=payload, approving_human=workspace.user_uc_uid)
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
             elif subject_type == "bank_transaction_import":
                 applied = await _approve_bank_transaction_import(
                     session,
@@ -455,7 +483,9 @@ def _project_approval_decision(
                 effective_date=payload.get("effective_date"),
                 payee=payload.get("payee"),
             )
-    elif subject_type == "bank_transaction_import":
+    elif subject_type in ("bank_transaction_import", "journal_entry_post"):
+        if subject_type == "journal_entry_post":
+            payload = payload["request"]
         from app.journal.posting import PostingOutcome
         from app.journal.materiality import MaterialityVerdict
         from app.journal.projection import project_journal_entry_posted
@@ -795,6 +825,9 @@ async def skip_approval(
         if row is None:
             raise HTTPException(status_code=404, detail="Approval not found")
 
+        if row["subject_type"] == "journal_entry_post":
+            raise HTTPException(status_code=409, detail="Journal proposals require explicit individual review")
+
         entity_id = UUID(row["entity_id"])
         assert_entity_in_scope(workspace, entity_id)
 
@@ -877,7 +910,7 @@ async def unskip_approval(
             await session.execute(
                 text(
                     """
-                    SELECT id::text, entity_id::text AS entity_id, status
+                    SELECT id::text, entity_id::text AS entity_id, subject_type, status
                     FROM approval_queue
                     WHERE id = :id
                     FOR UPDATE
@@ -888,6 +921,9 @@ async def unskip_approval(
         ).mappings().first()
         if row is None:
             raise HTTPException(status_code=404, detail="Approval not found")
+
+        if row["subject_type"] == "journal_entry_post":
+            raise HTTPException(status_code=409, detail="Journal proposals require explicit individual review")
 
         entity_id = UUID(row["entity_id"])
         assert_entity_in_scope(workspace, entity_id)
