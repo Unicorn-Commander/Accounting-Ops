@@ -161,62 +161,10 @@ export default async function ReportsPage(props: {
         {/* End of report views */}
 
         {(!pl && view === "pl") || (!bs && view === "bs") || (!cf && view === "cf") || (!ten99 && view === "1099-nec") ? (
-          // H9: standardised "no posted entries yet" empty state. For a brand-new
-          // empty workspace there's nothing posted to "open", so the CTAs point at
-          // the get-to-first-value path (connect a bank / upload documents) — once
-          // approved transactions exist, the report views above render instead.
           <EmptyState
             variant="no-data"
-            title="No posted entries for this period yet."
-            description={
-              <>
-                <p>
-                  Reports build from your posted activity — once transactions
-                  land, your Profit &amp; Loss, Balance Sheet, and the rest
-                  appear here automatically.
-                </p>
-                <p className="mt-2">
-                  New here? To get your first numbers,{" "}
-                  <Link
-                    href="/connectors"
-                    className="text-brand-300 underline hover:text-brand-200"
-                  >
-                    connect your bank
-                  </Link>{" "}
-                  or{" "}
-                  <Link
-                    href="/documents"
-                    className="text-brand-300 underline hover:text-brand-200"
-                  >
-                    drop in a few documents
-                  </Link>
-                  . Already have entries? Just nothing in this period —{" "}
-                  <Link
-                    href="/journal"
-                    className="text-brand-300 underline hover:text-brand-200"
-                  >
-                    open the journal
-                  </Link>{" "}
-                  to view or post them directly.
-                </p>
-              </>
-            }
-            primaryAction={
-              <Link
-                href="/connectors"
-                className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
-              >
-                Connect your bank
-              </Link>
-            }
-            secondaryAction={
-              <Link
-                href="/documents"
-                className="inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
-              >
-                Upload documents
-              </Link>
-            }
+            title="Unable to load this report."
+            description="The reporting service did not return data. Wait a moment and reload this page. Your posted entries have not changed."
           />
         ) : null}
       </PageShell>

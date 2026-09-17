@@ -372,6 +372,9 @@ def is_exempt(path: str) -> bool:
 
 
 def classify_tier(path: str, method: str) -> str:
+    # The shell reads static persona metadata; it does not run an LLM.
+    if path == "/api/chat/personas" and method.upper() in {"GET", "HEAD"}:
+        return "cheap"
     for pattern, tier in TIER_RULES:
         if pattern.search(path):
             return tier
