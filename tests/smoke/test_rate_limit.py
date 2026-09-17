@@ -78,6 +78,11 @@ def test_healthz_is_exempt():
 @pytest.mark.parametrize(
     "path,method,tier",
     [
+        ("/api/chat/personas", "GET", "cheap"),
+        ("/api/chat/personas", "HEAD", "cheap"),
+        ("/api/chat/personas", "POST", "expensive"),
+        ("/api/chat/personas-extra", "GET", "expensive"),
+        ("/api/chat/completions", "POST", "expensive"),
         (f"/api/workspaces/{WS_A}/chat", "POST", "expensive"),
         (f"/api/workspaces/{WS_A}/reports/p-and-l", "GET", "expensive"),
         (f"/api/workspaces/{WS_A}/irs-forms/1120/render", "POST", "expensive"),

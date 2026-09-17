@@ -92,6 +92,7 @@ export default async function ReportsPage(props: {
             const label = v === "pl" ? "Profit & Loss" : v === "bs" ? "Balance Sheet" : v === "cf" ? "Cash Flow" : "1099-NEC";
             return (
               <Link
+                prefetch={false}
                 key={v}
                 href={`/reports?view=${v}${view !== "1099-nec" && v !== "1099-nec" ? `&period=${period}` : v === "1099-nec" ? `&year=${year}` : ``}`}
                 className={cn(
@@ -109,6 +110,7 @@ export default async function ReportsPage(props: {
           {view !== "bs" && view !== "1099-nec" &&
             PERIODS.map((p) => (
               <Link
+                prefetch={false}
                 key={p.v}
                 href={`/reports?view=${view}&period=${p.v}`}
                 className={cn(
@@ -124,6 +126,7 @@ export default async function ReportsPage(props: {
           {view === "1099-nec" &&
             YEARS.map((y) => (
               <Link
+                prefetch={false}
                 key={y}
                 href={`/reports?view=1099-nec&year=${y}`}
                 className={cn(
@@ -138,6 +141,7 @@ export default async function ReportsPage(props: {
             ))}
           <span className="ml-auto">
             <Link
+                prefetch={false}
               href={`/cpa-export`}
               className="inline-flex items-center gap-1 rounded-md border border-default bg-surface px-3 py-1.5 text-xs text-ink-secondary hover:bg-elevated"
             >
@@ -161,62 +165,10 @@ export default async function ReportsPage(props: {
         {/* End of report views */}
 
         {(!pl && view === "pl") || (!bs && view === "bs") || (!cf && view === "cf") || (!ten99 && view === "1099-nec") ? (
-          // H9: standardised "no posted entries yet" empty state. For a brand-new
-          // empty workspace there's nothing posted to "open", so the CTAs point at
-          // the get-to-first-value path (connect a bank / upload documents) — once
-          // approved transactions exist, the report views above render instead.
           <EmptyState
             variant="no-data"
-            title="No posted entries for this period yet."
-            description={
-              <>
-                <p>
-                  Reports build from your posted activity — once transactions
-                  land, your Profit &amp; Loss, Balance Sheet, and the rest
-                  appear here automatically.
-                </p>
-                <p className="mt-2">
-                  New here? To get your first numbers,{" "}
-                  <Link
-                    href="/connectors"
-                    className="text-brand-300 underline hover:text-brand-200"
-                  >
-                    connect your bank
-                  </Link>{" "}
-                  or{" "}
-                  <Link
-                    href="/documents"
-                    className="text-brand-300 underline hover:text-brand-200"
-                  >
-                    drop in a few documents
-                  </Link>
-                  . Already have entries? Just nothing in this period —{" "}
-                  <Link
-                    href="/journal"
-                    className="text-brand-300 underline hover:text-brand-200"
-                  >
-                    open the journal
-                  </Link>{" "}
-                  to view or post them directly.
-                </p>
-              </>
-            }
-            primaryAction={
-              <Link
-                href="/connectors"
-                className="inline-flex items-center gap-1.5 rounded-md bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600"
-              >
-                Connect your bank
-              </Link>
-            }
-            secondaryAction={
-              <Link
-                href="/documents"
-                className="inline-flex items-center gap-1.5 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-ink-secondary hover:text-ink-primary"
-              >
-                Upload documents
-              </Link>
-            }
+            title="Unable to load this report."
+            description="The reporting service did not return data. Wait a moment and reload this page. Your posted entries have not changed."
           />
         ) : null}
       </PageShell>
@@ -266,6 +218,7 @@ function PLView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getProfi
                   <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0 hover:bg-white/[0.02]">
                     <td className="px-5 py-2 font-mono text-xs">
                       <Link
+                prefetch={false}
                         href={href}
                         className="hover:text-brand-300 hover:underline focus:outline-none focus-visible:underline"
                         title={`Show journal entries that hit ${l.canonical_form}`}
@@ -311,6 +264,7 @@ function PLView({ data }: { data: NonNullable<Awaited<ReturnType<typeof getProfi
                   <tr key={l.canonical_form} className="border-b border-subtle/40 last:border-b-0 hover:bg-white/[0.02]">
                     <td className="px-5 py-2 font-mono text-xs">
                       <Link
+                prefetch={false}
                         href={href}
                         className="hover:text-brand-300 hover:underline focus:outline-none focus-visible:underline"
                         title={`Show journal entries that hit ${l.canonical_form}`}

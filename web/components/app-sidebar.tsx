@@ -179,6 +179,7 @@ export function AppSidebar({
                       <li key={item.href}>
                         <Link
                           href={item.href}
+                          prefetch={false}
                           title={collapsed ? item.label : undefined}
                           aria-current={active ? "page" : undefined}
                           className={cn(
@@ -269,6 +270,7 @@ export function SidebarMobileNav({
               <Link
                 key={item.href}
                 href={item.href}
+                          prefetch={false}
                 onClick={onNavigate}
                 className={cn(
                   "flex items-center gap-2.5 rounded-md px-3 py-2.5 text-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
