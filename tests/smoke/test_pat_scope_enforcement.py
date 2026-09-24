@@ -16,12 +16,14 @@ Coverage required by the audit fix:
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi import HTTPException
 
 from app.auth import AuthContext, ServiceScope
+from app import mcp_auth
 from app.tenancy import (
     WorkspaceContext,
     _pat_holds_scope,
@@ -317,3 +319,32 @@ class TestGateIsPinned:
         # If the gate treated None as empty, this would 403 with token scope.
         require_role(ctx, "owner")
 
+
+@pytest.mark.asyncio
+async def test_mcp_authorize_workspace_enforces_pat_scope_and_allows_read(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """MCP entry point passes the PAT scope into the shared role chokepoint."""
+    workspace_id = uuid.uuid4()
+    auth = _auth(
+        scopes=("accounting:read",),
+        claims={"sub": "user-1", "pat_id": str(uuid.uuid4())},
+    )
+
+    async def fake_membership(*args: Any, **kwargs: Any):
+        # Fake session/membership result: this smoke test never opens a DB.
+        return "owner", None, False, "ws"
+
+    monkeypatch.setattr(mcp_auth, "_resolve_membership", fake_membership)
+    monkeypatch.setattr(
+        "app.config.get_settings", lambda: SimpleNamespace(is_community=True)
+    )
+    reset = mcp_auth._current_auth.set(auth)
+    try:
+        read_ctx = await mcp_auth.authorize_workspace(workspace_id, min_role="viewer")
+        assert read_ctx.pat_scopes == ("accounting:read",)
+
+        with pytest.raises(PermissionError, match="needs accounting:write"):
+            await mcp_auth.authorize_workspace(workspace_id, min_role="accountant")
+    finally:
+        mcp_auth._current_auth.reset(reset)
