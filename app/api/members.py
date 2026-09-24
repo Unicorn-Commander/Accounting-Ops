@@ -50,7 +50,6 @@ from app.auth import AuthContext
 from app.config import get_settings
 from app.db import SessionLocal
 from app.mailer import send_email
-from app.tools._audit import write_decision_audit
 from app.tenancy import (
     WorkspaceContext,
     require_role,
@@ -101,35 +100,49 @@ async def _write_membership_audit(
     new_entity_scope: Any = None,
     invitation_id: str | None = None,
 ) -> None:
-    """Append the membership event in the same transaction as its mutation.
+    """Append one membership event in the same transaction as its mutation.
 
-    ``decision_audit`` is entity-scoped; membership changes are workspace-level,
-    so the workspace UUID is used as the stable subject identifier. The full
-    membership subject is retained in the JSON payload. Audit failure is
-    intentionally request-failing and rolls back the mutation, matching the
-    approvals house pattern.
+    This is deliberately transaction-failing: an audit insert error rolls back
+    the membership mutation, matching the approvals house pattern. The table is
+    public and RLS-isolated, so set the transaction-local workspace GUC first.
     """
-    await write_decision_audit(
-        session,
-        workspace_id=workspace.workspace_id,
-        entity_id=workspace.workspace_id,
-        ctx=workspace,
-        tool_name="membership",
-        request_payload={
-            "kind": "membership",
+    import json
+
+    def scope_json(scope: Any) -> str | None:
+        if scope is None:
+            return None
+        return json.dumps([str(entity_id) for entity_id in scope])
+
+    await session.execute(
+        text("SELECT set_config('app.current_workspace', :wid, true)"),
+        {"wid": str(workspace.workspace_id)},
+    )
+    await session.execute(
+        text(
+            """
+            INSERT INTO public.membership_audit (
+                workspace_id, actor_uc_uid, action, target_user_id,
+                invited_email, invitation_id, old_role, new_role,
+                old_entity_scope, new_entity_scope
+            ) VALUES (
+                :workspace_id, :actor_uc_uid, :action, :target_user_id,
+                :invited_email, :invitation_id, :old_role, :new_role,
+                CAST(:old_entity_scope AS jsonb), CAST(:new_entity_scope AS jsonb)
+            )
+            """
+        ),
+        {
+            "workspace_id": str(workspace.workspace_id),
+            "actor_uc_uid": workspace.user_uc_uid,
             "action": action,
-            "actor_user_id": workspace.user_uc_uid,
             "target_user_id": str(target_user_id) if target_user_id else None,
             "invited_email": invited_email,
+            "invitation_id": str(invitation_id) if invitation_id else None,
             "old_role": old_role,
             "new_role": new_role,
-            "old_entity_scope": old_entity_scope,
-            "new_entity_scope": new_entity_scope,
-            "invitation_id": invitation_id,
+            "old_entity_scope": scope_json(old_entity_scope),
+            "new_entity_scope": scope_json(new_entity_scope),
         },
-        response_payload={"ok": True, "action": action},
-        reasoning=f"Membership {action} by {workspace.user_uc_uid}",
-        outcome="committed",
     )
 
 
