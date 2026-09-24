@@ -157,7 +157,9 @@ async def test_owner_pat_without_management_scope_denied(monkeypatch):
 async def test_redemption_wrong_authenticated_email_still_denied(monkeypatch):
     from app import auth
     monkeypatch.setattr(auth, "authenticate_token", AsyncMock(return_value=SimpleNamespace(
-        uc_uid="different-user", claims={"email": "wrong@example.test"})))
+        uc_uid="different-user",
+        claims={"email": "wrong@example.test", "email_verified": True},
+    )))
     inv = SimpleNamespace(cancelled_at=None, accepted_at=None,
                           expires_at=datetime.now(timezone.utc) + timedelta(days=1),
                           email="invited@example.test")
@@ -168,6 +170,58 @@ async def test_redemption_wrong_authenticated_email_still_denied(monkeypatch):
         await members.accept_invitation(request=request, token="synthetic-capability")
     assert exc.value.status_code == 403
     assert len(session.calls) == 2
+    mail.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_redemption_unverified_matching_email_denied_without_writes(monkeypatch):
+    from app import auth
+
+    monkeypatch.setattr(auth, "authenticate_token", AsyncMock(return_value=SimpleNamespace(
+        uc_uid="invited-user",
+        claims={"email": "invited@example.test", "email_verified": False},
+    )))
+    inv = SimpleNamespace(cancelled_at=None, accepted_at=None,
+                          expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+                          email="invited@example.test")
+    session, mail = setup(monkeypatch, [inv])
+    request = Request({"type": "http", "headers": [(b"authorization", b"Bearer synthetic-test")]})
+
+    with pytest.raises(HTTPException) as exc:
+        await members.accept_invitation(request=request, token="synthetic-capability")
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "EMAIL_NOT_VERIFIED"
+    assert "provider that verifies" in exc.value.detail["message"]
+    assert len(session.calls) == 1
+    assert not any("UPDATE public.workspace_invitation" in sql for sql, _ in session.calls)
+    assert not any("INSERT INTO public.user_account" in sql for sql, _ in session.calls)
+    mail.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_redemption_verified_matching_email_accepted(monkeypatch):
+    from app import auth
+
+    monkeypatch.setattr(auth, "authenticate_token", AsyncMock(return_value=SimpleNamespace(
+        uc_uid="invited-user",
+        claims={"email": "INVITED@example.test", "email_verified": True},
+    )))
+    inv = SimpleNamespace(
+        id=str(uuid4()), workspace_id=uuid4(), workspace_name="Synthetic",
+        workspace_slug="synthetic", role="viewer", entity_scope=None,
+        cancelled_at=None, accepted_at=None,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        email="invited@example.test",
+    )
+    user = SimpleNamespace(id=uuid4(), email="invited@example.test")
+    session, mail = setup(monkeypatch, [inv, user, None, None, None])
+    request = Request({"type": "http", "headers": [(b"authorization", b"Bearer synthetic-test")]})
+
+    result = await members.accept_invitation(request=request, token="synthetic-capability")
+
+    assert result["status"] == "accepted"
+    assert any("UPDATE public.workspace_invitation" in sql for sql, _ in session.calls)
     mail.assert_not_awaited()
 
 

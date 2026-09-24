@@ -46,7 +46,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
-from app.auth import AuthContext
+from app.auth import AuthContext, _token_email_verified
 from app.config import get_settings
 from app.db import SessionLocal
 from app.mailer import send_email
@@ -770,6 +770,18 @@ async def accept_invitation(
                         "return to this link to finish accepting."
                     ),
                 }
+
+            if not _token_email_verified(auth_ctx.claims):
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "code": "EMAIL_NOT_VERIFIED",
+                        "message": (
+                            "Verify your email address, then sign in with a provider "
+                            "that verifies the address."
+                        ),
+                    },
+                )
 
             # Authenticated path — provision user_account if missing, then
             # insert/update workspace_membership.
