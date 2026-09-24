@@ -2,7 +2,8 @@
 
 Routes:
   GET /api/workspaces/{wid}/entities/{eid}/tax-drafts/{tax_year}/{specialist_slug}.pdf
-    — renders a single specialist's Markdown draft from /drafts/ as a PDF.
+    — renders a single specialist's Markdown draft from a tenant-scoped /drafts/
+      workspace/entity directory as a PDF.
     - Returns application/pdf with Content-Disposition attachment.
 
   GET /api/workspaces/{wid}/entities/{eid}/tax-drafts/{tax_year}/handoff-package.zip
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import textwrap
 import zipfile
@@ -53,6 +55,7 @@ from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
 
 router = APIRouter(tags=["specialist-pdf"])
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Specialist slug → human-readable title + file-name prefix
@@ -62,37 +65,37 @@ _SLUG_META: dict[str, dict[str, str]] = {
     "form-1120": {
         "title": "Form 1120 — Federal Corporate Income Tax Return",
         "filename_prefix": "01-form-1120-draft",
-        "draft_file": "mu-inc-{year}-form-1120-draft.md",
+        "draft_file": "{year}-form-1120-draft.md",
     },
     "1099-nec": {
         "title": "1099-NEC Nonemployee Compensation Analysis",
         "filename_prefix": "02-1099-NEC-analysis",
-        "draft_file": "mu-inc-{year}-1099-nec-draft.md",
+        "draft_file": "{year}-1099-nec-draft.md",
     },
     "sc1120": {
         "title": "SC1120 — South Carolina Corporate Income Tax Return",
         "filename_prefix": "03-SC1120-draft",
-        "draft_file": "mu-inc-{year}-sc1120-draft.md",
+        "draft_file": "{year}-sc1120-draft.md",
     },
     "officer-compensation": {
         "title": "Officer Compensation Schedule",
         "filename_prefix": "04-officer-compensation",
-        "draft_file": "mu-inc-{year}-officer-compensation-draft.md",
+        "draft_file": "{year}-officer-compensation-draft.md",
     },
     "nol-schedule-l": {
         "title": "Net Operating Loss & Schedule L Analysis",
         "filename_prefix": "05-NOL-schedule-L",
-        "draft_file": "mu-inc-{year}-nol-schedule-l-draft.md",
+        "draft_file": "{year}-nol-schedule-l-draft.md",
     },
     "audit-defense-scdor-ftf": {
         "title": "Audit Defense — SCDOR Failure-to-File",
         "filename_prefix": "06-audit-defense-SCDOR-FTF",
-        "draft_file": "mu-inc-{year}-audit-defense-scdor-ftf-draft.md",
+        "draft_file": "{year}-audit-defense-scdor-ftf-draft.md",
     },
     "coordinator-summary": {
         "title": "Tax Operations Coordinator Summary",
         "filename_prefix": "07-coordinator-summary",
-        "draft_file": "mu-inc-{year}-coordinator-summary-draft.md",
+        "draft_file": "{year}-coordinator-summary-draft.md",
     },
 }
 
@@ -361,13 +364,18 @@ async def _get_entity_display_name(
     return row.display_name
 
 
-def _draft_path(tax_year: int, slug: str) -> Path | None:
+def _draft_path(
+    workspace_id: UUID,
+    entity_id: UUID,
+    tax_year: int,
+    slug: str,
+) -> Path | None:
     """Return the Path to a draft file if it exists, else None."""
     meta = _SLUG_META.get(slug)
     if meta is None:
         return None
     filename = meta["draft_file"].format(year=tax_year)
-    p = _DRAFTS_DIR / filename
+    p = _DRAFTS_DIR / str(workspace_id) / str(entity_id) / filename
     return p if p.exists() else None
 
 
@@ -396,13 +404,13 @@ async def get_specialist_pdf(
     """Render a single specialist Markdown draft as a PDF and return it.
 
     The specialist_slug maps to a draft file at:
-      /drafts/mu-inc-{year}-{slug}-draft.md
+      /drafts/{workspace_id}/{entity_id}/{year}-{slug}-draft.md
 
     Returns application/pdf.  Content-Disposition is 'attachment' by default
     (browser downloads); pass ?disposition=inline to render in-tab.
-    Role floor: viewer.
+    Role floor: accountant.
     """
-    require_role(workspace, "viewer")
+    require_role(workspace, "accountant")
     assert_entity_in_scope(workspace, entity_id)
 
     if specialist_slug not in _SLUG_META:
@@ -415,7 +423,7 @@ async def get_specialist_pdf(
     meta = _SLUG_META[specialist_slug]
     entity_name = await _get_entity_display_name(workspace_id, entity_id)
 
-    draft_path = _draft_path(tax_year, specialist_slug)
+    draft_path = _draft_path(workspace_id, entity_id, tax_year, specialist_slug)
     if draft_path is None:
         # Return a PDF that says "no draft yet" rather than a 404, so callers
         # can still include it in a bundle attempt without hard-failing.
@@ -486,9 +494,9 @@ async def get_specialist_markdown(
     This endpoint backs the in-browser Markdown viewer modal — it serves the
     source text so the viewer can render it client-side (react-markdown).
 
-    Role floor: viewer.  Entity scope: standard assert_entity_in_scope.
+    Role floor: accountant.  Entity scope: standard assert_entity_in_scope.
     """
-    require_role(workspace, "viewer")
+    require_role(workspace, "accountant")
     assert_entity_in_scope(workspace, entity_id)
 
     if specialist_slug not in _SLUG_META:
@@ -498,7 +506,7 @@ async def get_specialist_markdown(
                    f"Valid: {', '.join(_SLUG_META.keys())}",
         )
 
-    draft_path = _draft_path(tax_year, specialist_slug)
+    draft_path = _draft_path(workspace_id, entity_id, tax_year, specialist_slug)
     if draft_path is None:
         raise HTTPException(
             status_code=404,
@@ -594,8 +602,10 @@ async def _fetch_cpa_export_json(
     entity_id: UUID,
     tax_year: int,
     token: str,
-) -> bytes | None:
+) -> tuple[bytes | None, str | None]:
     """Fetch the /exports/1120/{year} JSON from the cpa-export sidecar."""
+    if not token:
+        return None, "CPA export token is empty"
     settings = get_settings()
     url = (
         f"{settings.cpa_export_url}/exports/1120/{tax_year}"
@@ -605,10 +615,10 @@ async def _fetch_cpa_export_json(
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
         if resp.status_code == 200:
-            return resp.content
-    except Exception:
-        pass
-    return None
+            return resp.content, None
+        return None, f"CPA export returned HTTP {resp.status_code}"
+    except Exception as exc:
+        return None, f"CPA export request failed: {type(exc).__name__}"
 
 
 async def _fetch_cpa_export_csv(
@@ -616,8 +626,10 @@ async def _fetch_cpa_export_csv(
     entity_id: UUID,
     tax_year: int,
     token: str,
-) -> bytes | None:
+) -> tuple[bytes | None, str | None]:
     """Fetch the /exports/csv?period={year} journal CSV from cpa-export."""
+    if not token:
+        return None, "CPA export token is empty"
     settings = get_settings()
     url = (
         f"{settings.cpa_export_url}/exports/csv"
@@ -627,10 +639,10 @@ async def _fetch_cpa_export_csv(
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
         if resp.status_code == 200:
-            return resp.content
-    except Exception:
-        pass
-    return None
+            return resp.content, None
+        return None, f"CPA export returned HTTP {resp.status_code}"
+    except Exception as exc:
+        return None, f"CPA export request failed: {type(exc).__name__}"
 
 
 async def _fetch_tax_review_queue_json(
@@ -704,14 +716,14 @@ async def get_handoff_package(
     Contents:
       00-cover-letter.pdf
       01-form-1120-draft.pdf      (etc. — one per slug, in order)
-      data/form-1120-package.json (cpa-export JSON, if sidecar is up)
-      data/journal-{year}.csv     (journal CSV, if sidecar is up)
+      data/form-1120-package.json (cpa-export JSON, or an explicit MISSING marker)
+      data/journal-{year}.csv     (journal CSV, or an explicit MISSING marker)
       data/tax-review-queue.json  (queue rows export)
       README.txt                  (human-readable index + disclaimer)
 
-    Role floor: viewer.
+    Role floor: accountant.
     """
-    require_role(workspace, "viewer")
+    require_role(workspace, "accountant")
     assert_entity_in_scope(workspace, entity_id)
 
     entity_name = await _get_entity_display_name(workspace_id, entity_id)
@@ -719,11 +731,9 @@ async def get_handoff_package(
     generated_dt = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     # Build auth token passthrough for cpa-export calls.
-    # The user's bearer token is available via workspace.user_uc_uid but we
-    # can't reconstruct the raw JWT here; we forward an empty string instead
-    # and rely on cpa-export's graceful degradation when no token is present.
-    # In practice the bundle assembly continues even if cpa-export is down.
-    cpa_token = ""
+    # The sidecar token is deployment configuration; missing/unavailable sidecar
+    # exports are represented explicitly in the bundle below.
+    cpa_token = get_settings().cpa_export_token
 
     # Collect all specialist PDFs for the year.
     specialist_pdfs: list[tuple[str, bytes]] = []  # (zip_name, pdf_bytes)
@@ -731,7 +741,7 @@ async def get_handoff_package(
 
     for slug in _ORDERED_SLUGS:
         meta = _SLUG_META[slug]
-        draft_path = _draft_path(tax_year, slug)
+        draft_path = _draft_path(workspace_id, entity_id, tax_year, slug)
         if draft_path is None:
             # Skip missing drafts — don't include a placeholder in the zip.
             continue
@@ -748,17 +758,33 @@ async def get_handoff_package(
         included_docs.append(f"{zip_name} — {meta['title']}")
 
     # Data files.
-    cpa_json = await _fetch_cpa_export_json(workspace_id, entity_id, tax_year, cpa_token)
-    journal_csv = await _fetch_cpa_export_csv(workspace_id, entity_id, tax_year, cpa_token)
+    cpa_json, cpa_json_reason = await _fetch_cpa_export_json(
+        workspace_id, entity_id, tax_year, cpa_token
+    )
+    journal_csv, journal_csv_reason = await _fetch_cpa_export_csv(
+        workspace_id, entity_id, tax_year, cpa_token
+    )
     queue_json = await _fetch_tax_review_queue_json(workspace_id, entity_id, tax_year)
 
     data_files: list[tuple[str, bytes]] = []
     if cpa_json:
         data_files.append(("data/form-1120-package.json", cpa_json))
         included_docs.append("data/form-1120-package.json — CPA Export JSON (Form 1120 line mapping)")
+    else:
+        reason = cpa_json_reason or "No response body"
+        _log.warning("CPA export JSON missing: %s", reason)
+        marker = "data/MISSING-form-1120-package.json.txt"
+        data_files.append((marker, f"Missing CPA export JSON: {reason}\n".encode("utf-8")))
+        included_docs.append(f"{marker} — {reason}")
     if journal_csv:
         data_files.append((f"data/journal-{tax_year}.csv", journal_csv))
         included_docs.append(f"data/journal-{tax_year}.csv — Full journal export (CSV)")
+    else:
+        reason = journal_csv_reason or "No response body"
+        _log.warning("CPA journal export missing: %s", reason)
+        marker = f"data/MISSING-journal-{tax_year}.csv.txt"
+        data_files.append((marker, f"Missing CPA journal export: {reason}\n".encode("utf-8")))
+        included_docs.append(f"{marker} — {reason}")
     data_files.append(("data/tax-review-queue.json", queue_json))
     included_docs.append("data/tax-review-queue.json — AI specialist review queue items")
 
