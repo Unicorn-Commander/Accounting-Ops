@@ -6,6 +6,7 @@ import { Check, Loader2, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { tryParseDollars } from "@/lib/money";
 import type { LiveTransaction } from "@/lib/transactions";
+import { CATEGORY_OPTIONS } from "@/lib/categories";
 
 type Outcome =
   | "posted"
@@ -23,27 +24,6 @@ type ApiResponse = {
   materiality_tier?: "L" | "M" | "H";
   existing_entry_id?: string | null;
 };
-
-const CATEGORY_OPTIONS = [
-  "Revenue · Marketplace",
-  "Revenue · Music",
-  "Revenue · Services",
-  "Revenue · Subscriptions",
-  "SaaS · AI",
-  "SaaS · Email",
-  "SaaS · Productivity",
-  "Infrastructure · CDN",
-  "Infrastructure · VPS",
-  "Infrastructure · Network",
-  "Banking · Fees",
-  "Banking · Interest",
-  "Inter-entity transfer",
-  "Travel · Lodging",
-  "Travel · Transport",
-  "Meals",
-  "Office · Supplies",
-  "Contractor · 1099-NEC"
-];
 
 function bestPattern(t: LiveTransaction): string {
   // Most distinctive token from the payee for the override pattern

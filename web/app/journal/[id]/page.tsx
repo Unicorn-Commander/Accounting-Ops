@@ -7,6 +7,20 @@ import { getActiveContext } from "@/lib/active-context";
 import { formatAmount, shortHash, type JournalEntry } from "@/lib/journal";
 import { shortDate } from "@/lib/transactions";
 import { cn } from "@/lib/cn";
+import { CategorizeAction } from "@/components/categorize-transaction";
+
+// Bookkeeper floor — mirrors app.tenancy._ROLE_ORDER (bookkeeper and above).
+// Matches the require_role(ctx.workspace, "bookkeeper") floor the backend
+// enforces on POST .../transactions/{id}/categorize.
+const BOOKKEEPER_FLOOR_ROLES = [
+  "owner",
+  "admin",
+  "accountant",
+  "bookkeeper",
+  "cpa",
+  "client_owner",
+  "platform_admin"
+];
 
 const INTERNAL_BASE =
   process.env.INTERNAL_API_BASE_URL ??
@@ -79,6 +93,21 @@ export default async function JournalEntryPage(props: {
             </div>
           }
         />
+
+        {entry.status === "posted" && (
+          <Card className="mb-4">
+            <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-ink-tertiary">
+              Categorize
+            </h3>
+            <CategorizeAction
+              workspaceId={ctx.activeWorkspace.id}
+              entityId={entry.entity_id}
+              transactionId={entry.id}
+              currentCategory={entry.category}
+              canCategorize={BOOKKEEPER_FLOOR_ROLES.includes(ctx.activeWorkspace.role)}
+            />
+          </Card>
+        )}
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <Card>
