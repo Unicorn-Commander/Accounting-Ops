@@ -87,6 +87,65 @@ TOKEN_BYTES = 32  # 256 bits — exceeds the 32-byte minimum the brief mandates
 _EMAIL_RX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 
+async def _write_membership_audit(
+    session: Any,
+    *,
+    workspace: WorkspaceContext,
+    action: str,
+    target_user_id: UUID | None = None,
+    invited_email: str | None = None,
+    old_role: str | None = None,
+    new_role: str | None = None,
+    old_entity_scope: Any = None,
+    new_entity_scope: Any = None,
+    invitation_id: str | None = None,
+) -> None:
+    """Append one membership event in the same transaction as its mutation.
+
+    This is deliberately transaction-failing: an audit insert error rolls back
+    the membership mutation, matching the approvals house pattern. The table is
+    public and RLS-isolated, so set the transaction-local workspace GUC first.
+    """
+    import json
+
+    def scope_json(scope: Any) -> str | None:
+        if scope is None:
+            return None
+        return json.dumps([str(entity_id) for entity_id in scope])
+
+    await session.execute(
+        text("SELECT set_config('app.current_workspace', :wid, true)"),
+        {"wid": str(workspace.workspace_id)},
+    )
+    await session.execute(
+        text(
+            """
+            INSERT INTO public.membership_audit (
+                workspace_id, actor_uc_uid, action, target_user_id,
+                invited_email, invitation_id, old_role, new_role,
+                old_entity_scope, new_entity_scope
+            ) VALUES (
+                :workspace_id, :actor_uc_uid, :action, :target_user_id,
+                :invited_email, :invitation_id, :old_role, :new_role,
+                CAST(:old_entity_scope AS jsonb), CAST(:new_entity_scope AS jsonb)
+            )
+            """
+        ),
+        {
+            "workspace_id": str(workspace.workspace_id),
+            "actor_uc_uid": workspace.user_uc_uid,
+            "action": action,
+            "target_user_id": str(target_user_id) if target_user_id else None,
+            "invited_email": invited_email,
+            "invitation_id": str(invitation_id) if invitation_id else None,
+            "old_role": old_role,
+            "new_role": new_role,
+            "old_entity_scope": scope_json(old_entity_scope),
+            "new_entity_scope": scope_json(new_entity_scope),
+        },
+    )
+
+
 def _hash_token(raw: str) -> str:
     """SHA-256 hex of the token. Constant-time compare on lookup."""
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -198,6 +257,7 @@ async def update_member(
                         """
                         SELECT m.id::text AS membership_id,
                                m.role::text AS old_role,
+                               m.entity_scope AS old_entity_scope,
                                u.uc_uid     AS uc_uid
                         FROM public.workspace_membership m
                         JOIN public.user_account u ON u.id = m.user_id
@@ -264,6 +324,20 @@ async def update_member(
                 ),
                 params,
             )
+            await _write_membership_audit(
+                session,
+                workspace=workspace,
+                action="role_change" if patch.role is not None else "entity_scope_change",
+                target_user_id=user_id,
+                old_role=row.old_role,
+                new_role=patch.role or row.old_role,
+                old_entity_scope=row.old_entity_scope,
+                new_entity_scope=(
+                    [str(entity_id) for entity_id in patch.entity_scope]
+                    if patch.entity_scope is not None
+                    else row.old_entity_scope
+                ),
+            )
     return {"ok": True, "user_id": str(user_id)}
 
 
@@ -287,7 +361,7 @@ async def remove_member(
                 await session.execute(
                     text(
                         """
-                        SELECT m.role::text AS role, u.uc_uid
+                        SELECT m.role::text AS role, u.uc_uid, m.entity_scope
                         FROM public.workspace_membership m
                         JOIN public.user_account u ON u.id = m.user_id
                         WHERE m.workspace_id = :wid AND m.user_id = :uid
@@ -328,6 +402,14 @@ async def remove_member(
                     "WHERE workspace_id = :wid AND user_id = :uid"
                 ),
                 {"wid": str(workspace.workspace_id), "uid": str(user_id)},
+            )
+            await _write_membership_audit(
+                session,
+                workspace=workspace,
+                action="removal",
+                target_user_id=user_id,
+                old_role=row.role,
+                old_entity_scope=row.entity_scope,
             )
     return {"ok": True, "removed_user_id": str(user_id)}
 
@@ -526,6 +608,20 @@ async def create_invitation(
                     related_invitation_id=invitation_id,
                 )
 
+            await _write_membership_audit(
+                session,
+                workspace=workspace,
+                action="invitation_create",
+                invited_email=email,
+                new_role=body.role,
+                new_entity_scope=(
+                    [str(entity_id) for entity_id in body.entity_scope]
+                    if body.entity_scope is not None
+                    else None
+                ),
+                invitation_id=str(invitation_id),
+            )
+
     return {
         "id": str(invitation_id),
         "email": email,
@@ -597,6 +693,12 @@ async def cancel_invitation(
             )
             if res.rowcount == 0:
                 raise HTTPException(status_code=404, detail="invitation not found")
+            await _write_membership_audit(
+                session,
+                workspace=workspace,
+                action="invitation_cancel",
+                invitation_id=str(invitation_id),
+            )
     return {"ok": True, "id": str(invitation_id)}
 
 
@@ -898,6 +1000,37 @@ async def accept_invitation(
                     """
                 ),
                 {"id": inv.id, "uid": str(user_id)},
+            )
+            accept_workspace = WorkspaceContext(
+                workspace_id=inv.workspace_id,
+                workspace_slug=inv.workspace_slug,
+                role=inv.role,
+                user_uc_uid=auth_ctx.uc_uid,
+                agent_id=getattr(auth_ctx, "agent_id", None),
+                entity_scope=None,
+                hipaa_protected=False,
+            )
+            await _write_membership_audit(
+                session,
+                workspace=accept_workspace,
+                action="invitation_accept",
+                target_user_id=user_id,
+                invited_email=inv.email,
+                old_role=existing_row.role if existing_row is not None else None,
+                new_role=(
+                    inv.role
+                    if existing_row is None or invite_rank > existing_rank
+                    else existing_row.role
+                ),
+                old_entity_scope=(
+                    existing_row.entity_scope if existing_row is not None else None
+                ),
+                new_entity_scope=(
+                    inv.entity_scope
+                    if existing_row is None or invite_rank > existing_rank
+                    else existing_row.entity_scope
+                ),
+                invitation_id=inv.id,
             )
 
     return {

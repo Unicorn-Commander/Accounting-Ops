@@ -38,6 +38,10 @@ class Session:
 
     async def execute(self, sql, params):
         self.calls.append((str(sql), params))
+        if "set_config('app.current_workspace'" in str(sql):
+            return SimpleNamespace(first=lambda: None)
+        if "INSERT INTO public.membership_audit" in str(sql):
+            return SimpleNamespace(first=lambda: None)
         row = next(self.rows)
         return SimpleNamespace(first=lambda: row)
 
@@ -60,13 +64,22 @@ async def test_manual_owner_hash_only_and_no_outbox(monkeypatch):
         email="member@example.test", role="viewer", delivery_mode="manual_link", ttl_days=2), ctx)
     mail.assert_not_awaited()
     raw = parse_qs(urlsplit(result["delivery"]["accept_url"]).query)["token"][0]
-    insert = session.calls[-1][1]
+    insert = next(params for sql, params in session.calls if "workspace_invitation" in sql and "INSERT" in sql)
     assert insert["token_hash"] == members._hash_token(raw)
     assert raw not in repr(session.calls)
     assert insert["wid"] == str(ctx.workspace_id)
     assert before + timedelta(days=2) <= insert["expires_at"] <= datetime.now(timezone.utc) + timedelta(days=2)
     assert result["delivery"]["status"] == "manual"
     assert not any("outbox" in sql.lower() for sql, _ in session.calls)
+    audit_sql, audit = next(
+        (sql, params) for sql, params in session.calls
+        if "INSERT INTO public.membership_audit" in sql
+    )
+    assert "workspace_id, actor_uc_uid, action" in audit_sql
+    assert audit["actor_uc_uid"] == ctx.user_uc_uid
+    assert audit["action"] == "invitation_create"
+    assert audit["invited_email"] == "member@example.test"
+    assert raw not in repr(audit)
 
 
 @pytest.mark.asyncio
@@ -81,6 +94,7 @@ async def test_default_email_still_sends(monkeypatch):
     assert result["delivery"] == {"status": "sent"}
     assert "accept_url" not in result
     assert mail.await_args.kwargs["related_invitation_id"]
+    assert sum("INSERT INTO public.membership_audit" in sql for sql, _ in session.calls) == 1
 
 
 @pytest.mark.asyncio
