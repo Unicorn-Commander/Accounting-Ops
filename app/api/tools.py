@@ -199,7 +199,7 @@ async def http_categorize_transaction(
     body: CategorizeRequest,
     ctx: EntityContext = Depends(resolve_entity),
 ) -> dict:
-    require_role(ctx.workspace, "accountant")
+    require_role(ctx.workspace, "bookkeeper")
     try:
         return await categorize_transaction(
             ctx.workspace.workspace_id,
@@ -225,7 +225,7 @@ async def http_ai_categorize_pending(
     suggestions into the review queue — never auto-posts. Pass ``dry_run=true``
     to preview the model's suggestions without writing them.
     """
-    require_role(ctx.workspace, "accountant")
+    require_role(ctx.workspace, "bookkeeper")
     return await ai_categorize_pending(
         ctx.workspace.workspace_id,
         ctx.entity_id,
@@ -239,7 +239,7 @@ async def http_ai_categorize_pending(
 async def http_link_receipt(
     body: LinkReceiptRequest, ctx: EntityContext = Depends(resolve_entity)
 ) -> dict:
-    require_role(ctx.workspace, "accountant")
+    require_role(ctx.workspace, "bookkeeper")
     try:
         return await link_receipt_to_transaction(
             ctx.workspace.workspace_id,
@@ -295,7 +295,7 @@ async def http_propose_payment(
     body: PaymentProposalRequest,
     ctx: EntityContext = Depends(resolve_entity),
 ) -> dict:
-    require_role(ctx.workspace, "accountant")
+    require_role(ctx.workspace, "bookkeeper")
     try:
         return await propose_payment(
             ctx.workspace.workspace_id,

@@ -308,7 +308,7 @@ async def analyze_pending_approvals(
 
     Role floor: accountant.
     """
-    ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")
     submitter_kind = "service_token" if ctx.agent_id else "user"
     submitter_id = ctx.agent_id or ctx.user_uc_uid
 

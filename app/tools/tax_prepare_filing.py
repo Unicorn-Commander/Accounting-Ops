@@ -59,7 +59,7 @@ async def tax_prepare_filing(
     DRAFT — re-rendered with a DRAFT watermark until reviewed or self-certified.
     Role floor: accountant.
     """
-    ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")  # noqa: F841
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")  # noqa: F841
 
     kind = (kind or "").strip().lower()
     if kind not in _SUPPORTED_KINDS:

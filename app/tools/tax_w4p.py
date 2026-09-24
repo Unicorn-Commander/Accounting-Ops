@@ -74,7 +74,7 @@ async def tax_fill_w4p(
     DRAFT — re-rendered with a DRAFT watermark until reviewed or self-certified.
     Role floor: accountant.
     """
-    ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")  # noqa: F841
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")  # noqa: F841
 
     auth = current_auth()
     creator = (auth.agent_id or auth.uc_uid) if auth else None

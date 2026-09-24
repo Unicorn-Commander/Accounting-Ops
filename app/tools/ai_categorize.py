@@ -97,7 +97,7 @@ async def ai_categorize_pending(
 
     Role floor: accountant.
     """
-    ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")
 
     # Allowed COA categories — the LLM may ONLY pick from these. Local import
     # avoids a circular import (posting <-> categorization).

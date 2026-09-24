@@ -137,7 +137,7 @@ async def propose_submission(
     body: ProposeBody,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict[str, Any]:
-    require_role(workspace, "accountant")
+    require_role(workspace, "bookkeeper")
     assert_entity_in_scope(workspace, entity_id)
 
     # Validate the channel name up front (clear 404 vs a generic FeatureDisabled).

@@ -62,7 +62,7 @@ async def tax_compute_1040(
     deterministic engine (Rev. Proc. 2024-40 / 2025-32 / OBBBA). DRAFT until
     reviewed or self-certified. Role floor: accountant.
     """
-    ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")  # noqa: F841
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")  # noqa: F841
 
     built = build_1040_computed(
         tax_year,

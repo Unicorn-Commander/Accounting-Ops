@@ -40,7 +40,7 @@ async def link_receipt_to_transaction(
     the same (receipt, transaction) returns the existing link rather than
     duplicating. Returns the recon_link id and the linked ids.
     """
-    ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")
 
     async with entity_session(SessionLocal, workspace_id, entity_id) as (session, eid):
         # Both sides must live in THIS entity. A missing side (wrong entity or

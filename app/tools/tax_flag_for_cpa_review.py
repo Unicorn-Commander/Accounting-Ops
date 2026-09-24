@@ -78,7 +78,7 @@ async def flag_for_cpa_review(
 
     Role floor: accountant.
     """
-    ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")
 
     confidence = (confidence or "medium").strip().lower()
     if confidence not in _VALID_CONFIDENCE:

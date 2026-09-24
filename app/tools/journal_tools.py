@@ -535,6 +535,7 @@ async def post_journal_entry(
     user_confirmed: bool = False,
     reasoning_trace: str = "",
     model_version: str = "",
+    force_queue: bool = False,
 ) -> dict[str, Any]:
     """Atomically post a transaction to the journal (full materiality gate).
 
@@ -581,7 +582,7 @@ async def post_journal_entry(
 
     Role floor: accountant.
     """
-    ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")
 
     _validate_post_arguments(
         source=source,
@@ -684,6 +685,7 @@ async def post_journal_entry(
             approving_human_uc_uid=approving_human,
             reasoning_trace=reasoning_trace,
             model_version=model_version,
+            force_queue=force_queue or getattr(ctx, "role", "accountant") == "bookkeeper",
         )
 
         if isinstance(result, PostingRefusal) and result.outcome in {

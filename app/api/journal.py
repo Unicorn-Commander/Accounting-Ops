@@ -452,7 +452,7 @@ async def post_entry(
     Returns 201 with entry_id on success; 200 with outcome='queued_for_confirm'
     or 'blocked_*' on refusal. Idempotent on (entity_id, source, source_external_id).
     """
-    require_role(workspace, "accountant")
+    require_role(workspace, "bookkeeper")
 
     # Check entity mapping: account_entity_mapping must connect the source+ext_id to this entity
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
@@ -501,6 +501,7 @@ async def post_entry(
             user_confirmed=body.user_confirmed,
             reasoning_trace=body.reasoning_trace,
             model_version=body.model_version,
+            force_queue=workspace.role == "bookkeeper",
         )
 
     # FalkorDB projection (best-effort, AFTER the workspace_session commit above).

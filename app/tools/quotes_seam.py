@@ -107,7 +107,7 @@ async def create_invoices_from_quote(
 
     Role floor: accountant.
     """
-    ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")
     _assert_enabled()
     wid = ctx.workspace_id
     if vendor_entity_id is not None:
@@ -167,7 +167,7 @@ async def run_invoice_schedules(
 
     Role floor: accountant.
     """
-    ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")
     _assert_enabled()
     wid = ctx.workspace_id
     scope = assert_entity_in_scope(ctx, entity_id)
