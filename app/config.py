@@ -211,6 +211,7 @@ class Settings(BaseModel):
     # URL of the accounting-ops-cpa-export sidecar. Defaults to the docker DNS
     # name used in the compose stack; override with CPA_EXPORT_URL in production.
     cpa_export_url: str = "http://accounting-ops-cpa-export:8001"
+    cpa_export_token: str = ""
     # 512 gives the JSON response room even if thinking suppression is unavailable.
     # With chat_template_kwargs enable_thinking=False (sent by the categorizer),
     # the actual output is ~150 tokens; the higher ceiling is a safety net for
@@ -413,6 +414,7 @@ def get_settings() -> Settings:
         narrative_llm_api_key=os.getenv("NARRATIVE_LLM_API_KEY", defaults.narrative_llm_api_key),
         ocr_bbox_service_url=os.getenv("OCR_BBOX_SERVICE_URL", defaults.ocr_bbox_service_url),
         cpa_export_url=os.getenv("CPA_EXPORT_URL", defaults.cpa_export_url),
+        cpa_export_token=os.getenv("CPA_EXPORT_TOKEN", defaults.cpa_export_token),
         llm_gateway_base_url=os.getenv(
             "LLM_GATEWAY_BASE_URL", defaults.llm_gateway_base_url
         ),

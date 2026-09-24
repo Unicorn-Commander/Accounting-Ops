@@ -21,9 +21,8 @@ they do NOT require a running Postgres instance or Keycloak. We patch
 workspace resolution and entity-scope checks to let the request reach the
 handler.
 
-File-system setup: a temporary /drafts directory is created with a minimal
-sample .md file. The DRAFTS_DIR env var (read by specialist_pdf._DRAFTS_DIR)
-is pointed at it.
+File-system setup: a temporary tenant-scoped /drafts directory is created with
+a minimal sample .md file. The module's DRAFTS_DIR path is pointed at it.
 """
 from __future__ import annotations
 
@@ -86,7 +85,8 @@ def drafts_dir(tmp_path: Path) -> Path:
     d = tmp_path / "drafts"
     d.mkdir()
     # Place a sample draft matching the slug "form-1120" for year 2023.
-    sample = d / "mu-inc-2023-form-1120-draft.md"
+    sample = d / str(_WORKSPACE_ID) / str(_ENTITY_ID) / "2023-form-1120-draft.md"
+    sample.parent.mkdir(parents=True)
     sample.write_text(
         "# Form 1120 — 2023 Draft\n\n**Entity:** Acme Inc.\n\n"
         "## Revenue Summary\n\n| Line | Amount |\n|------|--------|\n| 1a | $48,250 |\n",
