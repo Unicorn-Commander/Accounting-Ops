@@ -105,6 +105,17 @@ async def test_insufficient_role_denied(monkeypatch):
         mcp_auth._current_auth.reset(token)
 
 
+async def test_bookkeeper_passes_proposal_floor_but_not_accountant_floor(monkeypatch):
+    monkeypatch.setattr(mcp_auth, "_resolve_membership", _membership("bookkeeper"))
+    token = _set_auth(_auth())
+    try:
+        await authorize_workspace(WS_A, ENT_IN, min_role="bookkeeper")
+        with pytest.raises(PermissionError):
+            await authorize_workspace(WS_A, ENT_IN, min_role="accountant")
+    finally:
+        mcp_auth._current_auth.reset(token)
+
+
 async def test_consolidated_requires_unscoped(monkeypatch):
     """A scoped member must not get a full-workspace consolidated view."""
     monkeypatch.setattr(

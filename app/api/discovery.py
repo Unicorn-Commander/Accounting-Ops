@@ -64,10 +64,10 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
 
     # ----- Approval queue ---------------------------------------------------
     # analyze_pending_approvals writes recommendations rows so it is NOT read-only.
-    "analyze_pending_approvals":     {"min_role": "accountant", "read_only": False, "latency_ms": 1200},
+    "analyze_pending_approvals":     {"min_role": "bookkeeper", "read_only": False, "latency_ms": 1200},
     # ai_categorize_pending runs the LLM over uncategorized rows + writes suggestions
     # into payloads — NOT read-only; latency scales with the row count (LLM per row).
-    "ai_categorize_pending":         {"min_role": "accountant", "read_only": False, "latency_ms": 8000},
+    "ai_categorize_pending":         {"min_role": "bookkeeper", "read_only": False, "latency_ms": 8000},
     "list_pending_approvals":        {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
     "list_approval_recommendations": {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
     "decide_approval":               {"min_role": "admin",      "read_only": False, "latency_ms": 800},
@@ -81,8 +81,8 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     "query_specialty_rules":         {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
 
     # ----- Entity-scoped writes --------------------------------------------
-    "categorize_transaction":        {"min_role": "accountant", "read_only": False, "latency_ms": 800},
-    "link_receipt_to_transaction":   {"min_role": "accountant", "read_only": False, "latency_ms": 600},
+    "categorize_transaction":        {"min_role": "bookkeeper", "read_only": False, "latency_ms": 800},
+    "link_receipt_to_transaction":   {"min_role": "bookkeeper", "read_only": False, "latency_ms": 600},
     # add_specialty_rule writes a specialty_rule row → admin floor.
     "add_specialty_rule":            {"min_role": "admin",      "read_only": False, "latency_ms": 800},
 
@@ -116,7 +116,7 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     "get_journal_entry":             {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
     "verify_journal_chain":          {"min_role": "viewer",     "read_only": True,  "latency_ms": 600},
     "list_posting_log":              {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
-    "post_journal_entry":            {"min_role": "accountant", "read_only": False, "latency_ms": 800},
+    "post_journal_entry":            {"min_role": "bookkeeper", "read_only": False, "latency_ms": 800},
     "list_closed_periods":           {"min_role": "viewer",     "read_only": True,  "latency_ms": 200},
     "close_period":                  {"min_role": "admin",      "read_only": False, "latency_ms": 800},
 
@@ -129,8 +129,8 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     "void_invoice":                  {"min_role": "accountant", "read_only": False, "latency_ms": 700},
     "record_payment":                {"min_role": "accountant", "read_only": False, "latency_ms": 700},
     # Quotes seam: DRAFT invoices/schedules/partner bill from an accepted quote (no posting).
-    "create_invoices_from_quote":    {"min_role": "accountant", "read_only": False, "latency_ms": 1200},
-    "run_invoice_schedules":         {"min_role": "accountant", "read_only": False, "latency_ms": 900},
+    "create_invoices_from_quote":    {"min_role": "bookkeeper", "read_only": False, "latency_ms": 1200},
+    "run_invoice_schedules":         {"min_role": "bookkeeper", "read_only": False, "latency_ms": 900},
     "list_invoice_schedules":        {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
 
     # ----- Connectors / mappings / overrides / credentials -----------------
@@ -156,17 +156,17 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     "get_period_journal":            {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
     "get_1099_payees":               {"min_role": "viewer",     "read_only": True,  "latency_ms": 400},
     # draft_memo and flag_for_cpa_review write tax_review_queue / memo rows.
-    "draft_memo":                    {"min_role": "accountant", "read_only": False, "latency_ms": 800},
-    "flag_for_cpa_review":           {"min_role": "accountant", "read_only": False, "latency_ms": 600},
+    "draft_memo":                    {"min_role": "bookkeeper", "read_only": False, "latency_ms": 800},
+    "flag_for_cpa_review":           {"min_role": "bookkeeper", "read_only": False, "latency_ms": 600},
     # tax_fill_w4p prepares a finished W-4P work-product (reads a 1099-R + runs
     # the deterministic worksheet, writes a work_product DRAFT row).
-    "tax_fill_w4p":                  {"min_role": "accountant", "read_only": False, "latency_ms": 1200},
+    "tax_fill_w4p":                  {"min_role": "bookkeeper", "read_only": False, "latency_ms": 1200},
     # tax_prepare_filing creates a CP504 / ST-3 / 1040 work-product from
     # provenance-bearing fields (writes a work_product DRAFT row).
-    "tax_prepare_filing":            {"min_role": "accountant", "read_only": False, "latency_ms": 900},
+    "tax_prepare_filing":            {"min_role": "bookkeeper", "read_only": False, "latency_ms": 900},
     # tax_compute_1040 runs the deterministic engine over a client's income to
     # produce a computed 1040 work-product (writes a work_product DRAFT row).
-    "tax_compute_1040":              {"min_role": "accountant", "read_only": False, "latency_ms": 1100},
+    "tax_compute_1040":              {"min_role": "bookkeeper", "read_only": False, "latency_ms": 1100},
 
     # ----- Entity ownership (the Schedule K-1 input) -----------------------
     # upsert_entity_owner writes books.entity_owner (+ a decision_audit row) —

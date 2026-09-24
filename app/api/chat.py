@@ -960,7 +960,7 @@ async def save_chat_message_as_memo(
 
     Role floor: accountant (the queue itself is gated at accountant).
     """
-    require_role(workspace, "accountant")
+    require_role(workspace, "bookkeeper")
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         loaded = await _load_session_row(session, session_id)

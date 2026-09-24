@@ -524,6 +524,7 @@ async def post_journal_entry(
     counterparty_id: UUID | None = None,
     event_id: UUID | None = None,
     expected_account_pair: AccountPair | None = None,
+    force_queue: bool = False,
 ) -> PostingOutcome | PostingRefusal:
     """Atomic post with materiality gate + hash chain advance.
 
@@ -548,6 +549,12 @@ async def post_journal_entry(
         has_receipt_link=has_receipt_link,
         user_confirmed=user_confirmed,
     )
+    if force_queue and verdict.outcome == "auto_post":
+        verdict = MaterialityVerdict(
+            tier=verdict.tier,
+            outcome="queue_for_confirm",
+            reason="Bookkeeper proposals require accountant review.",
+        )
     if verdict.outcome != "auto_post":
         outcome_map = {
             "queue_for_confirm": "queued_for_confirm",
@@ -1236,6 +1243,7 @@ async def post_correction(
     reasoning: str,
     actor_uc_uid: str,
     actor_agent_id: str | None = None,
+    force_queue: bool = False,
 ) -> CorrectionOutcome | CorrectionQueued | PostingRefusal:
     """Re-categorize a POSTED journal entry, append-only.
 
@@ -1316,6 +1324,12 @@ async def post_correction(
         has_receipt_link=receipt_link_id is not None,
         user_confirmed=False,
     )
+    if force_queue and verdict.outcome == "auto_post":
+        verdict = MaterialityVerdict(
+            tier=verdict.tier,
+            outcome="queue_for_confirm",
+            reason="Bookkeeper proposals require accountant review.",
+        )
     if verdict.outcome != "auto_post":
         # Material (or 274(d)-blocked) correction: queue, do NOT touch the ledger.
         # The structured action is stored in approval_queue.payload so the

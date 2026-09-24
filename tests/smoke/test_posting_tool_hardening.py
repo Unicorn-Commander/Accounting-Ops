@@ -81,6 +81,7 @@ class _FakeSession:
 class _Ctx:
     user_uc_uid = "agent-caller"
     agent_id = "test-agent"
+    role = "accountant"
 
 
 def _valid_args(**overrides: Any) -> dict[str, Any]:
@@ -217,6 +218,7 @@ def _run_tool(
     *,
     session: _FakeSession,
     journal_post: AsyncMock,
+    role: str = "accountant",
     **overrides: Any,
 ) -> dict[str, Any]:
     @contextlib.asynccontextmanager
@@ -237,7 +239,11 @@ def _run_tool(
     kwargs.update(overrides)
 
     with (
-        patch.object(journal_tools, "authorize_workspace", AsyncMock(return_value=_Ctx())),
+        patch.object(
+            journal_tools,
+            "authorize_workspace",
+            AsyncMock(return_value=type("Ctx", (_Ctx,), {"role": role})()),
+        ),
         patch.object(journal_tools, "workspace_session", fake_ws_session),
         patch.object(journal_tools, "_journal_post", journal_post),
         patch("app.journal.pending_post.existing_proposal", AsyncMock(return_value=None)),
@@ -289,6 +295,13 @@ def test_correctly_signed_expense_keeps_sign_matched() -> None:
     jp = _success_post()
     _run_tool(session=session, journal_post=jp, amount_cents=-5_000, sign_matched=True)
     assert jp.call_args.kwargs["sign_matched"] is True
+
+
+def test_bookkeeper_post_is_forced_into_queue() -> None:
+    session = _FakeSession(account_type="expense")
+    jp = _success_post()
+    _run_tool(session=session, journal_post=jp, amount_cents=-5_000, role="bookkeeper")
+    assert jp.call_args.kwargs["force_queue"] is True
 
 
 def test_decision_audit_written_on_successful_post() -> None:

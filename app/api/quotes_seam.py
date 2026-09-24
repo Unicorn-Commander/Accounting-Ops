@@ -173,7 +173,7 @@ async def quote_accepted(
     Role floor: accountant (or the customer-ops M2M actor).
     """
     _assert_enabled()
-    require_role(workspace, "accountant")
+    require_role(workspace, "bookkeeper")
     assert_entity_in_scope(workspace, entity_id)
     if body.vendor_entity_id:
         assert_entity_in_scope(workspace, body.vendor_entity_id)
@@ -234,7 +234,7 @@ async def run_invoice_schedules_route(
     Role floor: accountant.
     """
     _assert_enabled()
-    require_role(workspace, "accountant")
+    require_role(workspace, "bookkeeper")
     scope = assert_entity_in_scope(workspace, entity_id)
     entity_ids: list[str | None]
     if entity_id is not None:

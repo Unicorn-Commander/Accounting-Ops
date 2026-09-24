@@ -49,7 +49,7 @@ async def categorize_transaction(
     preserving the per-entity hash chain. Returns the outcome ('applied' with the
     reversal + restated entry ids, or 'queued_for_approval' with the approval id).
     """
-    ctx = await authorize_workspace(workspace_id, entity_id, min_role="accountant")
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")
 
     async with entity_session(SessionLocal, workspace_id, entity_id) as (session, eid):
         original = (
@@ -108,6 +108,7 @@ async def categorize_transaction(
             reasoning=reasoning,
             actor_uc_uid=ctx.user_uc_uid,
             actor_agent_id=ctx.agent_id,
+            force_queue=getattr(ctx, "role", "accountant") == "bookkeeper",
         )
 
         if isinstance(result, CorrectionOutcome):

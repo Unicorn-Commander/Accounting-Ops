@@ -288,7 +288,7 @@ async def create_work_product(
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict[str, Any]:
     """Prepare a DRAFT work product (the browser's deterministic create path)."""
-    require_role(workspace, "accountant")
+    require_role(workspace, "bookkeeper")
     assert_entity_in_scope(workspace, entity_id)
 
     kind = (body.kind or "").strip().lower()
