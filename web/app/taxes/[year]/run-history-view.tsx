@@ -10,9 +10,11 @@
 //
 // Data is passed as initial props from the Server Component (page.tsx);
 // no client-side refetch on load. A "Refresh" button triggers a manual
-// re-fetch via the web-proxy GET route.
+// re-fetch via the web-proxy GET route. While any run is queued or running
+// the table polls every 5 s, and runs started from the app's "Run drafts"
+// button can be cancelled from the in-progress banner (accountant+).
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -27,6 +29,14 @@ import {
 import { cn } from "@/lib/cn";
 import { Card } from "@/components/primitives";
 import type { SpecialistRun, SpecialistRunsResponse } from "@/lib/specialist-runs";
+import {
+  LAUNCHER_AGENT_ID,
+  cancelUrl,
+  errorMessage,
+  isActive
+} from "@/lib/tax-run-launch";
+
+const POLL_MS = 5000;
 
 // ---------------------------------------------------------------------------
 // Utility helpers
@@ -97,6 +107,10 @@ function StatusBadge({ status }: { status: string }) {
     completed: {
       icon: <CheckCircle2 size={11} />,
       cls: "border-credit/40 bg-credit/[0.08] text-credit"
+    },
+    queued: {
+      icon: <Clock size={11} />,
+      cls: "border-brand-500/30 bg-brand-500/[0.04] text-brand-300"
     },
     running: {
       icon: <Loader2 size={11} className="animate-spin" />,
@@ -340,6 +354,7 @@ const STATUS_OPTIONS = [
   { value: "all", label: "All statuses" },
   { value: "completed", label: "Completed" },
   { value: "failed", label: "Failed" },
+  { value: "queued", label: "Queued" },
   { value: "running", label: "Running" },
   { value: "cancelled", label: "Cancelled" }
 ];
@@ -353,15 +368,23 @@ export type RunHistoryViewProps = {
   workspaceId: string;
   entityId: string;
   year: number;
+  /** A run the page just launched; merged in so it shows before the next poll. */
+  launchedRun?: SpecialistRun | null;
+  /** Show Cancel on in-app runs (accountant+; the backend re-checks). */
+  canCancel?: boolean;
 };
 
 export function RunHistoryView({
   initialRuns,
   workspaceId,
   entityId,
-  year
+  year,
+  launchedRun = null,
+  canCancel = false
 }: RunHistoryViewProps) {
   const [runs, setRuns] = useState<SpecialistRun[]>(initialRuns);
+  const [cancelling, setCancelling] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [specialistFilter, setSpecialistFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -404,6 +427,70 @@ export function RunHistoryView({
     }
   }, [workspaceId, entityId, year, specialistFilter, statusFilter]);
 
+  // Merge a just-launched run so it is visible immediately.
+  useEffect(() => {
+    if (!launchedRun) return;
+    setRuns((prev) =>
+      prev.some((r) => r.id === launchedRun.id) ? prev : [launchedRun, ...prev]
+    );
+  }, [launchedRun]);
+
+  const anyActive = runs.some(isActive);
+
+  // Poll (unfiltered) while something is queued or running.
+  useEffect(() => {
+    if (!anyActive) return;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const params = new URLSearchParams({
+          entity_id: entityId,
+          tax_year: String(year)
+        });
+        const res = await fetch(
+          `/api/workspaces/${workspaceId}/specialist-runs?${params}`,
+          { cache: "no-store" }
+        );
+        if (res.ok && !stopped) {
+          const data = (await res.json()) as SpecialistRunsResponse;
+          setRuns(data.items);
+        }
+      } catch {
+        // transient; the next tick retries
+      }
+    };
+    const id = window.setInterval(tick, POLL_MS);
+    return () => {
+      stopped = true;
+      window.clearInterval(id);
+    };
+  }, [anyActive, workspaceId, entityId, year]);
+
+  const handleCancel = useCallback(
+    async (runId: string) => {
+      setCancelling(runId);
+      setCancelError(null);
+      try {
+        const res = await fetch(cancelUrl(workspaceId, runId), {
+          method: "POST",
+          cache: "no-store"
+        });
+        if (!res.ok) {
+          setCancelError(await errorMessage(res));
+          return;
+        }
+        setRuns((prev) =>
+          prev.map((r) => (r.id === runId ? { ...r, status: "cancelled" } : r))
+        );
+      } catch {
+        setCancelError("Network error — the run was not cancelled.");
+      } finally {
+        setCancelling(null);
+      }
+    },
+    [workspaceId]
+  );
+
   const visible = useMemo(() => {
     return runs.filter((r) => {
       if (specialistFilter && r.specialist_id !== specialistFilter) return false;
@@ -412,18 +499,46 @@ export function RunHistoryView({
     });
   }, [runs, specialistFilter, statusFilter]);
 
-  const hasRunning = runs.some((r) => r.status === "running");
+  const activeRuns = runs.filter(isActive);
 
   return (
     <div className="space-y-4">
       {/* Info banner for active runs */}
-      {hasRunning && (
-        <div className="flex items-center gap-2 rounded-lg border border-brand-500/30 bg-brand-500/[0.06] px-4 py-2.5 text-xs text-brand-300">
-          <Loader2 size={13} className="animate-spin shrink-0" />
-          <span>
-            {runs.filter((r) => r.status === "running").length} run(s) currently in
-            progress. Refresh to see latest status.
-          </span>
+      {activeRuns.length > 0 && (
+        <div className="space-y-2 rounded-lg border border-brand-500/30 bg-brand-500/[0.06] px-4 py-2.5 text-xs text-brand-300">
+          <div className="flex items-center gap-2">
+            <Loader2 size={13} className="animate-spin shrink-0" />
+            <span>
+              {activeRuns.length} run(s) queued or in progress. Status updates
+              every few seconds.
+            </span>
+          </div>
+          {activeRuns
+            .filter((r) => r.agent_token_id === LAUNCHER_AGENT_ID)
+            .map((r) => (
+              <div key={r.id} className="flex items-center gap-2 pl-5">
+                <span className="text-ink-secondary">
+                  {specialistLabel(r.specialist_id)} · {r.status} · started{" "}
+                  {formatTimestamp(r.started_at)}
+                </span>
+                {canCancel && (
+                  <button
+                    type="button"
+                    onClick={() => handleCancel(r.id)}
+                    disabled={cancelling === r.id}
+                    className="ml-auto inline-flex items-center gap-1 rounded-md border border-debit/40 px-2 py-0.5 text-[11px] text-debit hover:bg-debit/[0.08] disabled:opacity-50"
+                  >
+                    {cancelling === r.id ? (
+                      <Loader2 size={11} className="animate-spin" />
+                    ) : (
+                      <XCircle size={11} />
+                    )}
+                    Cancel run
+                  </button>
+                )}
+              </div>
+            ))}
+          {cancelError && <p className="pl-5 text-debit">{cancelError}</p>}
         </div>
       )}
 
@@ -473,8 +588,8 @@ export function RunHistoryView({
               No runs recorded yet for {year}.
             </p>
             <p className="max-w-sm text-xs text-ink-tertiary">
-              When a specialist runs, its metadata (model, tokens, duration,
-              output) will appear here automatically.
+              When a specialist runs (from &ldquo;Run drafts&rdquo; or a
+              script), its metadata (model, duration, output) appears here.
             </p>
           </div>
         </Card>
