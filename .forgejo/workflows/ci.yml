@@ -124,7 +124,7 @@ jobs:
     steps:
       - name: Install toolchain (git, python, compose plugin)
         run: |
-          apk add --no-cache git python3 py3-pip make docker-cli-compose bash
+          apk add --no-cache git nodejs python3 py3-pip make docker-cli-compose bash
           python3 --version
           docker version
           docker compose version
