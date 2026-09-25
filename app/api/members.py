@@ -40,6 +40,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -422,7 +423,7 @@ async def remove_member(
 def _accept_url(token: str) -> str:
     settings = get_settings()
     base = (settings.public_base_url or "https://accounting.magicunicorn.dev").rstrip("/")
-    return f"{base}/api/invitations/accept?token={token}"
+    return f"{base}/invite/accept?token={quote(token, safe='')}"
 
 
 def _invite_email_body(
