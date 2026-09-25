@@ -1,8 +1,8 @@
 """Quotes seam HTTP routes (Customer-Ops ``quote.accepted`` → DRAFT paper).
 
-  POST /api/workspaces/{wid}/entities/{eid}/quotes/accepted   — the seam (M2M or accountant)
+  POST /api/workspaces/{wid}/entities/{eid}/quotes/accepted   — the seam (M2M or bookkeeper)
   GET  /api/workspaces/{wid}/invoice-schedules                — list (viewer)
-  POST /api/workspaces/{wid}/invoice-schedules/run            — generate due drafts (accountant)
+  POST /api/workspaces/{wid}/invoice-schedules/run            — generate due drafts (bookkeeper)
 
 The seam endpoint rides a WRITE variant of the trusted machine-to-machine rail
 (``resolve_workspace_for_quotes_seam``). The existing federation dependency
@@ -170,7 +170,7 @@ async def quote_accepted(
     201 when anything was created, 200 on a pure replay (same ids, nothing new).
     Never issues, never posts a journal entry. Errors carry
     ``{code, reason, federated}`` so Customer-Ops can record the adapter status.
-    Role floor: accountant (or the customer-ops M2M actor).
+    Role floor: bookkeeper (or the customer-ops M2M actor). Produces drafts only.
     """
     _assert_enabled()
     require_role(workspace, "bookkeeper")
@@ -231,7 +231,7 @@ async def run_invoice_schedules_route(
     """Generate the next DRAFT for every schedule due by ``as_of`` (default today).
 
     Idempotent per period; closed periods are skipped and reported. Never posts.
-    Role floor: accountant.
+    Role floor: bookkeeper. Produces drafts only; never issues or posts.
     """
     _assert_enabled()
     require_role(workspace, "bookkeeper")

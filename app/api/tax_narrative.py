@@ -31,7 +31,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import subprocess
 import tempfile
 from typing import Any
 from uuid import UUID, uuid4
@@ -42,6 +41,7 @@ from sqlalchemy import text
 
 from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
+from app.narrative_config import NarrativeLLMConfig, narrative_child_env, resolve_narrative_llm
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
 
@@ -186,11 +186,14 @@ async def _run_narrative_generator(
         "--backend", "openai",
         "--llm-endpoint-url", llm_endpoint_url,
         "--llm-model", llm_model,
-        "--llm-api-key", llm_api_key,
         "--verbose",
     ]
 
-    env = {**os.environ, "ACCTOPS_SERVICE_TOKEN": service_token}
+    env = narrative_child_env(
+        service_token=service_token,
+        mcp_url=mcp_url,
+        config=NarrativeLLMConfig(llm_endpoint_url, llm_model, llm_api_key),
+    )
 
     log.info(
         "[narrative] Starting generator run_id=%s entity=%s year=%s",
@@ -267,16 +270,17 @@ async def trigger_tax_narrative(
 
     run_id = str(uuid4())
 
-    # Resolve configuration from environment — same defaults as the CLI runner.
+    # Resolve configuration from the dedicated narrative settings.
     service_token = (
         os.environ.get("ACCTOPS_SERVICE_TOKEN")
         or os.environ.get("CPA_EXPORT_TOKEN")
         or ""
     )
     mcp_url = os.environ.get("ACCTOPS_MCP_URL", "http://localhost:8000/mcp")
-    llm_endpoint_url = os.environ.get("LLM_ENDPOINT_URL", "http://localhost:8088/v1")
-    llm_model = os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-4.6")
-    llm_api_key = os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_KEY", ""))
+    llm = resolve_narrative_llm()
+    llm_endpoint_url = llm.endpoint_url
+    llm_model = llm.model
+    llm_api_key = llm.api_key
 
     if not service_token:
         raise HTTPException(

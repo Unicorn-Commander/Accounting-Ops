@@ -849,7 +849,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--llm-api-key", default=None,
         help=(
             "API key for the endpoint. DEPRECATED — visible via `ps`. "
-            "Prefer $LLM_API_KEY, $OPENROUTER_API_KEY, or --llm-api-key-file."
+            "Prefer $NARRATIVE_LLM_API_KEY, $LLM_API_KEY, $OPENROUTER_API_KEY, "
+            "or --llm-api-key-file."
         ),
     )
     parser.add_argument(
@@ -910,7 +911,7 @@ def main(argv: list[str] | None = None) -> None:
         or os.environ.get("LLM_MODEL")
         or _DEFAULT_LLM_MODEL
     )
-    llm_api_key = resolve_llm_api_key(
+    llm_api_key = os.environ.get("NARRATIVE_LLM_API_KEY") or resolve_llm_api_key(
         args.llm_api_key,
         args.llm_api_key_file,
         default=_DEFAULT_LLM_API_KEY,
