@@ -197,8 +197,27 @@ jobs:
       - name: Dump app logs on failure
         if: failure()
         run: |
-          docker compose -p acctops_itest -f docker-compose.yml -f docker-compose.itest.yml \
-            --env-file .env.integration logs app postgres garage || true
+          COMPOSE="docker compose -p acctops_itest -f docker-compose.yml -f docker-compose.itest.yml --env-file .env.integration"
+          $COMPOSE logs app postgres garage || true
+          # Diagnostic only (does not change what's tested or the guard above).
+          # Every HTTP-client test hung for its full client timeout while every
+          # DB-only test passed; this answers whether the app's own DB session
+          # is stuck waiting on a lock (someone else holding it, or blocked on
+          # its own idle-in-transaction connection) versus never reaching
+          # Postgres at all, without guessing again.
+          echo "=== pg_stat_activity (non-idle) ==="
+          PGPW="$(grep '^POSTGRES_PASSWORD=' .env.integration | cut -d= -f2-)"
+          $COMPOSE exec -T -e PGPASSWORD="$PGPW" postgres \
+            psql -U accounting_ops -d accounting_ops -c \
+            "SELECT pid, usename, state, wait_event_type, wait_event, \
+                    now() - query_start AS duration, left(query, 200) AS query \
+             FROM pg_stat_activity WHERE state IS DISTINCT FROM 'idle' \
+             ORDER BY query_start;" || true
+          echo "=== pg_locks (ungranted) ==="
+          $COMPOSE exec -T -e PGPASSWORD="$PGPW" postgres \
+            psql -U accounting_ops -d accounting_ops -c \
+            "SELECT pid, relation::regclass, mode, granted FROM pg_locks \
+             WHERE NOT granted;" || true
 
       - name: Tear down
         if: always()
