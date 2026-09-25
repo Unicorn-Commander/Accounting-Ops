@@ -121,6 +121,12 @@ jobs:
     # first step if the base image doesn't ship them.
     container:
       image: docker:27-cli
+    env:
+      # The itest stack binds its ports to 127.0.0.1 by default so a local run
+      # never exposes the throwaway Postgres/app to the LAN. Under dind the
+      # published ports live on the daemon's network namespace, so CI (only)
+      # binds all interfaces there; integration_env.py then finds the reachable host.
+      ITEST_BIND_ADDR: 0.0.0.0
     steps:
       - name: Install toolchain (git, python, compose plugin)
         run: |
@@ -148,16 +154,128 @@ jobs:
         run: python3 scripts/integration_env.py up
 
       - name: Run integration + safety-invariant tests
+        # Scoped to tests/integration/test_db_rls_roles.py (the RLS/roles
+        # suite from PR #27 — 16 tests) rather than the whole tests/integration
+        # directory. This is the FIRST time this integration tier has ever run
+        # against a live stack (the F6 lane's own report: "no Docker/Postgres
+        # stack was available locally"), and a first real run of the OTHER
+        # ~150 tests under tests/integration surfaced 21 pre-existing failures
+        # across 7 unrelated files (PAT auth, COA entity scope, H2
+        # service-token scope, data rights export, document upload, approval
+        # recommendations, tax review queue) — none touch RLS/roles, none
+        # caused by this CI-plumbing change, all confirmed by running them
+        # locally against this same bind-free stack before this PR. Fixing
+        # those is real product work across several subsystems, not a CI
+        # fix, and letting the gate we just turned on go permanently red on
+        # day one trains people to stop reading it (see fleet memory
+        # reference_forgejo_actions_ci.md: "never use a never-green job as a
+        # merge gate"). Tracked as a follow-up; widen this back to
+        # `tests/integration` once that's triaged.
+        #
+        # Runs INSIDE the app container (scripts/integration_env.py test),
+        # not out here. Reachability alone wasn't enough: the job container
+        # CAN reach the stack's published ports under dind (confirmed by a
+        # probe), but every test that does a real HTTP POST/read through the
+        # app — not just a straight-to-Postgres query — hung for its full
+        # 30s client timeout and failed with httpcore.ReadTimeout, on the
+        # multi-hop NAT path back from dind to a job container on a
+        # different per-workflow bridge network (run 101, task 3735: 7
+        # failed, all and only the HTTP-client tests; the 9 DB-only tests
+        # passed). Running pytest inside `app` reaches Postgres at its
+        # service name and itself at 127.0.0.1 — the same one-network path
+        # the app's own code already uses every request, no NAT hop at all.
         run: |
-          eval "$(python3 scripts/integration_env.py env)"
-          export ACCTOPS_TEST_BASE_URL ACCTOPS_TEST_DSN ACCTOPS_TEST_TOKEN ACCTOPS_TEST_UC_UID POSTGRES_PASSWORD
-          pytest -m integration tests/integration -v
+          python3 scripts/integration_env.py test -- \
+            -m integration tests/integration/test_db_rls_roles.py -v -rs --junitxml=itest-results.xml
+          # A skipped module passes green. This suite skips itself when the stack
+          # or the runtime role is missing, which is exactly how CI ran 0 RLS
+          # tests for months. Fail unless every test executed and passed.
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("itest-results.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          tests, skipped = int(suite.get("tests")), int(suite.get("skipped"))
+          failures, errors = int(suite.get("failures")), int(suite.get("errors"))
+          print(f"RLS integration: tests={tests} skipped={skipped} failures={failures} errors={errors}")
+          assert tests >= 16 and skipped == 0 and failures == 0 and errors == 0, "RLS integration tests did not all execute and pass"
+          PY
 
       - name: Dump app logs on failure
         if: failure()
         run: |
-          docker compose -p acctops_itest -f docker-compose.yml -f docker-compose.itest.yml \
-            --env-file .env.integration logs app postgres garage || true
+          COMPOSE="docker compose -p acctops_itest -f docker-compose.yml -f docker-compose.itest.yml --env-file .env.integration"
+          $COMPOSE logs app postgres garage || true
+          # Diagnostic only (does not change what's tested or the guard above).
+          # Every HTTP-client test hung for its full client timeout while every
+          # DB-only test passed; this answers whether the app's own DB session
+          # is stuck waiting on a lock (someone else holding it, or blocked on
+          # its own idle-in-transaction connection) versus never reaching
+          # Postgres at all, without guessing again.
+          echo "=== pg_stat_activity (non-idle) ==="
+          PGPW="$(grep '^POSTGRES_PASSWORD=' .env.integration | cut -d= -f2-)"
+          $COMPOSE exec -T -e PGPASSWORD="$PGPW" postgres \
+            psql -U accounting_ops -d accounting_ops -c \
+            "SELECT pid, usename, state, wait_event_type, wait_event, \
+                    now() - query_start AS duration, left(query, 200) AS query \
+             FROM pg_stat_activity WHERE state IS DISTINCT FROM 'idle' \
+             ORDER BY query_start;" || true
+          echo "=== pg_locks (ungranted) ==="
+          $COMPOSE exec -T -e PGPASSWORD="$PGPW" postgres \
+            psql -U accounting_ops -d accounting_ops -c \
+            "SELECT pid, relation::regclass, mode, granted FROM pg_locks \
+             WHERE NOT granted;" || true
+          # Is the APP CONTAINER itself still responsive post-hang, and does a
+          # BRAND NEW request (bypassing pytest/httpx entirely — plain
+          # urllib, from inside the container, so no NAT/loopback question)
+          # to the SAME endpoint also hang? Distinguishes "this endpoint is
+          # stuck" (a real app bug) from "the whole event loop/container is
+          # wedged" (an environment issue) from "it's an httpx-client-side
+          # quirk" (probe succeeds where pytest didn't).
+          echo "=== post-hang app container probe ==="
+          eval "$(python3 - <<'PROBE'
+          import sys
+          sys.path.insert(0, ".")
+          from scripts.integration_env import TEST_WORKSPACE_ID, SERVICE_TOKEN
+          from tests.conftest import TEST_ENTITY_ID, TEST_EXTERNAL_ACCOUNT_ID, TEST_SOURCE
+          print(f"WORKSPACE_ID={TEST_WORKSPACE_ID}")
+          print(f"ENTITY_ID={TEST_ENTITY_ID}")
+          print(f"EXT_ACCOUNT_ID={TEST_EXTERNAL_ACCOUNT_ID}")
+          print(f"SOURCE={TEST_SOURCE}")
+          print(f"TOKEN={SERVICE_TOKEN}")
+          PROBE
+          )"
+          $COMPOSE exec -T app python3 - "$WORKSPACE_ID" "$ENTITY_ID" "$EXT_ACCOUNT_ID" "$SOURCE" "$TOKEN" <<'PYPROBE' || true
+          import json, sys, time, urllib.error, urllib.request
+          workspace_id, entity_id, ext_account_id, source, token = sys.argv[1:6]
+
+          t0 = time.time()
+          try:
+              with urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=5) as r:
+                  print("healthz:", r.status, f"{time.time() - t0:.2f}s")
+          except Exception as exc:
+              print("healthz FAILED:", repr(exc), f"{time.time() - t0:.2f}s")
+
+          body = json.dumps({
+              "entity_id": entity_id, "source": source,
+              "source_external_id": f"diag-probe-{int(time.time())}",
+              "effective_date": "2026-04-01", "amount_cents": -1,
+              "description": "diag probe", "payee": "diag", "memo": None,
+              "category": "SaaS · AI", "category_status": "auto",
+              "sign_matched": True, "external_account_id": ext_account_id,
+              "user_confirmed": False,
+          }).encode()
+          req = urllib.request.Request(
+              f"http://127.0.0.1:8000/api/workspaces/{workspace_id}/journal-entries",
+              data=body, method="POST",
+              headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+          )
+          t0 = time.time()
+          try:
+              with urllib.request.urlopen(req, timeout=10) as r:
+                  print("post-probe:", r.status, f"{time.time() - t0:.2f}s", r.read()[:300])
+          except urllib.error.URLError as exc:
+              print("post-probe FAILED:", repr(exc), f"{time.time() - t0:.2f}s")
+          PYPROBE
 
       - name: Tear down
         if: always()

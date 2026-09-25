@@ -25,7 +25,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -321,23 +323,90 @@ def cmd_up(with_cpa: bool) -> None:
           file=sys.stderr)
 
 
+def _resolve_test_host() -> str:
+    """Pick the address the published stack ports are actually reachable at.
+
+    Locally (no DOCKER_HOST, or a unix socket to a LOCAL daemon) this process
+    and the daemon share one network namespace, so 127.0.0.1 is correct —
+    that's the only candidate that will connect, and behavior for a dev
+    running this by hand is unchanged.
+
+    Under the Forgejo docker-in-docker CI sandbox, the daemon (dind) is a
+    SEPARATE container from the one running this script (the job container),
+    and `docker compose`/this script talk to it over DOCKER_HOST. A port
+    dind publishes binds inside DIND'S OWN network namespace — even bound to
+    0.0.0.0 (see docker-compose.itest.yml), "127.0.0.1" from here is this
+    container's own loopback, which is never the same namespace, so it can
+    never connect no matter how long we wait. What IS reachable is dind
+    itself: either by a hostname the runner aliases it to, or by this
+    container's own default-route gateway — which, since dind is the docker
+    engine that created BOTH this container's network and the stack's, is an
+    address dind owns on every network it manages, including the one this
+    container is on. A port published to 0.0.0.0 is reachable there.
+    Rather than assume which of these applies, probe each and use the first
+    one that actually answers on the app port — measured, not guessed.
+    """
+    candidates: list[str] = []
+
+    docker_host = os.environ.get("DOCKER_HOST", "")
+    if docker_host.startswith("tcp://"):
+        candidates.append(docker_host[len("tcp://"):].rsplit(":", 1)[0])
+
+    for name in ("docker", "dind", "host.docker.internal"):
+        try:
+            socket.gethostbyname(name)
+        except OSError:
+            continue
+        candidates.append(name)
+
+    try:
+        with open("/proc/net/route") as f:
+            for line in f.readlines()[1:]:
+                fields = line.split()
+                if len(fields) > 2 and fields[1] == "00000000":  # default route
+                    gw_hex = fields[2]
+                    octets = [gw_hex[i : i + 2] for i in (6, 4, 2, 0)]
+                    candidates.append(".".join(str(int(o, 16)) for o in octets))
+                    break
+    except OSError:
+        pass  # not on Linux (e.g. a dev running this on macOS) — fine, skip.
+
+    candidates.append("127.0.0.1")  # last resort; correct for a local daemon.
+
+    for host in candidates:
+        try:
+            with socket.create_connection((host, HOST_APP_PORT), timeout=3):
+                pass
+        except OSError as exc:
+            print(f"[integration] test host {host!r} unreachable: {exc!r}", file=sys.stderr)
+            continue
+        print(f"[integration] test host resolved: {host!r} (reached :{HOST_APP_PORT})", file=sys.stderr)
+        return host
+
+    raise SystemExit(
+        f"[integration] no candidate host could reach the stack on :{HOST_APP_PORT}. "
+        f"Tried (in order): {candidates!r}. DOCKER_HOST={docker_host!r}."
+    )
+
+
 def cmd_env(with_cpa: bool) -> None:
+    host = _resolve_test_host()
     # Owner DSN: used by the harness for seeding + tamper-injection (the tamper
     # test must DISABLE TRIGGER, an owner-only op — it models an attacker with
     # raw owner access).
-    dsn = f"postgresql://{OWNER_DB_ROLE}:{POSTGRES_PASSWORD}@127.0.0.1:{HOST_PG_PORT}/accounting_ops"
+    dsn = f"postgresql://{OWNER_DB_ROLE}:{POSTGRES_PASSWORD}@{host}:{HOST_PG_PORT}/accounting_ops"
     # Runtime-role DSN: used by the RLS + role-permission tests to prove the
     # least-privilege role canNOT mutate the ledger / disable triggers, and that
     # RLS blocks cross-tenant reads under it.
-    app_dsn = f"postgresql://{RUNTIME_DB_ROLE}:{RUNTIME_DB_PASSWORD}@127.0.0.1:{HOST_PG_PORT}/accounting_ops"
-    print(f'export ACCTOPS_TEST_BASE_URL="http://127.0.0.1:{HOST_APP_PORT}"')
+    app_dsn = f"postgresql://{RUNTIME_DB_ROLE}:{RUNTIME_DB_PASSWORD}@{host}:{HOST_PG_PORT}/accounting_ops"
+    print(f'export ACCTOPS_TEST_BASE_URL="http://{host}:{HOST_APP_PORT}"')
     print(f'export ACCTOPS_TEST_DSN="{dsn}"')
     print(f'export ACCTOPS_TEST_APP_DSN="{app_dsn}"')
     print(f'export ACCTOPS_TEST_TOKEN="{SERVICE_TOKEN}"')
     print(f'export ACCTOPS_TEST_UC_UID="{SERVICE_UC_UID}"')
     print(f'export POSTGRES_PASSWORD="{POSTGRES_PASSWORD}"')
     if with_cpa:
-        print(f'export CPA_EXPORT_URL="http://127.0.0.1:{HOST_CPA_PORT}"')
+        print(f'export CPA_EXPORT_URL="http://{host}:{HOST_CPA_PORT}"')
         print(f'export CPA_EXPORT_TOKEN="{SERVICE_TOKEN}"')
 
 
@@ -346,16 +415,72 @@ def cmd_down() -> None:
     print("[integration] stack + volumes removed.", file=sys.stderr)
 
 
+def cmd_test(pytest_args: list[str]) -> int:
+    """Run pytest INSIDE the `app` container instead of out here.
+
+    `env`'s host-probing (_resolve_test_host) fixed *reachability* under the
+    Forgejo dind sandbox — the job container really can reach the stack's
+    published ports now. What it can't do reliably is carry a full request
+    across that path: every test that only talks to Postgres directly
+    passed, but every test that does a real HTTP POST/read through the app
+    hung for its full 30s client timeout and failed with
+    httpcore.ReadTimeout. The TCP handshake completes (that's what `env`'s
+    probe checks); the multi-hop route through dind's NAT back to a job
+    container on a *different* per-workflow bridge network just isn't a
+    reliable path for a real response body. tests/conftest.py's own
+    ACCTOPS_TEST_* env vars are exactly what lets us sidestep that: point
+    them at what's true FROM INSIDE the app container instead — itself at
+    127.0.0.1, Postgres at its service name `postgres` — the same path the
+    app's own code already uses to reach Postgres/Garage every request, on
+    one compose network, no NAT hop at all.
+
+    Needs `.[dev]` inside the container (the image only ships the
+    `[tax-agents]` runtime extra); installed here rather than baked into
+    the image so production's Dockerfile/image stay untouched.
+    """
+    print("[integration] installing dev extras into the app container", file=sys.stderr)
+    _compose("exec", "-T", "app", "python", "-m", "pip", "install", "--no-cache-dir", "-e", ".[dev]")
+
+    in_container_env = {
+        "ACCTOPS_TEST_BASE_URL": "http://127.0.0.1:8000",
+        "ACCTOPS_TEST_DSN": f"postgresql://{OWNER_DB_ROLE}:{POSTGRES_PASSWORD}@postgres:5432/accounting_ops",
+        "ACCTOPS_TEST_APP_DSN": f"postgresql://{RUNTIME_DB_ROLE}:{RUNTIME_DB_PASSWORD}@postgres:5432/accounting_ops",
+        "ACCTOPS_TEST_TOKEN": SERVICE_TOKEN,
+        "ACCTOPS_TEST_UC_UID": SERVICE_UC_UID,
+        "POSTGRES_PASSWORD": POSTGRES_PASSWORD,
+    }
+    exec_args = ["exec", "-T"]
+    for key, value in in_container_env.items():
+        exec_args += ["-e", f"{key}={value}"]
+    exec_args += ["app", "pytest", *pytest_args]
+
+    print(f"[integration] running in-container: pytest {' '.join(pytest_args)}", file=sys.stderr)
+    result = _compose(*exec_args, check=False)
+
+    # pytest writes its junitxml inside the container (WORKDIR /app); copy it
+    # out so the caller (this script's own process, or CI reading the same
+    # relative path) can read it regardless of the exit code below.
+    for arg in pytest_args:
+        if arg.startswith("--junitxml="):
+            xml_path = arg.split("=", 1)[1]
+            _compose("cp", f"app:/app/{xml_path}", xml_path, check=False)
+            break
+
+    return result.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    for name in ("up", "env", "down"):
+    for name in ("up", "env", "down", "test"):
         p = sub.add_parser(name)
         if name in ("up", "env"):
             p.add_argument(
                 "--with-cpa", action="store_true",
                 help="include the cpa-export sibling service (exports profile)",
             )
+        if name == "test":
+            p.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.cmd == "up":
         cmd_up(args.with_cpa)
@@ -363,6 +488,11 @@ def main() -> int:
         cmd_env(args.with_cpa)
     elif args.cmd == "down":
         cmd_down()
+    elif args.cmd == "test":
+        pytest_args = args.pytest_args
+        if pytest_args and pytest_args[0] == "--":
+            pytest_args = pytest_args[1:]
+        return cmd_test(pytest_args)
     return 0
 
 

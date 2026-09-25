@@ -91,15 +91,38 @@ def _iso_to_ms(value: str | None) -> int | None:
 # themselves on completion.
 _PENDING_PROJECTIONS: set[asyncio.Task] = set()
 
+# Incident 2026-09-25 (Accounting-Ops integration CI): a task scheduled by
+# project() with FalkorDB unreachable took the WHOLE process down with it —
+# not just that one projection. Every request that posted a journal entry
+# hung for its full client timeout with NO Postgres activity and NO app
+# access-log line (confirmed via pg_stat_activity: nothing non-idle; the
+# request never got that far), and once one had fired, even /healthz on a
+# BRAND NEW connection stopped responding — a single-threaded event loop
+# wedged by one task blocks every other coroutine on it, including requests
+# that never touch FalkorDB. redis-py's asyncio connection setup (which
+# falkordb-py's async client sits on) does not bound its own connect
+# attempt by default, so a slow-to-fail path (DNS resolves, then the
+# connect() itself hangs rather than failing fast) can run well past
+# "fire-and-forget". A bounded wait_for() here is a hard backstop: it can
+# only cancel at an await point, so it will not save a TRULY synchronous
+# blocking call, but it does bound the common case (a slow async connect)
+# and keeps this function honest against its own documented contract below
+# ("adds ZERO latency" / "never blocks... never breaks the request") — an
+# unbounded hang is a direct violation of that, not a corner case of it.
+_PROJECTION_TIMEOUT_S = 5.0
+
 
 async def _run_projection(coro: Awaitable[Any], *, label: str) -> None:
     """Await a projection coroutine, swallowing + logging any failure.
 
     The graph is non-authoritative: a failure here is logged at WARNING and
     discarded so the (already-committed) Postgres write is never affected.
+    Bounded by _PROJECTION_TIMEOUT_S so an unreachable/slow FalkorDB can only
+    ever cost a few seconds on a background task — never an unbounded hang
+    that starves every other request on this process's single event loop.
     """
     try:
-        await coro
+        await asyncio.wait_for(coro, timeout=_PROJECTION_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001 - projection must never raise to caller
         _log.warning(
             "falkordb projection failed (non-authoritative, ignored): %s: %s",
