@@ -415,16 +415,72 @@ def cmd_down() -> None:
     print("[integration] stack + volumes removed.", file=sys.stderr)
 
 
+def cmd_test(pytest_args: list[str]) -> int:
+    """Run pytest INSIDE the `app` container instead of out here.
+
+    `env`'s host-probing (_resolve_test_host) fixed *reachability* under the
+    Forgejo dind sandbox — the job container really can reach the stack's
+    published ports now. What it can't do reliably is carry a full request
+    across that path: every test that only talks to Postgres directly
+    passed, but every test that does a real HTTP POST/read through the app
+    hung for its full 30s client timeout and failed with
+    httpcore.ReadTimeout. The TCP handshake completes (that's what `env`'s
+    probe checks); the multi-hop route through dind's NAT back to a job
+    container on a *different* per-workflow bridge network just isn't a
+    reliable path for a real response body. tests/conftest.py's own
+    ACCTOPS_TEST_* env vars are exactly what lets us sidestep that: point
+    them at what's true FROM INSIDE the app container instead — itself at
+    127.0.0.1, Postgres at its service name `postgres` — the same path the
+    app's own code already uses to reach Postgres/Garage every request, on
+    one compose network, no NAT hop at all.
+
+    Needs `.[dev]` inside the container (the image only ships the
+    `[tax-agents]` runtime extra); installed here rather than baked into
+    the image so production's Dockerfile/image stay untouched.
+    """
+    print("[integration] installing dev extras into the app container", file=sys.stderr)
+    _compose("exec", "-T", "app", "python", "-m", "pip", "install", "--no-cache-dir", "-e", ".[dev]")
+
+    in_container_env = {
+        "ACCTOPS_TEST_BASE_URL": "http://127.0.0.1:8000",
+        "ACCTOPS_TEST_DSN": f"postgresql://{OWNER_DB_ROLE}:{POSTGRES_PASSWORD}@postgres:5432/accounting_ops",
+        "ACCTOPS_TEST_APP_DSN": f"postgresql://{RUNTIME_DB_ROLE}:{RUNTIME_DB_PASSWORD}@postgres:5432/accounting_ops",
+        "ACCTOPS_TEST_TOKEN": SERVICE_TOKEN,
+        "ACCTOPS_TEST_UC_UID": SERVICE_UC_UID,
+        "POSTGRES_PASSWORD": POSTGRES_PASSWORD,
+    }
+    exec_args = ["exec", "-T"]
+    for key, value in in_container_env.items():
+        exec_args += ["-e", f"{key}={value}"]
+    exec_args += ["app", "pytest", *pytest_args]
+
+    print(f"[integration] running in-container: pytest {' '.join(pytest_args)}", file=sys.stderr)
+    result = _compose(*exec_args, check=False)
+
+    # pytest writes its junitxml inside the container (WORKDIR /app); copy it
+    # out so the caller (this script's own process, or CI reading the same
+    # relative path) can read it regardless of the exit code below.
+    for arg in pytest_args:
+        if arg.startswith("--junitxml="):
+            xml_path = arg.split("=", 1)[1]
+            _compose("cp", f"app:/app/{xml_path}", xml_path, check=False)
+            break
+
+    return result.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    for name in ("up", "env", "down"):
+    for name in ("up", "env", "down", "test"):
         p = sub.add_parser(name)
         if name in ("up", "env"):
             p.add_argument(
                 "--with-cpa", action="store_true",
                 help="include the cpa-export sibling service (exports profile)",
             )
+        if name == "test":
+            p.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.cmd == "up":
         cmd_up(args.with_cpa)
@@ -432,6 +488,11 @@ def main() -> int:
         cmd_env(args.with_cpa)
     elif args.cmd == "down":
         cmd_down()
+    elif args.cmd == "test":
+        pytest_args = args.pytest_args
+        if pytest_args and pytest_args[0] == "--":
+            pytest_args = pytest_args[1:]
+        return cmd_test(pytest_args)
     return 0
 
 

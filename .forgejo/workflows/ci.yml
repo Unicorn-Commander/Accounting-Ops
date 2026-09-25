@@ -165,10 +165,22 @@ jobs:
         # reference_forgejo_actions_ci.md: "never use a never-green job as a
         # merge gate"). Tracked as a follow-up; widen this back to
         # `tests/integration` once that's triaged.
+        #
+        # Runs INSIDE the app container (scripts/integration_env.py test),
+        # not out here. Reachability alone wasn't enough: the job container
+        # CAN reach the stack's published ports under dind (confirmed by a
+        # probe), but every test that does a real HTTP POST/read through the
+        # app — not just a straight-to-Postgres query — hung for its full
+        # 30s client timeout and failed with httpcore.ReadTimeout, on the
+        # multi-hop NAT path back from dind to a job container on a
+        # different per-workflow bridge network (run 101, task 3735: 7
+        # failed, all and only the HTTP-client tests; the 9 DB-only tests
+        # passed). Running pytest inside `app` reaches Postgres at its
+        # service name and itself at 127.0.0.1 — the same one-network path
+        # the app's own code already uses every request, no NAT hop at all.
         run: |
-          eval "$(python3 scripts/integration_env.py env)"
-          export ACCTOPS_TEST_BASE_URL ACCTOPS_TEST_DSN ACCTOPS_TEST_APP_DSN ACCTOPS_TEST_TOKEN ACCTOPS_TEST_UC_UID POSTGRES_PASSWORD
-          pytest -m integration tests/integration/test_db_rls_roles.py -v -rs --junitxml=itest-results.xml
+          python3 scripts/integration_env.py test -- \
+            -m integration tests/integration/test_db_rls_roles.py -v -rs --junitxml=itest-results.xml
           # A skipped module passes green. This suite skips itself when the stack
           # or the runtime role is missing, which is exactly how CI ran 0 RLS
           # tests for months. Fail unless every test executed and passed.
