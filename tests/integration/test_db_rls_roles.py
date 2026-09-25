@@ -278,9 +278,24 @@ async def test_runtime_role_cannot_mutate_append_only_books_tables(
         async with conn.transaction():
             await _set_books_workspace(conn, str(TEST_WORKSPACE_ID))
             for table in _APPEND_ONLY_TABLES:
+                # Each statement gets its own SAVEPOINT (asyncpg opens one
+                # automatically for a `conn.transaction()` nested inside an
+                # already-open transaction). Postgres aborts the WHOLE
+                # transaction on any error, so without this, the first caught
+                # InsufficientPrivilegeError would poison every statement
+                # after it: the next `conn.execute` raises
+                # InFailedSQLTransactionError instead — a different exception
+                # that `pytest.raises(InsufficientPrivilegeError)` below does
+                # NOT match, so it propagates and fails the test rather than
+                # proving the DELETE was blocked. The SAVEPOINT rolls back
+                # only the failed statement; `_set_books_workspace`'s SET
+                # LOCAL applies for the whole outer transaction and survives
+                # a ROLLBACK TO SAVEPOINT that happened after it was set.
                 with pytest.raises(asyncpg.InsufficientPrivilegeError):
-                    await conn.execute(
-                        f"UPDATE {table} SET workspace_id = workspace_id WHERE false"
-                    )
+                    async with conn.transaction():
+                        await conn.execute(
+                            f"UPDATE {table} SET workspace_id = workspace_id WHERE false"
+                        )
                 with pytest.raises(asyncpg.InsufficientPrivilegeError):
-                    await conn.execute(f"DELETE FROM {table} WHERE false")
+                    async with conn.transaction():
+                        await conn.execute(f"DELETE FROM {table} WHERE false")
