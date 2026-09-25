@@ -24,6 +24,7 @@ from app.api.specialty_rules import router as specialty_rules_router
 from app.api.tax_knowledge import router as tax_knowledge_router
 from app.api.tax_review import router as tax_review_router
 from app.api.tax_narrative import router as tax_narrative_router
+from app.api.tax_run_launch import router as tax_run_launch_router
 from app.api.tax_status import router as tax_status_router
 from app.api.tax_filing_submissions import router as tax_filing_submissions_router
 from app.api.usps_tracking import router as usps_tracking_router
@@ -161,6 +162,7 @@ app.include_router(specialist_pdf_router)
 app.include_router(specialty_rules_router)
 app.include_router(irs_forms_router)
 app.include_router(tax_narrative_router)
+app.include_router(tax_run_launch_router)
 app.include_router(tax_review_router)
 app.include_router(tax_status_router)
 app.include_router(tax_filing_submissions_router)

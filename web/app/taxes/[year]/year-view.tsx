@@ -22,6 +22,7 @@ import { IrsFormsSection } from "./irs-forms-section";
 import { NarrativeView } from "./narrative-view";
 import { SpecialistDraftView } from "./specialist-draft-view";
 import { RunHistoryView } from "./run-history-view";
+import { RunDraftsButton } from "./run-drafts-button";
 import { Card } from "@/components/primitives";
 import { DraftStatusBand } from "./draft-status-band";
 
@@ -36,6 +37,8 @@ export type YearViewProps = {
   year: number;
   taxReviewItems: TaxReviewItem[];
   specialistRuns: SpecialistRun[];
+  /** accountant+ on a single C-corp entity: show "Run drafts" + cancel. */
+  canRunDrafts?: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -118,9 +121,11 @@ export function YearView({
   entityDisplayName,
   year,
   taxReviewItems,
-  specialistRuns
+  specialistRuns,
+  canRunDrafts = false
 }: YearViewProps) {
   const [activeTab, setActiveTab] = useState<Tab>("narrative");
+  const [launchedRun, setLaunchedRun] = useState<SpecialistRun | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
 
   const pendingCount = taxReviewItems.filter((it) => it.status === "pending").length;
@@ -257,11 +262,25 @@ export function YearView({
 
         {/* Only show the handoff button when an entity (not consolidated) is selected */}
         {entityId !== "all" && (
-          <HandoffDownloadButton
-            workspaceId={workspaceId}
-            entityId={entityId}
-            year={year}
-          />
+          <div className="flex flex-wrap items-start gap-2">
+            {canRunDrafts && (
+              <RunDraftsButton
+                workspaceId={workspaceId}
+                entityId={entityId}
+                entityDisplayName={entityDisplayName}
+                year={year}
+                onLaunched={(run) => {
+                  setLaunchedRun(run);
+                  setActiveTab("runs");
+                }}
+              />
+            )}
+            <HandoffDownloadButton
+              workspaceId={workspaceId}
+              entityId={entityId}
+              year={year}
+            />
+          </div>
         )}
       </div>
 
@@ -302,6 +321,8 @@ export function YearView({
           workspaceId={workspaceId}
           entityId={entityId}
           year={year}
+          launchedRun={launchedRun}
+          canCancel={canRunDrafts}
         />
       )}
 

@@ -16,6 +16,7 @@ const INTERNAL_BASE =
 // ---------------------------------------------------------------------------
 
 export type SpecialistRunStatus =
+  | "queued"
   | "running"
   | "completed"
   | "failed"

@@ -55,7 +55,7 @@ router = APIRouter(tags=["specialist-runs"])
 # Valid enum values
 # ---------------------------------------------------------------------------
 
-_VALID_STATUSES = frozenset({"running", "completed", "failed", "cancelled", "all"})
+_VALID_STATUSES = frozenset({"queued", "running", "completed", "failed", "cancelled", "all"})
 _VALID_FINISH_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 # ---------------------------------------------------------------------------

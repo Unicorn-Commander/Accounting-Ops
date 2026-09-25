@@ -30,6 +30,7 @@ import { fetch1120Package } from "@/lib/taxes-1120";
 import { fetchSpecialistRuns } from "@/lib/specialist-runs";
 import { fetchTaxReviewQueue } from "@/lib/tax-review-queue";
 import { YearView } from "./year-view";
+import { canRunDrafts } from "@/lib/tax-run-launch";
 
 // ---------------------------------------------------------------------------
 // Form metadata per kind
@@ -355,6 +356,11 @@ export async function EntityKindRouter({
             year={year}
             taxReviewItems={reviewQueue.items}
             specialistRuns={specialistRunsResp.items}
+            canRunDrafts={
+              canRunDrafts(workspace.role) &&
+              !isConsolidated &&
+              entity?.kind === "c_corp"
+            }
           />
         )}
       </>

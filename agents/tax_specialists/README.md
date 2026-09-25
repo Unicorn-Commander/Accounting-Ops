@@ -51,6 +51,20 @@ agents/tax_specialists/
 
 ---
 
+## Running from the web app ("Run drafts")
+
+Accountants (and above) on a C-corporation entity can start the coordinator from
+the tax page (`/taxes/<year>` → **Run drafts**). The confirm dialog shows the
+model, the provider (and whether it is a third-party API) and what data is sent.
+The backend (`app/api/tax_run_launch.py`) queues a `specialist_run` row
+(`status='queued'`, `agent_token_id='app-launcher'`), runs
+`run_coordinator.py --backend openai` in the app process with the app's own
+`ACCTOPS_SERVICE_TOKEN` + `CPATEAM_LLM_*` route, writes outputs to
+`<DRAFTS_DIR>/<workspace>/<entity>/runs/<run_id>/`, and on success copies them
+to the canonical `<year>-<slug>-draft.md` names the draft viewer reads (older
+canonical drafts are kept as `*.superseded-<run8>.md`). One active run per
+entity + year; cancel from Run history. Off unless `AO_TAX_RUN_LAUNCH_ENABLED=1`.
+
 ## Running the Coordinator (recommended entry point)
 
 The Coordinator is the normal way to prepare a full tax package. It dispatches
