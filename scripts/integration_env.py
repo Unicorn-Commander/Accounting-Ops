@@ -25,7 +25,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -321,23 +323,90 @@ def cmd_up(with_cpa: bool) -> None:
           file=sys.stderr)
 
 
+def _resolve_test_host() -> str:
+    """Pick the address the published stack ports are actually reachable at.
+
+    Locally (no DOCKER_HOST, or a unix socket to a LOCAL daemon) this process
+    and the daemon share one network namespace, so 127.0.0.1 is correct —
+    that's the only candidate that will connect, and behavior for a dev
+    running this by hand is unchanged.
+
+    Under the Forgejo docker-in-docker CI sandbox, the daemon (dind) is a
+    SEPARATE container from the one running this script (the job container),
+    and `docker compose`/this script talk to it over DOCKER_HOST. A port
+    dind publishes binds inside DIND'S OWN network namespace — even bound to
+    0.0.0.0 (see docker-compose.itest.yml), "127.0.0.1" from here is this
+    container's own loopback, which is never the same namespace, so it can
+    never connect no matter how long we wait. What IS reachable is dind
+    itself: either by a hostname the runner aliases it to, or by this
+    container's own default-route gateway — which, since dind is the docker
+    engine that created BOTH this container's network and the stack's, is an
+    address dind owns on every network it manages, including the one this
+    container is on. A port published to 0.0.0.0 is reachable there.
+    Rather than assume which of these applies, probe each and use the first
+    one that actually answers on the app port — measured, not guessed.
+    """
+    candidates: list[str] = []
+
+    docker_host = os.environ.get("DOCKER_HOST", "")
+    if docker_host.startswith("tcp://"):
+        candidates.append(docker_host[len("tcp://"):].rsplit(":", 1)[0])
+
+    for name in ("docker", "dind", "host.docker.internal"):
+        try:
+            socket.gethostbyname(name)
+        except OSError:
+            continue
+        candidates.append(name)
+
+    try:
+        with open("/proc/net/route") as f:
+            for line in f.readlines()[1:]:
+                fields = line.split()
+                if len(fields) > 2 and fields[1] == "00000000":  # default route
+                    gw_hex = fields[2]
+                    octets = [gw_hex[i : i + 2] for i in (6, 4, 2, 0)]
+                    candidates.append(".".join(str(int(o, 16)) for o in octets))
+                    break
+    except OSError:
+        pass  # not on Linux (e.g. a dev running this on macOS) — fine, skip.
+
+    candidates.append("127.0.0.1")  # last resort; correct for a local daemon.
+
+    for host in candidates:
+        try:
+            with socket.create_connection((host, HOST_APP_PORT), timeout=3):
+                pass
+        except OSError as exc:
+            print(f"[integration] test host {host!r} unreachable: {exc!r}", file=sys.stderr)
+            continue
+        print(f"[integration] test host resolved: {host!r} (reached :{HOST_APP_PORT})", file=sys.stderr)
+        return host
+
+    raise SystemExit(
+        f"[integration] no candidate host could reach the stack on :{HOST_APP_PORT}. "
+        f"Tried (in order): {candidates!r}. DOCKER_HOST={docker_host!r}."
+    )
+
+
 def cmd_env(with_cpa: bool) -> None:
+    host = _resolve_test_host()
     # Owner DSN: used by the harness for seeding + tamper-injection (the tamper
     # test must DISABLE TRIGGER, an owner-only op — it models an attacker with
     # raw owner access).
-    dsn = f"postgresql://{OWNER_DB_ROLE}:{POSTGRES_PASSWORD}@127.0.0.1:{HOST_PG_PORT}/accounting_ops"
+    dsn = f"postgresql://{OWNER_DB_ROLE}:{POSTGRES_PASSWORD}@{host}:{HOST_PG_PORT}/accounting_ops"
     # Runtime-role DSN: used by the RLS + role-permission tests to prove the
     # least-privilege role canNOT mutate the ledger / disable triggers, and that
     # RLS blocks cross-tenant reads under it.
-    app_dsn = f"postgresql://{RUNTIME_DB_ROLE}:{RUNTIME_DB_PASSWORD}@127.0.0.1:{HOST_PG_PORT}/accounting_ops"
-    print(f'export ACCTOPS_TEST_BASE_URL="http://127.0.0.1:{HOST_APP_PORT}"')
+    app_dsn = f"postgresql://{RUNTIME_DB_ROLE}:{RUNTIME_DB_PASSWORD}@{host}:{HOST_PG_PORT}/accounting_ops"
+    print(f'export ACCTOPS_TEST_BASE_URL="http://{host}:{HOST_APP_PORT}"')
     print(f'export ACCTOPS_TEST_DSN="{dsn}"')
     print(f'export ACCTOPS_TEST_APP_DSN="{app_dsn}"')
     print(f'export ACCTOPS_TEST_TOKEN="{SERVICE_TOKEN}"')
     print(f'export ACCTOPS_TEST_UC_UID="{SERVICE_UC_UID}"')
     print(f'export POSTGRES_PASSWORD="{POSTGRES_PASSWORD}"')
     if with_cpa:
-        print(f'export CPA_EXPORT_URL="http://127.0.0.1:{HOST_CPA_PORT}"')
+        print(f'export CPA_EXPORT_URL="http://{host}:{HOST_CPA_PORT}"')
         print(f'export CPA_EXPORT_TOKEN="{SERVICE_TOKEN}"')
 
 
