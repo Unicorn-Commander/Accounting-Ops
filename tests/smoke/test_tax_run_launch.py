@@ -433,6 +433,22 @@ def test_worker_no_specialist_completed_is_failed_and_scrubbed(worker, monkeypat
     assert not (entity_dir / f"{YEAR}-form-1120-draft.md").exists()
 
 
+
+def _pid_alive(pid: int) -> bool:
+    """True while ``pid`` is running. A zombie counts as dead: in a CI job
+    container PID 1 may never reap the killed, re-parented grandchild, so
+    ``os.kill(pid, 0)`` alone keeps succeeding after the kill landed."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return True  # no /proc (macOS): the signal probe is all we have
+
+
 def test_worker_cancel_kills_process_group(worker):
     db, entity_dir, set_mode = worker
     set_mode("hang")
@@ -455,9 +471,7 @@ def test_worker_cancel_kills_process_group(worker):
     assert db.finish is None  # the worker never overwrote the cancel
     # The specialist-like grandchild died with the group.
     for _ in range(50):
-        try:
-            os.kill(child_pid, 0)
-        except ProcessLookupError:
+        if not _pid_alive(child_pid):
             break
         time.sleep(0.1)
     else:
