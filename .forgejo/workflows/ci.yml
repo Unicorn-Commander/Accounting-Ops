@@ -121,6 +121,12 @@ jobs:
     # first step if the base image doesn't ship them.
     container:
       image: docker:27-cli
+    env:
+      # The itest stack binds its ports to 127.0.0.1 by default so a local run
+      # never exposes the throwaway Postgres/app to the LAN. Under dind the
+      # published ports live on the daemon's network namespace, so CI (only)
+      # binds all interfaces there; integration_env.py then finds the reachable host.
+      ITEST_BIND_ADDR: 0.0.0.0
     steps:
       - name: Install toolchain (git, python, compose plugin)
         run: |
