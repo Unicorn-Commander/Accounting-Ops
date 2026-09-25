@@ -51,7 +51,7 @@ def setup(monkeypatch, rows):
     monkeypatch.setattr(members, "SessionLocal", lambda: session)
     mail = AsyncMock(return_value={"status": "sent"})
     monkeypatch.setattr(members, "send_email", mail)
-    monkeypatch.setattr(members, "_accept_url", lambda token: "https://test.example/accept?token=" + token)
+    monkeypatch.setattr(members, "_accept_url", lambda token: "https://test.example/invite/accept?token=" + token)
     return session, mail
 
 
@@ -70,6 +70,8 @@ async def test_manual_owner_hash_only_and_no_outbox(monkeypatch):
     assert insert["wid"] == str(ctx.workspace_id)
     assert before + timedelta(days=2) <= insert["expires_at"] <= datetime.now(timezone.utc) + timedelta(days=2)
     assert result["delivery"]["status"] == "manual"
+    assert "/invite/accept?token=" in result["delivery"]["accept_url"]
+    assert "/api/invitations/accept" not in result["delivery"]["accept_url"]
     assert not any("outbox" in sql.lower() for sql, _ in session.calls)
     audit_sql, audit = next(
         (sql, params) for sql, params in session.calls
@@ -93,8 +95,26 @@ async def test_default_email_still_sends(monkeypatch):
     mail.assert_awaited_once()
     assert result["delivery"] == {"status": "sent"}
     assert "accept_url" not in result
+    body_text = mail.await_args.kwargs["body_text"]
+    body_html = mail.await_args.kwargs["body_html"]
+    for delivered_body in (body_text, body_html):
+        assert "/invite/accept?token=" in delivered_body
+        assert "/api/invitations/accept" not in delivered_body
     assert mail.await_args.kwargs["related_invitation_id"]
     assert sum("INSERT INTO public.membership_audit" in sql for sql, _ in session.calls) == 1
+
+
+def test_accept_url_uses_web_form_and_encodes_token(monkeypatch):
+    monkeypatch.setattr(
+        members,
+        "get_settings",
+        lambda: SimpleNamespace(public_base_url="https://test.example/"),
+    )
+
+    url = members._accept_url("token/with spaces")
+
+    assert url == "https://test.example/invite/accept?token=token%2Fwith%20spaces"
+    assert "/api/invitations/accept" not in url
 
 
 @pytest.mark.asyncio
