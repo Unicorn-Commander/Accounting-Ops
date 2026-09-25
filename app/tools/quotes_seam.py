@@ -1,11 +1,11 @@
 """MCP tools for the Quotes → money seam (Customer-Ops ``quote.accepted``).
 
-  create_invoices_from_quote (accountant) — DRAFT deposit + milestone + first
+  create_invoices_from_quote (bookkeeper) — DRAFT deposit + milestone + first
                               recurring-period invoices, the recurring
                               schedules, and (with a delivery partner + split
                               rule) a DRAFT partner BILL. Idempotent on
                               quote_ref + version. Never issues, never posts.
-  run_invoice_schedules      (accountant) — generate the next DRAFT for every
+  run_invoice_schedules      (bookkeeper) — generate the next DRAFT for every
                               schedule that is due. Never posts.
   list_invoice_schedules     (viewer)     — the schedules in a workspace.
 
@@ -105,7 +105,7 @@ async def create_invoices_from_quote(
     partner_invoice_id, invoices[], schedules[], partner_bill, review_required, totals,
     federated: {accounting_ops: done|failed, partner: done|failed|skipped, reason}}.
 
-    Role floor: accountant.
+    Role floor: bookkeeper. Produces drafts only; never issues or posts.
     """
     ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")
     _assert_enabled()
@@ -165,7 +165,7 @@ async def run_invoice_schedules(
 
     Returns: {as_of, schedules_due, generated[], skipped[], partner_bills[], partner_skipped[]}.
 
-    Role floor: accountant.
+    Role floor: bookkeeper. Produces drafts only; never issues or posts.
     """
     ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")
     _assert_enabled()
