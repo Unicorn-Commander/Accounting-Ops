@@ -23,6 +23,7 @@ import { BankTxnBatchPanel } from "@/components/bank-txn-batch-panel";
 import { RecommendationsView } from "@/app/approvals/recommendations-view";
 import { ClusterReview } from "@/components/approvals/cluster-review";
 import { SkippedQueue } from "@/components/approvals/skipped-queue";
+import { AiSuggestCategoriesPanel } from "@/components/ai-suggest-categories";
 import { getActiveContext } from "@/lib/active-context";
 import {
   getApprovals,
@@ -38,6 +39,19 @@ import { formatAmount } from "@/lib/journal";
 // -----------------------------------------------------------------------
 
 type Tab = "review" | "rows" | "recommendations" | "skipped";
+
+// Bookkeeper floor — mirrors app.tenancy._ROLE_ORDER (bookkeeper and above).
+// Matches the require_role(ctx.workspace, "bookkeeper") floor the backend
+// enforces on POST .../approvals/ai-categorize.
+const BOOKKEEPER_FLOOR_ROLES = [
+  "owner",
+  "admin",
+  "accountant",
+  "bookkeeper",
+  "cpa",
+  "client_owner",
+  "platform_admin"
+];
 
 // -----------------------------------------------------------------------
 // Helpers for journal_recategorization + compliance_rule rows
@@ -278,6 +292,9 @@ export default async function ApprovalsPage({
   const canDecide = workspace
     ? ["owner", "admin"].includes(workspace.role)
     : false;
+  const canCategorize = workspace
+    ? BOOKKEEPER_FLOOR_ROLES.includes(workspace.role)
+    : false;
 
   // Split by type — BTI rows go to the interactive batch panel
   const btiApprovals = approvals.filter(
@@ -332,6 +349,12 @@ export default async function ApprovalsPage({
           </Card>
         ) : (
           <div className="flex flex-col gap-6">
+            <AiSuggestCategoriesPanel
+              workspaceId={workspace.id}
+              entityId={entityId}
+              canCategorize={canCategorize}
+            />
+
             {/* Tab bar (show only when there is something to switch to). */}
             {(reviewCount > 0 || btiApprovals.length > 0 || skippedCount > 0) && (
               <TabBar
