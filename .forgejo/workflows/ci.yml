@@ -168,7 +168,19 @@ jobs:
         run: |
           eval "$(python3 scripts/integration_env.py env)"
           export ACCTOPS_TEST_BASE_URL ACCTOPS_TEST_DSN ACCTOPS_TEST_APP_DSN ACCTOPS_TEST_TOKEN ACCTOPS_TEST_UC_UID POSTGRES_PASSWORD
-          pytest -m integration tests/integration/test_db_rls_roles.py -v
+          pytest -m integration tests/integration/test_db_rls_roles.py -v -rs --junitxml=itest-results.xml
+          # A skipped module passes green. This suite skips itself when the stack
+          # or the runtime role is missing, which is exactly how CI ran 0 RLS
+          # tests for months. Fail unless every test executed and passed.
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("itest-results.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          tests, skipped = int(suite.get("tests")), int(suite.get("skipped"))
+          failures, errors = int(suite.get("failures")), int(suite.get("errors"))
+          print(f"RLS integration: tests={tests} skipped={skipped} failures={failures} errors={errors}")
+          assert tests >= 16 and skipped == 0 and failures == 0 and errors == 0, "RLS integration tests did not all execute and pass"
+          PY
 
       - name: Dump app logs on failure
         if: failure()
