@@ -218,6 +218,58 @@ jobs:
             psql -U accounting_ops -d accounting_ops -c \
             "SELECT pid, relation::regclass, mode, granted FROM pg_locks \
              WHERE NOT granted;" || true
+          # Is the APP CONTAINER itself still responsive post-hang, and does a
+          # BRAND NEW request (bypassing pytest/httpx entirely — plain
+          # urllib, from inside the container, so no NAT/loopback question)
+          # to the SAME endpoint also hang? Distinguishes "this endpoint is
+          # stuck" (a real app bug) from "the whole event loop/container is
+          # wedged" (an environment issue) from "it's an httpx-client-side
+          # quirk" (probe succeeds where pytest didn't).
+          echo "=== post-hang app container probe ==="
+          eval "$(python3 - <<'PROBE'
+          import sys
+          sys.path.insert(0, ".")
+          from scripts.integration_env import TEST_WORKSPACE_ID, SERVICE_TOKEN
+          from tests.conftest import TEST_ENTITY_ID, TEST_EXTERNAL_ACCOUNT_ID, TEST_SOURCE
+          print(f"WORKSPACE_ID={TEST_WORKSPACE_ID}")
+          print(f"ENTITY_ID={TEST_ENTITY_ID}")
+          print(f"EXT_ACCOUNT_ID={TEST_EXTERNAL_ACCOUNT_ID}")
+          print(f"SOURCE={TEST_SOURCE}")
+          print(f"TOKEN={SERVICE_TOKEN}")
+          PROBE
+          )"
+          $COMPOSE exec -T app python3 - "$WORKSPACE_ID" "$ENTITY_ID" "$EXT_ACCOUNT_ID" "$SOURCE" "$TOKEN" <<'PYPROBE' || true
+          import json, sys, time, urllib.error, urllib.request
+          workspace_id, entity_id, ext_account_id, source, token = sys.argv[1:6]
+
+          t0 = time.time()
+          try:
+              with urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=5) as r:
+                  print("healthz:", r.status, f"{time.time() - t0:.2f}s")
+          except Exception as exc:
+              print("healthz FAILED:", repr(exc), f"{time.time() - t0:.2f}s")
+
+          body = json.dumps({
+              "entity_id": entity_id, "source": source,
+              "source_external_id": f"diag-probe-{int(time.time())}",
+              "effective_date": "2026-04-01", "amount_cents": -1,
+              "description": "diag probe", "payee": "diag", "memo": None,
+              "category": "SaaS · AI", "category_status": "auto",
+              "sign_matched": True, "external_account_id": ext_account_id,
+              "user_confirmed": False,
+          }).encode()
+          req = urllib.request.Request(
+              f"http://127.0.0.1:8000/api/workspaces/{workspace_id}/journal-entries",
+              data=body, method="POST",
+              headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+          )
+          t0 = time.time()
+          try:
+              with urllib.request.urlopen(req, timeout=10) as r:
+                  print("post-probe:", r.status, f"{time.time() - t0:.2f}s", r.read()[:300])
+          except urllib.error.URLError as exc:
+              print("post-probe FAILED:", repr(exc), f"{time.time() - t0:.2f}s")
+          PYPROBE
 
       - name: Tear down
         if: always()
