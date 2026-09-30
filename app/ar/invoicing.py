@@ -44,6 +44,8 @@ the hook is the ``materiality_tier`` we already stamp on each row.
 """
 from __future__ import annotations
 
+import json
+import secrets
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -630,7 +632,13 @@ async def _invoice_view(
             text(
                 """
                 SELECT i.*, c.display_name AS customer_name,
-                       e.display_name AS entity_display_name, e.slug AS entity_slug
+                       c.email AS customer_email,
+                       c.billing_address AS customer_billing_address,
+                       e.display_name AS entity_display_name, e.slug AS entity_slug,
+                       e.legal_name AS legal_name,
+                       e.brand_slug, e.logo_url, e.color_primary, e.color_accent,
+                       e.color_background, e.footer_line, e.from_address, e.reply_to,
+                       e.invoice_address
                 FROM invoice i
                 LEFT JOIN counterparty c ON c.id = i.counterparty_id
                 LEFT JOIN entity e ON e.id = i.entity_id
@@ -698,6 +706,8 @@ async def create_invoice_from_draft(
     auto_send: bool = False,
     post_journal: bool = True,
     quote_ref: str | None = None,
+    customer_ops_customer_id: str | None = None,
+    presentation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create + post an AR invoice. Idempotent on (external_source, external_ref).
 
@@ -874,6 +884,40 @@ async def create_invoice_from_draft(
             {"qr": str(quote_ref)[:160], "id": str(invoice_id)},
         )
 
+    public_token = secrets.token_urlsafe(32)
+    presentation_json = None
+    if presentation:
+        encoded = json.dumps(presentation)
+        if len(encoded) <= 8000:
+            presentation_json = encoded
+    await session.execute(
+        text(
+            """
+            UPDATE invoice
+               SET public_token = :token,
+                   customer_ops_customer_id = :cust,
+                   presentation = CAST(:presentation AS jsonb)
+             WHERE id = :id
+            """
+        ),
+        {
+            "token": public_token,
+            "cust": (str(customer_ops_customer_id)[:128] if customer_ops_customer_id else None),
+            "presentation": presentation_json,
+            "id": str(invoice_id),
+        },
+    )
+    await session.execute(
+        text(
+            """
+            INSERT INTO public.invoice_pay_token (token, workspace_id, invoice_id)
+            VALUES (:token, :wid, :iid)
+            ON CONFLICT (token) DO NOTHING
+            """
+        ),
+        {"token": public_token, "wid": workspace_id, "iid": str(invoice_id)},
+    )
+
     # ---- Draft-only (quotes seam): NO journal posting, journal_entry_id NULL ----
     if not post_journal:
         return await _invoice_view(session, invoice_id=str(invoice_id))
@@ -967,6 +1011,160 @@ async def create_invoice_from_draft(
     )
 
     return await _invoice_view(session, invoice_id=str(invoice_id))
+
+
+async def issue_invoice_draft(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    invoice_id: str,
+    actor_uc_uid: str,
+) -> dict[str, Any]:
+    """Post the journal for a draft and mark it sent.
+
+    Idempotent: an invoice that already has journal_entry_id is returned as-is.
+    The invoice number was assigned when the draft was created.
+    """
+    locked = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text, entity_id::text AS entity_id, invoice_number, status,
+                       issue_date, subtotal, discount_total, tax_total, po_number,
+                       external_source, journal_entry_id::text AS journal_entry_id
+                FROM invoice
+                WHERE id = :id
+                FOR UPDATE
+                """
+            ),
+            {"id": invoice_id},
+        )
+    ).mappings().first()
+    if locked is None:
+        raise InvoiceError(f"invoice {invoice_id} not found")
+    if locked["journal_entry_id"]:
+        return await _invoice_view(session, invoice_id=invoice_id)
+    if locked["status"] == "void":
+        raise InvoiceError("cannot issue a voided invoice")
+
+    lines = (
+        await session.execute(
+            text(
+                """
+                SELECT amount, tax_amount, revenue_account_canonical
+                FROM invoice_line WHERE invoice_id = :id
+                ORDER BY line_number ASC
+                """
+            ),
+            {"id": invoice_id},
+        )
+    ).mappings().all()
+    if not lines:
+        raise InvoiceError("invoice has no lines to issue")
+
+    entity_id = str(locked["entity_id"])
+    ar_canonical = await _ensure_account(
+        session, workspace_id=workspace_id, entity_id=entity_id, account_number=ACCT_AR
+    )
+    rev_by_acct: dict[str, Decimal] = {}
+    tax_total = Decimal("0")
+    for line in lines:
+        canonical = str(line["revenue_account_canonical"])
+        rev_by_acct[canonical] = _q(
+            rev_by_acct.get(canonical, Decimal("0")) + _to_decimal(line["amount"], "amount")
+        )
+        tax_total = _q(tax_total + _to_decimal(line["tax_amount"] or 0, "tax_amount"))
+    subtotal = _to_decimal(locked["subtotal"], "subtotal")
+    discount_total = _to_decimal(locked["discount_total"] or 0, "discount_total")
+    net_revenue = _net_of_discount(rev_by_acct, subtotal, discount_total)
+    tax_canonical = None
+    if tax_total > 0:
+        tax_canonical = await _ensure_account(
+            session, workspace_id=workspace_id, entity_id=entity_id, account_number=ACCT_SALES_TAX
+        )
+
+    issue_date = locked["issue_date"]
+    if isinstance(issue_date, datetime):
+        issue_date = issue_date.date()
+    invoice_number = locked["invoice_number"]
+    payee = str(invoice_number)
+    external_source = locked["external_source"] or "manual"
+    po_number = locked["po_number"]
+    base_description = f"Invoice {invoice_number}"
+    issue_je_ids: list[str] = []
+    row_index = 0
+    for acct_canonical, net_amount in net_revenue.items():
+        if net_amount == 0:
+            continue
+        row_index += 1
+        je_id = await _post_balanced_row(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            debit_canonical=ar_canonical,
+            credit_canonical=acct_canonical,
+            amount=net_amount,
+            effective_date=issue_date,
+            source_external_id=f"invoice:{invoice_id}:rev{row_index}",
+            description=base_description,
+            payee=payee,
+            memo=(f"PO {po_number}" if po_number else None),
+            reasoning=(
+                f"AR invoice {invoice_number} issued: DR Accounts Receivable / "
+                f"CR {acct_canonical}. external_source={external_source}"
+            ),
+            actor_uc_uid=actor_uc_uid,
+        )
+        issue_je_ids.append(str(je_id))
+    if tax_total > 0 and tax_canonical is not None:
+        tax_je_id = await _post_balanced_row(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            debit_canonical=ar_canonical,
+            credit_canonical=tax_canonical,
+            amount=tax_total,
+            effective_date=issue_date,
+            source_external_id=f"invoice:{invoice_id}:tax",
+            description=base_description,
+            payee=payee,
+            memo="Sales tax",
+            reasoning=f"AR invoice {invoice_number} sales tax.",
+            actor_uc_uid=actor_uc_uid,
+        )
+        issue_je_ids.append(str(tax_je_id))
+
+    primary_je = issue_je_ids[0] if issue_je_ids else None
+    await session.execute(
+        text(
+            """
+            UPDATE invoice
+               SET journal_entry_id = :je, status = 'sent'
+             WHERE id = :id AND journal_entry_id IS NULL
+            """
+        ),
+        {"je": primary_je, "id": invoice_id},
+    )
+    return await _invoice_view(session, invoice_id=invoice_id)
+
+
+def _net_of_discount(
+    rev_by_acct: dict[str, Decimal], subtotal: Decimal, discount_total: Decimal
+) -> dict[str, Decimal]:
+    if discount_total > 0 and subtotal > 0:
+        net: dict[str, Decimal] = {}
+        running = Decimal("0")
+        accts = list(rev_by_acct.items())
+        for idx, (acct, gross) in enumerate(accts):
+            if idx == len(accts) - 1:
+                net[acct] = _q(subtotal - discount_total - running)
+            else:
+                share = _q(gross / subtotal * discount_total)
+                amount = _q(gross - share)
+                running = _q(running + amount)
+                net[acct] = amount
+        return net
+    return dict(rev_by_acct)
 
 
 # ---------------------------------------------------------------------------

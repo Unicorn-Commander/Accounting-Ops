@@ -21,6 +21,7 @@ from app.tools import (
     create_coa_account,
     create_entity_with_coa,
     create_invoice_from_draft,
+    issue_invoice_draft,
     create_invoices_from_quote,
     create_workspace,
     decide_approval,
@@ -248,6 +249,7 @@ def build_server():
     # =====================================================================
     server.tool()(upsert_ar_customer)
     server.tool()(create_invoice_from_draft)
+    server.tool()(issue_invoice_draft)
     server.tool()(get_invoice)
     server.tool()(void_invoice)
     server.tool()(record_payment)

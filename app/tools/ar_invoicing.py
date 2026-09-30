@@ -43,6 +43,8 @@ from app.ar import (
 # path and only invoked when external_source is set, so community boot never
 # hard-imports the entitlement module and standalone invoicing is unaffected.
 from app.ar.invoicing import InvoiceError
+from sqlalchemy import text
+
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace, current_auth
 from app.workspace_session import workspace_session
@@ -123,6 +125,9 @@ async def create_invoice_from_draft(
     notes: str | None = None,
     po_number: str | None = None,
     auto_send: bool = False,
+    post_journal: bool = True,
+    customer_ops_customer_id: str | None = None,
+    presentation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create + post an AR invoice (DR Accounts Receivable / CR Revenue [+ tax]).
 
@@ -152,6 +157,11 @@ async def create_invoice_from_draft(
         notes: Optional free-text note on the invoice.
         po_number: Optional buyer PO reference.
         auto_send: When True the invoice starts in 'sent' (else 'draft').
+        post_journal: When False the invoice stays a draft and posts nothing.
+            The default True keeps existing callers posting on create.
+        customer_ops_customer_id: Customer-Ops customer id, when the caller has one.
+        presentation: Optional invoice-sheet copy (headline, deliverables). Capped
+            by the primitive.
 
     Returns the full invoice view: {id, invoice_number, status, total,
     balance_due, hosted_pay_url, pdf_url, journal_entry_id, lines[], payments[], ...}.
@@ -200,6 +210,9 @@ async def create_invoice_from_draft(
                 notes=notes,
                 po_number=po_number,
                 auto_send=auto_send,
+                post_journal=post_journal,
+                customer_ops_customer_id=customer_ops_customer_id,
+                presentation=presentation,
             )
     except InvoiceError as exc:
         raise ValueError(str(exc)) from exc
@@ -383,12 +396,103 @@ def _shape_invoice_result(view: dict[str, Any], workspace_id: UUID) -> dict[str,
     out["pdf_url"] = (
         f"/api/workspaces/{workspace_id}/invoices/{inv_id}/pdf" if inv_id else None
     )
+    token = out.get("public_token")
+    if token:
+        from app.config import get_settings
+
+        base = get_settings().public_base_url.rstrip("/")
+        out["public_url"] = f"{base}/pay/{token}"
+    else:
+        out.setdefault("public_url", None)
     return out
+
+
+async def issue_invoice_draft(
+    workspace_id: UUID,
+    invoice_id: UUID,
+    send_email: bool = False,
+) -> dict[str, Any]:
+    """Post the journal for an existing draft. Idempotent when already posted.
+
+    Does not email unless send_email is true. A pay link is stored only when
+    Checkout is configured; otherwise hosted_pay_url stays null.
+
+    Role floor: accountant.
+    """
+    from app.ar.invoicing import issue_invoice_draft as _issue
+    from app.connectors.stripe.checkout import create_checkout_session
+
+    ctx = await authorize_workspace(workspace_id, None, min_role="accountant")
+    wid = ctx.workspace_id
+    try:
+        async with workspace_session(SessionLocal, wid) as session:
+            existing = await _get_invoice(
+                session, workspace_id=str(wid), invoice_id=str(invoice_id)
+            )
+    except InvoiceError as exc:
+        raise LookupError(str(exc)) from exc
+    from app.authz import assert_entity_in_scope
+
+    scope = assert_entity_in_scope(ctx, None)
+    if scope is not None and UUID(existing["entity_id"]) not in scope:
+        raise LookupError("invoice not found")
+    from app.config import get_settings as _get_settings
+
+    if not _get_settings().is_community:
+        from app.ar.entitlement import assert_entitled_for_invoice
+
+        auth = current_auth()
+        claims = auth.claims if auth is not None else None
+        assert_entitled_for_invoice(
+            claims, external_source=existing.get("external_source"), workspace_id=wid
+        )
+    try:
+        async with workspace_session(SessionLocal, wid) as session:
+            view = await _issue(
+                session,
+                workspace_id=str(wid),
+                invoice_id=str(invoice_id),
+                actor_uc_uid=ctx.user_uc_uid,
+            )
+    except InvoiceError as exc:
+        raise ValueError(str(exc)) from exc
+    shaped = _shape_invoice_result(view, wid)
+    if not shaped.get("hosted_pay_url") and shaped.get("public_url") and shaped.get("status") != "void":
+        from decimal import Decimal
+
+        url = await create_checkout_session(
+            amount=Decimal(str(shaped.get("balance_due") or shaped.get("total") or "0")),
+            currency=str(shaped.get("currency") or "USD"),
+            invoice_id=str(shaped.get("id")),
+            workspace_id=str(wid),
+            invoice_number=str(shaped.get("invoice_number") or "invoice"),
+            success_url=str(shaped["public_url"]),
+            cancel_url=str(shaped["public_url"]),
+            customer_email=shaped.get("customer_email"),
+        )
+        if url:
+            async with workspace_session(SessionLocal, wid) as session:
+                await session.execute(
+                    text(
+                        "UPDATE invoice SET hosted_pay_url = :url "
+                        "WHERE id = :id AND hosted_pay_url IS NULL"
+                    ),
+                    {"url": url, "id": str(shaped["id"])},
+                )
+            shaped["hosted_pay_url"] = url
+    if send_email:
+        from app.ar.invoice_brand.email_draft import stage_invoice_email
+
+        shaped["email_status"] = await stage_invoice_email(shaped)
+    else:
+        shaped["email_status"] = "skipped"
+    return shaped
 
 
 __all__ = (
     "create_invoice_from_draft",
     "get_invoice",
+    "issue_invoice_draft",
     "record_payment",
     "upsert_ar_customer",
     "void_invoice",
