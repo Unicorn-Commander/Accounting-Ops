@@ -29,23 +29,14 @@ pytestmark = pytest.mark.integration
 
 
 async def test_mcp_endpoint_requires_bearer(live_stack):
-    """The served MCP endpoint (/mcp/) rejects an unauthenticated request.
-
-    Bare /mcp is the Starlette mount root, which 307-redirects to /mcp/ (the
-    canonical streamable-HTTP endpoint the MCP client connects to); that
-    redirect carries no body and lands on the gated path. We assert the gate on
-    the served path itself — both GET and POST with no bearer -> 401 — and that
-    the redirect target is /mcp/, so the redirect is not an auth bypass.
-    """
+    """Both spellings of the MCP endpoint reject an unauthenticated request."""
     async with httpx.AsyncClient(timeout=10) as c:
-        redirect = await c.get(f"{live_stack.base_url}/mcp")
-        assert redirect.status_code == 307
-        assert redirect.headers["location"].endswith("/mcp/")
-
-        r = await c.get(f"{live_stack.base_url}/mcp/")
-        assert r.status_code == 401, f"GET /mcp/ expected 401, got {r.status_code}"
-        r = await c.post(f"{live_stack.base_url}/mcp/")
-        assert r.status_code == 401, f"POST /mcp/ expected 401, got {r.status_code}"
+        for path in ("/mcp", "/mcp/"):
+            r = await c.get(f"{live_stack.base_url}{path}")
+            assert r.status_code == 401, f"GET {path} expected 401, got {r.status_code}"
+            assert "location" not in r.headers
+            r = await c.post(f"{live_stack.base_url}{path}")
+            assert r.status_code == 401, f"POST {path} expected 401, got {r.status_code}"
 
 
 async def _call_tool(base_url: str, token: str, name: str, args: dict):

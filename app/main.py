@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 
 from app.auth import AuthContext, validate_bearer_token
-from app.mcp_auth import MCPAuthMiddleware
+from app.mcp_auth import MCPAuthMiddleware, MCPMountRootAdapter
 from app.a2a.server import router as a2a_router
 from app.api.account_mappings import router as account_mappings_router
 from app.api.ai_activity import router as ai_activity_router
@@ -135,7 +135,17 @@ if _mcp_http_app is not None:
     # /mcp is gated by MCPAuthMiddleware (validates the uchub Bearer and binds
     # the AuthContext that every tool authorizes against). Traefik already
     # routes /mcp -> app:8000.
-    app.mount("/mcp", MCPAuthMiddleware(_mcp_http_app))
+    _mcp_app = MCPAuthMiddleware(_mcp_http_app)
+    # Starlette's mount route does not match the exact /mcp root, so without
+    # this route the parent router emits a scheme-sensitive 307 to /mcp/ before
+    # MCPAuthMiddleware can run. Adapt the exact root to the mounted app's /
+    # route and keep /mcp/ as the normal mounted path.
+    app.add_route(
+        "/mcp",
+        MCPMountRootAdapter(_mcp_app),
+        include_in_schema=False,
+    )
+    app.mount("/mcp", _mcp_app)
 app.include_router(a2a_router)
 app.include_router(workspaces_router)
 app.include_router(onboarding_router)
