@@ -241,7 +241,11 @@ async def list_recent_transactions(
 
     Args:
         workspace_id: Workspace UUID.
-        days: Lookback window in days (default 30).
+        days: Lookback window in days (default 30). The live transaction path
+            is expected to cap requests at 90 days and report that cap only in
+            ``errors[]``; this wrapper currently passes the requested value
+            through unchanged, so verify the backing source before relying on
+            a cap.
         limit: Max rows in the response (default 50).
         entity_id: Optional — UUID string, 'consolidated', 'unmapped', or omitted.
 

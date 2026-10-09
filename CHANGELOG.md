@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- fix(mcp): parse journal transaction date filters into `date` objects before
+  binding, accepting ISO dates and datetimes and surfacing invalid values as a
+  clear 400-style tool error instead of an asyncpg 500.
+
 - feat(ar): **Quotes seam** — Customer-Ops `quote.accepted` → Accounting-Ops DRAFT
   paper (QUOTES-CONTRACT-v1 §3 + AMENDMENT-01). `POST
   /api/workspaces/{wid}/entities/{eid}/quotes/accepted` (a write-capable M2M rail
