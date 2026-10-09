@@ -23,7 +23,9 @@ class InvalidDateFilter(ValueError):
                 f"(YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS): {value!r}"
             ),
         }
-        super().__init__(self.error["message"])
+        super().__init__(
+            f"{self.status_code} {self.code}: {self.error['message']}"
+        )
 
 
 def parse_iso_date_filter(value: Any, field: str) -> date:

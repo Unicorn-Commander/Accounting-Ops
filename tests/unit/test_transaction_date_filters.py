@@ -6,8 +6,9 @@ from uuid import uuid4
 
 import pytest
 
-from app.tools._date_filters import InvalidDateFilter, parse_iso_date_filter
 from app.tools import transactions
+from app.tools import journal_tools, tax_get_period_journal
+from app.tools._date_filters import InvalidDateFilter, parse_iso_date_filter
 
 
 @pytest.mark.parametrize(
@@ -50,6 +51,12 @@ class _ExecuteResult:
 
     def all(self):
         return []
+
+    def scalar_one(self):
+        return 0
+
+    def scalars(self):
+        return self
 
 
 class _FakeSession:
@@ -121,3 +128,65 @@ async def test_list_transactions_rejects_invalid_date_before_query(monkeypatch):
         )
 
     assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_get_period_journal_binds_date_objects(monkeypatch):
+    workspace_id = uuid4()
+    entity_id = uuid4()
+    session = _FakeSession()
+
+    async def fake_authorize(*_args, **_kwargs):
+        return None
+
+    @asynccontextmanager
+    async def fake_entity_session(*_args, **_kwargs):
+        yield session, entity_id
+
+    monkeypatch.setattr(tax_get_period_journal, "authorize_workspace", fake_authorize)
+    monkeypatch.setattr(tax_get_period_journal, "entity_session", fake_entity_session)
+
+    result = await tax_get_period_journal.get_period_journal(
+        workspace_id,
+        entity_id,
+        "2026-05-01T00:00:00Z",
+        "2026-07-09T23:59:59Z",
+        limit=10,
+    )
+
+    assert result["entries"] == []
+    _sql, params = session.calls[0]
+    assert params["start_date"] == date(2026, 5, 1)
+    assert params["end_date"] == date(2026, 7, 9)
+    assert type(params["start_date"]) is date
+    assert type(params["end_date"]) is date
+
+
+@pytest.mark.asyncio
+async def test_list_journal_entries_binds_date_objects(monkeypatch):
+    workspace_id = uuid4()
+    session = _FakeSession()
+
+    async def fake_authorize(*_args, **_kwargs):
+        return object()
+
+    @asynccontextmanager
+    async def fake_workspace_session(*_args, **_kwargs):
+        yield session
+
+    monkeypatch.setattr(journal_tools, "authorize_workspace", fake_authorize)
+    monkeypatch.setattr(journal_tools, "assert_entity_in_scope", lambda *_args: None)
+    monkeypatch.setattr(journal_tools, "workspace_session", fake_workspace_session)
+
+    result = await journal_tools.list_journal_entries(
+        workspace_id,
+        start_date="2026-05-01T00:00:00Z",
+        end_date="2026-07-09",
+    )
+
+    assert result == {"entries": [], "total": 0, "categories": []}
+    _sql, params = session.calls[0]
+    assert params["start_date"] == date(2026, 5, 1)
+    assert params["end_date"] == date(2026, 7, 9)
+    assert type(params["start_date"]) is date
+    assert type(params["end_date"]) is date
