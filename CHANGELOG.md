@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- ci(integration): namespace each Compose test stack with `AO_ITEST_PROJECT`
+  (Forgejo run ID in CI, short PID/random suffix locally), explicitly namespace
+  its volumes and networks, remove shared-runner host-port publications, and
+  tear down through the lifecycle command's `finally` block unless `--keep` is
+  requested.
+
 - feat(ar): **Quotes seam** — Customer-Ops `quote.accepted` → Accounting-Ops DRAFT
   paper (QUOTES-CONTRACT-v1 §3 + AMENDMENT-01). `POST
   /api/workspaces/{wid}/entities/{eid}/quotes/accepted` (a write-capable M2M rail
