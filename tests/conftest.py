@@ -10,8 +10,8 @@ The integration tier talks to the app over HTTP and to Postgres directly
 (for deterministic seeding + tamper injection). Everything is driven by a
 handful of env vars so the same tests run locally and in CI unchanged:
 
-  ACCTOPS_TEST_BASE_URL   app base URL          (default http://127.0.0.1:8000)
-  ACCTOPS_TEST_DSN        asyncpg DSN to PG     (default postgresql://accounting_ops:REMOVED@127.0.0.1:5432/accounting_ops)
+  ACCTOPS_TEST_BASE_URL   app base URL          (default http://app:8000)
+  ACCTOPS_TEST_DSN        asyncpg DSN to PG     (default postgresql://accounting_ops:REMOVED@postgres:5432/accounting_ops)
   ACCTOPS_TEST_TOKEN      service bearer token  (must be in the app's ACCTOPS_SERVICE_TOKENS)
   ACCTOPS_TEST_UC_UID     uc_uid the token maps to (default test-service)
   CPA_EXPORT_URL          cpa-export base URL   (optional; if unset the CPA step
@@ -79,14 +79,14 @@ class StackConfig:
 
 
 def _stack_config() -> StackConfig:
-    # Defaults match the remapped host ports in docker-compose.itest.yml
-    # (app 58000, postgres 55432) so a direct `pytest` run still hits the
-    # throwaway stack even without `eval "$(... env)"`.
-    base_url = env("ACCTOPS_TEST_BASE_URL", "http://127.0.0.1:58000").rstrip("/")
+    # Defaults are the service names on the private integration compose
+    # network. The harness runs pytest inside `app`, so no host ports are
+    # required or published on the shared runner.
+    base_url = env("ACCTOPS_TEST_BASE_URL", "http://app:8000").rstrip("/")
     pw = env("POSTGRES_PASSWORD", "accounting_ops_test_pw")
     dsn = env(
         "ACCTOPS_TEST_DSN",
-        f"postgresql://accounting_ops:{pw}@127.0.0.1:55432/accounting_ops",
+        f"postgresql://accounting_ops:{pw}@postgres:5432/accounting_ops",
     )
     token = env("ACCTOPS_TEST_TOKEN", "")
     uc_uid = env("ACCTOPS_TEST_UC_UID", "test-service")

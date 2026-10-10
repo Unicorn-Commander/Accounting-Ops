@@ -12,22 +12,26 @@ Subcommands:
             workspace + entity.
   env       print the `export VAR=...` lines pytest needs (eval-able).
   down      `docker compose down -v` (removes volumes — full reset).
+  run       up, run pytest in the app container, and always tear down.
 
-Everything is idempotent. The compose project is namespaced
-(COMPOSE_PROJECT_NAME=acctops_itest) so it never collides with a dev stack.
+Everything is idempotent. The compose project is namespaced per invocation:
+AO_ITEST_PROJECT wins when set; otherwise CI run IDs or a short local suffix
+are used. The selected name is written to .env.integration so separate `env`,
+`test`, and `down` invocations use the same project.
 
 Usage:
   python scripts/integration_env.py up
-  eval "$(python scripts/integration_env.py env)"
-  pytest -m integration tests/integration
+  python scripts/integration_env.py test -- -m integration tests/integration
   python scripts/integration_env.py down
+  python scripts/integration_env.py run -- -m integration tests/integration
+  python scripts/integration_env.py run --keep -- -m integration tests/integration
 """
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import secrets
-import socket
 import subprocess
 import sys
 import time
@@ -62,16 +66,13 @@ TEST_WORKSPACE_B_SLUG = "integration-ci-b"
 TEST_WORKSPACE_B_ID = uuid.uuid5(uuid.NAMESPACE_DNS, f"accounting-ops:{TEST_WORKSPACE_B_SLUG}")
 TEST_WORKSPACE_B_ENTITY_NAME = "Integration Test Co B"
 
-PROJECT = "acctops_itest"
 ENV_FILE = ROOT / ".env.integration"
 SECRET_FILE = ROOT / "secrets" / "accounting_ops_master_key"
 
-# Published host ports — MUST match docker-compose.itest.yml. Remapped into a
-# high range so the throwaway stack never collides with a standard-port
-# Postgres/app on the host or a shared CI runner.
-HOST_PG_PORT = 55432
-HOST_APP_PORT = 58000
-HOST_CPA_PORT = 58093
+PROJECT_ENV = "AO_ITEST_PROJECT"
+PROJECT_PREFIX = "acctops_itest"
+PROJECT_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+CI_RUN_ID_ENV_VARS = ("GITHUB_RUN_ID", "FORGEJO_RUN_ID")
 
 # Fixed, non-secret-but-local values for the throwaway test stack.
 POSTGRES_PASSWORD = "accounting_ops_test_pw"
@@ -94,8 +95,66 @@ BASE_COMPOSE = "docker-compose.yml"
 ITEST_COMPOSE = "docker-compose.itest.yml"  # redefines the external traefik net as managed
 
 
+def _read_env_value(name: str) -> str | None:
+    """Read one generated env value without exposing the rest of the file."""
+    try:
+        lines = ENV_FILE.read_text().splitlines()
+    except OSError:
+        return None
+    prefix = f"{name}="
+    for line in lines:
+        if not line.startswith(prefix):
+            continue
+        value = line[len(prefix):].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value or None
+    return None
+
+
+def _validate_project_name(value: str) -> str:
+    if not PROJECT_NAME_PATTERN.fullmatch(value):
+        raise ValueError(
+            f"{PROJECT_ENV} must contain only lowercase letters, digits, '-' or '_', "
+            f"starting with a letter or digit; got {value!r}"
+        )
+    return value
+
+
+def _new_project_name() -> str:
+    for env_name in CI_RUN_ID_ENV_VARS:
+        run_id = os.environ.get(env_name, "").strip()
+        if run_id:
+            suffix = re.sub(r"[^a-z0-9_-]+", "-", run_id.lower()).strip("-_")
+            if suffix:
+                return _validate_project_name(f"{PROJECT_PREFIX}_{suffix}")
+    return _validate_project_name(f"{PROJECT_PREFIX}_{os.getpid()}_{secrets.token_hex(2)}")
+
+
+def resolve_project_name(*, for_up: bool = False) -> str:
+    """Resolve the project name, retaining it across separate CLI invocations.
+
+    A fresh local `up` gets a new suffix. Later commands reuse the project
+    recorded in .env.integration. CI supplies AO_ITEST_PROJECT from the
+    workflow run ID, so every concurrent job has an independent namespace.
+    """
+    configured = os.environ.get(PROJECT_ENV, "").strip()
+    if configured:
+        return _validate_project_name(configured)
+
+    if not for_up:
+        persisted = _read_env_value(PROJECT_ENV)
+        if persisted:
+            return _validate_project_name(persisted)
+
+    return _new_project_name()
+
+
 def _compose(*args: str, env_file: bool = True, check: bool = True, capture: bool = False):
-    cmd = ["docker", "compose", "-p", PROJECT, "-f", BASE_COMPOSE, "-f", ITEST_COMPOSE]
+    cmd = [
+        "docker", "compose", "-p", resolve_project_name(),
+        "-f", BASE_COMPOSE, "-f", ITEST_COMPOSE,
+    ]
     if env_file:
         cmd += ["--env-file", str(ENV_FILE)]
     cmd += list(args)
@@ -105,7 +164,8 @@ def _compose(*args: str, env_file: bool = True, check: bool = True, capture: boo
     )
 
 
-def _write_secrets_and_env(with_cpa: bool) -> None:
+def _write_secrets_and_env(with_cpa: bool, project: str | None = None) -> None:
+    project = project or resolve_project_name(for_up=True)
     SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not SECRET_FILE.exists():
         SECRET_FILE.write_bytes(secrets.token_bytes(32))
@@ -129,7 +189,8 @@ def _write_secrets_and_env(with_cpa: bool) -> None:
         % (SERVICE_TOKEN, SERVICE_UC_UID)
     )
     lines = [
-        f"COMPOSE_PROJECT_NAME={PROJECT}",
+        f"AO_ITEST_PROJECT={project}",
+        f"COMPOSE_PROJECT_NAME={project}",
         "HEADSCALE_BIND_IP=127.0.0.1",
         "APP_PORT=8000",
         "WEB_PORT=3000",
@@ -228,11 +289,12 @@ def _bootstrap_runtime_role() -> None:
 
 
 def cmd_up(with_cpa: bool) -> None:
-    _write_secrets_and_env(with_cpa)
+    project = resolve_project_name(for_up=True)
+    _write_secrets_and_env(with_cpa, project)
     services = list(CORE_SERVICES)
     if with_cpa:
         services.append("cpa-export")
-    print(f"[integration] building + starting: {services}", file=sys.stderr)
+    print(f"[integration] project {project}; building + starting: {services}", file=sys.stderr)
     # cpa-export lives in the exports profile.
     up_args = ["up", "-d", "--build"]
     if with_cpa:
@@ -317,96 +379,34 @@ def cmd_up(with_cpa: bool) -> None:
         "alembic", "-c", "alembic-tenant.ini", "-x", f"tenant={SHARED_SCHEMA}",
         "upgrade", "head",
     )
+
     print("[integration] stack ready.", file=sys.stderr)
-    print("[integration] now run:  eval \"$(python scripts/integration_env.py env"
-          + (" --with-cpa" if with_cpa else "") + ")\" && pytest -m integration tests/integration",
-          file=sys.stderr)
-
-
-def _resolve_test_host() -> str:
-    """Pick the address the published stack ports are actually reachable at.
-
-    Locally (no DOCKER_HOST, or a unix socket to a LOCAL daemon) this process
-    and the daemon share one network namespace, so 127.0.0.1 is correct —
-    that's the only candidate that will connect, and behavior for a dev
-    running this by hand is unchanged.
-
-    Under the Forgejo docker-in-docker CI sandbox, the daemon (dind) is a
-    SEPARATE container from the one running this script (the job container),
-    and `docker compose`/this script talk to it over DOCKER_HOST. A port
-    dind publishes binds inside DIND'S OWN network namespace — even bound to
-    0.0.0.0 (see docker-compose.itest.yml), "127.0.0.1" from here is this
-    container's own loopback, which is never the same namespace, so it can
-    never connect no matter how long we wait. What IS reachable is dind
-    itself: either by a hostname the runner aliases it to, or by this
-    container's own default-route gateway — which, since dind is the docker
-    engine that created BOTH this container's network and the stack's, is an
-    address dind owns on every network it manages, including the one this
-    container is on. A port published to 0.0.0.0 is reachable there.
-    Rather than assume which of these applies, probe each and use the first
-    one that actually answers on the app port — measured, not guessed.
-    """
-    candidates: list[str] = []
-
-    docker_host = os.environ.get("DOCKER_HOST", "")
-    if docker_host.startswith("tcp://"):
-        candidates.append(docker_host[len("tcp://"):].rsplit(":", 1)[0])
-
-    for name in ("docker", "dind", "host.docker.internal"):
-        try:
-            socket.gethostbyname(name)
-        except OSError:
-            continue
-        candidates.append(name)
-
-    try:
-        with open("/proc/net/route") as f:
-            for line in f.readlines()[1:]:
-                fields = line.split()
-                if len(fields) > 2 and fields[1] == "00000000":  # default route
-                    gw_hex = fields[2]
-                    octets = [gw_hex[i : i + 2] for i in (6, 4, 2, 0)]
-                    candidates.append(".".join(str(int(o, 16)) for o in octets))
-                    break
-    except OSError:
-        pass  # not on Linux (e.g. a dev running this on macOS) — fine, skip.
-
-    candidates.append("127.0.0.1")  # last resort; correct for a local daemon.
-
-    for host in candidates:
-        try:
-            with socket.create_connection((host, HOST_APP_PORT), timeout=3):
-                pass
-        except OSError as exc:
-            print(f"[integration] test host {host!r} unreachable: {exc!r}", file=sys.stderr)
-            continue
-        print(f"[integration] test host resolved: {host!r} (reached :{HOST_APP_PORT})", file=sys.stderr)
-        return host
-
-    raise SystemExit(
-        f"[integration] no candidate host could reach the stack on :{HOST_APP_PORT}. "
-        f"Tried (in order): {candidates!r}. DOCKER_HOST={docker_host!r}."
+    print(
+        "[integration] now run: python scripts/integration_env.py test -- "
+        "-m integration tests/integration",
+        file=sys.stderr,
     )
 
 
 def cmd_env(with_cpa: bool) -> None:
-    host = _resolve_test_host()
+    """Print service-DNS settings for a process on the compose network."""
+    print(f'export AO_ITEST_PROJECT="{resolve_project_name()}"')
     # Owner DSN: used by the harness for seeding + tamper-injection (the tamper
     # test must DISABLE TRIGGER, an owner-only op — it models an attacker with
     # raw owner access).
-    dsn = f"postgresql://{OWNER_DB_ROLE}:{POSTGRES_PASSWORD}@{host}:{HOST_PG_PORT}/accounting_ops"
+    dsn = f"postgresql://{OWNER_DB_ROLE}:{POSTGRES_PASSWORD}@postgres:5432/accounting_ops"
     # Runtime-role DSN: used by the RLS + role-permission tests to prove the
     # least-privilege role canNOT mutate the ledger / disable triggers, and that
     # RLS blocks cross-tenant reads under it.
-    app_dsn = f"postgresql://{RUNTIME_DB_ROLE}:{RUNTIME_DB_PASSWORD}@{host}:{HOST_PG_PORT}/accounting_ops"
-    print(f'export ACCTOPS_TEST_BASE_URL="http://{host}:{HOST_APP_PORT}"')
+    app_dsn = f"postgresql://{RUNTIME_DB_ROLE}:{RUNTIME_DB_PASSWORD}@postgres:5432/accounting_ops"
+    print('export ACCTOPS_TEST_BASE_URL="http://app:8000"')
     print(f'export ACCTOPS_TEST_DSN="{dsn}"')
     print(f'export ACCTOPS_TEST_APP_DSN="{app_dsn}"')
     print(f'export ACCTOPS_TEST_TOKEN="{SERVICE_TOKEN}"')
     print(f'export ACCTOPS_TEST_UC_UID="{SERVICE_UC_UID}"')
     print(f'export POSTGRES_PASSWORD="{POSTGRES_PASSWORD}"')
     if with_cpa:
-        print(f'export CPA_EXPORT_URL="http://{host}:{HOST_CPA_PORT}"')
+        print('export CPA_EXPORT_URL="http://cpa-export:8093"')
         print(f'export CPA_EXPORT_TOKEN="{SERVICE_TOKEN}"')
 
 
@@ -415,24 +415,25 @@ def cmd_down() -> None:
     print("[integration] stack + volumes removed.", file=sys.stderr)
 
 
-def cmd_test(pytest_args: list[str]) -> int:
+def _collect_failure_logs(with_cpa: bool) -> None:
+    services = list(CORE_SERVICES)
+    if with_cpa:
+        services.append("cpa-export")
+    try:
+        _compose("logs", *services, check=False)
+    except Exception:
+        # Logging must never prevent the finally block from tearing the stack
+        # down, and the original test/startup error is more useful than a
+        # secondary logging failure.
+        print("[integration] unable to collect failure logs", file=sys.stderr)
+
+
+def cmd_test(pytest_args: list[str], with_cpa: bool = False) -> int:
     """Run pytest INSIDE the `app` container instead of out here.
 
-    `env`'s host-probing (_resolve_test_host) fixed *reachability* under the
-    Forgejo dind sandbox — the job container really can reach the stack's
-    published ports now. What it can't do reliably is carry a full request
-    across that path: every test that only talks to Postgres directly
-    passed, but every test that does a real HTTP POST/read through the app
-    hung for its full 30s client timeout and failed with
-    httpcore.ReadTimeout. The TCP handshake completes (that's what `env`'s
-    probe checks); the multi-hop route through dind's NAT back to a job
-    container on a *different* per-workflow bridge network just isn't a
-    reliable path for a real response body. tests/conftest.py's own
-    ACCTOPS_TEST_* env vars are exactly what lets us sidestep that: point
-    them at what's true FROM INSIDE the app container instead — itself at
-    127.0.0.1, Postgres at its service name `postgres` — the same path the
-    app's own code already uses to reach Postgres/Garage every request, on
-    one compose network, no NAT hop at all.
+    The test process runs inside the `app` container, where `127.0.0.1:8000`
+    reaches the app and Compose DNS resolves `postgres` and `cpa-export`.
+    No host port or dind NAT path is involved.
 
     Needs `.[dev]` inside the container (the image only ships the
     `[tax-agents]` runtime extra); installed here rather than baked into
@@ -449,6 +450,9 @@ def cmd_test(pytest_args: list[str]) -> int:
         "ACCTOPS_TEST_UC_UID": SERVICE_UC_UID,
         "POSTGRES_PASSWORD": POSTGRES_PASSWORD,
     }
+    if with_cpa:
+        in_container_env["CPA_EXPORT_URL"] = "http://cpa-export:8093"
+        in_container_env["CPA_EXPORT_TOKEN"] = SERVICE_TOKEN
     exec_args = ["exec", "-T"]
     for key, value in in_container_env.items():
         exec_args += ["-e", f"{key}={value}"]
@@ -469,17 +473,40 @@ def cmd_test(pytest_args: list[str]) -> int:
     return result.returncode
 
 
+def cmd_run(with_cpa: bool, keep: bool, pytest_args: list[str]) -> int:
+    """Run the full integration lifecycle and tear down unless `--keep`."""
+    try:
+        cmd_up(with_cpa)
+        result = cmd_test(pytest_args, with_cpa)
+        if result:
+            _collect_failure_logs(with_cpa)
+        return result
+    except BaseException:
+        _collect_failure_logs(with_cpa)
+        raise
+    finally:
+        if keep:
+            print("[integration] --keep set; stack left running for debugging.", file=sys.stderr)
+        else:
+            cmd_down()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    for name in ("up", "env", "down", "test"):
+    for name in ("up", "env", "down", "test", "run"):
         p = sub.add_parser(name)
-        if name in ("up", "env"):
+        if name in ("up", "env", "test", "run"):
             p.add_argument(
                 "--with-cpa", action="store_true",
                 help="include the cpa-export sibling service (exports profile)",
             )
-        if name == "test":
+        if name == "run":
+            p.add_argument(
+                "--keep", action="store_true",
+                help="leave the stack running after tests for debugging",
+            )
+        if name in ("test", "run"):
             p.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.cmd == "up":
@@ -492,7 +519,12 @@ def main() -> int:
         pytest_args = args.pytest_args
         if pytest_args and pytest_args[0] == "--":
             pytest_args = pytest_args[1:]
-        return cmd_test(pytest_args)
+        return cmd_test(pytest_args, args.with_cpa)
+    elif args.cmd == "run":
+        pytest_args = args.pytest_args
+        if pytest_args and pytest_args[0] == "--":
+            pytest_args = pytest_args[1:]
+        return cmd_run(args.with_cpa, args.keep, pytest_args)
     return 0
 
 

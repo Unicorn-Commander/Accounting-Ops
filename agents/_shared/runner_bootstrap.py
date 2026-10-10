@@ -2,14 +2,14 @@
 directly with ``python agents/.../run_specialist.py`` and still import
 ``agents._shared``.
 
-Runners that ``from agents._shared.limits import MAX_OUTPUT_TOKENS`` need the
-repo root on ``sys.path``. Containers usually have ``/app`` on the path; ad-hoc
+Runners that ``from agents._shared.limits import get_max_output_tokens`` need
+the repo root on ``sys.path``. Containers usually have ``/app`` on the path; ad-hoc
 ``uv run python agents/...`` invocations from the host don't. This helper does
 the insertion once so each runner only needs::
 
     from agents._shared.runner_bootstrap import ensure_repo_root
     ensure_repo_root(__file__)
-    from agents._shared.limits import MAX_OUTPUT_TOKENS
+    from agents._shared.limits import get_max_output_tokens
 
 idempotent: re-calling it does nothing.
 """

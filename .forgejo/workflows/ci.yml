@@ -85,11 +85,9 @@ jobs:
   # (see docs/admin/actions/docker-access):
   #   * DinD: the runner config sets DOCKER_HOST to the dind service.
   #   * socket mount: container.docker_host = 'automount'.
-  # The published test ports (app 58000 / pg 55432, see docker-compose.itest.yml)
-  # are reached over 127.0.0.1 — this assumes the job container shares the
-  # daemon's loopback (true for socket-mount and for DinD that shares the
-  # network namespace). If your runner isolates them, point ACCTOPS_TEST_BASE_URL
-  # / ACCTOPS_TEST_DSN at the dind host instead.
+  # The integration project is namespaced by Forgejo's run ID. The test process
+  # runs inside the app container, so it reaches app/postgres/garage by Compose
+  # service name and publishes no host ports.
   # ---------------------------------------------------------------------------
   integration:
     # Same label constraint as the unit job. This one also needs the host
@@ -122,11 +120,9 @@ jobs:
     container:
       image: docker:27-cli
     env:
-      # The itest stack binds its ports to 127.0.0.1 by default so a local run
-      # never exposes the throwaway Postgres/app to the LAN. Under dind the
-      # published ports live on the daemon's network namespace, so CI (only)
-      # binds all interfaces there; integration_env.py then finds the reachable host.
-      ITEST_BIND_ADDR: 0.0.0.0
+      # github.run_id is Forgejo's per-run identifier. integration_env.py also
+      # accepts GITHUB_RUN_ID/FORGEJO_RUN_ID when invoked outside this workflow.
+      AO_ITEST_PROJECT: acctops_itest_${{ github.run_id }}
     steps:
       - name: Install toolchain (git, python, compose plugin)
         run: |
@@ -173,17 +169,10 @@ jobs:
         # `tests/integration` once that's triaged.
         #
         # Runs INSIDE the app container (scripts/integration_env.py test),
-        # not out here. Reachability alone wasn't enough: the job container
-        # CAN reach the stack's published ports under dind (confirmed by a
-        # probe), but every test that does a real HTTP POST/read through the
-        # app — not just a straight-to-Postgres query — hung for its full
-        # 30s client timeout and failed with httpcore.ReadTimeout, on the
-        # multi-hop NAT path back from dind to a job container on a
-        # different per-workflow bridge network (run 101, task 3735: 7
-        # failed, all and only the HTTP-client tests; the 9 DB-only tests
-        # passed). Running pytest inside `app` reaches Postgres at its
+        # not out here. Running pytest inside `app` reaches Postgres at its
         # service name and itself at 127.0.0.1 — the same one-network path
-        # the app's own code already uses every request, no NAT hop at all.
+        # the app's own code already uses every request, with no host-port
+        # publication or dind NAT hop.
         run: |
           python3 scripts/integration_env.py test -- \
             -m integration tests/integration/test_db_rls_roles.py -v -rs --junitxml=itest-results.xml
@@ -203,7 +192,7 @@ jobs:
       - name: Dump app logs on failure
         if: failure()
         run: |
-          COMPOSE="docker compose -p acctops_itest -f docker-compose.yml -f docker-compose.itest.yml --env-file .env.integration"
+          COMPOSE="docker compose -p ${AO_ITEST_PROJECT:?} -f docker-compose.yml -f docker-compose.itest.yml --env-file .env.integration"
           $COMPOSE logs app postgres garage || true
           # Diagnostic only (does not change what's tested or the guard above).
           # Every HTTP-client test hung for its full client timeout while every
