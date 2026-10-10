@@ -2,7 +2,7 @@
 #
 #   make test              the whole suite (what CI runs; see the caveat below)
 #   make test-fast         stack-free tiers only (smoke + unit)
-#   make integration       stand up the stack, provision it, run integration tests, tear down
+#   make integration       run integration tests and always tear down
 #   make integration-keep  same, but leave the stack running afterwards
 #   make integration-up / integration-down   manage the stack by hand
 #   make knowledge-refresh run the Tax Knowledge Curator (requires running app container)
@@ -81,20 +81,17 @@ integration-down:
 
 .PHONY: integration-test
 integration-test:
-	@eval "$$($(PY) $(ENV_SCRIPT) env $(CPA_FLAG))"; \
-	export ACCTOPS_TEST_BASE_URL ACCTOPS_TEST_DSN ACCTOPS_TEST_APP_DSN ACCTOPS_TEST_TOKEN ACCTOPS_TEST_UC_UID POSTGRES_PASSWORD CPA_EXPORT_URL CPA_EXPORT_TOKEN; \
-	$(PYTEST) -m integration tests/integration -v
+	$(PY) $(ENV_SCRIPT) test $(CPA_FLAG) -- -m integration tests/integration -v
 
-# Full cycle: up -> test -> down (down always runs, even on test failure).
+# Full cycle: up -> test -> down, with teardown in the script's finally block.
 .PHONY: integration
-integration: integration-up
-	@set +e; $(MAKE) integration-test; rc=$$?; set -e; \
-	$(MAKE) integration-down; \
-	exit $$rc
+integration:
+	$(PY) $(ENV_SCRIPT) run $(CPA_FLAG) -- -m integration tests/integration -v
 
 # Same but leaves the stack running for debugging.
 .PHONY: integration-keep
-integration-keep: integration-up integration-test
+integration-keep:
+	$(PY) $(ENV_SCRIPT) run $(CPA_FLAG) --keep -- -m integration tests/integration -v
 
 # ---------------------------------------------------------------------------
 # Tax Knowledge Curator
