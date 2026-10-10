@@ -1,50 +1,71 @@
-"""Shared per-call limits for every specialist / narrative runner.
+"""Shared per-call output-token limits for specialist and narrative runners.
 
-This module is the single source of truth for the per-LLM-call output token
-budget used by all tax specialists and the CPA narrative generator. Centralised
-here so a fleet-wide tuning (e.g. bumping the budget for a longer draft) is a
-one-line change instead of an N-specialist scavenger hunt.
+The runner modules do not share one reliable model-resolution API, so this
+module intentionally uses one fleet-wide default. Claude 5 preparers need
+roughly 48K tokens, and the same safe default is used for other models unless
+an operator overrides it through the environment.
 
-Imported by:
-
-- ``agents/tax_specialists/form_1120_preparer/run_specialist.py``
-- ``agents/tax_specialists/officer_compensation_specialist/run_specialist.py``
-- ``agents/tax_specialists/sc_state_specialist/run_specialist.py``
-- ``agents/tax_specialists/1099_specialist/run_specialist.py``
-- ``agents/tax_specialists/nol_schedule_l_analyst/run_specialist.py``
-- ``agents/tax_specialists/audit_defense_specialist/run_specialist.py``
-- ``agents/tax_specialists/federal_strategy_drafter/run_specialist.py``
-- ``agents/tax_specialists/state_strategy_drafter/run_specialist.py``
-- ``agents/tax_specialists/personal_1040_specialist/run_specialist.py``
-- ``agents/cpa_team/narrative_generator/run_narrative_generator.py``
+``AO_MAX_OUTPUT_TOKENS`` is the preferred setting. ``MAX_OUTPUT_TOKENS`` is
+kept as a compatibility fallback for existing deployments. The helper is
+resolved at each LLM request so a caller cannot retain the old import-time
+constant after an environment override is applied.
 """
 
 from __future__ import annotations
 
-#: Per-call output token budget for specialist + narrative LLM calls.
-#:
-#: **Why 16384 is the floor, not the ceiling:**
-#:
-#: The original budget of 8192 tokens turned out to be too small for our
-#: specialist workflow. A typical specialist run emits between 8 and 15 tool
-#: calls (``draft_memo``, ``flag_for_cpa_review``, ``get_period_journal``,
-#: etc.) plus a final Markdown draft. The 8K budget left the model with no
-#: headroom — drafts got truncated mid-section, tool-call ``arguments`` JSON
-#: blobs blew the budget silently on some endpoints, and the CPA narrative
-#: generator (which emits a longer narrative-style document) was hitting the
-#: cap reliably.
-#:
-#: Bumping to 16384 gives the model enough room for:
-#:
-#: - 8–15 tool-call arguments JSON blobs
-#: - The full DRAFT Markdown output (cover, sections 1–8, memo IDs, flag IDs)
-#: - Some headroom for chain-of-thought before the model commits to output
-#:
-#: If individual runners later need a tighter budget (e.g. cost-sensitive
-#: paths), import this and override locally — don't lower this constant for
-#: everyone. Coordinator-style runners that only emit a tiny routing decision
-#: (e.g. ``max_tokens=64`` in ``coordinator/run_coordinator.py``) intentionally
-#: do NOT import this constant.
-MAX_OUTPUT_TOKENS: int = 16384
+import os
+from collections.abc import Mapping
 
-__all__ = ["MAX_OUTPUT_TOKENS"]
+MIN_OUTPUT_TOKENS = 1
+MAX_OUTPUT_TOKENS_LIMIT = 131_072
+DEFAULT_MAX_OUTPUT_TOKENS = 48_000
+
+_OUTPUT_TOKEN_ENV_VARS = ("AO_MAX_OUTPUT_TOKENS", "MAX_OUTPUT_TOKENS")
+
+
+def parse_max_output_tokens(raw: str, *, variable: str = "AO_MAX_OUTPUT_TOKENS") -> int:
+    """Parse and validate one output-token limit from an environment value."""
+    try:
+        value = int(raw.strip())
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(
+            f"{variable} must be an integer between "
+            f"{MIN_OUTPUT_TOKENS} and {MAX_OUTPUT_TOKENS_LIMIT}"
+        ) from exc
+
+    if not MIN_OUTPUT_TOKENS <= value <= MAX_OUTPUT_TOKENS_LIMIT:
+        raise ValueError(
+            f"{variable} must be an integer between "
+            f"{MIN_OUTPUT_TOKENS} and {MAX_OUTPUT_TOKENS_LIMIT}"
+        )
+    return value
+
+
+def get_max_output_tokens(env: Mapping[str, str] | None = None) -> int:
+    """Return the current configured per-call output-token limit.
+
+    ``env`` is injectable for unit tests; normal callers read ``os.environ``.
+    An explicitly set preferred variable is validated rather than silently
+    falling back to the legacy variable when malformed.
+    """
+    values = os.environ if env is None else env
+    for variable in _OUTPUT_TOKEN_ENV_VARS:
+        raw = values.get(variable)
+        if raw is not None:
+            return parse_max_output_tokens(raw, variable=variable)
+    return DEFAULT_MAX_OUTPUT_TOKENS
+
+
+# Backwards-compatible snapshot for external imports. Internal runners use
+# get_max_output_tokens() at request time so this name cannot freeze their
+# configured budget.
+MAX_OUTPUT_TOKENS: int = get_max_output_tokens()
+
+__all__ = [
+    "DEFAULT_MAX_OUTPUT_TOKENS",
+    "MAX_OUTPUT_TOKENS",
+    "MAX_OUTPUT_TOKENS_LIMIT",
+    "MIN_OUTPUT_TOKENS",
+    "get_max_output_tokens",
+    "parse_max_output_tokens",
+]

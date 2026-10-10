@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- fix(mcp): Serve both `/mcp` and `/mcp/` through the authenticated MCP app
+  without a scheme-sensitive trailing-slash redirect.
+- feat(agents): Make specialist and narrative output budgets configurable via
+  `AO_MAX_OUTPUT_TOKENS` (with `MAX_OUTPUT_TOKENS` compatibility fallback),
+  validated from 1 through 131072 and defaulting to 48000.
+- ops: Add the dry-run-by-default
+  `python -m scripts.maintain_stale_specialist_runs` maintenance command to
+  report long-running specialist runs and, with `--apply`, mark stale rows
+  failed with a dated audit note.
+
 - ci(integration): namespace each Compose test stack with `AO_ITEST_PROJECT`
   (Forgejo run ID in CI, short PID/random suffix locally), explicitly namespace
   its volumes and networks, remove shared-runner host-port publications, and

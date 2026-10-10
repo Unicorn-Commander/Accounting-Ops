@@ -82,7 +82,7 @@ if str(_REPO_ROOT_BOOTSTRAP) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT_BOOTSTRAP))
 
 from agents._shared.api_keys import HELP_TEXT_LLM_API_KEY, resolve_llm_api_key
-from agents._shared.limits import MAX_OUTPUT_TOKENS
+from agents._shared.limits import get_max_output_tokens
 
 try:
     import anthropic as _anthropic_module
@@ -119,13 +119,6 @@ _ALLOWED_TOOLS: list[str] = [
 ]
 
 _MAX_LOOP_ITERATIONS = 20
-
-# Output token budget for the LLM.  Sourced from the shared limits module so
-# fleet-wide tuning is a one-file change (agents/_shared/limits.py). The
-# narrative itself is ~5K–10K tokens; the shared 16384 leaves headroom for the
-# structured Markdown plus any per-iteration tool-call boilerplate.
-_MAX_OUTPUT_TOKENS = MAX_OUTPUT_TOKENS
-
 
 # ---------------------------------------------------------------------------
 # Helpers — shared
@@ -225,7 +218,7 @@ def _run_anthropic(
     client = anthropic.Anthropic()
     response = client.beta.messages.create(
         model=resolved_model,
-        max_tokens=_MAX_OUTPUT_TOKENS,
+        max_tokens=get_max_output_tokens(),
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
         mcp_servers=[_mcp_server_config(mcp_url, service_token)],
@@ -364,7 +357,7 @@ def _run_openai(
                         messages=messages,
                         tools=openai_tools if openai_tools else None,
                         tool_choice="auto" if openai_tools else None,
-                        max_tokens=_MAX_OUTPUT_TOKENS,
+                        max_tokens=get_max_output_tokens(),
                         temperature=0.1,
                         extra_body=extra_body,
                     )

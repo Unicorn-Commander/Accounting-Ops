@@ -29,6 +29,7 @@ from uuid import UUID
 from fastapi import Depends, HTTPException
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
+from starlette.types import Receive, Scope, Send
 
 from app.auth import AuthContext, authenticate_token, validate_bearer_token
 from app.authz import assert_entity_in_scope
@@ -158,6 +159,28 @@ class MCPAuthMiddleware:
         await response(scope, receive, send)
 
 
+class MCPMountRootAdapter:
+    """Adapt an exact ``/mcp`` route to the mounted MCP app's ``/`` route.
+
+    Starlette's ``Mount('/mcp', ...)`` matches ``/mcp/`` but not the exact
+    mount root. Its parent router therefore redirects ``/mcp`` before the
+    mounted middleware can authenticate the request. The exact route registered
+    by ``app.main`` uses this adapter to make the child app see ``/`` while
+    preserving the external mount path in the ASGI scope.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            scope = dict(scope)
+            mount_path = scope["path"].rstrip("/") or "/"
+            scope["root_path"] = mount_path
+            scope["path"] = "/" if mount_path == "/" else f"{mount_path}/"
+        await self.app(scope, receive, send)
+
+
 async def authorize_workspace(
     workspace_id: UUID,
     entity_id: UUID | str | None = None,
@@ -252,4 +275,10 @@ async def authorize_workspace(
     return ctx
 
 
-__all__ = ("MCPAuthMiddleware", "authorize_workspace", "bind_http_caller", "current_auth")
+__all__ = (
+    "MCPAuthMiddleware",
+    "MCPMountRootAdapter",
+    "authorize_workspace",
+    "bind_http_caller",
+    "current_auth",
+)

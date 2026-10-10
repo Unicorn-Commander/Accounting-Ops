@@ -101,7 +101,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from agents._shared.api_keys import HELP_TEXT_LLM_API_KEY, resolve_llm_api_key
 from agents._shared.cpateam_llm import resolve_cpateam_llm
-from agents._shared.limits import MAX_OUTPUT_TOKENS
+from agents._shared.limits import get_max_output_tokens
 from app.llm_client import FailoverAsyncClient
 
 # ---------------------------------------------------------------------------
@@ -468,8 +468,8 @@ async def _run_openai_path(
                     "model": llm_model,
                     "messages": messages,
                     # See agents/_shared/limits.py for the rationale behind
-                    # MAX_OUTPUT_TOKENS (16384, not 8192).
-                    "max_tokens": MAX_OUTPUT_TOKENS,
+                    # The shared limit defaults to 48000 and is env-overridable.
+                    "max_tokens": get_max_output_tokens(),
                 }
                 if use_function_calling and openai_tools:
                     kwargs["tools"] = openai_tools
@@ -635,7 +635,7 @@ def _run_anthropic_path(
 
     response = client.beta.messages.create(
         model=model_id,
-        max_tokens=MAX_OUTPUT_TOKENS,
+        max_tokens=get_max_output_tokens(),
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
         mcp_servers=[_mcp_server_config(mcp_url, service_token)],
