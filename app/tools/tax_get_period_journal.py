@@ -20,6 +20,7 @@ from sqlalchemy import text
 
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace
+from app.tools._date_filters import parse_iso_date_filter
 from app.workspace_session import entity_session
 
 _MAX_LIMIT = 500
@@ -58,8 +59,8 @@ async def get_period_journal(
     Args:
         workspace_id: Workspace UUID.
         entity_id: Entity UUID (entity-scoped; must be in caller's scope).
-        start_date: ISO 8601 date (inclusive), e.g. '2023-01-01'.
-        end_date: ISO 8601 date (inclusive), e.g. '2023-12-31'.
+        start_date: ISO 8601 date or datetime (inclusive), e.g. '2023-01-01'.
+        end_date: ISO 8601 date or datetime (inclusive), e.g. '2023-12-31'.
         limit: Maximum rows to return (default 500, max 500).
 
     Returns a dict with ``entries`` (list of journal row projections) and
@@ -73,11 +74,10 @@ async def get_period_journal(
 
     clamped_limit = max(1, min(int(limit), _MAX_LIMIT))
 
-    # asyncpg requires datetime.date for date columns; the tool accepts ISO
-    # 8601 strings as inputs (per MCP schema), so convert here.
-    from datetime import date as _date
-    _start = _date.fromisoformat(start_date) if isinstance(start_date, str) else start_date
-    _end = _date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
+    # asyncpg requires datetime.date for the effective_date DATE column; the
+    # tool accepts ISO date or datetime strings, so normalize before binding.
+    _start = parse_iso_date_filter(start_date, "start_date")
+    _end = parse_iso_date_filter(end_date, "end_date")
 
     params: dict[str, Any] = {
         "entity_id": str(entity_id),

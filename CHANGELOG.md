@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- fix(mcp): parse journal transaction date filters into `date` objects before
+  binding, accepting ISO dates and datetimes and surfacing invalid values as a
+  clear 400-style tool error instead of an asyncpg 500.
+
 - fix(mcp): Serve both `/mcp` and `/mcp/` through the authenticated MCP app
   without a scheme-sensitive trailing-slash redirect.
 - feat(agents): Make specialist and narrative output budgets configurable via

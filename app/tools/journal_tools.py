@@ -37,6 +37,7 @@ from app.journal.hash_chain import chain_summary, verify_chain
 from app.journal.posting import CATEGORY_TO_ACCOUNT
 from app.mcp_auth import authorize_workspace
 from app.tools._audit import project_decision_audit, write_decision_audit
+from app.tools._date_filters import parse_iso_date_filter
 from app.workspace_session import workspace_session
 
 
@@ -63,7 +64,8 @@ async def list_journal_entries(
     Args:
         workspace_id: Workspace UUID.
         entity_id: Optional — restrict to one entity.
-        start_date / end_date: ISO YYYY-MM-DD strings (effective_date range).
+        start_date / end_date: ISO date or datetime strings (effective_date
+            range; datetime inputs use their calendar date).
         category: Exact category match (e.g. "SaaS · AI").
         status_filter: 'posted' | 'reversed'.
         search: Case-insensitive substring on (payee, description, memo,
@@ -83,14 +85,6 @@ async def list_journal_entries(
     ctx = await authorize_workspace(workspace_id, entity_id, min_role="viewer")
     scope_restriction = assert_entity_in_scope(ctx, entity_id)
 
-    def _parse_iso_date(value: str, field: str) -> dt.date:
-        try:
-            return dt.date.fromisoformat(value)
-        except ValueError as exc:
-            raise ValueError(
-                f"{field} must be an ISO date (YYYY-MM-DD): {value!r}"
-            ) from exc
-
     where = ["1=1"]
     params: dict[str, Any] = {
         "limit": min(max(int(limit), 1), 500),
@@ -102,12 +96,12 @@ async def list_journal_entries(
     if scope_restriction is not None:
         where.append("je.entity_id = ANY(:entity_scope)")
         params["entity_scope"] = [str(e) for e in scope_restriction]
-    if start_date:
+    if start_date is not None:
         where.append("je.effective_date >= :start_date")
-        params["start_date"] = _parse_iso_date(start_date, "start_date")
-    if end_date:
+        params["start_date"] = parse_iso_date_filter(start_date, "start_date")
+    if end_date is not None:
         where.append("je.effective_date <= :end_date")
-        params["end_date"] = _parse_iso_date(end_date, "end_date")
+        params["end_date"] = parse_iso_date_filter(end_date, "end_date")
     if category:
         where.append("je.category = :category")
         params["category"] = category

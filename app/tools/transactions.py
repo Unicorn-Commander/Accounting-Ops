@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace
+from app.tools._date_filters import parse_iso_date_filter
 from app.workspace_session import entity_session
 
 # Columns surfaced in the list projection. Kept narrow + display-oriented; the
@@ -46,7 +47,8 @@ async def list_transactions(
 
     `filter` (all optional):
       - status:      journal status (e.g. 'posted', 'pending')
-      - start_date / end_date: ISO dates bounding effective_date (inclusive)
+      - start_date / end_date: ISO dates or datetimes bounding effective_date
+        (inclusive; datetime inputs use their calendar date)
       - category:    exact category match
       - limit:       page size (default 50, max 200)
       - offset:      page offset (default 0)
@@ -58,12 +60,12 @@ async def list_transactions(
     if f.get("status"):
         clauses.append("status = :status")
         params["status"] = str(f["status"])
-    if f.get("start_date"):
+    if f.get("start_date") is not None:
         clauses.append("effective_date >= :start_date")
-        params["start_date"] = str(f["start_date"])
-    if f.get("end_date"):
+        params["start_date"] = parse_iso_date_filter(f["start_date"], "start_date")
+    if f.get("end_date") is not None:
         clauses.append("effective_date <= :end_date")
-        params["end_date"] = str(f["end_date"])
+        params["end_date"] = parse_iso_date_filter(f["end_date"], "end_date")
     if f.get("category"):
         clauses.append("category = :category")
         params["category"] = str(f["category"])
