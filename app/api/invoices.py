@@ -63,11 +63,11 @@ class CustomerBody(BaseModel):
 
 class LineItemBody(BaseModel):
     description: str
-    quantity: float | str = 1
-    unit_price: float | str = 0
-    amount: float | str | None = None
+    quantity: Decimal = Decimal("1")
+    unit_price: Decimal = Decimal("0")
+    amount: Decimal | None = None
     tax_code: str | None = None
-    tax_amount: float | str | None = None
+    tax_amount: Decimal | None = None
     revenue_account_id: UUID | None = None
     source_ref: str | None = None
 
@@ -82,7 +82,7 @@ class CreateInvoiceBody(BaseModel):
     issue_date: date | None = None
     due_date: date | None = None
     net_terms: int | None = None
-    discount: float | str | None = None
+    discount: Decimal | None = None
     notes: str | None = None
     po_number: str | None = Field(default=None, max_length=128)
     auto_send: bool = False
@@ -96,7 +96,7 @@ class IssueInvoiceBody(BaseModel):
 
 
 class RecordPaymentBody(BaseModel):
-    amount: float | str
+    amount: Decimal
     method: str = Field(default="manual", max_length=32)
     received_date: date | None = None
     external_ref: str | None = Field(default=None, max_length=256)
@@ -474,9 +474,10 @@ async def issue_invoice(
         raise _invoice_error(exc) from exc
     view = _attach_pdf_url(view, workspace_id)
     view = await _attach_pay_link(workspace.workspace_id, view)
-    view["email_status"] = (
-        await stage_invoice_email(view) if body.send_email else "skipped"
-    )
+    # Issuing always stages a draft in Email-Ops when it is configured. The
+    # compose_email mode is hard-coded to draft; body.send_email remains an
+    # accepted compatibility field but can never send mail from this route.
+    view["email_status"] = await stage_invoice_email(view)
     return view
 
 
@@ -494,7 +495,9 @@ async def preview_invoice(
 
 
 def _public_token_ok(token: str) -> bool:
-    if not token or len(token) < 20 or len(token) > 128:
+    # token_urlsafe(16) is the minimum 128-bit source; this lane generates 32
+    # random bytes, but reject weaker legacy/hand-crafted path values too.
+    if not token or len(token) < 22 or len(token) > 128 or not token.isascii():
         return False
     return all(ch.isalnum() or ch in "-_" for ch in token)
 
@@ -540,7 +543,7 @@ async def public_invoice(token: str) -> HTMLResponse:
     view = await _invoice_for_token(token)
     if view is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found")
-    return HTMLResponse(render_invoice_html(view))
+    return HTMLResponse(render_invoice_html(view), headers={"Cache-Control": "no-store"})
 
 
 @router.get("/pay/{token}/pdf")

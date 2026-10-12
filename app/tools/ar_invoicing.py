@@ -27,6 +27,7 @@ never write the ledger directly.
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -121,7 +122,7 @@ async def create_invoice_from_draft(
     issue_date: str | None = None,
     due_date: str | None = None,
     net_terms: int | None = None,
-    discount: float | str | None = None,
+    discount: Decimal | None = None,
     notes: str | None = None,
     po_number: str | None = None,
     auto_send: bool = False,
@@ -325,7 +326,7 @@ async def void_invoice(
 async def record_payment(
     workspace_id: UUID,
     invoice_id: UUID,
-    amount: float | str,
+    amount: Decimal,
     method: str = "manual",
     received_date: str | None = None,
     external_ref: str | None = None,
@@ -414,8 +415,10 @@ async def issue_invoice_draft(
 ) -> dict[str, Any]:
     """Post the journal for an existing draft. Idempotent when already posted.
 
-    Does not email unless send_email is true. A pay link is stored only when
-    Checkout is configured; otherwise hosted_pay_url stays null.
+    Stages an Email-Ops draft when configured; it never sends mail. The
+    send_email argument remains for MCP compatibility and is ignored. A pay
+    link is stored only when Checkout is configured; otherwise hosted_pay_url
+    stays null.
 
     Role floor: accountant.
     """
@@ -480,12 +483,11 @@ async def issue_invoice_draft(
                     {"url": url, "id": str(shaped["id"])},
                 )
             shaped["hosted_pay_url"] = url
-    if send_email:
-        from app.ar.invoice_brand.email_draft import stage_invoice_email
+    from app.ar.invoice_brand.email_draft import stage_invoice_email
 
-        shaped["email_status"] = await stage_invoice_email(shaped)
-    else:
-        shaped["email_status"] = "skipped"
+    # Stage the draft on every issue. The Email-Ops payload is always mode=draft,
+    # so this remains approval-gated even when the legacy flag is true.
+    shaped["email_status"] = await stage_invoice_email(shaped)
     return shaped
 
 

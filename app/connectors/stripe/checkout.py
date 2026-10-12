@@ -14,6 +14,8 @@ import time
 from decimal import Decimal
 from typing import Any
 
+import httpx
+
 _API = "https://api.stripe.com/v1/checkout/sessions"
 _VERSION = "2024-06-20"
 
@@ -73,7 +75,6 @@ async def create_checkout_session(
     cents = int((amount * 100).to_integral_value())
     if cents <= 0:
         return None
-    import httpx
     data = {
         "mode": "payment",
         "success_url": success_url,
@@ -91,14 +92,24 @@ async def create_checkout_session(
     }
     if customer_email:
         data["customer_email"] = customer_email
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.post(
-            _API,
-            data=data,
-            headers={"Authorization": f"Bearer {key}", "Stripe-Version": _VERSION},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                _API,
+                data=data,
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Stripe-Version": _VERSION,
+                    "Idempotency-Key": f"invoice-checkout-{invoice_id}",
+                },
+            )
+    except httpx.HTTPError:
+        return None
     if response.status_code >= 400:
         return None
-    body: dict[str, Any] = response.json()
+    try:
+        body: dict[str, Any] = response.json()
+    except (TypeError, ValueError):
+        return None
     url = body.get("url")
     return str(url) if url else None

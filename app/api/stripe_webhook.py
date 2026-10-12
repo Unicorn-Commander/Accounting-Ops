@@ -33,6 +33,9 @@ async def stripe_webhook(request: Request) -> dict:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid payload") from exc
     if event.get("type") != "checkout.session.completed":
         return {"received": True}
+    event_id = event.get("id")
+    if not isinstance(event_id, str) or not event_id.strip():
+        return {"received": True, "applied": False}
     obj = (event.get("data") or {}).get("object") or {}
     meta = obj.get("metadata") or {}
     invoice_id = meta.get("invoice_id")
@@ -52,7 +55,7 @@ async def stripe_webhook(request: Request) -> dict:
                 amount=amount,
                 method="stripe",
                 received_date=datetime.now(tz=timezone.utc).date(),
-                external_ref=str(event.get("id") or ""),
+                external_ref=event_id.strip(),
                 memo="Stripe Checkout",
             )
     except InvoiceError as exc:

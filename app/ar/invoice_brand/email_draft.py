@@ -1,7 +1,8 @@
-"""Stage an invoice email in Email-Ops. Plain text. Draft unless Aaron sets
-INVOICE_EMAIL_MODE=send. Skips cleanly when Email-Ops is not configured or the
-customer has no address. The body links the hosted page. Email-Ops has no
-attachment field.
+"""Stage an invoice email draft in Email-Ops.
+
+The invoice issue path is never an email-send path: this module only asks
+Email-Ops to create a draft for later human approval. It skips cleanly when
+Email-Ops is not configured or the customer has no address.
 """
 from __future__ import annotations
 
@@ -11,13 +12,8 @@ from typing import Any
 import httpx
 
 
-def _mode() -> str:
-    raw = (os.environ.get("INVOICE_EMAIL_MODE") or "draft").strip().lower()
-    return "send" if raw == "send" else "draft"
-
-
 async def stage_invoice_email(view: dict[str, Any]) -> str:
-    """Return sent|draft|skipped. Never raises. Does not log the bearer."""
+    """Return draft|skipped. Never sends mail or logs the bearer."""
     base = (os.environ.get("EMAIL_OPS_BASE_URL") or "").rstrip("/")
     token = os.environ.get("EMAIL_OPS_TOKEN") or ""
     to_address = (view.get("customer_email") or "").strip()
@@ -47,7 +43,7 @@ async def stage_invoice_email(view: dict[str, Any]) -> str:
         "to_address": to_address,
         "subject": f"Invoice {number}",
         "body": "\n".join(lines),
-        "mode": _mode(),
+        "mode": "draft",
         "external_source": "accounting-ops",
         "external_ref": f"invoice:{view.get('id')}",
     }
@@ -74,4 +70,4 @@ async def stage_invoice_email(view: dict[str, Any]) -> str:
         return "skipped"
     if response.status_code >= 400:
         return "skipped"
-    return "draft" if args["mode"] == "draft" else "sent"
+    return "draft"
