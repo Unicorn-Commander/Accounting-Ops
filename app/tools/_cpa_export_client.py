@@ -35,6 +35,7 @@ _log = logging.getLogger("acctops.cpa_export")
 
 _CPA_EXPORT_ALLOW_BEARER_ONLY_ENV = "CPA_EXPORT_ALLOW_BEARER_ONLY"
 _CPA_EXPORT_IDENTITY_ASSERTION_ERROR = "cpa-export identity assertion unavailable"
+_CPA_EXPORT_CONSOLIDATED_ENTITY_IDS = frozenset({"all", "consolidated"})
 
 _DRAFT_NOTICE = (
     "DRAFT — for CPA review only. "
@@ -81,15 +82,28 @@ async def fetch_return_package(
     form_path: str,
     form_label: str,
     workspace_id: UUID,
-    entity_id: UUID,
+    entity_id: UUID | str,
     tax_year: int,
+    require_unscoped: bool = False,
 ) -> dict[str, Any]:
     """GET /exports/{form_path}/{tax_year} from the cpa-export sidecar.
 
     ``form_path`` is the URL segment ("1120s", "1065"); ``form_label`` is the
     human name used in error messages.
     """
-    ctx = await authorize_workspace(workspace_id, entity_id, min_role="viewer")
+    if require_unscoped:
+        ctx = await authorize_workspace(
+            workspace_id,
+            entity_id,
+            min_role="viewer",
+            require_unscoped=True,
+        )
+    else:
+        ctx = await authorize_workspace(workspace_id, entity_id, min_role="viewer")
+    entity_id_text = str(entity_id)
+    is_consolidated = entity_id_text.strip().lower() in _CPA_EXPORT_CONSOLIDATED_ENTITY_IDS
+    wire_entity_id = "all" if is_consolidated else entity_id_text
+    assertion_entity_id = None if is_consolidated else entity_id_text
 
     settings = get_settings()
     auth = current_auth()
@@ -103,7 +117,7 @@ async def fetch_return_package(
             master_key,
             uc_uid=auth.uc_uid,
             workspace_id=str(ctx.workspace_id),
-            entity_id=str(entity_id),
+            entity_id=assertion_entity_id,
             role=ctx.role,
             scopes=auth.scopes,
             agent_id=auth.agent_id,
@@ -129,7 +143,7 @@ async def fetch_return_package(
 
     url = (
         f"{settings.cpa_export_url.rstrip('/')}/exports/{form_path}/{tax_year}"
-        f"?workspace_id={ctx.workspace_id}&entity_id={entity_id}"
+        f"?workspace_id={ctx.workspace_id}&entity_id={wire_entity_id}"
     )
 
     async with httpx.AsyncClient(timeout=30) as client:

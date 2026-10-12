@@ -165,3 +165,63 @@ async def test_successful_assertion_forwards_canonical_claim_shapes(monkeypatch)
     assert assertion.scopes == ("accounting:read", "tax:read")
     assert assertion.agent_id == "agent-shape"
     assert parse_qs(urlsplit(url).query)["workspace_id"] == [str(CANONICAL_WORKSPACE)]
+
+
+@pytest.mark.asyncio
+async def test_consolidated_request_uses_sidecar_all_sentinel_and_null_entity_claim(
+    monkeypatch,
+):
+    master_key = b"c" * 32
+    monkeypatch.delenv("CPA_EXPORT_ALLOW_BEARER_ONLY", raising=False)
+    monkeypatch.setenv("CPA_EXPORT_TOKEN", "transport-token-for-test")
+    monkeypatch.setattr(
+        client,
+        "get_crypto",
+        lambda: SimpleNamespace(master_key_bytes=lambda: master_key),
+    )
+    _AsyncClient.last_call = None
+    monkeypatch.setattr(client.httpx, "AsyncClient", _AsyncClient)
+
+    auth = SimpleNamespace(
+        uc_uid="canonical-subject",
+        scopes=("accounting:read",),
+        agent_id=None,
+    )
+    _bind_authorized_caller(monkeypatch, auth=auth)
+    await client.fetch_return_package(
+        form_path="1120",
+        form_label="1120",
+        workspace_id=REQUESTED_WORKSPACE,
+        entity_id="all",
+        tax_year=2024,
+        require_unscoped=True,
+    )
+
+    assert _AsyncClient.last_call is not None
+    url, headers = _AsyncClient.last_call
+    assertion = verify_assertion(master_key, headers["X-Internal-Assertion"])
+    assert assertion.entity_id is None
+    query = parse_qs(urlsplit(url).query)
+    assert query["entity_id"] == ["all"]
+
+
+@pytest.mark.asyncio
+async def test_http_form_1120_route_delegates_to_assertion_aware_tool(monkeypatch):
+    from app.api import tools as http_tools
+
+    calls: list[tuple[UUID, UUID, int]] = []
+
+    async def fake_get_form_1120_data(workspace_id, entity_id, tax_year):
+        calls.append((workspace_id, entity_id, tax_year))
+        return {"ok": True}
+
+    monkeypatch.setattr(http_tools, "get_form_1120_data", fake_get_form_1120_data)
+    ctx = SimpleNamespace(
+        workspace=SimpleNamespace(workspace_id=CANONICAL_WORKSPACE),
+        entity_id=ENTITY,
+    )
+
+    result = await http_tools.http_get_form_1120_data(2024, ctx)
+
+    assert result == {"ok": True}
+    assert calls == [(CANONICAL_WORKSPACE, ENTITY, 2024)]

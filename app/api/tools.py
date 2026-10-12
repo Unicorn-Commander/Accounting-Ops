@@ -28,6 +28,7 @@ from app.tools import (
     add_specialty_rule,
     ai_categorize_pending,
     categorize_transaction,
+    get_form_1120_data,
     get_consolidated_p_and_l,
     get_p_and_l,
     get_runway,
@@ -39,6 +40,7 @@ from app.tools import (
     query_specialty_rules,
     upsert_entity_owner,
 )
+from app.tools._cpa_export_client import fetch_return_package
 
 
 router = APIRouter(
@@ -115,6 +117,18 @@ def _phase_1(exc: NotImplementedError) -> HTTPException:
     )
 
 
+def _cpa_export_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, PermissionError):
+        code = status.HTTP_403_FORBIDDEN
+    elif isinstance(exc, LookupError):
+        code = status.HTTP_404_NOT_FOUND
+    elif isinstance(exc, ValueError):
+        code = status.HTTP_400_BAD_REQUEST
+    else:
+        code = status.HTTP_502_BAD_GATEWAY
+    return HTTPException(status_code=code, detail=str(exc))
+
+
 # Read endpoints (viewer+) ---------------------------------------------------
 
 
@@ -131,6 +145,24 @@ async def http_list_transactions(
         )
     except NotImplementedError as exc:
         raise _phase_1(exc) from exc
+
+
+@router.get("/tax/{tax_year}/form-1120")
+async def http_get_form_1120_data(
+    tax_year: int,
+    ctx: EntityContext = Depends(resolve_entity),
+) -> dict[str, Any]:
+    """Return a Form 1120 package through the app's assertion-aware client."""
+    try:
+        return await get_form_1120_data(
+            ctx.workspace.workspace_id,
+            ctx.entity_id,
+            tax_year,
+        )
+    except HTTPException:
+        raise
+    except (PermissionError, LookupError, ValueError, RuntimeError) as exc:
+        raise _cpa_export_http_error(exc) from exc
 
 
 @router.get("/transactions/{id}")
@@ -328,3 +360,25 @@ async def http_get_consolidated_p_and_l(
         )
     except NotImplementedError as exc:
         raise _phase_1(exc) from exc
+
+
+@consolidated_router.get("/tax/{tax_year}/form-1120")
+async def http_get_consolidated_form_1120_data(
+    tax_year: int,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict[str, Any]:
+    """Return a consolidated Form 1120 package for an unrestricted viewer."""
+    require_role(workspace, "viewer")
+    try:
+        return await fetch_return_package(
+            form_path="1120",
+            form_label="1120",
+            workspace_id=workspace.workspace_id,
+            entity_id="consolidated",
+            tax_year=tax_year,
+            require_unscoped=True,
+        )
+    except HTTPException:
+        raise
+    except (PermissionError, LookupError, ValueError, RuntimeError) as exc:
+        raise _cpa_export_http_error(exc) from exc

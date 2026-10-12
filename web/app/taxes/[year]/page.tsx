@@ -29,8 +29,14 @@ const VALID_YEARS = new Set(["2022", "2023", "2024", "2025"]);
 
 export default async function TaxYearPage(props: {
   params: Promise<{ year: string }>;
+  searchParams: Promise<{ entity_id?: string | string[] }>;
 }) {
   const { year } = await props.params;
+  const searchParams = await props.searchParams;
+  const rawEntityId = searchParams.entity_id;
+  const requestedEntityId = Array.isArray(rawEntityId)
+    ? rawEntityId[0]
+    : rawEntityId;
 
   if (!VALID_YEARS.has(year) || !/^\d{4}$/.test(year)) {
     notFound();
@@ -67,12 +73,20 @@ export default async function TaxYearPage(props: {
     );
   }
 
+  const requestedEntity = requestedEntityId
+    ? ctx.entities.find((entity) => entity.id === requestedEntityId) ?? null
+    : null;
+  const requestedConsolidated =
+    requestedEntityId === "all" || requestedEntityId === "consolidated";
+  const isConsolidated = requestedConsolidated || (!requestedEntity && ctx.isConsolidated);
+  const activeEntity = requestedConsolidated ? null : requestedEntity ?? ctx.activeEntity;
+
   const taxYear = parseInt(year, 10);
 
   // Title + subtitle reflect the form variant routed to (not always 1120).
   const { title, subtitle } = titleFor(
-    ctx.isConsolidated,
-    ctx.activeEntity,
+    isConsolidated,
+    activeEntity,
     taxYear
   );
 
@@ -95,7 +109,7 @@ export default async function TaxYearPage(props: {
             <EntitySelector
               entities={ctx.entities}
               activeEntityId={
-                ctx.isConsolidated ? "consolidated" : ctx.activeEntity?.id
+                isConsolidated ? "consolidated" : activeEntity?.id
               }
               canConsolidate={canConsolidate}
             />
@@ -107,9 +121,9 @@ export default async function TaxYearPage(props: {
             (C-Corp) or a chat-handoff placeholder (everything else). */}
         <EntityKindRouter
           workspace={workspace}
-          entity={ctx.activeEntity}
+          entity={activeEntity}
           entities={ctx.entities}
-          isConsolidated={ctx.isConsolidated}
+          isConsolidated={isConsolidated}
           canConsolidate={canConsolidate}
           year={taxYear}
         />
