@@ -146,8 +146,8 @@ async function main(): Promise<void> {
   const statusPayload = {
     as_of: "2026-10-12",
     entities: [
-      { entity_id: "entity-a", years: [] },
-      { entity_id: "entity-b", years: [] }
+      { entity_id: "entity-a", entity_slug: "entity-a", display_name: "Entity A", entity_type: "corporation", jurisdictions: ["US"], incorporated_at: null, years: [] },
+      { entity_id: "entity-b", entity_slug: "entity-b", display_name: "Entity B", entity_type: "partnership", jurisdictions: ["US"], incorporated_at: null, years: [] }
     ]
   } as Parameters<typeof taxStatus.filterTaxStatusByEntity>[0];
   if (taxStatus.filterTaxStatusByEntity(statusPayload, "entity-b").entities.length !== 1) {
