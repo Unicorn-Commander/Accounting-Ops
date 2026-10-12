@@ -67,6 +67,13 @@ def upgrade() -> None:
     bind = op.get_bind()
     bind.execute(
         sa.text(
+            f'CREATE UNIQUE INDEX IF NOT EXISTS uq_invoice_public_token '
+            f'ON "{schema}".invoice (public_token) '
+            "WHERE public_token IS NOT NULL"
+        )
+    )
+    bind.execute(
+        sa.text(
             """
             CREATE INDEX IF NOT EXISTS ix_invoice_customer_ops
             ON invoice (workspace_id, customer_ops_customer_id)
@@ -78,6 +85,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     _set_search_path()
+    op.execute("DROP INDEX IF EXISTS uq_invoice_public_token")
     op.execute("DROP INDEX IF EXISTS ix_invoice_customer_ops")
     for column in ("customer_ops_customer_id", "presentation", "public_token"):
         op.drop_column("invoice", column)

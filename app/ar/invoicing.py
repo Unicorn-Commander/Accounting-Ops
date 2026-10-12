@@ -85,6 +85,8 @@ _ENSURE_ACCOUNTS: dict[str, tuple[str, str, str]] = {
 }
 
 _CENTS = Decimal("0.01")
+_PUBLIC_TOKEN_BYTES = 32
+_PUBLIC_TOKEN_ATTEMPTS = 8
 
 
 class InvoiceError(Exception):
@@ -632,8 +634,8 @@ async def _invoice_view(
             text(
                 """
                 SELECT i.*, c.display_name AS customer_name,
-                       c.email AS customer_email,
-                       c.billing_address AS customer_billing_address,
+                       c.external_refs->>'email' AS customer_email,
+                       c.external_refs->>'billing_address' AS customer_billing_address,
                        e.display_name AS entity_display_name, e.slug AS entity_slug,
                        e.legal_name AS legal_name,
                        e.brand_slug, e.logo_url, e.color_primary, e.color_accent,
@@ -729,6 +731,17 @@ async def create_invoice_from_draft(
     via ``app.ar.entitlement.assert_entitled_for_invoice`` — standalone callers
     do not gate.
     """
+    external_source = str(external_source or "").strip()
+    if not external_source:
+        raise InvoiceError("external_source is required")
+    if len(external_source) > 64:
+        raise InvoiceError("external_source cannot exceed 64 characters")
+    if external_ref is not None:
+        external_ref = str(external_ref).strip()
+        if not external_ref:
+            raise InvoiceError("external_ref cannot be blank when supplied")
+        if len(external_ref) > 256:
+            raise InvoiceError("external_ref cannot exceed 256 characters")
     currency = (currency or "USD").upper()[:3]
     issue_date = issue_date or datetime.now(tz=timezone.utc).date()
     if due_date is None:
@@ -884,20 +897,40 @@ async def create_invoice_from_draft(
             {"qr": str(quote_ref)[:160], "id": str(invoice_id)},
         )
 
-    public_token = secrets.token_urlsafe(32)
     presentation_json = None
     if presentation:
         encoded = json.dumps(presentation)
         if len(encoded) <= 8000:
             presentation_json = encoded
+    public_token = None
+    for _ in range(_PUBLIC_TOKEN_ATTEMPTS):
+        candidate = secrets.token_urlsafe(_PUBLIC_TOKEN_BYTES)
+        inserted = (
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO public.invoice_pay_token (token, workspace_id, invoice_id)
+                    VALUES (:token, :wid, :iid)
+                    ON CONFLICT (token) DO NOTHING
+                    RETURNING token
+                    """
+                ),
+                {"token": candidate, "wid": workspace_id, "iid": str(invoice_id)},
+            )
+        ).first()
+        if inserted is None:
+            continue
+        public_token = candidate
+        break
+    if public_token is None:
+        raise InvoiceError("could not allocate a unique public invoice token")
     await session.execute(
         text(
             """
-            UPDATE invoice
-               SET public_token = :token,
-                   customer_ops_customer_id = :cust,
-                   presentation = CAST(:presentation AS jsonb)
-             WHERE id = :id
+            UPDATE invoice SET public_token = :token,
+                               customer_ops_customer_id = :cust,
+                               presentation = CAST(:presentation AS jsonb)
+            WHERE id = :id
             """
         ),
         {
@@ -906,16 +939,6 @@ async def create_invoice_from_draft(
             "presentation": presentation_json,
             "id": str(invoice_id),
         },
-    )
-    await session.execute(
-        text(
-            """
-            INSERT INTO public.invoice_pay_token (token, workspace_id, invoice_id)
-            VALUES (:token, :wid, :iid)
-            ON CONFLICT (token) DO NOTHING
-            """
-        ),
-        {"token": public_token, "wid": workspace_id, "iid": str(invoice_id)},
     )
 
     # ---- Draft-only (quotes seam): NO journal posting, journal_entry_id NULL ----
@@ -1236,6 +1259,12 @@ async def record_payment(
     payment is capped at the remaining balance and rejects a zero/negative amount.
     """
     received_date = received_date or datetime.now(tz=timezone.utc).date()
+    if external_ref is not None:
+        external_ref = str(external_ref).strip()
+        if not external_ref:
+            raise InvoiceError("external_ref cannot be blank when supplied")
+        if len(external_ref) > 256:
+            raise InvoiceError("external_ref cannot exceed 256 characters")
     pay_amount = _q(_to_decimal(amount, "amount"))
     if pay_amount <= 0:
         raise InvoiceError("payment amount must be positive")
