@@ -339,21 +339,6 @@ def cmd_up(with_cpa: bool) -> None:
         "upgrade", TENANT_PRE_DATA_REVISION,
     )
 
-    # --- Drop the stale UNIQUE(workspace.postgres_schema) constraint --------
-    # public/0001 put a UNIQUE constraint on workspace.postgres_schema from the
-    # per-workspace-schema era. In the shared-schema model
-    # create_workspace_record writes postgres_schema='books' for EVERY
-    # workspace, so seeding workspace B collides on that constraint
-    # (workspace_postgres_schema_key). The column is no longer unique by design;
-    # drop the obsolete constraint on the throwaway stack so multi-workspace
-    # seeding works. (The production fix is a public migration dropping it,
-    # tracked separately — this harness must not depend on that landing first.)
-    print("[integration] dropping stale UNIQUE(workspace.postgres_schema)", file=sys.stderr)
-    _psql_owner(
-        "ALTER TABLE public.workspace "
-        "DROP CONSTRAINT IF EXISTS workspace_postgres_schema_key"
-    )
-
     print(f"[integration] provisioning workspace {TEST_WORKSPACE_ID}", file=sys.stderr)
     _exec_app(
         "python", "-m", "scripts.provision_workspace",
