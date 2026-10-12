@@ -47,9 +47,10 @@ except Exception:  # pragma: no cover
     ensure_workspace_subgraph = None  # type: ignore[assignment]
 
 
-# Provisioning is an ADMIN operation: CREATE SCHEMA + alembic DDL + the seed
+# Provisioning is an ADMIN operation: the public registry and shared-schema seed
 # INSERTs must run as the table-OWNING role (accounting_ops), NOT the
-# least-privilege runtime role. We use a dedicated admin engine bound to
+# least-privilege runtime role. Shared-schema DDL runs separately through the
+# deploy-time tenant migration. We use a dedicated admin engine bound to
 # ADMIN_DATABASE_URL (falls back to DATABASE_URL for single-role setups).
 @lru_cache
 def _admin_engine() -> AsyncEngine:

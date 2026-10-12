@@ -138,9 +138,10 @@ async def entity_session(
     Application code uses the entity_id to filter rows in queries against
     entity-scoped tables (journal_entry, compliance_rule, approval_queue, etc.).
 
-    The workspace boundary is enforced at the schema level (impossible to
-    accidentally read another workspace's data). The entity boundary is
-    enforced by application-level filters in tool implementations.
+    The workspace boundary is enforced by FORCE RLS on the shared ``books``
+    schema (impossible to accidentally read another workspace's data). The
+    entity boundary is enforced by application-level filters in tool
+    implementations.
 
     Usage:
         async with entity_session(SessionLocal, workspace_id, entity_id) as (s, eid):
