@@ -124,6 +124,36 @@ async function main(): Promise<void> {
   });
   if (spC.get("entity_id") !== "all") throw new Error("'consolidated' entity should map to 'all'");
 
+  // Form 1120 now crosses the app API so the Python assertion client binds
+  // the canonical subject before calling the sidecar.
+  const tax1120 = await import("../lib/taxes-1120");
+  const entityUrl = tax1120.buildTax1120ApiUrl("ws-uuid", "entity-uuid", 2024);
+  if (!entityUrl.endsWith("/api/workspaces/ws-uuid/entities/entity-uuid/tax/2024/form-1120")) {
+    throw new Error(`unexpected entity Form 1120 URL: ${entityUrl}`);
+  }
+  const consolidatedUrl = tax1120.buildTax1120ApiUrl("ws-uuid", "all", 2024);
+  if (!consolidatedUrl.endsWith("/api/workspaces/ws-uuid/consolidated/tax/2024/form-1120")) {
+    throw new Error(`unexpected consolidated Form 1120 URL: ${consolidatedUrl}`);
+  }
+  const forbiddenHint = tax1120.taxPackageFailureHint(
+    'cpa-export 403: {"detail":"No active membership for this workspace"}',
+  );
+  if (!forbiddenHint.includes("identity/membership mismatch between the app and cpa-export")) {
+    throw new Error("403 Form 1120 hint should identify the app/sidecar identity mismatch");
+  }
+
+  const taxStatus = await import("../lib/tax-status");
+  const statusPayload = {
+    as_of: "2026-10-12",
+    entities: [
+      { entity_id: "entity-a", entity_slug: "entity-a", display_name: "Entity A", entity_type: "corporation", jurisdictions: ["US"], incorporated_at: null, years: [] },
+      { entity_id: "entity-b", entity_slug: "entity-b", display_name: "Entity B", entity_type: "partnership", jurisdictions: ["US"], incorporated_at: null, years: [] }
+    ]
+  } as Parameters<typeof taxStatus.filterTaxStatusByEntity>[0];
+  if (taxStatus.filterTaxStatusByEntity(statusPayload, "entity-b").entities.length !== 1) {
+    throw new Error("entity tax-status filter should return one entity");
+  }
+
   // --- module load ------------------------------------------------------------
   // The route module pulls in next-auth + NextResponse. Page + client pull in
   // React + Radix. We just need them to LOAD without throwing — that catches

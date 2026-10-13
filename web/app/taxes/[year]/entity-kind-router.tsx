@@ -26,7 +26,7 @@ import { ArrowLeft, ExternalLink, MessageSquare, Sparkles } from "lucide-react";
 import { Card } from "@/components/primitives";
 import { EntitySelector } from "@/components/entity-selector";
 import type { Entity, Workspace } from "@/lib/api";
-import { fetch1120Package } from "@/lib/taxes-1120";
+import { fetch1120Package, taxPackageFailureHint } from "@/lib/taxes-1120";
 import { fetchSpecialistRuns } from "@/lib/specialist-runs";
 import { fetchTaxReviewQueue } from "@/lib/tax-review-queue";
 import { YearView } from "./year-view";
@@ -342,8 +342,7 @@ export async function EntityKindRouter({
           <Card>
             <p className="text-sm text-debit">{fetchError}</p>
             <p className="mt-1 text-xs text-ink-tertiary">
-              Make sure the entity has posted journal entries for {year} and the
-              cpa-export service is running.
+              {taxPackageFailureHint(fetchError)}
             </p>
           </Card>
         ) : (

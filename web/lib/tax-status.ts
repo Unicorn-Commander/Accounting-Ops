@@ -64,6 +64,21 @@ export type TaxStatusResponse = {
   entities: EntityTaxStatus[];
 };
 
+/** Return a status payload narrowed to one entity without changing its shape. */
+export function filterTaxStatusByEntity(
+  taxStatus: TaxStatusResponse,
+  entityId: string | null | undefined,
+): TaxStatusResponse {
+  const normalized = entityId?.trim();
+  if (!normalized || normalized === "all" || normalized === "consolidated") {
+    return taxStatus;
+  }
+  return {
+    ...taxStatus,
+    entities: taxStatus.entities.filter((entity) => entity.entity_id === normalized),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Fetcher
 // ---------------------------------------------------------------------------

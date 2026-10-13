@@ -9,9 +9,9 @@
 // other /exports + /reports endpoint). The authorize_export dependency reads
 // them from the URL and authorizes against the bearer-token JWT.
 //
-// On the server side (Next.js Server Components) we call cpa-export directly
-// with the user's Keycloak bearer token.
-// On the client side, the same path is reachable via the /api/cpa-export proxy.
+// The app API calls cpa-export through its assertion-aware Python client. The
+// web server calls that API with the user's bearer so the canonical app subject
+// and workspace membership are used before the sidecar request.
 
 import { auth } from "@/lib/auth";
 
@@ -19,9 +19,6 @@ const INTERNAL_BASE =
   process.env.INTERNAL_API_BASE_URL ??
   process.env.NEXT_PUBLIC_API_BASE_URL ??
   "http://app:8000";
-
-const CPA_EXPORT_INTERNAL_URL =
-  process.env.CPA_EXPORT_INTERNAL_URL ?? "http://cpa-export:8093";
 
 // ---------------------------------------------------------------------------
 // Types — mirror the shape documented in form_1120.py
@@ -90,9 +87,37 @@ export const CPA_REVIEW_CATEGORIES: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Server-side fetcher — calls cpa-export directly with the user's token.
-// Use this in Server Components / route handlers.
+// Server-side fetcher — calls the authenticated app API, which then uses the
+// shared assertion-aware cpa-export client.
 // ---------------------------------------------------------------------------
+
+export function buildTax1120ApiUrl(
+  workspaceId: string,
+  entityId: string,
+  year: number,
+): string {
+  const workspacePath = encodeURIComponent(workspaceId);
+  if (entityId === "all" || entityId === "consolidated") {
+    return `${INTERNAL_BASE}/api/workspaces/${workspacePath}/consolidated/tax/${year}/form-1120`;
+  }
+  return `${INTERNAL_BASE}/api/workspaces/${workspacePath}/entities/${encodeURIComponent(entityId)}/tax/${year}/form-1120`;
+}
+
+export function taxPackageFailureHint(fetchError: string): string {
+  const normalized = fetchError.toLowerCase();
+  if (
+    normalized.includes("cpa-export 403") ||
+    normalized.includes("http 403") ||
+    normalized.includes("no active membership") ||
+    normalized.includes("denied access")
+  ) {
+    return "This is an identity/membership mismatch between the app and cpa-export, not a missing journal-entry problem.";
+  }
+  if (normalized.includes("identity assertion unavailable")) {
+    return "The app could not create the cpa-export identity assertion. Contact an operator; the request was stopped before data was fetched.";
+  }
+  return "Check that the cpa-export service is available and try again.";
+}
 
 export async function fetch1120Package(
   workspaceId: string,
@@ -104,11 +129,7 @@ export async function fetch1120Package(
     throw new Error("unauthenticated");
   }
 
-  const qs = new URLSearchParams({
-    workspace_id: workspaceId,
-    entity_id: entityId,
-  });
-  const url = `${CPA_EXPORT_INTERNAL_URL}/exports/1120/${year}?${qs.toString()}`;
+  const url = buildTax1120ApiUrl(workspaceId, entityId, year);
 
   const res = await fetch(url, {
     headers: {
@@ -120,7 +141,14 @@ export async function fetch1120Package(
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`cpa-export ${res.status}: ${text}`);
+    let detail = text;
+    try {
+      const body = JSON.parse(text) as { detail?: string; error?: string };
+      detail = body.detail ?? body.error ?? text;
+    } catch {
+      // Preserve a non-JSON upstream response verbatim below.
+    }
+    throw new Error(`cpa-export ${res.status}: ${detail}`);
   }
 
   return (await res.json()) as Form1120Package;
