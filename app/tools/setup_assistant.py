@@ -290,9 +290,10 @@ async def create_workspace(
     workspace can call this. The caller is automatically added as ``owner``
     of the new workspace.
 
-    NOTE: This tool wraps ``scripts.provision_workspace.provision_workspace``
-    which runs ``CREATE SCHEMA`` + ``alembic upgrade`` + workspace registry
-    INSERT under the admin DB role. Provisioning takes 5-15 seconds.
+    NOTE: This tool wraps ``scripts.provision_workspace.provision_workspace``.
+    It writes the public workspace registry row and optional tenant rows under
+    the admin DB role; the shared ``books`` schema DDL is applied separately by
+    the deploy-time tenant migration. Provisioning takes 5-15 seconds.
 
     Args:
         display_name: Human-readable name (e.g. "Acme Shared Workspace").

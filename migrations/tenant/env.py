@@ -1,8 +1,10 @@
-"""Alembic env for per-tenant (workspace) schemas. Runs against accounting_ops_<workspace_uuid>.
+"""Alembic env for the shared tenant schema.
 
-Run: `alembic -c alembic-tenant.ini -x tenant=accounting_ops_<uuid_underscored> upgrade head`
+Run: `alembic -c alembic-tenant.ini -x tenant=books upgrade head`
 
-Iterates one workspace per invocation. Use scripts/provision_workspace.py to loop.
+The current shared-table model runs this once for ``books``. The legacy
+``accounting_ops_<workspace_uuid>`` form remains accepted only for the historical
+cutover path; provisioning does not fan migrations out per workspace.
 
 We use a SYNC SQLAlchemy engine here (not the async one the app runs on).
 Reason: the async-wrapper + run_sync() + alembic begin_transaction() chain has
