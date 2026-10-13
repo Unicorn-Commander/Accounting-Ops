@@ -22,16 +22,20 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app.ar import (
     create_invoice_from_draft,
     get_invoice,
+    issue_invoice_draft,
     record_payment,
     void_invoice,
 )
+from app.ar.invoice_brand.email_draft import stage_invoice_email
+from app.ar.invoice_brand.template import render_invoice_html, render_invoice_pdf
+from app.connectors.stripe.checkout import create_checkout_session
 # NOTE (Community Edition carve-out): app.ar.entitlement is the enterprise
 # cross-app entitlement gate (no-op for standalone). Deferred into the create
 # path behind an edition check so community boot never hard-imports it.
@@ -59,11 +63,11 @@ class CustomerBody(BaseModel):
 
 class LineItemBody(BaseModel):
     description: str
-    quantity: float | str = 1
-    unit_price: float | str = 0
-    amount: float | str | None = None
+    quantity: Decimal = Decimal("1")
+    unit_price: Decimal = Decimal("0")
+    amount: Decimal | None = None
     tax_code: str | None = None
-    tax_amount: float | str | None = None
+    tax_amount: Decimal | None = None
     revenue_account_id: UUID | None = None
     source_ref: str | None = None
 
@@ -78,14 +82,21 @@ class CreateInvoiceBody(BaseModel):
     issue_date: date | None = None
     due_date: date | None = None
     net_terms: int | None = None
-    discount: float | str | None = None
+    discount: Decimal | None = None
     notes: str | None = None
     po_number: str | None = Field(default=None, max_length=128)
     auto_send: bool = False
+    post_journal: bool = True
+    customer_ops_customer_id: str | None = Field(default=None, max_length=128)
+    presentation: dict[str, Any] | None = None
+
+
+class IssueInvoiceBody(BaseModel):
+    send_email: bool = False
 
 
 class RecordPaymentBody(BaseModel):
-    amount: float | str
+    amount: Decimal
     method: str = Field(default="manual", max_length=32)
     received_date: date | None = None
     external_ref: str | None = Field(default=None, max_length=256)
@@ -107,6 +118,10 @@ def _attach_pdf_url(view: dict[str, Any], workspace_id: UUID) -> dict[str, Any]:
     out["pdf_url"] = (
         f"/api/workspaces/{workspace_id}/invoices/{inv_id}/pdf" if inv_id else None
     )
+    token = out.get("public_token")
+    if token:
+        base = get_settings().public_base_url.rstrip("/")
+        out["public_url"] = f"{base}/pay/{token}"
     return out
 
 
@@ -121,6 +136,7 @@ async def list_invoices(
     entity_id: UUID | None = None,
     status_filter: str | None = Query(default=None, alias="status"),
     customer_id: UUID | None = None,
+    customer_ops_customer_id: str | None = None,
     limit: int = 100,
     offset: int = 0,
     workspace: WorkspaceContext = Depends(resolve_workspace),
@@ -151,6 +167,9 @@ async def list_invoices(
     if customer_id:
         where.append("i.counterparty_id = :cpid")
         params["cpid"] = str(customer_id)
+    if customer_ops_customer_id:
+        where.append("i.customer_ops_customer_id = :cocid")
+        params["cocid"] = customer_ops_customer_id
     where_sql = " AND ".join(where)
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
@@ -287,6 +306,9 @@ async def create_invoice(
                 notes=body.notes,
                 po_number=body.po_number,
                 auto_send=body.auto_send,
+                post_journal=body.post_journal,
+                customer_ops_customer_id=body.customer_ops_customer_id,
+                presentation=body.presentation,
             )
     except InvoiceError as exc:
         raise _invoice_error(exc) from exc
@@ -397,6 +419,182 @@ async def record_payment_route(
 
 
 # ---------------------------------------------------------------------------
+# Issue a draft, preview, and the public pay page
+# ---------------------------------------------------------------------------
+
+
+async def _gate_cross_app(external_source: str | None, workspace_id: UUID) -> None:
+    if get_settings().is_community:
+        return
+    if external_source not in ("project-ops", "customer-ops"):
+        return
+    from app.ar.entitlement import EntitlementError, assert_entitled_for_invoice
+    from app.mcp_auth import current_auth
+
+    auth = current_auth()
+    claims = auth.claims if auth is not None else None
+    try:
+        assert_entitled_for_invoice(
+            claims, external_source=external_source, workspace_id=workspace_id
+        )
+    except EntitlementError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+
+
+@router.post("/api/workspaces/{workspace_id}/invoices/{invoice_id}/issue")
+async def issue_invoice(
+    workspace_id: UUID,
+    invoice_id: UUID,
+    body: IssueInvoiceBody | None = None,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Post the journal for a draft, then (when asked) stage the email and the pay link."""
+    require_role(workspace, "accountant")
+    body = body or IssueInvoiceBody()
+    try:
+        async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+            existing = await get_invoice(
+                session,
+                workspace_id=str(workspace.workspace_id),
+                invoice_id=str(invoice_id),
+            )
+    except InvoiceError as exc:
+        raise _invoice_error(exc) from exc
+    assert_entity_in_scope(workspace, existing.get("entity_id"))
+    await _gate_cross_app(existing.get("external_source"), workspace_id)
+    try:
+        async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+            view = await issue_invoice_draft(
+                session,
+                workspace_id=str(workspace.workspace_id),
+                invoice_id=str(invoice_id),
+                actor_uc_uid=workspace.user_uc_uid,
+            )
+    except InvoiceError as exc:
+        raise _invoice_error(exc) from exc
+    view = _attach_pdf_url(view, workspace_id)
+    view = await _attach_pay_link(workspace.workspace_id, view)
+    # Issuing always stages a draft in Email-Ops when it is configured. The
+    # compose_email mode is hard-coded to draft; body.send_email remains an
+    # accepted compatibility field but can never send mail from this route.
+    view["email_status"] = await stage_invoice_email(view)
+    return view
+
+
+@router.get("/api/workspaces/{workspace_id}/invoices/{invoice_id}/preview")
+async def preview_invoice(
+    workspace_id: UUID,
+    invoice_id: UUID,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> HTMLResponse:
+    """Branded HTML for a draft or a posted invoice. Does not post."""
+    require_role(workspace, "viewer")
+    view = await _load_invoice_scoped(workspace, invoice_id)
+    view = _attach_pdf_url(view, workspace_id)
+    return HTMLResponse(render_invoice_html(view))
+
+
+def _public_token_ok(token: str) -> bool:
+    # token_urlsafe(16) is the minimum 128-bit source; this lane generates 32
+    # random bytes, but reject weaker legacy/hand-crafted path values too.
+    if not token or len(token) < 22 or len(token) > 128 or not token.isascii():
+        return False
+    return all(ch.isalnum() or ch in "-_" for ch in token)
+
+
+async def _invoice_for_token(token: str) -> dict[str, Any] | None:
+    if not _public_token_ok(token):
+        return None
+    async with SessionLocal() as session:
+        async with session.begin():
+            await session.execute(text("SET LOCAL search_path = books, public"))
+            await session.execute(
+                text("SELECT set_config('app.pay_token', :tok, true)"),
+                {"tok": token},
+            )
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT workspace_id::text AS workspace_id, invoice_id::text AS invoice_id
+                        FROM public.invoice_pay_token
+                        WHERE token = :tok
+                        """
+                    ),
+                    {"tok": token},
+                )
+            ).mappings().first()
+    if row is None:
+        return None
+    try:
+        async with workspace_session(SessionLocal, row["workspace_id"]) as session:
+            view = await get_invoice(
+                session,
+                workspace_id=row["workspace_id"],
+                invoice_id=row["invoice_id"],
+            )
+    except InvoiceError:
+        return None
+    return _attach_pdf_url(view, row["workspace_id"])
+
+
+@router.get("/pay/{token}", response_class=HTMLResponse)
+async def public_invoice(token: str) -> HTMLResponse:
+    view = await _invoice_for_token(token)
+    if view is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found")
+    return HTMLResponse(render_invoice_html(view), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/pay/{token}/pdf")
+async def public_invoice_pdf(token: str) -> Response:
+    view = await _invoice_for_token(token)
+    if view is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found")
+    try:
+        pdf_bytes = render_invoice_pdf(render_invoice_html(view))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    filename = f"{view.get('invoice_number', 'invoice')}.pdf".replace(" ", "")
+    return Response(content=pdf_bytes, media_type="application/pdf", headers={
+        "Content-Disposition": f'inline; filename="{filename}"',
+        "Cache-Control": "no-store",
+    })
+
+
+async def _attach_pay_link(workspace_id: UUID, view: dict[str, Any]) -> dict[str, Any]:
+    """Fill hosted_pay_url once. Leaves it null when Checkout is not configured."""
+    if view.get("hosted_pay_url") or view.get("status") == "void":
+        return view
+    public_url = view.get("public_url")
+    if not public_url:
+        return view
+    try:
+        amount = Decimal(str(view.get("balance_due") or view.get("total") or "0"))
+    except Exception:
+        return view
+    url = await create_checkout_session(
+        amount=amount,
+        currency=str(view.get("currency") or "USD"),
+        invoice_id=str(view.get("id")),
+        workspace_id=str(workspace_id),
+        invoice_number=str(view.get("invoice_number") or "invoice"),
+        success_url=public_url,
+        cancel_url=public_url,
+        customer_email=view.get("customer_email"),
+    )
+    if not url:
+        return view
+    async with workspace_session(SessionLocal, workspace_id) as session:
+        await session.execute(
+            text("UPDATE invoice SET hosted_pay_url = :url WHERE id = :id AND hosted_pay_url IS NULL"),
+            {"url": url, "id": str(view["id"])},
+        )
+    view["hosted_pay_url"] = url
+    return view
+
+
+# ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
 
@@ -408,11 +606,14 @@ async def get_invoice_pdf(
     disposition: str = Query("inline"),
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> Response:
-    """Render the invoice as a clean server-side PDF (reportlab). Role floor: viewer."""
+    """Render the branded invoice PDF. Role floor: viewer."""
     require_role(workspace, "viewer")
     view = await _load_invoice_scoped(workspace, invoice_id)
 
-    pdf_bytes = _render_invoice_pdf(view)
+    try:
+        pdf_bytes = render_invoice_pdf(render_invoice_html(view))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     cd_mode = "inline" if disposition.lower().strip() == "inline" else "attachment"
     filename = f"{view.get('invoice_number', 'invoice')}.pdf".replace(" ", "")
     return Response(

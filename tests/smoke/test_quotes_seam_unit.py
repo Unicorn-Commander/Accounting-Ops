@@ -647,6 +647,11 @@ class _SeamStubSession:
             b["void_reason"] = p["reason"]
             return _Result([])
 
+        if "INSERT INTO public.invoice_pay_token" in sql:
+            return _Result([_Row(token=p["token"])])
+        if "UPDATE invoice SET public_token" in sql:
+            return _Result([])
+
         # ---- ledger: must never be touched ----
         if "INSERT INTO journal_entry" in sql or "INSERT INTO posting_log" in sql:
             self.journal_entries.append(dict(p))

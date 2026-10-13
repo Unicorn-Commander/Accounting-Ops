@@ -126,6 +126,19 @@ async def test_write_tool_marked_pro_and_not_read_only():
     assert ct["scopes_required"] == ["write:accounting"]
 
 
+async def test_issue_invoice_draft_is_an_accountant_write():
+    async with _client() as c:
+        m = (await c.get("/.well-known/mcps.json")).json()
+    tools = {t["name"]: t for t in m["tools"]}
+    issue = tools.get("issue_invoice_draft")
+    assert issue is not None
+    assert issue["min_role"] == "accountant"
+    assert issue["read_only"] is False
+    assert issue["tier_required"] == "pro"
+    assert issue["scopes_required"] == ["write:accounting"]
+    assert issue["expected_latency_ms"] == 900
+
+
 async def test_admin_tool_marked_enterprise():
     async with _client() as c:
         m = (await c.get("/.well-known/mcps.json")).json()

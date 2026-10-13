@@ -41,6 +41,7 @@ from app.api.billing import router as billing_router
 from app.api.federation import router as federation_router
 from app.api.inference_settings import router as inference_settings_router
 from app.api.invoices import router as invoices_router
+from app.api.stripe_webhook import router as stripe_checkout_webhook_router
 from app.api.journal import router as journal_router
 from app.api.members import router as members_router
 from app.api.metrics import router as metrics_router
@@ -158,6 +159,7 @@ app.include_router(account_mappings_router)
 app.include_router(category_overrides_router)
 app.include_router(journal_router)
 app.include_router(invoices_router)
+app.include_router(stripe_checkout_webhook_router)
 # Quotes seam: Customer-Ops quote.accepted -> DRAFT invoices/schedules/partner bill.
 # Rides a write-capable M2M rail scoped to ONE actor (customer-ops); never posts.
 app.include_router(quotes_seam_router)

@@ -125,6 +125,7 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
     # a counterparty row. get_invoice is a pure read (viewer floor).
     "upsert_ar_customer":            {"min_role": "accountant", "read_only": False, "latency_ms": 400},
     "create_invoice_from_draft":     {"min_role": "accountant", "read_only": False, "latency_ms": 900},
+    "issue_invoice_draft":           {"min_role": "accountant", "read_only": False, "latency_ms": 900},
     "get_invoice":                   {"min_role": "viewer",     "read_only": True,  "latency_ms": 300},
     "void_invoice":                  {"min_role": "accountant", "read_only": False, "latency_ms": 700},
     "record_payment":                {"min_role": "accountant", "read_only": False, "latency_ms": 700},

@@ -3,6 +3,7 @@ from app.tools.ai_categorize import ai_categorize_pending
 from app.tools.ar_invoicing import (
     create_invoice_from_draft,
     get_invoice,
+    issue_invoice_draft,
     record_payment,
     upsert_ar_customer,
     void_invoice,
@@ -105,6 +106,7 @@ __all__ = [
     "create_coa_account",
     "create_entity_with_coa",
     "create_invoice_from_draft",
+    "issue_invoice_draft",
     "create_invoices_from_quote",
     "create_workspace",
     "decide_approval",

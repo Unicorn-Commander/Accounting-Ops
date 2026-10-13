@@ -216,6 +216,7 @@ class _StubSession:
         self.counterparties: list[dict] = []
         self.posting_log: list[dict] = []
         self.updates: list[str] = []
+        self.public_tokens: set[str] = set()
         self._existing_invoice = existing_invoice
         self._issue_rows_for_void = issue_rows_for_void or []
         # invoice-number counter
@@ -266,15 +267,22 @@ class _StubSession:
             return _StubResult([])
         # invoice fetch by id (the _invoice_view header + the void/payment header reads)
         if "FROM invoice i" in sql and "i.id = :id" in sql:
+            if "c.email AS" in sql or "c.billing_address AS" in sql:
+                raise AssertionError("invoice view must read customer snapshots from external_refs")
             inv = self.invoices[-1] if self.invoices else None
             if inv is None:
                 return _StubResult([])
-            return _StubResult([_Row(
-                **inv,
+            row = dict(inv)
+            row.update(
                 customer_name="Acme LLC",
                 entity_display_name="Test Co",
                 entity_slug="test-co",
-            )])
+                customer_email="ap@acme.test",
+                customer_billing_address="1 Demo St",
+            )
+            row.setdefault("journal_entry_id", None)
+            row.setdefault("public_token", None)
+            return _StubResult([_Row(**row)])
         if "FROM invoice WHERE id = :id" in sql:
             inv = self.invoices[-1] if self.invoices else None
             return _StubResult([_Row(**inv)] if inv else [])
@@ -285,6 +293,12 @@ class _StubSession:
             self._invoice_count += 1
             self.invoices.append(dict(p))
             return _StubResult([])
+        if "INSERT INTO public.invoice_pay_token" in sql:
+            token = p["token"]
+            if token in self.public_tokens:
+                return _StubResult([])
+            self.public_tokens.add(token)
+            return _StubResult([_Row(token=token)])
         if "UPDATE invoice" in sql:
             self.updates.append("invoice")
             if self.invoices:
@@ -300,6 +314,8 @@ class _StubSession:
                     self.invoices[-1]["balance_due"] = p["bal"]
                 if "st" in p:
                     self.invoices[-1]["status"] = p["st"]
+                if "public_token" in sql and "token" in p:
+                    self.invoices[-1]["public_token"] = p["token"]
             return _StubResult([])
 
         # ---- invoice_line ----
@@ -389,6 +405,56 @@ async def test_create_invoice_untaxed_single_row():
     assert je["debit"] == _COA["1100"]
     assert je["credit"] == _COA["4030"]
     assert Decimal(str(je["amount"])) == Decimal("250.00")
+
+
+@pytest.mark.asyncio
+async def test_create_invoice_draft_does_not_post_until_issue():
+    s = _StubSession()
+    view = await ar.create_invoice_from_draft(
+        s,
+        workspace_id="wid",
+        entity_id="eid",
+        actor_uc_uid="tester",
+        external_source="customer-ops",
+        external_ref="quote-1",
+        customer={"name": "Draft Customer"},
+        line_items=[{"description": "Draft work", "quantity": 1, "unit_price": "125.00"}],
+        post_journal=False,
+    )
+    assert view["status"] == "draft"
+    assert view["journal_entry_id"] is None
+    assert s.journal_entries == []
+
+
+@pytest.mark.asyncio
+async def test_public_token_collision_retries(monkeypatch):
+    s = _StubSession()
+    s.public_tokens.add("collision")
+    candidates = iter(("collision", "fresh-token"))
+    monkeypatch.setattr(ar.secrets, "token_urlsafe", lambda n: next(candidates))
+
+    view = await ar.create_invoice_from_draft(
+        s,
+        workspace_id="wid",
+        entity_id="eid",
+        actor_uc_uid="tester",
+        external_source="manual",
+        external_ref=None,
+        customer={"name": "Token Customer"},
+        line_items=[{"description": "Token work", "quantity": 1, "unit_price": "10.00"}],
+        post_journal=False,
+    )
+    assert view["public_token"] == "fresh-token"
+    assert "fresh-token" in s.public_tokens
+
+
+@pytest.mark.asyncio
+async def test_invoice_view_uses_counterparty_external_refs_for_render_snapshots():
+    s = _StubSession()
+    s.invoices.append({"id": "invoice-1", "entity_id": "eid", "status": "draft"})
+    view = await ar._invoice_view(s, invoice_id="invoice-1")
+    assert view["customer_email"] == "ap@acme.test"
+    assert view["customer_billing_address"] == "1 Demo St"
 
 
 @pytest.mark.asyncio
