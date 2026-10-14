@@ -98,11 +98,13 @@ logger = logging.getLogger("chunker")
 # 8k is comfortably inside Qwen3's window (measured OK at 64k) AND is a
 # better retrieval unit: one vector over 100k chars dilutes the signal so
 # far that a matching phrase barely moves the embedding.
-MAX_CHUNK_CHARS = 8_000
+# Env-overridable so a ring can retune without a rebuild; the default is
+# the value above.
+MAX_CHUNK_CHARS = int(os.getenv("TAXKB_MAX_CHUNK_CHARS", "8000"))
 
 # Overlap between consecutive chunks, ~10% of chunk size. Scaled down with
 # MAX_CHUNK_CHARS: 5_000 of overlap on an 8_000 chunk would be 62% duplication.
-OVERLAP_CHARS = 800
+OVERLAP_CHARS = int(os.getenv("TAXKB_OVERLAP_CHARS", "800"))
 
 # Threshold at which we start chunking. Anything <= this stays as a single
 # row. Set equal to MAX_CHUNK_CHARS so that documents at exactly the boundary
