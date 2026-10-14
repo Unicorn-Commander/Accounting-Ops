@@ -36,7 +36,10 @@ dependencies = [
   "opentelemetry-sdk>=1.27.0",
   "pydantic>=2.9.0",
   "python-jose[cryptography]>=3.3.0",
-  "sqlalchemy[asyncio]>=2.0.35",
+  # CAPPED 2026-10-14: SQLAlchemy 2.1 makes psycopg (v3) the default driver for a
+  # bare postgresql:// URL; the image ships psycopg2 only, so a rebuild that
+  # floated to 2.1.4 crash-looped the mail-drainer on PROD. 2.0.x is what dogfood runs.
+  "sqlalchemy[asyncio]>=2.0.35,<2.1",
   "uvicorn[standard]>=0.30.6",
   # Specialist draft PDF rendering (handoff package)
   "weasyprint>=62.0",
