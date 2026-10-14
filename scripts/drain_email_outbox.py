@@ -110,8 +110,13 @@ def _resolve_database_url() -> str:
         raise SystemExit(
             "drain_email_outbox: neither ADMIN_DATABASE_URL nor DATABASE_URL is set"
         )
-    # Make it synchronous regardless of how the app was configured.
-    return url.replace("+asyncpg", "")
+    # Make it synchronous regardless of how the app was configured, and name
+    # the driver: SQLAlchemy 2.1 defaults a bare postgresql:// URL to psycopg
+    # v3, which this image does not ship.
+    url = url.replace("+asyncpg", "+psycopg2")
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+    return url
 
 
 def _build_engine() -> Engine:

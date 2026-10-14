@@ -79,15 +79,22 @@ def test_resolve_database_url_prefers_admin(drainer, monkeypatch):
     )
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://app:pw@pg:5432/db")
     url = drainer._resolve_database_url()
-    # +asyncpg is stripped (drainer is synchronous)
-    assert url == "postgresql://admin:REMOVED@pg:5432/db"
+    # +asyncpg becomes an explicit psycopg2 driver (drainer is synchronous;
+    # SQLAlchemy 2.1 would default a bare postgresql:// URL to psycopg v3)
+    assert url == "postgresql+psycopg2://admin:pw@pg:5432/db"
 
 
 def test_resolve_database_url_falls_back_to_runtime(drainer, monkeypatch):
     monkeypatch.delenv("ADMIN_DATABASE_URL", raising=False)
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://app:pw@pg:5432/db")
     url = drainer._resolve_database_url()
-    assert url == "postgresql://app:REMOVED@pg:5432/db"
+    assert url == "postgresql+psycopg2://app:pw@pg:5432/db"
+
+
+def test_resolve_database_url_names_driver_for_bare_url(drainer, monkeypatch):
+    monkeypatch.delenv("ADMIN_DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://app:REMOVED@pg:5432/db")
+    assert drainer._resolve_database_url() == "postgresql+psycopg2://app:pw@pg:5432/db"
 
 
 def test_resolve_database_url_raises_when_both_unset(drainer, monkeypatch):
