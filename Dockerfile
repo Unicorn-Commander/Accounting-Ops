@@ -23,6 +23,9 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --extra tax-agents --no-install-project
 COPY . .
 RUN uv sync --frozen --no-dev --extra tax-agents --no-editable
+# pip inside the venv: the integration harness (scripts/integration_env.py) and ops recipes run
+# `python -m pip install -e .[dev]` in the container; uv-made venvs carry no pip by default.
+RUN uv pip install --python /app/.venv/bin/python --no-cache pip
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
