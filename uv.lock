@@ -105,7 +105,7 @@ requires-dist = [
     { name = "redis", marker = "extra == 'ratelimit'", specifier = ">=5.0.0,<8.1" },
     { name = "reportlab", specifier = ">=4.2.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.13" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35,<2.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.6" },
     { name = "weasyprint", specifier = ">=62.0" },
 ]

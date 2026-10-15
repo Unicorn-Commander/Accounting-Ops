@@ -12,6 +12,16 @@ Operator detail for the optional Sentinel daemon is in
 
 ---
 
+## Reproducible application images
+
+The backend image installs its runtime dependencies from the committed
+`uv.lock` with uv `0.9.30`, including the `tax-agents` extra. Keep
+`pyproject.toml` and `uv.lock` together. To intentionally refresh dependencies,
+change the constraints in `pyproject.toml`, run `uv lock`, review the resulting
+lockfile diff, and verify it with `uv lock --check` before building the image.
+
+---
+
 ## One command
 
 ```bash
