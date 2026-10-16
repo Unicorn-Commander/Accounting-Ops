@@ -27,6 +27,23 @@ def business_today(now: datetime | None = None) -> date:
     return current.date()
 
 
+def business_date(instant: datetime | int | float) -> date:
+    """Return the New York calendar date for an instant or Unix epoch.
+
+    A naive ``datetime`` is an instant without an offset at this boundary, so
+    interpret it as UTC before converting it to the business timezone.
+    """
+    if isinstance(instant, (int, float)):
+        current = datetime.fromtimestamp(instant, tz=timezone.utc)
+    elif isinstance(instant, datetime):
+        current = instant
+    else:
+        raise TypeError("instant must be a datetime or Unix epoch")
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(_BUSINESS_ZONE).date()
+
+
 def business_day_bounds(day: date) -> tuple[datetime, datetime]:
     """Return a business-local calendar day's half-open UTC bounds.
 
@@ -40,4 +57,4 @@ def business_day_bounds(day: date) -> tuple[datetime, datetime]:
     return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
 
 
-__all__ = ("BUSINESS_TIMEZONE", "business_day_bounds", "business_today")
+__all__ = ("BUSINESS_TIMEZONE", "business_date", "business_day_bounds", "business_today")

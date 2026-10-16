@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, Request, status
 
 from app.ar.invoicing import InvoiceError, record_payment
 from app.connectors.stripe.checkout import verify_stripe_signature
+from app.core.business_time import business_today
 from app.db import SessionLocal
 from app.workspace_session import workspace_session
 
@@ -54,7 +54,7 @@ async def stripe_webhook(request: Request) -> dict:
                 actor_uc_uid="stripe-webhook",
                 amount=amount,
                 method="stripe",
-                received_date=datetime.now(tz=timezone.utc).date(),
+                received_date=business_today(),
                 external_ref=event_id.strip(),
                 memo="Stripe Checkout",
             )

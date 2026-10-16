@@ -52,7 +52,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, date, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -61,6 +61,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.business_time import business_date, business_today
 from app.journal.hash_chain import compute_hash, get_last_chain_hash
 from app.journal.materiality import evaluate
 from app.journal.posting import _insert_journal_entry, _log_post_attempt
@@ -133,9 +134,13 @@ def _parse_stripe_ts(value: int | None) -> date | None:
     if value is None:
         return None
     try:
-        return datetime.fromtimestamp(int(value), tz=timezone.utc).date()
+        return business_date(int(value))
     except (ValueError, OverflowError, OSError):
         return None
+
+
+def _effective_date(txn: dict[str, Any]) -> date:
+    return _parse_stripe_ts(txn.get("available_on") or txn.get("created")) or business_today()
 
 
 def _opaque_payee(txn: dict[str, Any]) -> str:
@@ -526,7 +531,7 @@ async def map_and_post_balance_transaction(
             amount_cents=amount_cents,
             debit_account="(undecided)",
             credit_account="(undecided)",
-            effective_date=_parse_stripe_ts(txn.get("created")) or date.today(),
+            effective_date=_effective_date(txn),
             payee=_opaque_payee(txn),
             description=_opaque_description(txn),
             raw_txn=txn,
@@ -561,9 +566,7 @@ async def map_and_post_balance_transaction(
         )
 
     # ---- 3. Effective date ----
-    eff_date = _parse_stripe_ts(txn.get("available_on") or txn.get("created"))
-    if eff_date is None:
-        eff_date = date.today()
+    eff_date = _effective_date(txn)
 
     if stripe_type == "payout":
         payee = "Stripe payout"

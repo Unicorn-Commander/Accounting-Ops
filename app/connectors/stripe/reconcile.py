@@ -63,7 +63,7 @@ async def find_unmatched_stripe_payouts(
                 WHERE entity_id = :eid
                   AND source = 'stripe_api'
                   AND category = 'Stripe Payout Settlement'
-                  AND effective_date >= (now()::date - (:days || ' days')::interval)::date
+                  AND effective_date >= ((now() AT TIME ZONE 'America/New_York')::date - (:days || ' days')::interval)::date
                 ORDER BY effective_date DESC
                 """
             ),
@@ -90,7 +90,7 @@ async def find_simplefin_bofa_inflows(
                 WHERE je.entity_id = :eid
                   AND je.source = 'simplefin'
                   AND coa.account_number IN ('1010', '1011')
-                  AND je.effective_date >= (now()::date - (:days || ' days')::interval)::date
+                  AND je.effective_date >= ((now() AT TIME ZONE 'America/New_York')::date - (:days || ' days')::interval)::date
                 ORDER BY je.effective_date DESC
                 """
             ),

@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, date, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -44,6 +44,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.business_time import business_date, business_today
 from app.journal.hash_chain import compute_hash, get_last_chain_hash
 from app.journal.materiality import evaluate
 from app.journal.posting import _insert_journal_entry, _log_post_attempt
@@ -131,9 +132,22 @@ def _parse_iso_date(value: str | None) -> date | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+        raw = str(value).strip()
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None and len(raw) == 10:
+            return parsed.date()
+        return business_date(parsed)
     except (ValueError, TypeError):
         return None
+
+
+def _effective_date(txn: dict[str, Any]) -> date:
+    value = (
+        txn.get("transactionDate")
+        or txn.get("payoutDate")
+        or txn.get("transactionCreationDate")
+    )
+    return _parse_iso_date(value) or business_today()
 
 
 def _opaque_payee(txn: dict[str, Any]) -> str:
@@ -492,12 +506,7 @@ async def map_and_post_transaction(
         )
 
     # ---- 3. Effective date ----
-    eff_date_str = (
-        txn.get("transactionDate")
-        or txn.get("payoutDate")
-        or txn.get("transactionCreationDate")
-    )
-    eff_date = _parse_iso_date(eff_date_str) or date.today()
+    eff_date = _effective_date(txn)
 
     payee = _opaque_payee(txn) if ebay_type != "PAYOUT" else "eBay payout"
     description = (
