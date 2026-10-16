@@ -6,7 +6,6 @@ workspace owner can see it on the dashboard.
 """
 from __future__ import annotations
 
-import datetime as dt
 from decimal import Decimal
 from typing import Any
 
@@ -14,6 +13,7 @@ from sqlalchemy import text
 
 from agents.sentinel.actions import ActionContext, execute_action
 from agents.sentinel.checks._helpers import list_active_entities
+from app.core.business_time import BUSINESS_TIMEZONE, business_today
 
 RUNWAY_THRESHOLD_MONTHS = 6
 
@@ -23,11 +23,12 @@ async def _burn_rate_monthly(session, entity_id: str) -> Decimal:
     row = (
         await session.execute(
             text(
-                """
+                f"""
                 SELECT coalesce(sum(usd_equivalent_at_event_time), 0) AS net
                 FROM journal_entry
                 WHERE entity_id = :eid
-                  AND effective_date >= current_date - interval '90 days'
+                  AND effective_date >= (now() AT TIME ZONE '{BUSINESS_TIMEZONE}')::date
+                      - interval '90 days'
                 """
             ),
             {"eid": entity_id},
@@ -58,7 +59,7 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
     entities = await list_active_entities(ctx.session)
     findings = 0
     actions = 0
-    today = dt.date.today()
+    today = business_today()
     month_key = today.strftime("%Y-%m")
 
     for ent in entities:

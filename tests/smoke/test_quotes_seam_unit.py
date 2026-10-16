@@ -592,7 +592,7 @@ class _SeamStubSession:
             for s in sorted(self.schedules.values(), key=lambda r: (r["next_run_at"] or far)):
                 if s["workspace_id"] != p["wid"]:
                     continue
-                if not s["active"] or s["next_run_at"] is None or s["next_run_at"] > p["cutoff"]:
+                if not s["active"] or s["next_run_at"] is None or s["next_run_at"] >= p["cutoff"]:
                     continue
                 if "s.entity_id = :eid" in sql and s["entity_id"] != p["eid"]:
                     continue
@@ -729,6 +729,36 @@ async def test_apply_creates_drafts_only_and_never_posts():
     assert res["partner_bill"]["total_cents"] == 347_500
     assert res["totals"]["deposit_cents"] == 275_000
     assert res["superseded"]["versions"] == [] and res["superseded"]["voided_invoice_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_omitted_quote_acceptance_date_uses_business_date(monkeypatch):
+    expected = date(2026, 12, 31)
+    monkeypatch.setattr(qs, "business_today", lambda: expected)
+    s = _SeamStubSession()
+
+    result = await _apply(s, _payload(accepted_at=None), actor="m2m:customer-ops")
+
+    assert result["issue_date"] == expected.isoformat()
+    assert all(row["issue_date"] == expected for row in s.invoices.values())
+    assert all(row["issue_date"] == expected for row in s.bills.values())
+
+
+@pytest.mark.asyncio
+async def test_schedule_next_run_uses_business_midnight_and_half_open_cutoff():
+    s = _SeamStubSession()
+    await _seed_schedules(
+        s,
+        delivery_partner=None,
+        split_rule=None,
+        accepted_at="2026-09-16",
+    )
+
+    hosting = s.schedules[(WID, "Q-2026-0001 v2", 5)]
+    assert hosting["next_run_at"] == datetime(2026, 10, 16, 4, tzinfo=timezone.utc)
+
+    result = await _run(s, date(2026, 10, 15))
+    assert result["generated"] == []
 
 
 @pytest.mark.asyncio

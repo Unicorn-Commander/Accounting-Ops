@@ -21,6 +21,7 @@ no stack (mirrors tests/smoke/test_stripe_mapper_unit.py).
 """
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -405,6 +406,43 @@ async def test_create_invoice_untaxed_single_row():
     assert je["debit"] == _COA["1100"]
     assert je["credit"] == _COA["4030"]
     assert Decimal(str(je["amount"])) == Decimal("250.00")
+
+
+@pytest.mark.asyncio
+async def test_omitted_invoice_and_payment_dates_use_business_date(monkeypatch):
+    expected = date(2026, 12, 31)
+    monkeypatch.setattr(ar, "business_today", lambda: expected)
+    s = _StubSession()
+
+    view = await ar.create_invoice_from_draft(
+        s,
+        workspace_id="wid",
+        entity_id="eid",
+        actor_uc_uid="tester",
+        external_source="manual",
+        external_ref=None,
+        customer={"name": "Business Date Customer"},
+        line_items=[{"description": "Work", "quantity": 1, "unit_price": "10.00"}],
+        post_journal=False,
+    )
+    assert s.invoices[-1]["issue"] == expected
+
+    s.invoices[-1].update(
+        entity_id="eid",
+        invoice_number="INV-2026-0001",
+        status="draft",
+        total=s.invoices[-1]["total"],
+        balance_due=s.invoices[-1]["balance"],
+        currency="USD",
+    )
+    await ar.record_payment(
+        s,
+        workspace_id="wid",
+        invoice_id=view["id"],
+        actor_uc_uid="tester",
+        amount="10.00",
+    )
+    assert s.payments[-1]["rdate"] == expected
 
 
 @pytest.mark.asyncio

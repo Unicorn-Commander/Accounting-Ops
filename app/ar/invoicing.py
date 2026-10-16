@@ -60,6 +60,7 @@ from app.journal.accounts import canonical_form
 from app.journal.hash_chain import compute_hash, get_last_chain_hash
 from app.journal.materiality import materiality_tier
 from app.journal.posting import _insert_journal_entry, _log_post_attempt
+from app.core.business_time import business_today
 
 # journal_entry.source label for every AR posting (issue + payment + void).
 INVOICE_SOURCE = "ar_invoice"
@@ -743,7 +744,7 @@ async def create_invoice_from_draft(
         if len(external_ref) > 256:
             raise InvoiceError("external_ref cannot exceed 256 characters")
     currency = (currency or "USD").upper()[:3]
-    issue_date = issue_date or datetime.now(tz=timezone.utc).date()
+    issue_date = issue_date or business_today()
     if due_date is None:
         terms = int(net_terms) if net_terms is not None else 30
         if terms < 0:
@@ -1258,7 +1259,7 @@ async def record_payment(
     is given. Updates the invoice balance_due + status. Never overpays: the
     payment is capped at the remaining balance and rejects a zero/negative amount.
     """
-    received_date = received_date or datetime.now(tz=timezone.utc).date()
+    received_date = received_date or business_today()
     if external_ref is not None:
         external_ref = str(external_ref).strip()
         if not external_ref:

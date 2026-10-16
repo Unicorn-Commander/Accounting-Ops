@@ -43,6 +43,7 @@ from agents.sentinel.checks._helpers import (
     federal_1120_deadline,
     federal_return_deadline,
 )
+from app.core.business_time import business_today
 from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
@@ -80,6 +81,15 @@ def _date_or_none(value: Any) -> dt.date | None:
         except ValueError:
             return None
     return None
+
+
+def _as_of_date(as_of: str | None) -> dt.date:
+    if as_of:
+        try:
+            return dt.date.fromisoformat(as_of)
+        except ValueError:
+            pass
+    return business_today()
 
 
 # ---------------------------------------------------------------------------
@@ -446,14 +456,7 @@ async def get_tax_status(
     require_role(workspace, "viewer")
 
     # as_of date
-    today: dt.date
-    if as_of:
-        try:
-            today = dt.date.fromisoformat(as_of)
-        except ValueError:
-            today = dt.date.today()
-    else:
-        today = dt.date.today()
+    today = _as_of_date(as_of)
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         # ----------------------------------------------------------------

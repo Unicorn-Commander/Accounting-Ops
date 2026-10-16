@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 
 from app.authz import assert_entity_in_scope
+from app.core.business_time import business_today
 from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
@@ -38,6 +39,10 @@ _CENTS = Decimal("0.01")
 
 def _q2(value: Decimal) -> float:
     return float(value.quantize(_CENTS, rounding=ROUND_HALF_UP))
+
+
+def _default_as_of() -> date:
+    return business_today()
 
 
 def _build_daily_series(
@@ -95,7 +100,7 @@ async def workspace_cash_daily_balance(
     concrete = entity_id if entity_id and entity_id not in ("consolidated", "unmapped") else None
     scope_restriction = assert_entity_in_scope(workspace, concrete)
 
-    as_of = date.today()
+    as_of = _default_as_of()
     start = as_of - timedelta(days=days - 1)
 
     # Entity filter fragment + params, shared by the opening and per-day queries.

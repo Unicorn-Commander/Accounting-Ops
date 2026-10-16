@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 
 from app.authz import assert_entity_in_scope
+from app.core.business_time import business_today
 from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace, resolve_workspace_for_federation
 from app.workspace_session import workspace_session
@@ -37,9 +38,13 @@ from app.workspace_session import workspace_session
 router = APIRouter(tags=["reports"])
 
 
+def _default_as_of(as_of: str | None) -> date:
+    return date.fromisoformat(as_of) if as_of else business_today()
+
+
 def _parse_period(period: str, today: date | None = None) -> tuple[date, date, str]:
     """Return (start_date, end_date, display_label) for the period string."""
-    today = today or date.today()
+    today = today or business_today()
     p = period.lower().strip()
     if p == "ytd":
         return date(today.year, 1, 1), today, f"{today.year} YTD"
@@ -357,7 +362,7 @@ async def balance_sheet(
     """
     require_role(workspace, "viewer")
     scope_restriction = assert_entity_in_scope(workspace, entity_id)
-    as_of_date = date.fromisoformat(as_of) if as_of else date.today()
+    as_of_date = _default_as_of(as_of)
     entity_clause, entity_params = _entity_filter(entity_id, scope_restriction)
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
@@ -761,7 +766,7 @@ async def trial_balance(
     """
     require_role(workspace, "viewer")
     scope_restriction = assert_entity_in_scope(workspace, entity_id)
-    as_of_date = date.fromisoformat(as_of) if as_of else date.today()
+    as_of_date = _default_as_of(as_of)
     entity_clause, entity_params = _entity_filter(entity_id, scope_restriction)
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
@@ -1233,8 +1238,7 @@ async def years_with_entries(
         ).all()
 
     data_years = {int(r.y) for r in rows}
-    import datetime as dt
-    today = dt.date.today()
+    today = business_today()
     # Always include the current and prior year so the UI has chips even when
     # the workspace has zero posted entries.
     data_years.add(today.year)

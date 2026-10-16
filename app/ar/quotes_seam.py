@@ -71,7 +71,7 @@ import calendar
 import json
 import logging
 from dataclasses import asdict, dataclass, field, replace
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from typing import Any, Literal, Sequence
 from uuid import UUID, uuid4
@@ -89,6 +89,7 @@ from app.ar.invoicing import (
     upsert_ar_customer,
     void_invoice,
 )
+from app.core.business_time import business_day_bounds, business_today
 from app.journal.materiality import materiality_tier
 from app.journal.posting import assert_period_open
 
@@ -849,8 +850,8 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
-def _utc_start(d: date) -> datetime:
-    return datetime.combine(d, time.min, tzinfo=timezone.utc)
+def _business_day_start(d: date) -> datetime:
+    return business_day_bounds(d)[0]
 
 
 def _escape_like(value: str) -> str:
@@ -1310,7 +1311,7 @@ async def apply_quote_acceptance(
     """
     plan = plan_quote_billing(payload)
     fq = plan.quote_ref
-    today = today or datetime.now(tz=timezone.utc).date()
+    today = today or business_today()
     issue_date = payload.accepted_at or today
     currency = plan.currency
 
@@ -1452,7 +1453,7 @@ async def apply_quote_acceptance(
         invoices.append(_summarize_invoice(view, kind="recurring", memo=memo, created=created))
 
         done_after_first = s.periods_total is not None and s.periods_total <= 1
-        next_run = None if done_after_first else _utc_start(period_date(issue_date, s.cadence, 2))
+        next_run = None if done_after_first else _business_day_start(period_date(issue_date, s.cadence, 2))
         has_partner = bool(partner_supplier_id) and s.partner_amount_cents > 0
         partner_split = None
         if has_partner and rule is not None:
@@ -1645,9 +1646,9 @@ async def generate_due_schedule_invoices(
     Never posts.
     """
     workspace_id = str(workspace_id)
-    as_of = as_of or datetime.now(tz=timezone.utc).date()
-    cutoff = datetime.combine(as_of, time.max, tzinfo=timezone.utc)
-    where = ["s.workspace_id = :wid", "s.active", "s.next_run_at IS NOT NULL", "s.next_run_at <= :cutoff"]
+    as_of = as_of or business_today()
+    _day_start, cutoff = business_day_bounds(as_of)
+    where = ["s.workspace_id = :wid", "s.active", "s.next_run_at IS NOT NULL", "s.next_run_at < :cutoff"]
     params: dict[str, Any] = {"wid": workspace_id, "cutoff": cutoff, "limit": max(1, min(int(limit), 1000))}
     if entity_id:
         where.append("s.entity_id = :eid")
@@ -1771,7 +1772,7 @@ async def generate_due_schedule_invoices(
                 {
                     "pgen": periods_generated,
                     "ids": json.dumps(ids),
-                    "next": None if done else _utc_start(period_date(anchor, cadence, periods_generated + 1)),
+                    "next": None if done else _business_day_start(period_date(anchor, cadence, periods_generated + 1)),
                     "active": not done,
                     "id": r["id"],
                 },

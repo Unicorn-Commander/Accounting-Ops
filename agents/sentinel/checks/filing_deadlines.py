@@ -26,13 +26,13 @@ from agents.sentinel.checks._helpers import (
     EntitySummary,
     days_until,
     estimated_tax_due_dates,
-    federal_1120_deadline,
     federal_return_deadline,
     form_7004_deadline,
     list_active_entities,
     return_form_for_kind,
     sc1120_deadline,
 )
+from app.core.business_time import business_day_bounds, business_today
 
 CORP_KINDS = {"c_corp", "s_corp"}
 SC_ENTITY_KINDS = {"c_corp", "s_corp", "llc", "partnership"}  # SC-registered subset
@@ -43,12 +43,18 @@ DEADLINE_WINDOW_DAYS_1099 = 30
 
 
 async def _existing_memo_today(
-    ctx: ActionContext, entity_id: UUID, topic_key: str
+    ctx: ActionContext,
+    entity_id: UUID,
+    topic_key: str,
+    *,
+    business_date: dt.date | None = None,
 ) -> bool:
     """Has Sentinel already drafted a memo with this topic_key in today's window?
 
-    Used to make re-runs idempotent within a UTC day.
+    Used to make re-runs idempotent within a business-local day.
     """
+    day = business_date or business_today()
+    business_day_start, _ = business_day_bounds(day)
     row = (
         await ctx.session.execute(
             text(
@@ -57,12 +63,16 @@ async def _existing_memo_today(
                 FROM tax_review_queue
                 WHERE entity_id = :eid
                   AND submitter_id = 'sentinel/v1'
-                  AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')
+                  AND created_at >= :business_day_start
                   AND content->>'topic' = :topic
                 LIMIT 1
                 """
             ),
-            {"eid": str(entity_id), "topic": topic_key},
+            {
+                "eid": str(entity_id),
+                "topic": topic_key,
+                "business_day_start": business_day_start,
+            },
         )
     ).first()
     return row is not None
@@ -76,10 +86,11 @@ async def _flag_deadline(
     due: dt.date,
     days: int,
     severity: str,
+    business_date: dt.date | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     topic = f"sentinel-deadline-{form}-{due.isoformat()}"
-    if await _existing_memo_today(ctx, entity.id, topic):
+    if await _existing_memo_today(ctx, entity.id, topic, business_date=business_date):
         return {"ok": False, "skipped_reason": "deduped_same_day"}
 
     title = f"{form} due in {days} day{'s' if days != 1 else ''} ({due.isoformat()})"
@@ -112,7 +123,7 @@ async def _flag_deadline(
 
 async def run(ctx: ActionContext, **_) -> dict[str, Any]:
     """Run the filing-deadlines check across all active entities."""
-    today = dt.date.today()
+    today = business_today()
     entities = await list_active_entities(ctx.session)
     findings = 0
     actions = 0
@@ -138,6 +149,7 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
                     res = await _flag_deadline(
                         ctx, ent, form=return_form, due=fed_due, days=d,
                         severity="high" if d <= 14 else "medium",
+                        business_date=today,
                     )
                     findings += 1
                     if res.get("ok"):
@@ -151,6 +163,7 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
                         res = await _flag_deadline(
                             ctx, ent, form="7004", due=ext_due, days=d_ext,
                             severity="medium",
+                            business_date=today,
                             extra={"note": f"File 7004 if {return_form} won't be ready."},
                         )
                         findings += 1
@@ -167,6 +180,7 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
                         res = await _flag_deadline(
                             ctx, ent, form="SC1120", due=sc_due, days=d_sc,
                             severity="high" if d_sc <= 14 else "medium",
+                            business_date=today,
                             extra={"note": "Only applies if SC-registered."},
                         )
                         findings += 1
@@ -184,6 +198,7 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
                     res = await _flag_deadline(
                         ctx, ent, form="estimated-tax", due=est_due, days=d_est,
                         severity="medium",
+                        business_date=today,
                         extra={"quarter": _quarter_of(est_due)},
                     )
                     findings += 1
@@ -202,6 +217,7 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
                     res = await _flag_deadline(
                         ctx, ent, form="1099-NEC", due=form_1099_due, days=d_1099,
                         severity="high",
+                        business_date=today,
                         extra={"note": "Run the 1099-NEC specialist if not already drafted."},
                     )
                     findings += 1
