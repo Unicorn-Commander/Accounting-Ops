@@ -100,3 +100,30 @@ def test_run_keep_skips_teardown(monkeypatch: pytest.MonkeyPatch):
 
     assert integration_env.cmd_run(False, True, ["-q"]) == 0
     assert events == ["up", "test"]
+
+
+def test_cmd_up_builds_before_writing_the_runtime_key(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """The dummy master key must never be a build input: cmd_up writes the env
+    without the key, builds, THEN writes the key, THEN brings the stack up."""
+    _isolate_project_state(monkeypatch, tmp_path)
+    monkeypatch.setenv("AO_ITEST_PROJECT", "acctops_itest_order")
+    calls: list[tuple[str, object]] = []
+
+    class StopAtUp(Exception):
+        pass
+
+    def fake_write(with_cpa, project, include_master_key=True):
+        calls.append(("write", include_master_key))
+
+    def fake_compose(*args):
+        calls.append(("compose", args[0]))
+        if args[0] == "up":
+            raise StopAtUp
+
+    monkeypatch.setattr(integration_env, "_write_secrets_and_env", fake_write)
+    monkeypatch.setattr(integration_env, "_compose", fake_compose)
+
+    with pytest.raises(StopAtUp):
+        integration_env.cmd_up(False)
+
+    assert calls == [("write", False), ("compose", "build"), ("write", True), ("compose", "up")]
