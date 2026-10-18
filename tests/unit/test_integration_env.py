@@ -48,6 +48,22 @@ def test_project_name_is_reused_from_generated_env(monkeypatch: pytest.MonkeyPat
     assert integration_env.resolve_project_name() == "acctops_itest_saved"
 
 
+def test_runtime_master_key_is_written_after_the_build_phase(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    _isolate_project_state(monkeypatch, tmp_path)
+
+    integration_env._write_secrets_and_env(
+        False, "acctops_itest_test", include_master_key=False
+    )
+    assert not integration_env.SECRET_FILE.exists()
+    assert "AO_ITEST_MASTER_KEY_HEX=" not in integration_env.ENV_FILE.read_text()
+
+    integration_env._write_secrets_and_env(False, "acctops_itest_test")
+    assert integration_env.SECRET_FILE.stat().st_size == 32
+    assert "AO_ITEST_MASTER_KEY_HEX=" in integration_env.ENV_FILE.read_text()
+
+
 def test_run_tears_down_after_fake_pytest_failure(monkeypatch: pytest.MonkeyPatch, tmp_path):
     _isolate_project_state(monkeypatch, tmp_path)
     monkeypatch.setattr(integration_env, "ROOT", tmp_path)
