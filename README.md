@@ -481,7 +481,8 @@ prove every number.
   under shared tenancy; the runtime DB role is `NOSUPERUSER` / `NOBYPASSRLS` and does not own its
   objects, so the append-only guarantee is enforced by Postgres, not merely by app code.
 - **Encrypted credentials.** Connector credentials are encrypted at rest with a local master key
-  (`secrets/accounting_ops_master_key`). **Back it up out-of-band** — losing it orphans all
+  mounted in the container at `/run/secrets/accounting_ops_master_key`; the key is runtime-only and
+  is never baked into the application image. **Back it up out-of-band** — losing it orphans all
   encrypted credentials.
 - Found a vulnerability? See **[SECURITY.md](SECURITY.md)**.
 

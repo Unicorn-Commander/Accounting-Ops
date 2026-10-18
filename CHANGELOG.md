@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- security: exclude the master-key source directory from application image
+  builds; mount the key at `/run/secrets/accounting_ops_master_key` at runtime.
+
 - fix(mcp): parse journal transaction date filters into `date` objects before
   binding, accepting ISO dates and datetimes and surfacing invalid values as a
   clear 400-style tool error instead of an asyncpg 500.

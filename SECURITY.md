@@ -33,8 +33,9 @@ reported to their respective maintainers (but do tell us if it affects us).
 - **Never** include real secrets, API keys, or real financial/PII data in an
   issue, PR, test fixture, or bug report.
 - Encrypted credentials in Accounting-Ops are protected by a local master key
-  (`secrets/accounting_ops_master_key`). Treat it like a root password: back it
-  up securely, never commit it, and rotate credentials if you suspect exposure.
+  mounted at `/run/secrets/accounting_ops_master_key`; it is never baked into an
+  application image. Treat it like a root password: back it up securely, never
+  commit it, and rotate credentials if you suspect exposure.
 - CI enforces secret scanning (`gitleaks` + `trufflehog`) on the codebase.
 
 ## Supported versions
