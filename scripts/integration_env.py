@@ -164,15 +164,22 @@ def _compose(*args: str, env_file: bool = True, check: bool = True, capture: boo
     )
 
 
-def _write_secrets_and_env(with_cpa: bool, project: str | None = None) -> None:
+def _write_secrets_and_env(
+    with_cpa: bool,
+    project: str | None = None,
+    *,
+    include_master_key: bool = True,
+) -> None:
     project = project or resolve_project_name(for_up=True)
-    SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not SECRET_FILE.exists():
-        SECRET_FILE.write_bytes(secrets.token_bytes(32))
-        SECRET_FILE.chmod(0o600)
-    dummy_key = SECRET_FILE.read_bytes()
-    if len(dummy_key) != 32:
-        raise ValueError(f"{SECRET_FILE} must contain exactly 32 bytes for itest")
+    dummy_key: bytes | None = None
+    if include_master_key:
+        SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if not SECRET_FILE.exists():
+            SECRET_FILE.write_bytes(secrets.token_bytes(32))
+            SECRET_FILE.chmod(0o600)
+        dummy_key = SECRET_FILE.read_bytes()
+        if len(dummy_key) != 32:
+            raise ValueError(f"{SECRET_FILE} must contain exactly 32 bytes for itest")
 
     # H2 / audit 2026-05-31 Bug 7: the app REJECTS a service token that declares
     # NONE of workspace_ids / entity_ids / role_floor (unless the dev escape
@@ -207,7 +214,6 @@ def _write_secrets_and_env(with_cpa: bool, project: str | None = None) -> None:
         f"ADMIN_DATABASE_URL=postgresql+asyncpg://{OWNER_DB_ROLE}:{POSTGRES_PASSWORD}@postgres:5432/accounting_ops",
         f"GARAGE_RPC_SECRET={secrets.token_hex(32)}",
         f"GARAGE_ADMIN_TOKEN={secrets.token_hex(32)}",
-        f"AO_ITEST_MASTER_KEY_HEX={dummy_key.hex()}",
         "GARAGE_S3_ENDPOINT=http://garage:3900",
         # Service-token auth for the test caller (see app/auth.py).
         f"ACCTOPS_SERVICE_TOKENS={service_tokens}",
@@ -218,6 +224,8 @@ def _write_secrets_and_env(with_cpa: bool, project: str | None = None) -> None:
     ]
     if with_cpa:
         lines.append("CPA_EXPORT_PORT=8093")
+    if dummy_key is not None:
+        lines.append(f"AO_ITEST_MASTER_KEY_HEX={dummy_key.hex()}")
     ENV_FILE.write_text("\n".join(lines) + "\n")
 
 
@@ -294,13 +302,23 @@ def _bootstrap_runtime_role() -> None:
 
 def cmd_up(with_cpa: bool) -> None:
     project = resolve_project_name(for_up=True)
-    _write_secrets_and_env(with_cpa, project)
+    _write_secrets_and_env(with_cpa, project, include_master_key=False)
     services = list(CORE_SERVICES)
     if with_cpa:
         services.append("cpa-export")
     print(f"[integration] project {project}; building + starting: {services}", file=sys.stderr)
+    # Build before creating the dummy runtime secret. This guarantees the
+    # generated file is never a build input, even if the context rules regress.
+    build_args = ["build"]
+    if with_cpa:
+        build_args = ["--profile", "exports", *build_args]
+    _compose(*build_args, *services)
+
+    # The app/sidecar receive this key through the runtime-only named volume.
+    _write_secrets_and_env(with_cpa, project)
+
     # cpa-export lives in the exports profile.
-    up_args = ["up", "-d", "--build"]
+    up_args = ["up", "-d"]
     if with_cpa:
         up_args = ["--profile", "exports", *up_args]
     _compose(*up_args, *services)
