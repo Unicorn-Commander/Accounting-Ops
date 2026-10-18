@@ -170,6 +170,9 @@ def _write_secrets_and_env(with_cpa: bool, project: str | None = None) -> None:
     if not SECRET_FILE.exists():
         SECRET_FILE.write_bytes(secrets.token_bytes(32))
         SECRET_FILE.chmod(0o600)
+    dummy_key = SECRET_FILE.read_bytes()
+    if len(dummy_key) != 32:
+        raise ValueError(f"{SECRET_FILE} must contain exactly 32 bytes for itest")
 
     # H2 / audit 2026-05-31 Bug 7: the app REJECTS a service token that declares
     # NONE of workspace_ids / entity_ids / role_floor (unless the dev escape
@@ -204,6 +207,7 @@ def _write_secrets_and_env(with_cpa: bool, project: str | None = None) -> None:
         f"ADMIN_DATABASE_URL=postgresql+asyncpg://{OWNER_DB_ROLE}:{POSTGRES_PASSWORD}@postgres:5432/accounting_ops",
         f"GARAGE_RPC_SECRET={secrets.token_hex(32)}",
         f"GARAGE_ADMIN_TOKEN={secrets.token_hex(32)}",
+        f"AO_ITEST_MASTER_KEY_HEX={dummy_key.hex()}",
         "GARAGE_S3_ENDPOINT=http://garage:3900",
         # Service-token auth for the test caller (see app/auth.py).
         f"ACCTOPS_SERVICE_TOKENS={service_tokens}",

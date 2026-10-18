@@ -9,6 +9,11 @@
 .env.*
 *.env
 
+# The master key is mounted at runtime under /run/secrets; never include it in
+# image content or layers.
+secrets/
+**/secrets/
+
 # Stray backup files from ops changes
 *.bak
 *.bak-*
