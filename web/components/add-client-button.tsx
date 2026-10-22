@@ -115,7 +115,7 @@ export function AddClientButton({
                   <p className="mt-1 text-ink-secondary">
                     {success.owner_invitation
                       ? `You own the workspace and run the books. We emailed an owner invitation to ${success.owner_invitation.email} — they get owner-level access to their own data.`
-                      : "You own the workspace. Start the books now; invite the business owner or your team from Team → Members whenever you like."}
+                      : "You own the workspace. Start the books now; invite the client or your team from Team → Members whenever you like."}
                   </p>
                 </div>
               </div>
@@ -133,22 +133,22 @@ export function AddClientButton({
           ) : (
             <div className="space-y-5 px-6 py-5">
               <Dialog.Description className="text-sm leading-relaxed text-ink-secondary">
-                Set up a new client&apos;s books. You&apos;ll be the new
-                workspace&apos;s <strong>owner</strong> — connect their bank, add
-                entities, invite your team and close periods right away. Add the
-                owner&apos;s email to send them an invitation so they hold
-                owner-level access to their own data too.
+                Set up a new client&apos;s books — a business or an individual.
+                You&apos;ll be the new workspace&apos;s <strong>owner</strong> —
+                connect their bank, add entities, invite your team and close
+                periods right away. Add the client&apos;s email to send them an
+                invitation so they hold owner-level access to their own books too.
               </Dialog.Description>
 
               <label className="block">
                 <span className="text-xs font-medium uppercase tracking-wider text-ink-tertiary">
-                  Business name
+                  Client name
                 </span>
                 <input
                   type="text"
                   value={businessName}
                   onChange={(e) => setBusinessName(e.target.value)}
-                  placeholder="e.g. Northwind Remodeling LLC"
+                  placeholder="e.g. Northwind Remodeling LLC — or Jane Doe"
                   maxLength={160}
                   className="mt-1.5 w-full rounded-md border border-default bg-canvas px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
                 />
@@ -156,14 +156,14 @@ export function AddClientButton({
 
               <label className="block">
                 <span className="text-xs font-medium uppercase tracking-wider text-ink-tertiary">
-                  Owner email{" "}
+                  Client email{" "}
                   <span className="text-ink-disabled normal-case">(optional)</span>
                 </span>
                 <input
                   type="email"
                   value={ownerEmail}
                   onChange={(e) => setOwnerEmail(e.target.value)}
-                  placeholder="owner@theirbusiness.com"
+                  placeholder="jane@theirbusiness.com"
                   maxLength={256}
                   className="mt-1.5 w-full rounded-md border border-default bg-canvas px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
                 />
