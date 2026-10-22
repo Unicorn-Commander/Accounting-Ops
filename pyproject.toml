@@ -50,7 +50,12 @@ dependencies = [
   "reportlab>=4.2.0",
   # Rasterize scanned tax-document PDFs to page images for the vision VLM
   # (app/categorization/tax_doc_vlm.py). pypdf can't render; pymupdf can.
-  "pymupdf>=1.24.0",
+  # <2: pymupdf 2.0 (2026-10) ships no musllinux wheel, so a floating install on
+  # the alpine CI job image tries to build MuPDF from source and dies on a
+  # missing cc (PO 2af132a6). The image itself is uv.lock-pinned; this keeps
+  # the host-side `pip install -e .[dev]` in the integration job on the 1.x
+  # wheels too. Nothing here uses 2.0 APIs.
+  "pymupdf>=1.24.0,<2",
 ]
 
 [project.optional-dependencies]
