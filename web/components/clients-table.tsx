@@ -215,6 +215,14 @@ export function ClientsTable({
                             >
                               {w.role}
                             </span>
+                            {w.onboarded_by_me ? (
+                              <span
+                                className="rounded-full border border-subtle bg-white/5 px-2 py-0.5 text-[10px] uppercase tracking-wider text-ink-tertiary"
+                                title="You set this workspace up from Clients → Add client"
+                              >
+                                your client
+                              </span>
+                            ) : null}
                           </div>
                           <div className="mt-0.5 text-[11px] text-ink-tertiary">
                             {w.entity_count} entit

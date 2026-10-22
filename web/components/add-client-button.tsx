@@ -18,10 +18,11 @@ type AddClientResponse = {
 };
 
 // CPA-originated client onboarding. Provisions a brand-new client workspace
-// (caller becomes a `cpa` member who can run the books but cannot self-grant)
-// and, if an owner email is given, emails the business owner an `owner`
-// invitation so the client owns their own data. Calls the backend through the
-// generic /api/proxy passthrough (no per-endpoint route handler needed).
+// with the caller seated as its `owner` (the practice runs the books end to
+// end: bank connections, invitations, period close) and, if an owner email is
+// given, emails the business owner a `client_owner` invitation (owner rank) so
+// the client holds full authority over their own data. Calls the backend
+// through the generic /api/proxy passthrough (no per-endpoint route handler).
 export function AddClientButton({
   variant = "primary",
 }: {
@@ -113,8 +114,8 @@ export function AddClientButton({
                   </p>
                   <p className="mt-1 text-ink-secondary">
                     {success.owner_invitation
-                      ? `You're on as their CPA. We emailed an owner invitation to ${success.owner_invitation.email} — they own their data, you run the books.`
-                      : "You're on as their CPA. You can start the books now and invite the business owner later."}
+                      ? `You own the workspace and run the books. We emailed an owner invitation to ${success.owner_invitation.email} — they get owner-level access to their own data.`
+                      : "You own the workspace. Start the books now; invite the business owner or your team from Settings → Members whenever you like."}
                   </p>
                 </div>
               </div>
@@ -132,10 +133,11 @@ export function AddClientButton({
           ) : (
             <div className="space-y-5 px-6 py-5">
               <Dialog.Description className="text-sm leading-relaxed text-ink-secondary">
-                Set up a new client&apos;s books. You&apos;ll be added as their{" "}
-                <strong>CPA</strong> — you can run the books immediately. Add the
-                owner&apos;s email to send them an invitation so they own their
-                own data.
+                Set up a new client&apos;s books. You&apos;ll be the new
+                workspace&apos;s <strong>owner</strong> — connect their bank, add
+                entities, invite your team and close periods right away. Add the
+                owner&apos;s email to send them an invitation so they hold
+                owner-level access to their own data too.
               </Dialog.Description>
 
               <label className="block">

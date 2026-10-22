@@ -75,6 +75,7 @@ async def create_workspace_record(
     hipaa_protected: bool = False,
     isolation_tier: str = "shared",
     uc_org_id: str | None = None,
+    onboarded_by_user_id: uuid.UUID | None = None,
 ) -> str:
     # Shared-schema model: no per-workspace schema is created; every workspace's
     # rows live in the fixed SHARED_SCHEMA and are isolated by FORCE RLS on
@@ -90,22 +91,31 @@ async def create_workspace_record(
                 # uc_org_id (migration 0012) is the UC platform org a workspace
                 # meters inference under. COALESCE on conflict so re-provisioning
                 # without an org never NULLs out an already-bridged workspace.
+                # onboarded_by_user_id (migration 0019) is the practitioner who
+                # provisioned the workspace through the CPA console; provenance
+                # is written once and never overwritten by a re-provision.
                 """
                 INSERT INTO public.workspace (
                     id, slug, display_name, postgres_schema,
                     falkordb_subgraph, garage_bucket,
-                    hipaa_protected, isolation_tier, uc_org_id, status
+                    hipaa_protected, isolation_tier, uc_org_id,
+                    onboarded_by_user_id, status
                 )
                 VALUES (
                     :id, :slug, :display_name, :schema,
                     :subgraph, :bucket,
-                    :hipaa, :tier, :uc_org_id, 'provisioning'
+                    :hipaa, :tier, :uc_org_id,
+                    CAST(:onboarded_by AS uuid), 'provisioning'
                 )
                 ON CONFLICT (id) DO UPDATE
                 SET display_name = EXCLUDED.display_name,
                     hipaa_protected = EXCLUDED.hipaa_protected,
                     isolation_tier = EXCLUDED.isolation_tier,
-                    uc_org_id = COALESCE(EXCLUDED.uc_org_id, public.workspace.uc_org_id)
+                    uc_org_id = COALESCE(EXCLUDED.uc_org_id, public.workspace.uc_org_id),
+                    onboarded_by_user_id = COALESCE(
+                        public.workspace.onboarded_by_user_id,
+                        EXCLUDED.onboarded_by_user_id
+                    )
                 """
             ),
             {
@@ -118,6 +128,7 @@ async def create_workspace_record(
                 "hipaa": hipaa_protected,
                 "tier": isolation_tier,
                 "uc_org_id": uc_org_id,
+                "onboarded_by": str(onboarded_by_user_id) if onboarded_by_user_id else None,
             },
         )
     return schema
@@ -224,11 +235,16 @@ async def provision_workspace(
     isolation_tier: str = "shared",
     entities: list[tuple[str, str]] | None = None,
     uc_org_id: str | None = None,
+    onboarded_by_user_id: uuid.UUID | None = None,
 ) -> tuple[str, list[uuid.UUID]]:
     """End-to-end workspace provisioning. Returns (schema_name, [entity_ids]).
 
     `entities` is a list of (display_name, kind) tuples. kind is one of
     c_corp / s_corp / llc / partnership / sole_proprietorship / personal / trust / non_profit / estate / other.
+
+    `onboarded_by_user_id` records the practitioner who provisioned the
+    workspace through the CPA console (POST /api/me/clients); operator and
+    self-serve provisioning leave it NULL.
 
     Shared-schema model: provisioning inserts the workspace registry row + seed
     entity rows only (no CREATE SCHEMA, no per-schema migration). It still runs
@@ -243,6 +259,7 @@ async def provision_workspace(
     schema = await create_workspace_record(
         engine, workspace_id, display_name, slug, hipaa_protected, isolation_tier,
         uc_org_id=uc_org_id,
+        onboarded_by_user_id=onboarded_by_user_id,
     )
     # Shared-schema model: tables already exist in SHARED_SCHEMA, so provisioning
     # inserts rows only — NO CREATE SCHEMA and NO per-schema alembic fan-out.

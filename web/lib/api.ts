@@ -62,6 +62,8 @@ export type ClientsDashboard = {
   workspaces: (Workspace & {
     open_items_count: number;
     entity_scope?: string[] | null;
+    /** true when the caller set this workspace up from Clients → Add client. */
+    onboarded_by_me?: boolean;
   })[];
   total_workspaces: number;
   total_open_items: number;
@@ -83,6 +85,8 @@ export type TriageWorkspace = Workspace & {
   last_client_activity_at: string | null;
   suggested_route: TriageRoute;
   entity_scope?: string[] | null;
+  /** true when the caller set this workspace up from Clients → Add client. */
+  onboarded_by_me?: boolean;
 };
 
 export type ClientsTriage = {
@@ -188,6 +192,8 @@ export type Persona = {
   persona: "platform_admin" | "cpa" | "client" | "new";
   roles: string[];
   cpa_count: number;
+  /** Active workspaces the caller set up from Clients → Add client (owner seat). */
+  clients_onboarded?: number;
   workspace_count: number;
   can_add_clients: boolean;
 };
