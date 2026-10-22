@@ -115,7 +115,7 @@ export function AddClientButton({
                   <p className="mt-1 text-ink-secondary">
                     {success.owner_invitation
                       ? `You own the workspace and run the books. We emailed an owner invitation to ${success.owner_invitation.email} — they get owner-level access to their own data.`
-                      : "You own the workspace. Start the books now; invite the business owner or your team from Settings → Members whenever you like."}
+                      : "You own the workspace. Start the books now; invite the business owner or your team from Team → Members whenever you like."}
                   </p>
                 </div>
               </div>
