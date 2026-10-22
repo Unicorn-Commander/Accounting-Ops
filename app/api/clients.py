@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -76,11 +77,14 @@ async def list_my_clients(
     workspace's `tax_review_queue` (best-effort — a missing table on a
     workspace is treated as 0).
 
-    Caller persona detection:
-      * if the caller holds a ``cpa`` role in 2+ workspaces, ``persona``
-        returns "cpa"
-      * if they hold ``platform_admin`` anywhere, persona is "platform_admin"
-      * else, persona is "client" (the customer's owner / team).
+    Caller persona detection (same rule as GET /api/me/persona, ``_persona_for``):
+      * ``platform_admin`` anywhere -> "platform_admin"
+      * a ``cpa`` seat anywhere, OR at least one active workspace the caller
+        onboarded through POST /api/me/clients (where they sit as ``owner``)
+        -> "cpa"
+      * else "client" (the customer's owner / team).
+
+    ``onboarded_by_me`` marks the workspaces the caller set up from the console.
     """
     user_id = await _user_id_for(auth.uc_uid)
     if user_id is None:
@@ -101,6 +105,8 @@ async def list_my_clients(
                             w.hipaa_protected   AS hipaa_protected,
                             m.entity_scope      AS entity_scope,
                             m.last_active_at    AS last_active_at,
+                            COALESCE(w.onboarded_by_user_id = :user_id, false)
+                                                AS onboarded_by_me,
                             w.postgres_schema   AS postgres_schema
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
@@ -112,19 +118,13 @@ async def list_my_clients(
                     {"user_id": user_id},
                 )
             ).mappings().all()
+            clients_onboarded = await _clients_onboarded_count(session, user_id)
 
     workspaces: list[dict[str, Any]] = []
-    cpa_count = 0
-    has_platform = False
 
     for row in rows:
         entry = dict(row)
         entry.pop("postgres_schema", None)
-        role = entry["role"]
-        if role == "cpa":
-            cpa_count += 1
-        if role == "platform_admin":
-            has_platform = True
 
         # Per-workspace counts. Best-effort: errors degrade to zeros so a
         # single broken workspace can't 500 the dashboard.
@@ -164,14 +164,9 @@ async def list_my_clients(
         entry["open_items_count"] = open_items
         workspaces.append(entry)
 
-    if has_platform:
-        persona = "platform_admin"
-    elif cpa_count >= 2:
-        persona = "cpa"
-    elif cpa_count == 1:
-        persona = "cpa"
-    else:
-        persona = "client"
+    persona = _persona_for(
+        (r["role"] for r in rows), clients_onboarded, empty="client"
+    )
 
     return {
         "persona": persona,
@@ -353,7 +348,9 @@ async def list_my_clients_triage(
                             w.isolation_tier::text AS isolation_tier,
                             w.hipaa_protected   AS hipaa_protected,
                             m.entity_scope      AS entity_scope,
-                            m.last_active_at    AS last_active_at
+                            m.last_active_at    AS last_active_at,
+                            COALESCE(w.onboarded_by_user_id = :user_id, false)
+                                                AS onboarded_by_me
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :user_id
@@ -364,21 +361,15 @@ async def list_my_clients_triage(
                     {"user_id": user_id},
                 )
             ).mappings().all()
+            clients_onboarded = await _clients_onboarded_count(session, user_id)
 
     import datetime as dt
     now = dt.datetime.now(dt.timezone.utc)
 
     workspaces: list[dict[str, Any]] = []
-    cpa_count = 0
-    has_platform = False
 
     for row in rows:
         entry = dict(row)
-        role = entry["role"]
-        if role == "cpa":
-            cpa_count += 1
-        if role == "platform_admin":
-            has_platform = True
 
         ent_count = 0
         open_items = 0
@@ -506,12 +497,9 @@ async def list_my_clients_triage(
         entry["suggested_route"] = suggested
         workspaces.append(entry)
 
-    if has_platform:
-        persona = "platform_admin"
-    elif cpa_count >= 1:
-        persona = "cpa"
-    else:
-        persona = "client"
+    persona = _persona_for(
+        (r["role"] for r in rows), clients_onboarded, empty="client"
+    )
 
     # Sort: deadline_soon (by days asc) > needs_cpa (desc count) > waiting >
     #       stale > ok. We do this in one sort key for stability.
@@ -549,18 +537,28 @@ async def list_my_clients_triage(
 #
 # `/api/me/clients` (GET) and `/triage` peek into every workspace schema, which
 # is too heavy for a login-time redirect. `GET /api/me/persona` answers the one
-# question the landing router needs — "is this caller a CPA?" — from the
-# membership table alone (no per-workspace schema sessions).
+# question the landing router needs — "is this caller a practitioner?" — from
+# the registry tables alone (no per-workspace schema sessions).
 #
 # `POST /api/me/clients` is the CPA-originated onboarding path. The existing
 # member-invite endpoints (app/api/members.py) are deliberately client-
 # originated and admin-gated: a CPA can NEVER self-grant privilege inside an
 # existing customer workspace. This endpoint does not violate that — it
-# *provisions a brand-new workspace*, makes the caller a ``cpa`` member (the
-# accountant-rank role that can do the books but cannot invite), and issues the
-# client-owner an ``owner`` invitation. Granting someone ABOVE you in a
-# workspace you just created is not self-escalation, so issuing the owner invite
-# here (bypassing the admin gate) is correct and safe.
+# *provisions a brand-new workspace* for a client of the caller's practice and
+# seats the caller as its ``owner`` (CLIENT_SEAT_ROLE). The practice set the
+# books up, so the practice runs them end to end: bank connections (admin
+# floor), member invitations including the client-owner seat (owner floor),
+# period close, data rights. If the practitioner supplies the business owner's
+# email, that person is invited as ``client_owner`` (CLIENT_OWNER_INVITE_ROLE):
+# the same rank as owner, so the client holds full authority over their own
+# data while the practice operates it. Seating yourself in a workspace you just
+# created is not self-escalation inside someone else's workspace, which is why
+# the admin gate does not apply here.
+#
+# Because the practitioner holds ``owner`` (not ``cpa``) in the workspaces they
+# onboard, "holds a cpa seat" no longer identifies a practice. The workspace
+# registry records who onboarded it (``workspace.onboarded_by_user_id``, public
+# migration 0019) and ``_persona_for`` counts those too.
 # ---------------------------------------------------------------------------
 
 # Roles that mark an "established practitioner" allowed to onboard new clients.
@@ -575,6 +573,52 @@ _PRACTITIONER_ROLES = (
     "platform_admin",
 )
 
+# The seat the onboarding practitioner gets in the client workspace they
+# provision, and the seat the business owner is invited to. Both are rank 5 in
+# app/tenancy.py, so either side can run the workspace in full.
+CLIENT_SEAT_ROLE = "owner"
+CLIENT_OWNER_INVITE_ROLE = "client_owner"
+# membership_audit.action for the console's self-seat. Must be admitted by
+# ck_membership_audit_action (public migration 0019 widens 0017's list).
+CONSOLE_ONBOARD_AUDIT_ACTION = "console_onboard"
+
+
+def _persona_for(
+    roles: Iterable[str], clients_onboarded: int, *, empty: str = "new"
+) -> str:
+    """platform_admin > cpa > client > ``empty``.
+
+    A caller reads as a practitioner ("cpa") when they hold a ``cpa`` seat
+    anywhere OR have onboarded at least one active client workspace through
+    POST /api/me/clients. ``empty`` is what a caller with no active membership
+    at all reads as: "new" for the landing router, "client" for the list
+    endpoints' older contract.
+    """
+    role_set = set(roles)
+    if "platform_admin" in role_set:
+        return "platform_admin"
+    if "cpa" in role_set or clients_onboarded > 0:
+        return "cpa"
+    if role_set:
+        return "client"
+    return empty
+
+
+async def _clients_onboarded_count(session: Any, user_id: UUID) -> int:
+    """Active workspaces this user provisioned through POST /api/me/clients."""
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT count(*) AS c FROM public.workspace
+                WHERE onboarded_by_user_id = :uid AND status = 'active'
+                """
+            ),
+            {"uid": user_id},
+        )
+    ).first()
+    return int(row.c) if row else 0
+
 
 def _slugify(value: str) -> str:
     import re
@@ -585,8 +629,11 @@ def _slugify(value: str) -> str:
 
 async def _caller_account(
     uc_uid: str, *, autoprovision: bool = False
-) -> tuple[UUID, str | None, list[str]]:
-    """Return (user_id, email, distinct_roles_held) for the caller.
+) -> tuple[UUID, str | None, list[str], int]:
+    """Return (user_id, email, distinct_roles_held, clients_onboarded) for the caller.
+
+    ``clients_onboarded`` counts the active workspaces the caller provisioned
+    through POST /api/me/clients (see ``_persona_for``).
 
     JIT-provisions a ``user_account`` row only for caller classes allowed to
     auto-provision (``AuthContext.may_autoprovision``: Keycloak login / CE
@@ -617,10 +664,12 @@ async def _caller_account(
                     {"uid": user_id},
                 )
             ).mappings().all()
+            clients_onboarded = await _clients_onboarded_count(session, user_id)
     return (
         user_id,
         (email_row.email if email_row else None),
         [r["role"] for r in role_rows],
+        clients_onboarded,
     )
 
 
@@ -630,28 +679,24 @@ async def my_persona(
 ) -> dict[str, Any]:
     """Cheap persona check for the login-time landing router.
 
-    Membership-table only (no per-workspace schema peek), so it's safe to call
+    Registry tables only (no per-workspace schema peek), so it's safe to call
     on every sign-in. ``can_add_clients`` is true when the caller already holds
     a practitioner-or-owner role somewhere (the gate POST /api/me/clients
-    enforces).
+    enforces). ``clients_onboarded`` is how many active workspaces the caller
+    set up from the console; one or more makes the persona "cpa" (see
+    ``_persona_for``).
     """
-    _user_id, _email, roles = await _caller_account(
+    _user_id, _email, roles, clients_onboarded = await _caller_account(
         auth.uc_uid, autoprovision=auth.may_autoprovision
     )
     role_set = set(roles)
-    if "platform_admin" in role_set:
-        persona = "platform_admin"
-    elif "cpa" in role_set:
-        persona = "cpa"
-    elif role_set:
-        persona = "client"
-    else:
-        persona = "new"
+    persona = _persona_for(roles, clients_onboarded)
     can_add = bool(role_set & set(_PRACTITIONER_ROLES))
     return {
         "persona": persona,
         "roles": sorted(role_set),
         "cpa_count": sum(1 for r in roles if r == "cpa"),
+        "clients_onboarded": clients_onboarded,
         "workspace_count": len(roles),
         "can_add_clients": can_add,
     }
@@ -662,7 +707,10 @@ class AddClientRequest(BaseModel):
     owner_email: str | None = Field(
         default=None,
         max_length=256,
-        description="If set, the client-owner is emailed an 'owner' invitation.",
+        description=(
+            "If set, the business owner is emailed a 'client_owner' invitation "
+            "(owner rank) so they hold full authority over their own data."
+        ),
     )
     hipaa_protected: bool = False
     isolation_tier: str = Field(default="shared")
@@ -676,10 +724,13 @@ async def add_client(
     """CPA-originated client onboarding: provision a workspace + (optionally)
     invite the business owner.
 
-    The caller becomes a ``cpa`` member (accountant-rank: can run the books,
-    cannot invite). If ``owner_email`` is supplied, the business owner is sent
-    an ``owner`` magic-link invitation so they own their own data while the CPA
-    operates it. Gate: caller must already hold a practitioner/owner role.
+    The caller becomes the new workspace's ``owner`` (CLIENT_SEAT_ROLE): they
+    can run the books, connect the client's bank, invite their own team and
+    the client, and close periods without waiting on anyone. If
+    ``owner_email`` is supplied, the business owner is sent a ``client_owner``
+    magic-link invitation (owner rank) so they hold full authority over their
+    own data while the practice operates it. Gate: caller must already hold a
+    practitioner/owner role somewhere.
     """
     # Reuse the proven invite helpers + provisioning path. Imported lazily to
     # avoid import cycles (members.py imports tenancy which imports nothing here).
@@ -690,11 +741,13 @@ async def add_client(
         _hash_token,
         _invite_email_body,
         _normalize_email,
+        _write_membership_audit,
     )
     from app.mailer import send_email
+    from app.tenancy import WorkspaceContext
     from scripts.provision_workspace import provision_workspace
 
-    user_id, caller_email, roles = await _caller_account(
+    user_id, caller_email, roles, _onboarded = await _caller_account(
         auth.uc_uid, autoprovision=auth.may_autoprovision
     )
     if not (set(roles) & set(_PRACTITIONER_ROLES)):
@@ -721,11 +774,23 @@ async def add_client(
         hipaa_protected=body.hipaa_protected,
         isolation_tier=body.isolation_tier,
         entities=None,
+        onboarded_by_user_id=user_id,
     )
 
-    # Make the caller a cpa member (NOTE: no 'status' column on
-    # workspace_membership — see migration 0001; setup_assistant's INSERT that
-    # references it is a latent bug, fixed separately).
+    # Seat the caller as the workspace's owner. invited_by_uc_uid = the caller
+    # themself records that the seat came from console onboarding, not from an
+    # invitation. (workspace_membership.status defaults to 'active' — 0015.)
+    # The membership audit trail (0017) gets the same rows the members API
+    # would write, in the same transaction, so this self-seat is accountable.
+    audit_ctx = WorkspaceContext(
+        workspace_id=wid,
+        workspace_slug=slug,
+        role=CLIENT_SEAT_ROLE,
+        user_uc_uid=auth.uc_uid,
+        agent_id=auth.agent_id,
+        entity_scope=None,
+        hipaa_protected=body.hipaa_protected,
+    )
     async with SessionLocal() as session:
         async with session.begin():
             await session.execute(
@@ -733,12 +798,27 @@ async def add_client(
                     """
                     INSERT INTO public.workspace_membership
                         (id, user_id, workspace_id, role, invited_by_uc_uid, created_at)
-                    VALUES (gen_random_uuid(), :uid, :wid, 'cpa', :uc, now())
+                    VALUES (
+                        gen_random_uuid(), :uid, :wid,
+                        CAST(:role AS workspace_role), :uc, now()
+                    )
                     ON CONFLICT ON CONSTRAINT uq_workspace_membership
-                    DO UPDATE SET role = 'cpa'
+                    DO UPDATE SET role = CAST(:role AS workspace_role)
                     """
                 ),
-                {"uid": user_id, "wid": str(wid), "uc": auth.uc_uid},
+                {
+                    "uid": user_id,
+                    "wid": str(wid),
+                    "role": CLIENT_SEAT_ROLE,
+                    "uc": auth.uc_uid,
+                },
+            )
+            await _write_membership_audit(
+                session,
+                workspace=audit_ctx,
+                action=CONSOLE_ONBOARD_AUDIT_ACTION,
+                target_user_id=user_id,
+                new_role=CLIENT_SEAT_ROLE,
             )
 
     owner_invitation: dict[str, Any] | None = None
@@ -756,7 +836,7 @@ async def add_client(
                             id, workspace_id, email, role, entity_scope,
                             token_hash, expires_at, created_by_uc_uid
                         ) VALUES (
-                            :id, :wid, :email, CAST('owner' AS workspace_role),
+                            :id, :wid, :email, CAST(:role AS workspace_role),
                             NULL, :token_hash, :expires_at, :created_by
                         )
                         """
@@ -765,15 +845,24 @@ async def add_client(
                         "id": str(invitation_id),
                         "wid": str(wid),
                         "email": owner_email,
+                        "role": CLIENT_OWNER_INVITE_ROLE,
                         "token_hash": _hash_token(raw_token),
                         "expires_at": expires_at,
                         "created_by": auth.uc_uid,
                     },
                 )
+                await _write_membership_audit(
+                    session,
+                    workspace=audit_ctx,
+                    action="invitation_create",
+                    invited_email=owner_email,
+                    invitation_id=str(invitation_id),
+                    new_role=CLIENT_OWNER_INVITE_ROLE,
+                )
                 text_body, html_body = _invite_email_body(
                     workspace_name=body.business_name,
                     inviter_email=caller_email,
-                    role="owner",
+                    role=CLIENT_OWNER_INVITE_ROLE,
                     accept_url=_accept_url(raw_token),
                     expires_at=expires_at,
                 )
@@ -791,7 +880,7 @@ async def add_client(
         owner_invitation = {
             "id": str(invitation_id),
             "email": owner_email,
-            "role": "owner",
+            "role": CLIENT_OWNER_INVITE_ROLE,
             "expires_at": expires_at.isoformat(),
             "delivery": delivery,
         }
@@ -801,7 +890,7 @@ async def add_client(
         "slug": slug,
         "display_name": body.business_name,
         "schema": schema,
-        "your_role": "cpa",
+        "your_role": CLIENT_SEAT_ROLE,
         "owner_invitation": owner_invitation,
     }
 
