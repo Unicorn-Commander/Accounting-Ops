@@ -8,16 +8,40 @@ seat they hold there is ``owner``, not ``cpa``.
 """
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 
 from app.api.clients import (
     _PRACTITIONER_ROLES,
     CLIENT_OWNER_INVITE_ROLE,
     CLIENT_SEAT_ROLE,
+    CONSOLE_ONBOARD_AUDIT_ACTION,
     _persona_for,
 )
 from app.api.members import ELEVATED_ROLES, INVITEABLE_ROLES
 from app.tenancy import _ROLE_RANK, role_at_least
+
+_MIGRATION_0019 = (
+    Path(__file__).resolve().parents[2]
+    / "migrations" / "public" / "versions" / "0019_workspace_onboarded_by.py"
+)
+
+
+def test_console_onboard_audit_action_is_admitted_by_the_check_constraint():
+    """The console self-seat writes a membership_audit row; 0017's CHECK lists the
+    allowed actions, so the action name lives in one place (the migration) and
+    the API must use a value from that list — an unlisted value is a 500 on
+    every Add client (found live on the itest stack 2026-10-22)."""
+    spec = importlib.util.spec_from_file_location("mig_0019", _MIGRATION_0019)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    assert CONSOLE_ONBOARD_AUDIT_ACTION in mod.MEMBERSHIP_AUDIT_ACTIONS
+    # The other action the console writes (client-owner invitation) was already admitted by 0017.
+    assert "invitation_create" in mod.MEMBERSHIP_AUDIT_ACTIONS
+    assert mod._action_check_sql(("a", "b")) == "action IN ('a', 'b')"
 
 # ---------------------------------------------------------------------------
 # Seating: the console seat clears every floor a practice needs in a client

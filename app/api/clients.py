@@ -578,6 +578,9 @@ _PRACTITIONER_ROLES = (
 # app/tenancy.py, so either side can run the workspace in full.
 CLIENT_SEAT_ROLE = "owner"
 CLIENT_OWNER_INVITE_ROLE = "client_owner"
+# membership_audit.action for the console's self-seat. Must be admitted by
+# ck_membership_audit_action (public migration 0019 widens 0017's list).
+CONSOLE_ONBOARD_AUDIT_ACTION = "console_onboard"
 
 
 def _persona_for(
@@ -813,7 +816,7 @@ async def add_client(
             await _write_membership_audit(
                 session,
                 workspace=audit_ctx,
-                action="console_onboard",
+                action=CONSOLE_ONBOARD_AUDIT_ACTION,
                 target_user_id=user_id,
                 new_role=CLIENT_SEAT_ROLE,
             )
