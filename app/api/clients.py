@@ -703,13 +703,22 @@ async def my_persona(
 
 
 class AddClientRequest(BaseModel):
-    business_name: str = Field(..., min_length=2, max_length=160)
+    business_name: str = Field(
+        ...,
+        min_length=2,
+        max_length=160,
+        description=(
+            "The client's name — a business or an individual the practice files "
+            "for. Becomes the workspace display name."
+        ),
+    )
     owner_email: str | None = Field(
         default=None,
         max_length=256,
         description=(
-            "If set, the business owner is emailed a 'client_owner' invitation "
-            "(owner rank) so they hold full authority over their own data."
+            "If set, the client (business owner or individual) is emailed a "
+            "'client_owner' invitation (owner rank) so they hold full authority "
+            "over their own books."
         ),
     )
     hipaa_protected: bool = False
