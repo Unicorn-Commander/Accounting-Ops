@@ -321,17 +321,35 @@ admin login; **Keycloak and the other Unicorn Commander apps are not required**.
 and report workflows do not require a model or GPU. Initial image builds and model downloads
 need network access and can take longer than the configuration steps.
 
-Use the following sequence for a **fresh checkout and new database volumes**. `make selfhost`
-runs public-schema migrations, provisions one workspace, grants the admin, and seeds a chart of
-accounts. Creating the `books` schema and running `alembic -c alembic-tenant.ini` are the extra
-steps in the sequence below. The sequence uses the self-host Compose file's database defaults.
-
-### Prepare local configuration
+### One command
 
 ```bash
 git clone https://github.com/Unicorn-Commander/Accounting-Ops.git
 cd Accounting-Ops
+make selfhost
+```
 
+`make selfhost` writes `.env` with generated secrets, stores only a scrypt hash of the admin
+password, generates the credential master key, builds and starts the stack, runs the public and
+tenant (`books`) migrations, sets the least-privilege runtime role's password and checks it can
+log in, then provisions one workspace, grants the admin, and seeds a chart of accounts. It
+prompts for the admin password on a terminal. For a scripted install, pass it in; it is never
+written to `.env`:
+
+```bash
+AO_LOCAL_ADMIN_EMAIL=you@example.com AO_LOCAL_ADMIN_PASSWORD='choose-a-strong-one' make selfhost
+```
+
+With no terminal and no `AO_LOCAL_ADMIN_PASSWORD`, it generates a password and prints it once.
+
+### Or step by step
+
+The sequence below is the same setup by hand, for a **fresh checkout and new database volumes**.
+It uses the self-host Compose file's single-role database defaults.
+
+### Prepare local configuration
+
+```bash
 python3 - <<'PY'
 from pathlib import Path
 import secrets
