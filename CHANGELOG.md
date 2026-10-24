@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Licence: Apache-2.0 (was AGPL-3.0-or-later).
+
 - security: exclude the master-key source directory from application image
   builds; mount the key at `/run/secrets/accounting_ops_master_key` at runtime.
 

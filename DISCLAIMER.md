@@ -1,3 +1,5 @@
+[COUNSEL: the open-source edition's licence changed from AGPL-3.0 to Apache-2.0 on 2026-10-24; review this document.]
+
 # Disclaimer — read this before you use Accounting-Ops
 
 **Accounting-Ops is software, not a licensed professional. It does not give you
@@ -43,7 +45,7 @@ trace to a source (it returns an error rather than inventing a number).
 
 ## No warranty
 
-This program is distributed under the GNU Affero General Public License v3
+This program is distributed under the Apache License, Version 2.0
 **WITHOUT ANY WARRANTY**; without even the implied warranty of MERCHANTABILITY or
 FITNESS FOR A PARTICULAR PURPOSE. See the [LICENSE](LICENSE) file. To the maximum
 extent permitted by law, Magic Unicorn Unconventional Technology & Stuff Inc

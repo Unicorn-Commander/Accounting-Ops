@@ -1,10 +1,8 @@
 # Contributing to Accounting-Ops
 
 Thank you for your interest in contributing! Accounting-Ops is an open-core
-project: the Community Edition in this repository is licensed under
-**AGPL-3.0-or-later**, and Magic Unicorn Unconventional Technology & Stuff Inc
-additionally offers the project under a commercial license. To keep that
-dual-licensing model working, we ask every contributor to sign off on the
+project: the code in this repository is licensed under the
+**Apache License 2.0**. We ask every contributor to sign off on the
 **Developer Certificate of Origin (DCO)**.
 
 ## Ground rules
@@ -99,13 +97,13 @@ By making a contribution to this project, I certify that:
 
 ## Source file license headers
 
-New or substantially rewritten source files should carry a short AGPL header at
+New or substantially rewritten source files should carry a short Apache-2.0 header at
 the top (after any shebang). Entry points already use this form:
 
 ```python
 # Copyright (C) 2026 Magic Unicorn Unconventional Technology & Stuff Inc
 # and the Accounting-Ops contributors.
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: Apache-2.0
 ```
 
 For TypeScript / JavaScript, use the same text with `//` comments. The
@@ -118,7 +116,7 @@ opening a PR — add headers when you touch a file's top or create a new one.
 
 This repository is the **Community Edition**. The following live outside the
 community tree (or are gated off when `AO_EDITION=community`) and must **not**
-be contributed here as if they were free AGPL surface:
+be contributed here as if they were free open-source surface:
 
 - Multi-tenant firm / multi-client CPA console and cross-client work inbox
 - Hosted-frontier billing, smart-inference credit gates, and suite entitlement
@@ -128,7 +126,7 @@ be contributed here as if they were free AGPL surface:
 
 See [COMMUNITY_MANIFEST.md](COMMUNITY_MANIFEST.md) for the path-level
 COMMUNITY / ENTANGLED / ENTERPRISE-HOLD classification, and [NOTICE](NOTICE)
-for the dual-licensing statement. If a change only makes sense for enterprise
+for the licence statement. If a change only makes sense for enterprise
 hosting or suite federation, discuss it with the maintainers rather than
 landing it in Community paths.
 
@@ -147,9 +145,6 @@ Please do **not** open a public issue for security vulnerabilities. See
 
 ## Licensing of your contribution
 
-By submitting a contribution with a DCO sign-off, you agree that your
-contribution is licensed under AGPL-3.0-or-later for the Community Edition, and
-you affirm the certifications in the DCO above — which include that the work may
-be redistributed consistent with the project's license(s). This preserves Magic
-Unicorn Unconventional Technology & Stuff Inc's ability to offer the project
-under both the AGPL and a commercial license.
+Contributions are made under the Apache License 2.0, the same licence as the
+repository (section 5). By opening a pull request you confirm you wrote the
+change or have the right to submit it under that licence.
