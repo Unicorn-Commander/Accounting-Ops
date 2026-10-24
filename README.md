@@ -4,7 +4,7 @@
 
 <p><strong>Self-hosted accounting: agents prepare the books, you review the work, and the journal keeps the trail.</strong></p>
 
-[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-8B5CF6?style=flat-square)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-8B5CF6?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.8.0-8B5CF6?style=flat-square)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square)](pyproject.toml)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?style=flat-square)](app/main.py)
@@ -597,7 +597,7 @@ Compose file into an enterprise deployment.
 | Tax-Planning document-extraction read | Mounted. A workspace member uses normal membership. A trusted machine caller is capped at viewer and is refused on a HIPAA workspace. Returns transcribed fields and classification metadata. Serves no document bytes. | Same as Community |
 | Contact-Ops pull | Refused with HTTP 503 | Available when Contact-Ops is configured |
 | Hosted smart-inference entitlement gate | Exempt | Optional; requires explicit configuration |
-| Source license in this repository | AGPL-3.0-or-later | AGPL-3.0-or-later |
+| Source license in this repository | Apache-2.0 | Apache-2.0 |
 
 Hosted, professional, and on-premises deployments are deployment choices, not additional
 `AO_EDITION` enum values. Feature flags do not provision Keycloak, register OAuth clients, start
@@ -779,10 +779,6 @@ air-gapped operation or a production security certification.
 
 ## Licence
 
-Accounting-Ops is licensed under **[GNU AGPL-3.0-or-later](LICENSE)**.
-The same source license applies regardless of the `AO_EDITION` runtime setting.
-[NOTICE](NOTICE) also records that the project steward offers a separate commercial license.
-The edition flag does not change the license of the source in this repository.
-Copyright Magic Unicorn Unconventional Technology & Stuff Inc. and the Accounting-Ops contributors.
+Accounting-Ops is licensed under the [Apache License 2.0](LICENSE). You can use, change and redistribute it, including commercially, under its terms. Our names and logos are covered by [TRADEMARKS.md](TRADEMARKS.md). PyMuPDF is a dependency with its own licence (AGPL-3.0); using it brings its terms.
 
 Built by [Magic Unicorn](https://magicunicorn.tech) · part of [Unicorn Commander](https://unicorncommander.ai)

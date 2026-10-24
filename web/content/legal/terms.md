@@ -1,3 +1,5 @@
+[COUNSEL: the open-source edition's licence changed from AGPL-3.0 to Apache-2.0 on 2026-10-24; review this document.]
+
 # Terms of Service — Accounting-Ops (Hosted)
 
 > # ⚠️ UNREVIEWED DRAFT — NOT IN FORCE
@@ -21,7 +23,7 @@
 > hosted service, this needs to change everywhere in all four documents.]`
 
 These terms cover the **hosted** service that we run for you. They do not cover
-the self-hosted Community Edition, which you get under the GNU AGPL v3 and which
+the self-hosted Community Edition, which you get under the Apache License 2.0 and which
 comes with no warranty and no contract with us — see `LICENSE` and
 `DISCLAIMER.md` in the source repository.
 
@@ -135,10 +137,10 @@ Do not:
 - use it to build a competing product, or to extract our models, prompts, or
   form-mapping logic in bulk.
 
-> `[COUNSEL: The self-hosted edition is AGPL v3, so a competitive-use restriction
+> `[COUNSEL: The self-hosted edition is Apache-2.0, so a competitive-use restriction
 > on the hosted service sits alongside a licence that explicitly permits
 > competitors to run their own copy. Please check this restriction is coherent
-> with the AGPL grant and does not purport to restrict rights the AGPL gives —
+> with the Apache-2.0 grant and does not purport to restrict rights Apache-2.0 gives —
 > we do not want to be accused of licence violation by our own terms. Consider
 > narrowing to the hosted service's operational assets only.]`
 
@@ -216,7 +218,7 @@ records, your documents, or anything that identifies you or your customers.
 
 We keep all rights in the service itself — the software, models, prompts, form
 mappings, tax logic, and documentation — except for what is licensed to you
-under the AGPL in the open-source edition. These terms give you a right to use
+under the Apache License 2.0 in the open-source edition. These terms give you a right to use
 the hosted service, nothing more.
 
 ## 9. Warranties, and the absence of them
