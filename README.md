@@ -38,8 +38,9 @@ quotes, invoice email drafts, and tax-planning data.
 
 - **Follow the evidence.** Trace supported dashboard and report figures to journal entries,
   source references, linked documents, and recorded decisions.
-- **Keep the original entry.** Corrections append a reversal and a restatement; a per-entity
-  hash chain lets you check the journal for broken links or altered hashed fields.
+- **Keep the original entry.** A recategorization appends a reversal and a restatement and
+  leaves the original entry in place. A per-entity hash chain lets you check the journal for
+  broken links or altered hashed fields.
 - **Review consequential work.** Materiality and receipt checks stop uncertain postings;
   approval screens show the proposed action and its reasoning before a reviewer applies it.
 - **Start with rules.** Vendor rules and saved category overrides work without a model.
@@ -96,9 +97,10 @@ from an agent-supplied confirmation flag.
 
 ### Reports from the posted journal
 
-View profit and loss, balance sheet, cash flow, trial balance, and contractor reporting by period
-and entity. Built-in financial statements read the ledger directly. The separate **CPA Export**
-screen offers CSV, IIF, QBO XML, and PDF downloads when its companion service is configured.
+View profit and loss, balance sheet, cash flow, and trial balance by period and entity, and
+1099-NEC by calendar year and entity. Built-in reports are served by this application from posted
+journal data. The separate **CPA Export** screen offers CSV, IIF, QBO XML, and PDF downloads when
+its companion service is configured.
 
 <p align="center">
   <img src="web/public/landing-assets/reports.webp" width="100%" alt="Profit and loss report with revenue, expense accounts, period controls, and net income">
@@ -107,9 +109,10 @@ screen offers CSV, IIF, QBO XML, and PDF downloads when its companion service is
 ### Tax forms and work products
 
 Prepare business-return working data, personal-return calculations, form fills, specialist memos,
-and selected state work products. Drafts carry a draft watermark; work-product watermarks reflect
-review or self-attestation status. Populated work-product fields must cite a source before PDF
-rendering. IRS and state transmission are not implemented.
+and selected state work products. Drafts carry a review watermark; work-product watermarks reflect
+review or self-attestation status. A populated work-product field with no `source_ref` is refused
+with HTTP 422 before it is stored or rendered. A blank value is allowed. IRS and state transmission
+are not implemented.
 
 <p align="center">
   <img src="web/public/landing-assets/tax-forms.webp" width="100%" alt="Tax Forms catalog with computed and fill-based forms, preparation controls, and a link to prepared work products">
@@ -118,8 +121,10 @@ rendering. IRS and state transmission are not implemented.
 ### Reconciliation starts with the right accounts
 
 Map connected accounts to entities and maintain each entity's chart of accounts. The reconciliation
-queue separates categorized transactions, uncertain matches, and unknown items; corrections can
-be saved as category overrides for later imports. The image shows the chart that underpins posting.
+queue has three columns: needs review (a sign mismatch, or an unmapped entity that is not already
+unknown), uncategorized (`category_status` unknown), and auto-categorized (status auto and an
+entity mapping). Rejecting an item can save a category override for later imports. The image shows
+the chart that underpins posting.
 
 <p align="center">
   <img src="web/public/landing-assets/reconciliation.webp" width="100%" alt="Chart of accounts used for reconciliation, showing asset and liability accounts for the selected demo entity">
@@ -139,18 +144,19 @@ The rest of the working surface is available from the same workspace:
 
 | Surface | Capability and dependency |
 |---|---|
-| **Transactions and connectors** | Categorization, entity mappings, encrypted connector credentials, native Stripe and eBay reconciliation code, and clients for optional bank-feed services. Uploaded CSVs are stored for review; uploading one does not automatically import its transactions. |
+| **Transactions and connectors** | Categorization, entity mappings, encrypted connector credentials, native Stripe and eBay reconciliation, and a SimpleFIN client that uses stored credentials. Uploaded CSVs are stored for review; uploading one does not automatically import its transactions. |
 | **Invoices and receivables** | Draft and issue invoices, record payments, void with reversing entries, and render invoice PDFs. Optional Stripe Checkout creates customer payment links when configured. |
 | **Documents** | Store source files in Garage and extract supported receipt or tax-document information. Uploads need initialized object storage and S3 credentials; model-assisted extraction needs an appropriate model. |
 | **Tax knowledge** | Retrieve indexed tax-knowledge documents and rules. Semantic search requires a populated index and an embedding backend. |
-| **Tax working data** | Tools for Form 1120, 1120-S, 1065, 1040, and 1099 work, alongside specialist runners for state analysis, officer compensation, NOL/Schedule L, and audit-defense drafts. Some business-return data tools call the optional CPA export service. |
+| **Tax working data** | Tools for Form 1120, 1120-S, 1065, 1040, and 1099 work. The coordinator marks Form 1120, 1099, the South Carolina state specialist, officer compensation, and NOL/Schedule L available. Audit defense and the payroll advisor are registered as unavailable and produce gap notices. A separate state-strategy drafter writes multi-state memos (South Carolina populated; Georgia, New York, California, Florida, and Texas are scaffolding). Some business-return data tools call the optional CPA export service. |
 | **Sentinel** | Opt-in scheduled checks for bookkeeping, deadlines, regulatory-feed freshness, and other findings; per-workspace controls and a global disable switch govern the daemon. |
 | **Clients and work inbox** | In enterprise mode, a multi-client console and a read-only cross-client queue bring actionable work together, ordered by age. |
 
 <details>
 <summary><strong>How it works: one transaction, from classification to a report</strong></summary>
 
-Saved category overrides take precedence over vendor rules. If those rules cannot classify an
+Saved category overrides take precedence over vendor rules in
+[app/categorization/vendor_rules.py](app/categorization/vendor_rules.py). If neither classifies an
 item, an optional model may suggest a category. A suggestion does not establish permission to
 post: the posting engine also checks materiality, entity mapping, category trust, and required
 receipt links.
@@ -174,13 +180,13 @@ The [materiality gate](app/journal/materiality.py) uses the absolute transaction
 
 | Condition | Posting behavior |
 |---|---|
-| Below $75 | Eligible for automatic posting only with a trusted category, an entity mapping, and a matching transaction direction. |
+| Below $75 | Eligible for automatic posting only when the category status is `auto`, the category is not Uncategorized, the entity is mapped, and the transaction direction matches. |
 | $75 to below $1,000 | Requires confirmation, even when a vendor rule matched. |
 | $1,000 or more | Blocks automatic posting until explicitly confirmed. |
 | A receipt-required category without its receipt link | Blocks posting regardless of amount or confirmation. |
 | A bookkeeper's proposed write | The posting path requires review rather than allowing that role to auto-post. |
 
-The code treats travel and meals as receipt-required categories. These are software rules, not
+The receipt-required categories are `Travel · Lodging`, `Travel · Transport`, and `Meals`. These are software rules, not
 a statement that the software covers every accounting or tax requirement. See the
 [posting engine](app/journal/posting.py) and [category engine](app/categorization/engine.py).
 
@@ -191,8 +197,9 @@ this_hash = SHA-256(previous_hash || canonical_accounting_fields)
 ```
 
 [Verification](app/journal/hash_chain.py) reports mismatched hashes and broken predecessor links.
-Reversals and restatements preserve the original entry. A valid chain checks integrity of the
-hashed records; reviewers still need to establish that the underlying evidence is correct.
+A recategorization appends a reversal and a restatement and leaves the original entry in place.
+Voiding an invoice appends reversing entries for the issue rows. A valid chain checks integrity
+of the hashed records; reviewers still need to establish that the underlying evidence is correct.
 
 </details>
 
@@ -219,13 +226,19 @@ Quote tools require their feature gate, some tax-data tools require CPA Export, 
 `propose_payment_tool` remains an unimplemented placeholder. See the
 [tool registrations](mcp_server.py) and [implementations](app/tools).
 
-At present, approving a queued MCP journal-entry proposal requires the application's Keycloak
-browser-session claims. Local admin tokens do not satisfy that specific gate; local manual
-journal entry remains available.
+The HTTP decide route for a queued journal-entry proposal (`journal_entry_post`) requires
+Keycloak browser-session claims: `sid` or `session_state`, an integer `auth_time` greater than
+zero, and `azp` equal to `KEYCLOAK_CLIENT_ID`. It rejects personal access tokens, agents, service
+tokens, and machine callers. The local admin token sets `uc_uid` and `scope`, and has no `sid`,
+`session_state`, `auth_time`, or `azp`. The MCP
+`decide_approval` tool calls that handler without an `AuthContext` argument, so this subject type is refused
+with HTTP 403. The local owner's manual journal form still posts: it sets `user_confirmed` on
+the journal-entry route, and the owner role is not force-queued.
 
 ### Connect an MCP client
 
-Sign in and create a Personal Access Token under **Settings → PATs**, narrowing its workspace
+Sign in and create a Personal Access Token under **Settings → MCP Access Tokens**
+(`/settings/pats`), narrowing its workspace
 access and scopes as appropriate. For the Docker quick start, the API is on
 `http://localhost:8000/mcp`; the browser UI is on a different port.
 
@@ -261,8 +274,9 @@ remote deployment, replace the URL with your HTTPS API endpoint.
 - **Suite agents:** enterprise mode supports Brigade-signed JWTs and publishes a live tool
   catalog at `/.well-known/mcps.json` under the `account` namespace. The simpler
   `/.well-known/mcp.json` document advertises the MCP URL and OIDC metadata.
-- **Roles:** viewer, client user, bookkeeper, accountant, CPA, admin, and owner roles have distinct
-  permissions, with additional client and platform roles. See [the role guide](docs/roles.md).
+- **Roles:** viewer, client user, bookkeeper, accountant, admin, and owner are separate ranks.
+  CPA matches accountant, and client owner matches owner. `platform_admin` is a platform role.
+  See [the role guide](docs/roles.md).
 
 Use the mounted HTTP transport for authenticated clients. Although `mcp_server.py` has a stdio
 entry point, it does not supply the request authentication context required by workspace tools.
@@ -288,9 +302,11 @@ flowchart TB
     GATE --> LEDGER["Journal"]
 ```
 
-The tax-page **Run drafts** launcher is off by default, needs a scoped worker identity and
-specialist-model configuration, and currently launches the C-corporation workflow. Sentinel is
-also opt-in. See [tax specialists](agents/tax_specialists/README.md),
+The tax-page **Run drafts** launcher stays off unless `AO_TAX_RUN_LAUNCH_ENABLED` is `1`,
+`true`, `yes`, or `on`. It launches Form 1120, 1099, and SC1120, and only for a C-corporation
+entity. It needs `ACCTOPS_SERVICE_TOKEN` registered in `ACCTOPS_SERVICE_TOKENS` (and scoped to
+the workspace when that token lists workspace ids) plus the CPA-team model route (`CPATEAM_LLM_*`).
+Sentinel is also opt-in. See [tax specialists](agents/tax_specialists/README.md),
 [the CPA team](agents/cpa_team/README.md), and [agent activity](docs/AGENT-ACTIVITY-SPEC.md).
 
 **A2A status:** `/a2a/agent-card.json` publishes discovery information, but the `/a2a` handler
@@ -305,9 +321,10 @@ admin login; **Keycloak and the other Unicorn Commander apps are not required**.
 and report workflows do not require a model or GPU. Initial image builds and model downloads
 need network access and can take longer than the configuration steps.
 
-Use the following sequence for a **fresh checkout and new database volumes**. The current
-`make selfhost` helper predates the shared-schema migration path; this sequence supplies the
-missing steps and uses the self-host Compose file's database defaults.
+Use the following sequence for a **fresh checkout and new database volumes**. `make selfhost`
+runs public-schema migrations, provisions one workspace, grants the admin, and seeds a chart of
+accounts. Creating the `books` schema and running `alembic -c alembic-tenant.ini` are the extra
+steps in the sequence below. The sequence uses the self-host Compose file's database defaults.
 
 ### Prepare local configuration
 
@@ -403,8 +420,9 @@ make selfhost-up
 ```
 
 `selfhost-down` stops the stack without deleting its named volumes. `make demo` additionally
-seeds generic workspace and entity records for development; it does not reproduce the screenshot
-books, populate their journals, or grant your admin access to those extra workspaces.
+seeds two generic workspaces, Test Workspace 1 and Test Workspace 2, each with sample entities.
+It leaves their journals empty and does not grant your admin access to those workspaces. It does
+not reproduce the screenshot books.
 
 ### Enable the capabilities you need
 
@@ -446,10 +464,11 @@ For example, to add the embedding and graph services:
 docker compose -f docker-compose.selfhost.yml --profile embeddings --profile graph up -d
 ```
 
-The suite Compose file also defines optional connector, receipt-worker,
-and CPA-export profiles that build **sibling repositories**. Those components are not included
-in this checkout or the self-host stack. Its SSO and reverse-proxy configuration also assumes
-external services; use it as a deployment reference rather than a standalone quick start.
+The suite Compose file also defines optional `connectors`, `receipts`, and
+`exports` profiles. Those profiles build sibling repositories: SimpleFIN and eBay finance MCP
+servers, a receipt worker and reconciler, and the CPA export service. Those components are not
+included in this checkout or the self-host stack. Its SSO and reverse-proxy configuration also
+assumes external services; use it as a deployment reference rather than a standalone quick start.
 
 ## Run from source
 
@@ -574,8 +593,9 @@ Compose file into an enterprise deployment.
 | Local or hosted model configuration | Available | Available |
 | Local admin or Keycloak authentication | Selected independently with `AO_AUTH_MODE` | Selected independently with `AO_AUTH_MODE` |
 | Multi-client console and cross-client work inbox | API routers not mounted; navigation hidden | Mounted, subject to permissions |
-| Brigade discovery and federation initialization | Disabled | Available when configured |
-| Contact-Ops pull and suite platform/gateway hooks | Community guards disable the suite-specific paths | Available when configured |
+| Brigade discovery (`/.well-known/mcps.json`) and Brigade client startup | Not mounted and not started | Available when configured |
+| Tax-Planning document-extraction read | Mounted. A workspace member uses normal membership. A trusted machine caller is capped at viewer and is refused on a HIPAA workspace. Returns transcribed fields and classification metadata. Serves no document bytes. | Same as Community |
+| Contact-Ops pull | Refused with HTTP 503 | Available when Contact-Ops is configured |
 | Hosted smart-inference entitlement gate | Exempt | Optional; requires explicit configuration |
 | Source license in this repository | AGPL-3.0-or-later | AGPL-3.0-or-later |
 
@@ -588,10 +608,18 @@ hosted inference setup.
 <details>
 <summary><strong>Tax review, filing, signatures, and payments: current boundaries</strong></summary>
 
-Specialist draft PDFs are marked for review. Work products start as drafts; the engagement
-policy can permit explicit self-attestation, which changes the watermark. Reviewed or finalized
-work-product states have their own rendering behavior. Review status is not proof of legal or
-financial correctness.
+Specialist draft PDFs carry the page watermark `DRAFT — CPA REVIEW REQUIRED` and a disclaimer
+that begins `DRAFT — CPA REVIEW REQUIRED.` The response header is
+`DRAFT - for CPA review only. Do not file without professional review and signature.`
+Draft form fills stamp a diagonal `DRAFT` and the banner
+`DRAFT — CPA review required — do not file as-is`. Work products start as drafts. Self-attestation
+switches the form-fill overlay to
+`Prepared via self-certification — review carefully before you sign and submit`
+and drops the diagonal DRAFT stamp. Reviewed or finalized work-product states (`pro_reviewed`,
+`finalized`) render with no watermark. Review status is not proof of legal or financial correctness.
+
+A populated work-product field with no `source_ref` is refused with HTTP 422 on create and on PDF
+render. A blank value is allowed.
 
 The app can prepare filing artifacts and record externally submitted filings, but the live
 IRS/state e-file transmitter and outbound submission rails remain gated stubs. It does not
@@ -677,19 +705,27 @@ schema-per-workspace examples.
 | [UUDA](https://github.com/Unicorn-Commander/UUDA) | The device agent for your fleet |
 | [fleet-map](https://github.com/Unicorn-Commander/fleet-map) | Fleet inventory and topology map |
 
-When configured, Accounting-Ops uses Ops-Center organization/billing hooks, Brigade MCP federation,
-Contact-Ops contact pulls, Customer-Ops accepted quotes, Email-Ops invoice drafts, and shared-SSO
-reads of accounting data for Tax-Planning-Ops.
+Enterprise mode can use Ops-Center organization and billing hooks, Brigade MCP federation, and
+Contact-Ops contact pulls when those services are configured. Customer-Ops accepted quotes and
+Email-Ops invoice drafts are optional seams in this tree. The Tax-Planning document-extraction
+read is mounted in both editions. It accepts a workspace member or a trusted machine caller and
+returns transcribed fields and classification metadata. It serves no document bytes.
 
 ## Development
 
 Install the development dependencies as described in [Run from source](#run-from-source).
-For the stack-free Python tests and the blocking Python lint target used by CI:
+CI's unit job installs with `pip install -e ".[dev]"`, then runs `ruff check tests scripts` as a
+blocking lint and `pytest -v` (the same invocation as `make test`). Integration tests in that job
+skip themselves when no stack is reachable. `ruff check app` is informational there (`|| true`).
+`make test-fast` is the local smoke-and-unit subset.
 
 ```bash
 make test-fast PY=.venv/bin/python
 uv run --frozen --extra dev ruff check tests scripts
 ```
+
+The `uv` lint line is a local equivalent of CI's blocking `ruff check tests scripts`. CI also runs
+`uv lock --check` and `bash scripts/download_irs_forms.sh` before the tests.
 
 The repository also exposes the following test workflows:
 
@@ -700,7 +736,9 @@ The repository also exposes the following test workflows:
 | `make integration PY=.venv/bin/python` | Build a disposable Compose integration stack, run its tests, and tear it down. Requires Docker. |
 | `make integration-keep PY=.venv/bin/python` | Keep that disposable stack running for investigation. |
 | `make integration-down PY=.venv/bin/python` | Remove the integration stack using its harness. |
-| `uv run --frozen --extra dev ruff check app` | Inspect application lint; CI currently treats this surface as informational. |
+| `uv run --frozen --extra dev ruff check app` | Local application lint. CI runs `ruff check app || true` and does not fail the job on it. |
+
+The CI integration job runs on pull requests and on `main`, and only when the repository variable `ACCTOPS_INTEGRATION_CI` equals `true`. When it runs, it executes `tests/integration/test_db_rls_roles.py` through the integration harness. `make integration` runs the broader `tests/integration` selection marked `integration`.
 
 Frontend checks, after `npm --prefix web ci`:
 
@@ -713,7 +751,9 @@ npm --prefix web run build
 Read [CONTRIBUTING.md](CONTRIBUTING.md) and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before opening
 a pull request. Contributions use the Developer Certificate of Origin; add the required sign-off
 with `git commit -s`. Use synthetic data in examples and tests. Release history is maintained in
-[CHANGELOG.md](CHANGELOG.md).
+[CHANGELOG.md](CHANGELOG.md). `pyproject.toml`, `web/package.json`, and the FastAPI `version` in
+[app/main.py](app/main.py) are `0.8.0`. The latest released CHANGELOG heading is `0.7.1`
+(2026-06-16). Later changes are listed under `Unreleased`.
 
 ## Security
 
@@ -741,6 +781,8 @@ air-gapped operation or a production security certification.
 
 Accounting-Ops is licensed under **[GNU AGPL-3.0-or-later](LICENSE)**.
 The same source license applies regardless of the `AO_EDITION` runtime setting.
+[NOTICE](NOTICE) also records that the project steward offers a separate commercial license.
+The edition flag does not change the license of the source in this repository.
 Copyright Magic Unicorn Unconventional Technology & Stuff Inc. and the Accounting-Ops contributors.
 
 Built by [Magic Unicorn](https://magicunicorn.tech) · part of [Unicorn Commander](https://unicorncommander.ai)
