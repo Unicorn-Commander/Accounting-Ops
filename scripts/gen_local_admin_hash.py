@@ -8,8 +8,13 @@ using the SAME parameters Node's crypto.scryptSync uses by default (N=16384,
 r=8, p=1), so a hash minted here validates in the web layer unchanged.
 
 Usage:
-    python scripts/gen_local_admin_hash.py            # prompts (no echo)
+    python scripts/gen_local_admin_hash.py            # prompts (no echo) on a TTY
+    AO_LOCAL_ADMIN_PASSWORD=... python scripts/gen_local_admin_hash.py
+                                                      # non-interactive (installers, CI)
     python scripts/gen_local_admin_hash.py 'password' # arg (shell history!)
+
+Without a TTY and without AO_LOCAL_ADMIN_PASSWORD the helper refuses (exit 2)
+instead of crashing in getpass; the bootstrap then generates a password itself.
 
 Then set in your .env:
     AO_AUTH_MODE=local
@@ -38,8 +43,18 @@ _MAXMEM = 64 * 1024 * 1024
 
 
 def main() -> int:
+    env_password = os.environ.get("AO_LOCAL_ADMIN_PASSWORD")
     if len(sys.argv) > 1:
         password = sys.argv[1]
+    elif env_password is not None:
+        password = env_password
+    elif not sys.stdin.isatty():
+        print(
+            "No TTY to prompt on: set AO_LOCAL_ADMIN_PASSWORD for a "
+            "non-interactive install.",
+            file=sys.stderr,
+        )
+        return 2
     else:
         password = getpass.getpass("Admin password: ")
         confirm = getpass.getpass("Confirm password: ")
