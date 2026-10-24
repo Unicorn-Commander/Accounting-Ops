@@ -8,7 +8,6 @@ version = "0.8.0"
 description = "Agent-first, MCP-first financial operations platform for Magic Unicorn Inc."
 requires-python = ">=3.12"
 license = "Apache-2.0"
-classifiers = ["License :: OSI Approved :: Apache Software License"]
 dependencies = [
   "a2a-sdk>=0.3.0",
   "alembic>=1.13.3",
