@@ -72,10 +72,10 @@ def test_protected_resource_metadata_is_available_at_both_paths(monkeypatch):
         ]
 
 
-def test_protected_resource_options_and_slash_redirect():
+def test_protected_resource_options_and_slash_form_names_itself():
     client = TestClient(app, raise_server_exceptions=False)
     options = client.options("/.well-known/oauth-protected-resource/mcp")
-    redirect = client.get(
+    slash = client.get(
         "/.well-known/oauth-protected-resource/mcp/",
         follow_redirects=False,
     )
@@ -83,10 +83,10 @@ def test_protected_resource_options_and_slash_redirect():
     assert options.status_code == 200
     assert options.headers["access-control-allow-origin"] == "*"
     assert set(options.json()) >= {"resource", "authorization_servers"}
-    assert redirect.status_code == 308
-    assert redirect.headers["location"].endswith(
-        "/.well-known/oauth-protected-resource/mcp"
-    )
+    # No redirect: the slash form answers 200 and names the slash URL.
+    assert slash.status_code == 200
+    assert "location" not in slash.headers
+    assert slash.json()["resource"].endswith("/mcp/")
 
 
 def test_legacy_mcp_manifest_points_at_oauth_discovery():
@@ -155,9 +155,14 @@ def test_mcp_cors_preflight_and_disallowed_origin_are_before_auth():
     assert browser_unauthorized.headers["access-control-expose-headers"] == "Mcp-Session-Id"
 
 
-def test_mcp_trailing_slash_redirects_to_canonical_path():
+def test_both_mcp_paths_serve_without_redirect_and_point_at_their_own_metadata():
+    """Every existing AO MCP client uses /mcp/; behind Traefik the app sees http,
+    so a redirect built from the request would downgrade them to http (10-26)."""
     client = TestClient(app, raise_server_exceptions=False)
-    response = client.post("/mcp/", json={}, follow_redirects=False)
+    slash = client.post("/mcp/", json={}, follow_redirects=False)
+    bare = client.post("/mcp", json={}, follow_redirects=False)
 
-    assert response.status_code == 308
-    assert response.headers["location"].endswith("/mcp")
+    assert slash.status_code == 401 and bare.status_code == 401
+    assert "location" not in slash.headers and "location" not in bare.headers
+    assert 'oauth-protected-resource/mcp/"' in slash.headers["www-authenticate"]
+    assert 'oauth-protected-resource/mcp"' in bare.headers["www-authenticate"]

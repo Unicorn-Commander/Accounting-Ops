@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.types import Receive, Scope, Send
@@ -32,20 +32,27 @@ MCP_SCOPES = ("openid", "profile", "email", "offline_access", "mcp")
 router = APIRouter(tags=["oauth-discovery"])
 
 
-def canonical_mcp_url() -> str:
-    """Return the configured public MCP URL without trailing-slash drift."""
-    return f"{str(get_settings().public_base_url).rstrip('/')}{MCP_PATH}"
+def canonical_mcp_url(trailing_slash: bool = False) -> str:
+    """Return the configured public MCP URL.
+
+    Both ``/mcp`` and ``/mcp/`` serve MCP (no redirect: behind Traefik the app
+    sees http, and every existing client already uses ``/mcp/``), so each form
+    gets metadata naming itself.
+    """
+    base = f"{str(get_settings().public_base_url).rstrip('/')}{MCP_PATH}"
+    return f"{base}/" if trailing_slash else base
 
 
-def protected_resource_metadata_url() -> str:
-    """Return the path-suffixed RFC 9728 URL clients discover from the challenge."""
-    return f"{str(get_settings().public_base_url).rstrip('/')}/.well-known/oauth-protected-resource{MCP_PATH}"
+def protected_resource_metadata_url(trailing_slash: bool = False) -> str:
+    """Return the path-suffixed RFC 9728 URL for the MCP path the client used."""
+    base = str(get_settings().public_base_url).rstrip("/")
+    return f"{base}/.well-known/oauth-protected-resource{MCP_PATH}" + ("/" if trailing_slash else "")
 
 
-def _metadata_document() -> dict[str, object]:
+def _metadata_document(trailing_slash: bool = False) -> dict[str, object]:
     settings = get_settings()
     return {
-        "resource": canonical_mcp_url(),
+        "resource": canonical_mcp_url(trailing_slash),
         "authorization_servers": [str(settings.keycloak_realm_url).rstrip("/")],
         "bearer_methods_supported": ["header"],
         "scopes_supported": list(MCP_SCOPES),
@@ -54,9 +61,9 @@ def _metadata_document() -> dict[str, object]:
     }
 
 
-def _metadata_response() -> JSONResponse:
+def _metadata_response(trailing_slash: bool = False) -> JSONResponse:
     return JSONResponse(
-        _metadata_document(),
+        _metadata_document(trailing_slash),
         headers={
             # RFC 9728 metadata is public and must be readable by hosted clients.
             "Access-Control-Allow-Origin": "*",
@@ -67,11 +74,11 @@ def _metadata_response() -> JSONResponse:
     )
 
 
-def mcp_unauthorized_response(*, token_present: bool) -> JSONResponse:
+def mcp_unauthorized_response(*, token_present: bool, trailing_slash: bool = False) -> JSONResponse:
     """Build the contract 401 without reflecting any bearer material."""
     challenge = (
         f'Bearer realm="{MCP_REALM}", '
-        f'resource_metadata="{protected_resource_metadata_url()}"'
+        f'resource_metadata="{protected_resource_metadata_url(trailing_slash)}"'
     )
     if token_present:
         challenge += ', error="invalid_token"'
@@ -83,11 +90,6 @@ def mcp_unauthorized_response(*, token_present: bool) -> JSONResponse:
         status_code=401,
         headers={"WWW-Authenticate": challenge},
     )
-
-
-async def mcp_trailing_slash_redirect(request: Request) -> RedirectResponse:
-    """Redirect the non-canonical ``/mcp/`` endpoint to ``/mcp`` with 308."""
-    return RedirectResponse(url=str(request.url.replace(path=MCP_PATH)), status_code=308)
 
 
 def _normalise_origin(origin: str) -> str:
@@ -210,11 +212,9 @@ async def protected_resource_metadata_root_slash() -> RedirectResponse:
     methods=["GET", "OPTIONS"],
     include_in_schema=False,
 )
-async def protected_resource_metadata_mcp_slash() -> RedirectResponse:
-    return RedirectResponse(
-        url="/.well-known/oauth-protected-resource/mcp",
-        status_code=308,
-    )
+async def protected_resource_metadata_mcp_slash() -> JSONResponse:
+    # The slash form names the slash URL: clients compare `resource` with the URL they connect to.
+    return _metadata_response(trailing_slash=True)
 
 
 __all__ = (
@@ -222,7 +222,6 @@ __all__ = (
     "MCP_REALM",
     "MCP_PATH",
     "canonical_mcp_url",
-    "mcp_trailing_slash_redirect",
     "mcp_unauthorized_response",
     "protected_resource_metadata_url",
     "router",
