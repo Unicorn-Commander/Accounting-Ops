@@ -153,7 +153,10 @@ class MCPAuthMiddleware:
 
     @staticmethod
     async def _deny(scope, receive, send, *, token_present: bool) -> None:
-        response = mcp_unauthorized_response(token_present=token_present)
+        # raw_path is the path the client sent; the /mcp root adapter rewrites `path` to /mcp/.
+        raw = scope.get("raw_path") or scope.get("path", "").encode()
+        trailing_slash = raw.split(b"?", 1)[0].endswith(b"/")
+        response = mcp_unauthorized_response(token_present=token_present, trailing_slash=trailing_slash)
         await response(scope, receive, send)
 
 

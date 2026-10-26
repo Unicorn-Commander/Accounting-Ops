@@ -65,7 +65,6 @@ from app.otel import audit_span_middleware, setup_otel
 from app.oauth_discovery import (
     MCPPathCORSMiddleware,
     canonical_mcp_url,
-    mcp_trailing_slash_redirect,
     protected_resource_metadata_url,
     router as oauth_discovery_router,
 )
@@ -153,16 +152,12 @@ if _mcp_http_app is not None:
     # Starlette's mount route does not match the exact /mcp root, so without
     # this route the parent router emits a scheme-sensitive 307 to /mcp/ before
     # MCPAuthMiddleware can run. Adapt the exact root to the mounted app's /
-    # route and make /mcp the canonical public URL; the slash form redirects.
+    # route. Both /mcp and /mcp/ serve MCP with NO redirect: behind Traefik the
+    # app sees http, so a request-built Location would downgrade clients to http
+    # (they drop Authorization on the hop), and every existing client uses /mcp/.
     app.add_route(
         "/mcp",
         MCPMountRootAdapter(_mcp_app),
-        include_in_schema=False,
-    )
-    app.add_route(
-        "/mcp/",
-        mcp_trailing_slash_redirect,
-        methods=["GET", "POST", "DELETE", "OPTIONS", "HEAD"],
         include_in_schema=False,
     )
     app.mount("/mcp", _mcp_app)
