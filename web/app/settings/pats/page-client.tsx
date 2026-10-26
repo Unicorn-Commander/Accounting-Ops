@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Card } from "@/components/primitives";
+import { ConnectYourAI } from "@/components/connect-your-ai";
 import { cn } from "@/lib/cn";
 import type {
   PATMeta,
@@ -72,10 +73,12 @@ async function readError(res: Response): Promise<string> {
 
 export function PATsClient({
   initialTokens,
-  meta
+  meta,
+  mcpUrl
 }: {
   initialTokens: PersonalAccessToken[];
   meta: PATMeta;
+  mcpUrl: string;
 }) {
   const [tokens, setTokens] = useState<PersonalAccessToken[]>(initialTokens);
   const [createOpen, setCreateOpen] = useState(false);
@@ -125,6 +128,8 @@ export function PATsClient({
 
   return (
     <div className="space-y-6">
+      <ConnectYourAI mcpUrl={mcpUrl} />
+
       {/* Header actions */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-sm text-ink-secondary">
@@ -268,6 +273,7 @@ export function PATsClient({
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         meta={meta}
+        mcpUrl={mcpUrl}
         onCreated={async () => {
           await refetch();
         }}
@@ -353,11 +359,13 @@ function CreateModal({
   open,
   onClose,
   meta,
+  mcpUrl,
   onCreated
 }: {
   open: boolean;
   onClose: () => void;
   meta: PATMeta;
+  mcpUrl: string;
   onCreated: () => Promise<void>;
 }) {
   const [name, setName] = useState("");
@@ -473,6 +481,7 @@ function CreateModal({
           {created ? (
             <SecretRevealView
               created={created}
+              mcpUrl={mcpUrl}
               copied={copied}
               onCopy={copyToClipboard}
               onDone={close}
@@ -651,11 +660,13 @@ function CreateModal({
 
 function SecretRevealView({
   created,
+  mcpUrl,
   copied,
   onCopy,
   onDone
 }: {
   created: CreateResponse;
+  mcpUrl: string;
   copied: boolean;
   onCopy: (text: string) => Promise<void>;
   onDone: () => void;
@@ -666,8 +677,8 @@ function SecretRevealView({
         {
           mcpServers: {
             "accounting-ops": {
-              url: "https://accounting-ops.example.com/mcp",
-              transport: "streamable_http",
+              type: "http",
+              url: mcpUrl,
               headers: {
                 Authorization: `Bearer ${created.secret}`
               }
@@ -677,8 +688,10 @@ function SecretRevealView({
         null,
         2
       ),
-    [created.secret]
+    [created.secret, mcpUrl]
   );
+
+  const claudeCodeCommand = `claude mcp add --transport http accounting-ops ${mcpUrl} --header "Authorization: Bearer ${created.secret}"`;
 
   return (
     <div className="space-y-5 px-6 py-5">
@@ -693,6 +706,28 @@ function SecretRevealView({
             generate a new one.
           </p>
         </div>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-medium uppercase tracking-wider text-ink-tertiary">
+            Claude Code token command
+          </p>
+          <button
+            type="button"
+            onClick={() => onCopy(claudeCodeCommand)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-default bg-surface px-2.5 py-1 text-xs hover:border-strong"
+          >
+            <Copy size={12} />
+            Copy command
+          </button>
+        </div>
+        <p className="mt-1.5 text-xs text-ink-tertiary">
+          This command contains the token and is shown only in this one-time reveal.
+        </p>
+        <pre className="mt-2 overflow-x-auto rounded-md border border-default bg-canvas px-3 py-2.5 font-mono text-[11px] text-ink-secondary">
+          {claudeCodeCommand}
+        </pre>
       </div>
 
       <div>
@@ -720,7 +755,7 @@ function SecretRevealView({
       <div>
         <div className="flex items-center justify-between">
           <p className="text-xs font-medium uppercase tracking-wider text-ink-tertiary">
-            Claude Desktop config snippet
+            Token config snippet
           </p>
           <button
             type="button"
@@ -732,11 +767,11 @@ function SecretRevealView({
           </button>
         </div>
         <p className="mt-1.5 text-xs text-ink-tertiary">
-          Add this block to{" "}
-          <code className="font-mono text-[11px]">
-            ~/Library/Application Support/Claude/claude_desktop_config.json
-          </code>{" "}
-          and restart Claude Desktop.
+            Add this block to your client&apos;s{" "}
+            <code className="font-mono text-[11px]">
+              mcp.json
+            </code>{" "}
+            and replace the token only when you are ready to connect.
         </p>
         <pre className="mt-2 overflow-x-auto rounded-md border border-default bg-canvas px-3 py-2.5 font-mono text-[11px] text-ink-secondary">
           {claudeConfig}

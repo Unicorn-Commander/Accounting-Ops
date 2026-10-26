@@ -8,6 +8,11 @@ import {
 } from "@/lib/personal-access-tokens";
 import { PATsClient } from "./page-client";
 
+function getMcpUrl(): string {
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.trim().replace(/\/+$/, "");
+  return apiBaseUrl ? `${apiBaseUrl}/mcp/` : "/mcp/";
+}
+
 export default async function PersonalAccessTokensPage() {
   const [tokens, meta] = await Promise.all([listMyPATs(), getPATMeta()]);
 
@@ -40,6 +45,7 @@ export default async function PersonalAccessTokensPage() {
           <PATsClient
             initialTokens={tokens as PersonalAccessToken[]}
             meta={meta ?? fallbackMeta}
+            mcpUrl={getMcpUrl()}
           />
         )}
       </PageShell>
