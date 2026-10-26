@@ -202,15 +202,25 @@ async def test_no_aud_no_resource_access_rejected():
     assert exc.value.status_code == 403
 
 
-async def test_azp_match_alone_is_not_enough():
-    """The OLD behaviour accepted a token solely because azp == our client id.
-    The fix removes that: azp matching but audience absent must be rejected."""
+async def test_azp_match_is_accepted_for_existing_client():
+    """Keycloak's dynamic client id in azp is accepted for this app client."""
     token = _mint(
         _PRIVATE_PEM, _base_claims(azp=APP_AUD, aud=["account"])
     )
-    with pytest.raises(HTTPException) as exc:
-        await authenticate_token(token)
-    assert exc.value.status_code == 403
+    ctx = await authenticate_token(token)
+    assert ctx.uc_uid == "jane"
+
+
+async def test_configured_dynamic_azp_is_accepted(monkeypatch):
+    monkeypatch.setenv("KEYCLOAK_EXPECTED_AUDIENCES", "dynamic-client,another-client")
+    get_settings.cache_clear()
+
+    token = _mint(
+        _PRIVATE_PEM,
+        _base_claims(azp="dynamic-client", aud=["account"]),
+    )
+    ctx = await authenticate_token(token)
+    assert ctx.uc_uid == "jane"
 
 
 async def test_resource_access_wrong_client_rejected():

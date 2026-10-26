@@ -18,6 +18,7 @@ from fastapi import HTTPException
 import app.mcp_auth as mcp_auth
 from app.auth import AuthContext
 from app.mcp_auth import MCPAuthMiddleware, authorize_workspace, current_auth
+from app.oauth_discovery import protected_resource_metadata_url
 
 WS_A = uuid.uuid4()
 WS_B = uuid.uuid4()
@@ -149,13 +150,18 @@ async def test_middleware_rejects_missing_bearer():
     async with _client() as c:
         r = await c.get("/mcp")
         assert r.status_code == 401
-        assert r.headers.get("WWW-Authenticate") == "Bearer"
+        assert r.headers.get("WWW-Authenticate") == (
+            'Bearer realm="accounting-ops-mcp", '
+            f'resource_metadata="{protected_resource_metadata_url()}"'
+        )
 
 
 async def test_middleware_rejects_garbage_bearer():
     async with _client() as c:
         r = await c.get("/mcp", headers={"Authorization": "Bearer not-a-jwt"})
         assert r.status_code == 401
+        assert 'error="invalid_token"' in r.headers["WWW-Authenticate"]
+        assert "not-a-jwt" not in r.text
 
 
 async def test_middleware_passes_valid_service_token(monkeypatch):

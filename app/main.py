@@ -62,6 +62,13 @@ from app.api.transactions import router as transactions_router
 from app.api.workspaces import router as workspaces_router
 from app.config import get_settings
 from app.otel import audit_span_middleware, setup_otel
+from app.oauth_discovery import (
+    MCPPathCORSMiddleware,
+    canonical_mcp_url,
+    mcp_trailing_slash_redirect,
+    protected_resource_metadata_url,
+    router as oauth_discovery_router,
+)
 from app.rate_limit import RateLimitMiddleware
 
 settings = get_settings()
@@ -131,6 +138,12 @@ app.middleware("http")(audit_span_middleware)
 # app/rate_limit.py for the tier table and the per-replica caveat.
 # /healthz is exempt: throttling it would break healthchecks + monitoring.
 app.add_middleware(RateLimitMiddleware)
+# MCP browser CORS is path-scoped. It must sit outside the mounted auth gate so
+# preflight OPTIONS requests and disallowed Origins never reach authentication.
+app.add_middleware(
+    MCPPathCORSMiddleware,
+    allowed_origins=settings.mcp_allowed_origins,
+)
 setup_otel(app)
 if _mcp_http_app is not None:
     # /mcp is gated by MCPAuthMiddleware (validates the uchub Bearer and binds
@@ -140,13 +153,20 @@ if _mcp_http_app is not None:
     # Starlette's mount route does not match the exact /mcp root, so without
     # this route the parent router emits a scheme-sensitive 307 to /mcp/ before
     # MCPAuthMiddleware can run. Adapt the exact root to the mounted app's /
-    # route and keep /mcp/ as the normal mounted path.
+    # route and make /mcp the canonical public URL; the slash form redirects.
     app.add_route(
         "/mcp",
         MCPMountRootAdapter(_mcp_app),
         include_in_schema=False,
     )
+    app.add_route(
+        "/mcp/",
+        mcp_trailing_slash_redirect,
+        methods=["GET", "POST", "DELETE", "OPTIONS", "HEAD"],
+        include_in_schema=False,
+    )
     app.mount("/mcp", _mcp_app)
+app.include_router(oauth_discovery_router)
 app.include_router(a2a_router)
 app.include_router(workspaces_router)
 app.include_router(onboarding_router)
@@ -278,12 +298,17 @@ async def well_known_mcp() -> dict:
     return {
         "name": "Accounting-Ops",
         "version": "0.1.0",
-        "mcp_endpoint": f"{settings.public_base_url}/mcp",
+        "mcp_endpoint": canonical_mcp_url(),
         "auth": {
             "type": "oauth2",
             "issuer": str(settings.keycloak_realm_url),
             "authorization_url": f"{settings.keycloak_realm_url}/protocol/openid-connect/auth",
             "token_url": f"{settings.keycloak_realm_url}/protocol/openid-connect/token",
+            "authorization_server": str(settings.keycloak_realm_url),
+            "authorization_servers": [str(settings.keycloak_realm_url)],
+            "resource": canonical_mcp_url(),
+            "resource_metadata": protected_resource_metadata_url(),
+            "resource_metadata_url": protected_resource_metadata_url(),
             "scopes": ["accounting:read", "accounting:write", "accounting:admin"],
         },
         "addressing": {
@@ -326,7 +351,7 @@ async def well_known_mcps() -> dict:
             "Agent-first financial operations for Magic Unicorn — journal, "
             "approvals, tax review queue, runway, P&L, 1120 working data."
         ),
-        "mcp_endpoint": f"{settings.public_base_url}/mcp",
+        "mcp_endpoint": canonical_mcp_url(),
         "tool_namespace": "account",
         "auth": {
             "type": "oauth2",

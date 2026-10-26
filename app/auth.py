@@ -876,27 +876,40 @@ async def authenticate_token(token: str) -> AuthContext:
             options={"verify_at_hash": False, "verify_aud": False},
         )
         # OAuth resource-server audience validation (finding H3). A valid uchub
-        # token is authorized for THIS resource server iff its configured
-        # audience (settings.accepted_audience, default = our client id) is
-        # present in the `aud` claim (string OR list) OR appears as a client key
-        # under `resource_access`. Agent/Brigade clients carry it via a Keycloak
-        # Audience mapper, so a token minted by a different client is accepted
-        # when — and only when — it is explicitly scoped to this resource. We no
-        # longer key off azp: that would reject valid cross-client tokens (H3).
-        expected_aud = settings.accepted_audience
+        # token is authorized for THIS resource server iff one configured
+        # audience is present in the `aud` claim (string OR list), the dynamic
+        # client id in `azp`, or a client key under `resource_access`. The
+        # accepted set defaults to the existing accepted_audience (normally this
+        # app's client id) and may include DCR/CIMD client ids explicitly listed
+        # in KEYCLOAK_EXPECTED_AUDIENCES.
+        expected_audiences = {
+            audience
+            for audience in (
+                settings.accepted_audience,
+                *settings.keycloak_expected_audiences,
+            )
+            if audience
+        }
         aud = claims.get("aud")
         aud_list = aud if isinstance(aud, list) else [aud] if aud else []
+        claim_audiences = {value for value in aud_list if isinstance(value, str)}
+        azp = claims.get("azp")
+        if isinstance(azp, str) and azp:
+            claim_audiences.add(azp)
         resource_access = claims.get("resource_access")
-        in_resource_access = (
-            isinstance(resource_access, dict) and expected_aud in resource_access
-        )
-        if expected_aud not in aud_list and not in_resource_access:
+        if isinstance(resource_access, dict):
+            claim_audiences.update(
+                key for key in resource_access if isinstance(key, str) and key
+            )
+        matched_audiences = expected_audiences.intersection(claim_audiences)
+        if not matched_audiences:
             _log.warning(
-                "[acctops.auth] token rejected: aud=%r / resource_access keys=%r "
-                "do not include required audience %r",
+                "[acctops.auth] token rejected: aud=%r azp=%r / resource_access "
+                "keys=%r do not include an accepted audience %r",
                 aud,
+                azp,
                 list(resource_access) if isinstance(resource_access, dict) else None,
-                expected_aud,
+                sorted(expected_audiences),
             )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

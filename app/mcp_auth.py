@@ -28,7 +28,6 @@ from uuid import UUID
 
 from fastapi import Depends, HTTPException
 from starlette.datastructures import Headers
-from starlette.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
 from app.auth import AuthContext, authenticate_token, validate_bearer_token
@@ -40,6 +39,7 @@ from app.tenancy import (
     apply_service_scope,
     require_role,
 )
+from app.oauth_discovery import mcp_unauthorized_response
 
 # Set per-request by MCPAuthMiddleware; read by authorize_workspace. Defaults to
 # None so a tool invoked outside the middleware (e.g. a stdio transport) fails
@@ -103,17 +103,19 @@ class MCPAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
+        authorization = Headers(scope=scope).get("authorization")
+        token_present = bool(authorization and authorization.strip())
         token = _bearer_from_scope(scope)
         if token is None:
-            await self._deny(scope, receive, send, "Missing bearer token")
+            await self._deny(scope, receive, send, token_present=token_present)
             return
         try:
             ctx = await authenticate_token(token)
-        except HTTPException as exc:
-            await self._deny(scope, receive, send, str(exc.detail))
+        except HTTPException:
+            await self._deny(scope, receive, send, token_present=True)
             return
         except Exception:  # pragma: no cover - defensive; never 500 the gate
-            await self._deny(scope, receive, send, "Token validation failed")
+            await self._deny(scope, receive, send, token_present=True)
             return
 
         reset = _current_auth.set(ctx)
@@ -150,12 +152,8 @@ class MCPAuthMiddleware:
                 pass
 
     @staticmethod
-    async def _deny(scope, receive, send, detail: str) -> None:
-        response = JSONResponse(
-            {"error": "unauthorized", "detail": detail},
-            status_code=401,
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    async def _deny(scope, receive, send, *, token_present: bool) -> None:
+        response = mcp_unauthorized_response(token_present=token_present)
         await response(scope, receive, send)
 
 
