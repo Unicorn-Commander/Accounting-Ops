@@ -1,0 +1,227 @@
+"""OAuth protected-resource discovery and the MCP HTTP edge contract.
+
+This module owns the RFC 9728 metadata routes and the challenge emitted by the
+MCP bearer gate. Keeping both in one place makes the resource URL, issuer, and
+realm stable across the dogfood and production rings while the app's existing
+configuration supplies the ring-specific values.
+"""
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+from fastapi import APIRouter, Request
+from starlette.datastructures import Headers
+from starlette.responses import JSONResponse, RedirectResponse, Response
+from starlette.types import Receive, Scope, Send
+
+from app.config import get_settings
+
+MCP_PATH = "/mcp"
+MCP_REALM = "accounting-ops-mcp"
+MCP_CORS_METHODS = "GET, POST, DELETE, OPTIONS"
+MCP_CORS_HEADERS = (
+    "Authorization, Content-Type, Accept, Mcp-Session-Id, "
+    "Mcp-Protocol-Version, Last-Event-ID"
+)
+MCP_CORS_EXPOSE_HEADERS = "Mcp-Session-Id"
+MCP_RESOURCE_DOCUMENTATION = "https://unicorncommander.ai/platform/bring-your-own-ai"
+MCP_SCOPES = ("openid", "profile", "accounting:read", "accounting:write", "accounting:admin")
+
+router = APIRouter(tags=["oauth-discovery"])
+
+
+def canonical_mcp_url() -> str:
+    """Return the configured public MCP URL without trailing-slash drift."""
+    return f"{str(get_settings().public_base_url).rstrip('/')}{MCP_PATH}"
+
+
+def protected_resource_metadata_url() -> str:
+    """Return the path-suffixed RFC 9728 URL clients discover from the challenge."""
+    return f"{str(get_settings().public_base_url).rstrip('/')}/.well-known/oauth-protected-resource{MCP_PATH}"
+
+
+def _metadata_document() -> dict[str, object]:
+    settings = get_settings()
+    return {
+        "resource": canonical_mcp_url(),
+        "authorization_servers": [str(settings.keycloak_realm_url).rstrip("/")],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": list(MCP_SCOPES),
+        "resource_name": "Accounting-Ops MCP",
+        "resource_documentation": MCP_RESOURCE_DOCUMENTATION,
+    }
+
+
+def _metadata_response() -> JSONResponse:
+    return JSONResponse(
+        _metadata_document(),
+        headers={
+            # RFC 9728 metadata is public and must be readable by hosted clients.
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": MCP_CORS_HEADERS,
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
+
+def mcp_unauthorized_response(*, token_present: bool) -> JSONResponse:
+    """Build the contract 401 without reflecting any bearer material."""
+    challenge = (
+        f'Bearer realm="{MCP_REALM}", '
+        f'resource_metadata="{protected_resource_metadata_url()}"'
+    )
+    if token_present:
+        challenge += ', error="invalid_token"'
+    return JSONResponse(
+        {
+            "error": "unauthorized",
+            "detail": "Invalid bearer token" if token_present else "Missing bearer token",
+        },
+        status_code=401,
+        headers={"WWW-Authenticate": challenge},
+    )
+
+
+async def mcp_trailing_slash_redirect(request: Request) -> RedirectResponse:
+    """Redirect the non-canonical ``/mcp/`` endpoint to ``/mcp`` with 308."""
+    return RedirectResponse(url=str(request.url.replace(path=MCP_PATH)), status_code=308)
+
+
+def _normalise_origin(origin: str) -> str:
+    return origin.strip().rstrip("/")
+
+
+def _mcp_path(path: str) -> bool:
+    return path == MCP_PATH or path.startswith(f"{MCP_PATH}/")
+
+
+class MCPPathCORSMiddleware:
+    """Apply browser CORS only to the mounted MCP path.
+
+    The middleware handles OPTIONS before the bearer gate and rejects an
+    untrusted browser origin before any authentication work. Non-browser calls
+    (without ``Origin``) pass through unchanged.
+    """
+
+    def __init__(self, app, allowed_origins: Iterable[str] = ()) -> None:
+        self.app = app
+        self.allowed_origins = tuple(allowed_origins)
+
+    def _allowed(self, origin: str) -> bool:
+        settings = get_settings()
+        configured = (
+            settings.public_base_url,
+            *settings.mcp_allowed_origins,
+            *self.allowed_origins,
+        )
+        return _normalise_origin(origin) in {
+            _normalise_origin(value) for value in configured if value
+        }
+
+    @staticmethod
+    def _response_headers(origin: str | None) -> dict[str, str]:
+        headers = {
+            "Access-Control-Allow-Methods": MCP_CORS_METHODS,
+            "Access-Control-Allow-Headers": MCP_CORS_HEADERS,
+            "Access-Control-Expose-Headers": MCP_CORS_EXPOSE_HEADERS,
+            "Access-Control-Max-Age": "3600",
+        }
+        if origin:
+            headers["Access-Control-Allow-Origin"] = origin
+            headers["Vary"] = "Origin"
+        return headers
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not _mcp_path(scope.get("path", "")):
+            await self.app(scope, receive, send)
+            return
+
+        origin = Headers(scope=scope).get("origin")
+        if origin and not self._allowed(origin):
+            await JSONResponse(
+                {"error": "forbidden", "detail": "Origin not allowed"},
+                status_code=403,
+            )(scope, receive, send)
+            return
+
+        if scope.get("method") == "OPTIONS":
+            await Response(
+                status_code=204,
+                headers=self._response_headers(origin),
+            )(scope, receive, send)
+            return
+
+        if not origin:
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_cors(message) -> None:
+            if message["type"] == "http.response.start":
+                message = dict(message)
+                response_headers = list(message.get("headers", []))
+                existing = {name.lower() for name, _value in response_headers}
+                for name, value in self._response_headers(origin).items():
+                    encoded_name = name.lower().encode("latin-1")
+                    if encoded_name not in existing:
+                        response_headers.append(
+                            (encoded_name, value.encode("latin-1"))
+                        )
+                message["headers"] = response_headers
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
+
+
+@router.api_route(
+    "/.well-known/oauth-protected-resource",
+    methods=["GET", "OPTIONS"],
+    include_in_schema=False,
+)
+async def protected_resource_metadata_root() -> JSONResponse:
+    return _metadata_response()
+
+
+@router.api_route(
+    "/.well-known/oauth-protected-resource/mcp",
+    methods=["GET", "OPTIONS"],
+    include_in_schema=False,
+)
+async def protected_resource_metadata_mcp() -> JSONResponse:
+    return _metadata_response()
+
+
+@router.api_route(
+    "/.well-known/oauth-protected-resource/",
+    methods=["GET", "OPTIONS"],
+    include_in_schema=False,
+)
+async def protected_resource_metadata_root_slash() -> RedirectResponse:
+    return RedirectResponse(
+        url="/.well-known/oauth-protected-resource",
+        status_code=308,
+    )
+
+
+@router.api_route(
+    "/.well-known/oauth-protected-resource/mcp/",
+    methods=["GET", "OPTIONS"],
+    include_in_schema=False,
+)
+async def protected_resource_metadata_mcp_slash() -> RedirectResponse:
+    return RedirectResponse(
+        url="/.well-known/oauth-protected-resource/mcp",
+        status_code=308,
+    )
+
+
+__all__ = (
+    "MCPPathCORSMiddleware",
+    "MCP_REALM",
+    "MCP_PATH",
+    "canonical_mcp_url",
+    "mcp_trailing_slash_redirect",
+    "mcp_unauthorized_response",
+    "protected_resource_metadata_url",
+    "router",
+)

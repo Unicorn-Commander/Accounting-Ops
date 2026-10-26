@@ -4,6 +4,13 @@ import os
 from pydantic import BaseModel, model_validator
 
 
+def _split_env_list(raw: str | None) -> tuple[str, ...]:
+    """Parse a comma- or whitespace-separated env list without empty entries."""
+    if not raw:
+        return ()
+    return tuple(part.strip() for part in raw.replace(",", " ").split() if part.strip())
+
+
 class Settings(BaseModel):
     app_name: str = "Accounting-Ops"
     # Generic self-host default. Deployments override via PUBLIC_BASE_URL.
@@ -54,13 +61,18 @@ class Settings(BaseModel):
     keycloak_realm_url: str = "https://sso.example.com/realms/accounting-ops"
     keycloak_client_id: str = "accounting-ops-app"
     keycloak_client_secret: str | None = None
-    # OAuth resource-server audience this app validates incoming bearer tokens
-    # against (finding H3). A uchub token is accepted iff this value appears in
-    # the token's `aud` (string or list) OR under `resource_access` — so tokens
-    # minted by OTHER uchub clients (agents, Brigade) are accepted when they
-    # carry this app's resource id via a Keycloak Audience mapper. Defaults to
-    # keycloak_client_id (the app's own client id) when ACCEPTED_AUDIENCE unset.
+    # OAuth resource-server audiences this app validates incoming bearer tokens
+    # against (finding H3). A uchub token is accepted iff one of these values
+    # appears in `aud`, `azp`, or a `resource_access` client key. Defaults to the
+    # effective keycloak client id when ACCEPTED_AUDIENCE is unset; the optional
+    # expected-audiences list admits dynamic OAuth client ids when configured.
     accepted_audience: str = "accounting-ops-app"
+    keycloak_expected_audiences: tuple[str, ...] = ()
+
+    # Browser origins allowed to call the hosted MCP transport. The effective
+    # list always includes PUBLIC_BASE_URL (the app's own web origin), and may
+    # be extended with comma- or whitespace-separated MCP_ALLOWED_ORIGINS.
+    mcp_allowed_origins: tuple[str, ...] = ()
 
     # Contact-Ops federation (pull a user's contacts → AO counterparties).
     # AO obtains an on-behalf-of token via uchub RFC-8693 token-exchange, then
@@ -341,6 +353,15 @@ def get_settings() -> Settings:
     # Resolve client_id first so accepted_audience can default to the EFFECTIVE
     # client id (env-overridden or not), not the static class default.
     keycloak_client_id = os.getenv("KEYCLOAK_CLIENT_ID", defaults.keycloak_client_id)
+    public_base_url = os.getenv("PUBLIC_BASE_URL", defaults.public_base_url)
+    configured_mcp_origins = _split_env_list(os.getenv("MCP_ALLOWED_ORIGINS"))
+    mcp_allowed_origins = tuple(
+        dict.fromkeys(
+            origin.rstrip("/")
+            for origin in (public_base_url, *configured_mcp_origins)
+            if origin.strip()
+        )
+    )
     # Resolve the llm_* block first: the categorizer_* primaries INHERIT these
     # when unset, so they must be the effective (env-resolved) values, not the
     # static class defaults.
@@ -349,7 +370,7 @@ def get_settings() -> Settings:
     _llm_api_key = os.getenv("LLM_API_KEY", defaults.llm_api_key)
     _llm_timeout_s = int(os.getenv("LLM_TIMEOUT_S", str(defaults.llm_timeout_s)))
     return Settings(
-        public_base_url=os.getenv("PUBLIC_BASE_URL", defaults.public_base_url),
+        public_base_url=public_base_url,
         edition=os.getenv("AO_EDITION", defaults.edition),
         auth_mode=os.getenv("AO_AUTH_MODE", defaults.auth_mode),
         local_auth_secret=os.getenv("AO_LOCAL_AUTH_SECRET", defaults.local_auth_secret),
@@ -363,6 +384,10 @@ def get_settings() -> Settings:
         keycloak_client_id=keycloak_client_id,
         keycloak_client_secret=os.getenv("KEYCLOAK_CLIENT_SECRET"),
         accepted_audience=os.getenv("ACCEPTED_AUDIENCE", keycloak_client_id),
+        keycloak_expected_audiences=_split_env_list(
+            os.getenv("KEYCLOAK_EXPECTED_AUDIENCES")
+        ),
+        mcp_allowed_origins=mcp_allowed_origins,
         contact_ops_mcp_url=os.getenv("CONTACT_OPS_MCP_URL", defaults.contact_ops_mcp_url),
         contact_ops_audience=os.getenv("CONTACT_OPS_AUDIENCE", defaults.contact_ops_audience),
         contact_ops_client_id=os.getenv("CONTACT_OPS_CLIENT_ID"),
