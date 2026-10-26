@@ -62,6 +62,8 @@ def test_protected_resource_metadata_is_available_at_both_paths(monkeypatch):
             "resource_name",
             "resource_documentation",
         }
+        # Clients request exactly these; Keycloak's DCR policy refuses any other scope, and `mcp` carries the audience.
+        assert response.json()["scopes_supported"] == ["openid", "profile", "email", "offline_access", "mcp"]
         assert response.json()["resource"] == (
             "https://accounting-ops.unicorncommander.ai/mcp"
         )
