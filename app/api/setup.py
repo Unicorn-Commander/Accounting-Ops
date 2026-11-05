@@ -141,14 +141,30 @@ async def bootstrap_setup_entity(
 
     # No entities — provision a placeholder via the same path
     # ``create_entity_with_coa`` uses. We import here to avoid a circular
-    # import at module-load time.
+    # import at module-load time. Kind stays "other" unless the workspace
+    # profile (setup_progress.client_kind) says this client is an individual,
+    # in which case the only change is the default: personal.
+    from app.api.clients import client_kind_from_profile, first_entity_kind_for
     from app.tools.create_entity_with_coa import create_entity_with_coa
+
+    async with SessionLocal() as session:
+        async with session.begin():
+            profile_row = (
+                await session.execute(
+                    text(
+                        "SELECT setup_progress FROM public.workspace WHERE id = :id"
+                    ),
+                    {"id": str(workspace.workspace_id)},
+                )
+            ).first()
+    profile = profile_row.setup_progress if profile_row else None
+    kind = first_entity_kind_for(client_kind_from_profile(profile))
 
     result = await create_entity_with_coa(
         workspace_id=workspace.workspace_id,
         display_name="Setup Sandbox",
         legal_name="Setup Sandbox (Placeholder)",
-        kind="other",
+        kind=kind,
         country_code="US",
     )
     return {
