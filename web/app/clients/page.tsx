@@ -61,7 +61,7 @@ export default async function ClientsPage() {
             title="No clients yet."
             description={
               canAddClients
-                ? "Add your first client to set up their books — you'll own the new workspace, and you can invite the business owner so they hold their own data too. (A workspace owner can also invite you directly.)"
+                ? "Add your first client to set up their books — you'll own the new workspace, and you can invite the client so they hold their own data too. (A workspace owner can also invite you directly.)"
                 : "A workspace owner needs to invite you with the CPA or accountant role before assigned clients show up here."
             }
             primaryAction={canAddClients ? <AddClientButton /> : undefined}

@@ -30,15 +30,16 @@ the platform uses gates the response. There is no admin override.
 """
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
 from app.auth import AuthContext, validate_bearer_token
@@ -627,6 +628,93 @@ def _slugify(value: str) -> str:
     return s[:80] or "client"
 
 
+# client_kind lives on public.workspace.setup_progress (migration 0011), the
+# workspace row's only JSON document. The checklist PATCH merges keys, so this
+# sibling survives later setup writes. Absent on a row means business — the
+# historical default — so no new column and no backfill.
+CLIENT_KIND_PROFILE_KEY = "client_kind"
+CLIENT_KINDS = ("business", "individual")
+# Kind the Setup Assistant seeds for the first entity today (setup bootstrap).
+# An individual client changes only that default, to the 1040 entity kind.
+PLACEHOLDER_ENTITY_KIND = "other"
+INDIVIDUAL_ENTITY_KIND = "personal"
+
+
+def client_kind_profile_patch(client_kind: str) -> dict[str, str]:
+    """The profile fragment merged into workspace.setup_progress."""
+    if client_kind not in CLIENT_KINDS:
+        raise ValueError(
+            f"client_kind must be 'business' or 'individual', got {client_kind!r}"
+        )
+    return {CLIENT_KIND_PROFILE_KEY: client_kind}
+
+
+def client_kind_patch_json(client_kind: str) -> str:
+    return json.dumps(client_kind_profile_patch(client_kind))
+
+
+def client_kind_from_profile(profile: Any) -> str:
+    """Read client_kind off a workspace profile. Missing or unknown → business."""
+    if isinstance(profile, str):
+        try:
+            profile = json.loads(profile)
+        except json.JSONDecodeError:
+            return "business"
+    if not isinstance(profile, dict):
+        return "business"
+    raw = profile.get(CLIENT_KIND_PROFILE_KEY)
+    if raw in CLIENT_KINDS:
+        return raw
+    return "business"
+
+
+def first_entity_kind_for(client_kind: str | None) -> str:
+    """Entity kind for the workspace's first seeded entity.
+
+    Business (and any caller that omits client_kind) keeps ``other``.
+    An individual defaults to ``personal``.
+    """
+    if client_kind == "individual":
+        return INDIVIDUAL_ENTITY_KIND
+    return PLACEHOLDER_ENTITY_KIND
+
+
+def invitation_subject(display_name: str) -> str:
+    """Invitation subject. Names the client; does not add the word business."""
+    return f"You've been invited to {display_name} on Accounting-Ops"
+
+
+def individual_invite_bodies(
+    display_name: str,
+    inviter_email: str | None,
+    accept_url: str,
+    expires_at: datetime,
+) -> tuple[str, str]:
+    """Text and HTML for an individual. Lead line is 'invited to <name>'."""
+    by = f" by {inviter_email}" if inviter_email else ""
+    expires_str = expires_at.strftime("%Y-%m-%d %H:%M UTC")
+    text_body = (
+        f"You've been invited{by} to {display_name} on Accounting-Ops "
+        f"as a workspace owner.\n\n"
+        f"Accept this invitation:\n  {accept_url}\n\n"
+        f"This link expires on {expires_str}. If you don't have an "
+        f"Accounting-Ops account yet, you'll be prompted to create one when "
+        f"you click the link.\n\n"
+        f"Accounting-Ops — Your books. Your machine. Your rules.\n"
+    )
+    html_body = (
+        f"<p>You've been invited{by} to <strong>{display_name}</strong> "
+        f"on Accounting-Ops as a workspace owner.</p>"
+        f"<p><a href='{accept_url}'>Accept invitation</a></p>"
+        f"<p>This link expires on <code>{expires_str}</code>. If you don't "
+        f"have an Accounting-Ops account yet, you'll be prompted to create one "
+        f"when you click the link.</p>"
+        f"<hr><p style='color:#888;font-size:12px;'>Accounting-Ops — "
+        f"Your books. Your machine. Your rules.</p>"
+    )
+    return text_body, html_body
+
+
 async def _caller_account(
     uc_uid: str, *, autoprovision: bool = False
 ) -> tuple[UUID, str | None, list[str], int]:
@@ -721,8 +809,25 @@ class AddClientRequest(BaseModel):
             "over their own books."
         ),
     )
+    client_kind: Literal["business", "individual"] = Field(
+        default="business",
+        description=(
+            "Whether the client is a business or an individual person. "
+            "Omitted or null means business, so existing callers are unchanged. "
+            "An individual is stored on the workspace profile and the first "
+            "seeded entity defaults to kind personal."
+        ),
+    )
     hipaa_protected: bool = False
     isolation_tier: str = Field(default="shared")
+
+    @field_validator("client_kind", mode="before")
+    @classmethod
+    def _blank_client_kind_is_business(cls, value: object) -> object:
+        # Explicit null or "" is the same as omitting the field.
+        if value is None or value == "":
+            return "business"
+        return value
 
 
 @router.post("/api/me/clients", status_code=status.HTTP_201_CREATED)
@@ -829,6 +934,21 @@ async def add_client(
                 target_user_id=user_id,
                 new_role=CLIENT_SEAT_ROLE,
             )
+            # Merge, don't replace: a re-provision must not wipe checklist steps.
+            await session.execute(
+                text(
+                    """
+                    UPDATE public.workspace
+                    SET setup_progress = COALESCE(setup_progress, '{}'::jsonb)
+                        || CAST(:patch AS jsonb)
+                    WHERE id = :id
+                    """
+                ),
+                {
+                    "patch": client_kind_patch_json(body.client_kind),
+                    "id": str(wid),
+                },
+            )
 
     owner_invitation: dict[str, Any] | None = None
     if owner_email:
@@ -868,20 +988,28 @@ async def add_client(
                     invitation_id=str(invitation_id),
                     new_role=CLIENT_OWNER_INVITE_ROLE,
                 )
-                text_body, html_body = _invite_email_body(
-                    workspace_name=body.business_name,
-                    inviter_email=caller_email,
-                    role=CLIENT_OWNER_INVITE_ROLE,
-                    accept_url=_accept_url(raw_token),
-                    expires_at=expires_at,
-                )
+                accept_url = _accept_url(raw_token)
+                if body.client_kind == "individual":
+                    # "invited to <name>" — the shared template is for a
+                    # business workspace and this copy must not say business.
+                    text_body, html_body = individual_invite_bodies(
+                        body.business_name,
+                        caller_email,
+                        accept_url,
+                        expires_at,
+                    )
+                else:
+                    text_body, html_body = _invite_email_body(
+                        workspace_name=body.business_name,
+                        inviter_email=caller_email,
+                        role=CLIENT_OWNER_INVITE_ROLE,
+                        accept_url=accept_url,
+                        expires_at=expires_at,
+                    )
                 delivery = await send_email(
                     session,
                     to_email=owner_email,
-                    subject=(
-                        f"You've been invited to {body.business_name} on "
-                        f"Accounting-Ops"
-                    ),
+                    subject=invitation_subject(body.business_name),
                     body_text=text_body,
                     body_html=html_body,
                     related_invitation_id=invitation_id,
