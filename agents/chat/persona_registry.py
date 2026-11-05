@@ -15,7 +15,7 @@ import os
 import pathlib
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
 
 Tier = Literal["strategic", "specialist", "operational"]
@@ -134,15 +134,38 @@ class Persona:
         entity_id: str,
         tax_year: int | None,
         user_uc_uid: str,
+        client_kind: str | None = None,
+        workspace_profile: Any = None,
     ) -> str:
-        """Build the full system prompt: preamble + on-disk system_prompt.md."""
+        """Build the full system prompt: preamble + on-disk system_prompt.md.
+
+        ``client_kind`` / ``workspace_profile`` are Setup Assistant facts
+        (``setup_progress.client_kind``). Other personas ignore them.
+        """
         base = self.system_prompt_path.read_text(encoding="utf-8")
+        extra_context = ""
+        if self.slug == "setup-assistant":
+            from agents.cpa_team.setup_assistant import (
+                resolve_client_kind,
+                resolve_system_prompt,
+            )
+
+            kind = resolve_client_kind(client_kind, workspace_profile)
+            extra_context = f"- client_kind:   {kind or 'unknown'}\n"
+            base = resolve_system_prompt(
+                base,
+                client_kind=kind,
+                workspace_profile=workspace_profile,
+            )
         preamble = _CHAT_MODE_PREAMBLE.format(
             workspace_id=workspace_id,
             entity_id=entity_id,
             tax_year=tax_year if tax_year is not None else "(not bound for this session)",
             user_uc_uid=user_uc_uid,
         )
+        if extra_context:
+            needle = f"- caller uc_uid: {user_uc_uid}\n"
+            preamble = preamble.replace(needle, needle + extra_context, 1)
         return preamble + base
 
 
