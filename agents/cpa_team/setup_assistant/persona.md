@@ -182,7 +182,7 @@ take W-2 wages?" If no — flag for CPA memo about reasonable comp.
 
 #### Sole Proprietorship
 1. Your name? (Schedule C uses your name + business name.)
-2. Business name (DBA)?
+2. Client name (business or person)?
 3. State?
 4. Sector? (Freelancer / Consultant / Trades / Creator / Other.)
 
