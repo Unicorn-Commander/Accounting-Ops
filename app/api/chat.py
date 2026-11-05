@@ -646,12 +646,31 @@ async def send_chat_message(
         raise HTTPException(status_code=401, detail="Bearer required for chat stream")
     user_bearer = auth_header.split(None, 1)[1].strip()
 
+    # The Setup Assistant opens differently for an individual (1040) client: read the
+    # workspace profile set by Add client. Best effort, like the CFO grounding below;
+    # no profile = the original business opening.
+    workspace_profile = None
+    if persona_slug == "setup-assistant":
+        try:
+            async with SessionLocal() as profile_session:
+                async with profile_session.begin():
+                    profile_row = (
+                        await profile_session.execute(
+                            text("SELECT setup_progress FROM public.workspace WHERE id = :id"),
+                            {"id": str(workspace.workspace_id)},
+                        )
+                    ).first()
+            workspace_profile = profile_row.setup_progress if profile_row else None
+        except Exception:  # noqa: BLE001 - a prompt hint must never block the chat
+            _log.warning("setup_assistant_profile_read_failed", exc_info=True)
+
     # Build the system prompt for the persona.
     system_prompt = persona.system_prompt(
         workspace_id=str(workspace.workspace_id),
         entity_id=entity_id,
         tax_year=tax_year,
         user_uc_uid=workspace.user_uc_uid,
+        workspace_profile=workspace_profile,
     )
 
     # CFO Agent: ground the persona in the platform's accumulated memory —
