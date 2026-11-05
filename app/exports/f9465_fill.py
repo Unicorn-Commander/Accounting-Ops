@@ -92,6 +92,7 @@ from app.exports.f9465_field_map import (
     F9465_CHECKBOX_FIELDS,
     TAXPAYER_COMPLETED_KEYS,
 )
+from app.exports.form_pins import verify_pinned_form
 
 # Truthy strings that set a checkbox on this revision (line 1b, and printed
 # line 12c). The Rev. 9-2020 433-F bullet, line 14, and Part II choice keys
@@ -164,6 +165,8 @@ def render_9465(
     ------
     FileNotFoundError
         If no Form 9465 source PDF is present in ``data/irs_forms/``.
+    ValueError
+        If the PDF on disk is not the revision the field map is pinned to.
     """
     source_path = _f9465_form_path(tax_year)
     if not source_path.exists():
@@ -171,6 +174,9 @@ def render_9465(
             f"IRS Form 9465 PDF not found at {source_path}. "
             "Run scripts/download_irs_forms.sh to fetch it."
         )
+    pin_check = verify_pinned_form("9465", pdf_path=source_path)
+    if not pin_check.ok:
+        raise ValueError(pin_check.message)
     source_bytes = source_path.read_bytes()
 
     field_values: dict[str, str] = {}
