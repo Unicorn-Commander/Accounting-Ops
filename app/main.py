@@ -284,8 +284,12 @@ async def healthz() -> dict[str, str]:
 
 
 @app.get("/readyz", tags=["system"])
-async def readyz() -> dict[str, str]:
-    return {"status": "ready"}
+async def readyz() -> dict[str, object]:
+    # A pinned-form mismatch is a warning. Readiness stays "ready" so a stale
+    # IRS PDF cannot flap the probe or restart the container.
+    from app.exports.form_pins import pinned_form_warnings
+
+    return {"status": "ready", "pinned_form_warnings": pinned_form_warnings()}
 
 
 @app.get("/.well-known/mcp.json", tags=["discovery"])

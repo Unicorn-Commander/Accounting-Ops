@@ -188,13 +188,22 @@ def render_form(
     watermark_mode: WatermarkMode,
     inputs: dict,
 ) -> tuple[bytes, str]:
-    """Dispatch to a registered form's renderer. Raises ValueError on unknown kind."""
+    """Dispatch to a registered form's renderer.
+
+    Raises ValueError on an unknown kind, and when a pinned form's PDF on
+    disk is not the revision its field map was verified against.
+    """
     spec = get_spec(kind)
     if spec is None:
         raise ValueError(
             f"No form registered for kind {kind!r}. "
             f"Known: {sorted(FORM_REGISTRY)}."
         )
+    from app.exports.form_pins import verify_pinned_form
+
+    pin_check = verify_pinned_form(spec.kind, tax_year=tax_year)
+    if not pin_check.ok:
+        raise ValueError(pin_check.message)
     module = importlib.import_module(spec.module)
     renderer = getattr(module, spec.func)
     return renderer(tax_year, watermark_mode, inputs)
