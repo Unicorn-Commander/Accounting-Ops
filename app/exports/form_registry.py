@@ -151,8 +151,10 @@ FORM_REGISTRY: dict[str, FormSpec] = {
         jurisdiction="federal", mode="fill", module="app.exports.f1096_fill",
         func="render_1096", goes_to="the IRS (⚠️ official red-ink copy only — this render is a preparation/record copy and must not be filed)",
         category="business"),
-    # --- Installment Agreement ---
-    "9465": FormSpec(kind="9465", title="Form 9465 — Installment Agreement Request",
+    # Payment plan. Printed title on the pinned revision
+    # (f9465_field_map.F9465_PINNED_REVISION, Rev. 12-2026). FormSpec has no
+    # revision field — no other form carries one — so the key stays "9465".
+    "9465": FormSpec(kind="9465", title="Form 9465 — Payment Plan Request",
         jurisdiction="federal", mode="fill", module="app.exports.f9465_fill",
         func="render_9465", goes_to="the IRS", category="individual"),
     # --- Representation (added 2026-07-15) -----------------------------------
