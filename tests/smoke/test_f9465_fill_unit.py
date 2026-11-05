@@ -1,11 +1,11 @@
-"""Unit tests for Form 9465 (Installment Agreement Request) renderer.
+"""Unit tests for Form 9465 (Payment Plan Request) renderer.
 
-Ground truth is the official Rev. 9-2020 fillable PDF at
+Ground truth is the official Rev. 12-2026 fillable PDF at
 ``data/irs_forms/f9465.pdf`` (fetched by ``scripts/download_irs_forms.sh``).
 The field map was pinned by dumping that PDF's AcroForm (names, /FT types,
-checkbox on-states, widget rects) and visually confirming a marker render;
-``TestSourcePdfGroundTruth`` re-asserts those pins against the live PDF on
-every run.
+checkbox /AP /N on-states, widget rects) and visually confirming a marker
+render; ``TestSourcePdfGroundTruth`` re-asserts those pins against the live
+PDF on every run, and fails on a revision change before any field assertion.
 
 Render tests do a REAL round-trip through the module's public
 ``render_9465``: values are read back from the produced PDF with BOTH pypdf
@@ -20,14 +20,20 @@ Missing-PDF behavior is tested by monkeypatching the module's forms dir to a
 
 from __future__ import annotations
 
+import hashlib
 import io
 import re
 
 import pytest
 
 from app.exports.f9465_field_map import (
-    F9465_FIELDS,
     F9465_CHECKBOX_FIELDS,
+    F9465_FIELDS,
+    F9465_PINNED_FIELD_COUNT,
+    F9465_PINNED_PAGE_COUNT,
+    F9465_PINNED_REVISION,
+    F9465_PINNED_SHA256,
+    F9465_UNMAPPED_KEYS,
     TAXPAYER_COMPLETED_KEYS,
     VALID_F9465_FIELDS,
 )
@@ -35,7 +41,6 @@ from app.exports.f9465_fill import render_9465, _f9465_form_path
 from app.exports.form_prefill import WatermarkMode
 
 _P1 = "topmostSubform[0].Page1[0]"
-_P2 = "topmostSubform[0].Page2[0]"
 
 
 # ---------------------------------------------------------------------------
@@ -44,45 +49,51 @@ _P2 = "topmostSubform[0].Page2[0]"
 
 class TestF9465FieldMap:
     def test_text_field_names_pinned(self):
-        # Spot-pin the rows most easily mis-mapped, verified against the
-        # Rev. 9-2020 widget rects: name row 1a, address block, the line 5-12
-        # money column, and Part II.
-        assert F9465_FIELDS["request_forms"] == f"{_P1}.f1_1[0]"
-        assert F9465_FIELDS["tax_periods"] == f"{_P1}.f1_2[0]"
-        assert F9465_FIELDS["first_name"] == f"{_P1}.f1_3[0]"
-        assert F9465_FIELDS["last_name"] == f"{_P1}.f1_4[0]"
-        assert F9465_FIELDS["ssn"] == f"{_P1}.f1_5[0]"
-        assert F9465_FIELDS["spouse_ssn"] == f"{_P1}.f1_8[0]"
-        assert F9465_FIELDS["address"] == f"{_P1}.f1_9[0]"
-        assert F9465_FIELDS["apt"] == f"{_P1}.f1_10[0]"
-        assert F9465_FIELDS["city_state_zip"] == f"{_P1}.f1_11[0]"
-        assert F9465_FIELDS["total_owed_5"] == f"{_P1}.f1_22[0]"
-        assert F9465_FIELDS["payment_with_request_8"] == f"{_P1}.f1_25[0]"
-        assert F9465_FIELDS["monthly_payment_11a"] == f"{_P1}.f1_28[0]"
-        assert F9465_FIELDS["payment_day_12"] == f"{_P1}.f1_30[0]"
-        assert F9465_FIELDS["routing_number"] == f"{_P1}.f1_31[0]"
-        assert F9465_FIELDS["account_number"] == f"{_P1}.f1_32[0]"
-        assert F9465_FIELDS["county_15"] == f"{_P2}.f2_1[0]"
-        assert F9465_FIELDS["dependent_care_27"] == f"{_P2}.f2_10[0]"
+        # Full pin, not a spot check. Rects were matched to captions on the
+        # Rev. 12-2026 PDF: zero-padded f1_01..f1_09, ReadOrder parents on
+        # the phone row, line 10 = monthly amount (f1_27), line 11 = pay
+        # day (f1_28), line 12a/12b nested under RoutingNo / AccountNo.
+        assert F9465_FIELDS == {
+            "request_forms": f"{_P1}.f1_01[0]",
+            "tax_periods": f"{_P1}.f1_02[0]",
+            "first_name": f"{_P1}.f1_03[0]",
+            "last_name": f"{_P1}.f1_04[0]",
+            "ssn": f"{_P1}.f1_05[0]",
+            "spouse_first_name": f"{_P1}.f1_06[0]",
+            "spouse_last_name": f"{_P1}.f1_07[0]",
+            "spouse_ssn": f"{_P1}.f1_08[0]",
+            "address": f"{_P1}.f1_09[0]",
+            "apt": f"{_P1}.f1_10[0]",
+            "city_state_zip": f"{_P1}.f1_11[0]",
+            "foreign_country": f"{_P1}.f1_12[0]",
+            "foreign_province": f"{_P1}.f1_13[0]",
+            "foreign_postal_code": f"{_P1}.f1_14[0]",
+            "business_name_2": f"{_P1}.f1_15[0]",
+            "business_ein_2": f"{_P1}.f1_16[0]",
+            "home_phone_3": f"{_P1}.PhoneNumber_Ln3_ReadOrder[0].f1_17[0]",
+            "best_time_call_3": f"{_P1}.BestTime_Ln3_ReadOrder[0].f1_18[0]",
+            "work_phone_4": f"{_P1}.PhoneNumber_Ln4_ReadOrder[0].f1_19[0]",
+            "work_ext_4": f"{_P1}.Ext_ReadOrder[0].f1_20[0]",
+            "best_time_call_4": f"{_P1}.f1_21[0]",
+            "total_owed_5": f"{_P1}.f1_22[0]",
+            "additional_bal_6": f"{_P1}.f1_23[0]",
+            "total_liability_7": f"{_P1}.f1_24[0]",
+            "payment_with_request_8": f"{_P1}.f1_25[0]",
+            "amount_owed_9": f"{_P1}.f1_26[0]",
+            "monthly_payment_11a": f"{_P1}.f1_27[0]",
+            "payment_day_12": f"{_P1}.f1_28[0]",
+            "routing_number": f"{_P1}.RoutingNo[0].f1_29[0]",
+            "account_number": f"{_P1}.AccountNo[0].f1_30[0]",
+        }
 
     def test_checkbox_names_and_on_states_pinned(self):
-        assert F9465_CHECKBOX_FIELDS["address_new_1b"] == (f"{_P1}.c1_1[0]", "1")
-        # The 433-F bullet checkbox nests under BulletedList[0].Bullet1[0] —
-        # a bare Page1[0].c1_2[0] name does NOT match the PDF's /T chain.
-        assert F9465_CHECKBOX_FIELDS["cannot_increase_11b_433f"] == (
-            f"{_P1}.BulletedList[0].Bullet1[0].c1_2[0]", "1",
-        )
-        assert F9465_CHECKBOX_FIELDS["low_income_no_debit_13c"] == (f"{_P1}.c1_3[0]", "1")
-        assert F9465_CHECKBOX_FIELDS["payroll_deduction_14"] == (f"{_P1}.c1_4[0]", "1")
-        # Radio-style groups: each XFA kid is its own field with its own
-        # on-state (/1../4) — e.g. marital status and pay frequency.
-        assert F9465_CHECKBOX_FIELDS["marital_single_16a"] == (f"{_P2}.c2_1[0]", "1")
-        assert F9465_CHECKBOX_FIELDS["marital_married_16a"] == (f"{_P2}.c2_1[1]", "2")
-        assert F9465_CHECKBOX_FIELDS["paid_weekly_19"] == (f"{_P2}.c2_3[0]", "1")
-        assert F9465_CHECKBOX_FIELDS["paid_biweekly_19"] == (f"{_P2}.c2_3[1]", "2")
-        assert F9465_CHECKBOX_FIELDS["paid_monthly_19"] == (f"{_P2}.c2_3[2]", "3")
-        assert F9465_CHECKBOX_FIELDS["paid_twice_month_19"] == (f"{_P2}.c2_3[3]", "4")
-        assert F9465_CHECKBOX_FIELDS["court_deducted_no_26b"] == (f"{_P2}.c2_8[1]", "2")
+        # Both boxes export /1 from /AP /N. c1_2 is line 12c (low-income),
+        # a direct Page1 child — the Rev. 9-2020 BulletedList c1_2 is gone.
+        assert F9465_CHECKBOX_FIELDS == {
+            "address_new_1b": (f"{_P1}.c1_1[0]", "1"),
+            "low_income_no_debit_13c": (f"{_P1}.c1_2[0]", "1"),
+        }
+        assert "BulletedList" not in F9465_CHECKBOX_FIELDS["low_income_no_debit_13c"][0]
 
     def test_checkbox_values_are_name_onstate_tuples(self):
         for key, val in F9465_CHECKBOX_FIELDS.items():
@@ -113,7 +124,8 @@ class TestF9465FieldMap:
         )
 
     def test_legacy_misconceived_keys_dropped(self):
-        # Keys from the pre-audit map that have NO target on Rev. 9-2020.
+        # Keys from the pre-audit map that had no target on Rev. 9-2020
+        # and still have none on Rev. 12-2026.
         for gone in (
             "account_type", "city", "state", "zip", "name", "spouse_name",
             "phone", "household_status", "employment_status", "payment_method",
@@ -122,10 +134,110 @@ class TestF9465FieldMap:
         for gone in ("address_changed", "related_return", "other_agreement", "consent"):
             assert gone not in F9465_CHECKBOX_FIELDS, gone
 
+    def test_removed_lines_stay_unmapped(self):
+        # Rev. 12-2026 deleted these lines. Mapping one of them onto a
+        # surviving widget would write the wrong caption.
+        assert F9465_UNMAPPED_KEYS == frozenset({
+            "divided_by_72_10",
+            "revised_monthly_payment_11b",
+            "cannot_increase_11b_433f",
+            "payroll_deduction_14",
+            "county_15",
+            "marital_single_16a",
+            "marital_married_16a",
+            "share_expenses_yes_16b",
+            "share_expenses_no_16b",
+            "dependents_17",
+            "age_65_older_18",
+            "paid_weekly_19",
+            "paid_biweekly_19",
+            "paid_monthly_19",
+            "paid_twice_month_19",
+            "net_income_20",
+            "spouse_paid_weekly_21",
+            "spouse_paid_biweekly_21",
+            "spouse_paid_monthly_21",
+            "spouse_paid_twice_month_21",
+            "spouse_net_income_22",
+            "vehicles_23",
+            "car_payments_24",
+            "health_insurance_yes_25a",
+            "health_insurance_no_25a",
+            "premiums_deducted_yes_25b",
+            "premiums_deducted_no_25b",
+            "health_premiums_25c",
+            "court_payments_yes_26a",
+            "court_payments_no_26a",
+            "court_deducted_yes_26b",
+            "court_deducted_no_26b",
+            "court_payments_26c",
+            "dependent_care_27",
+        })
+        assert len(F9465_UNMAPPED_KEYS) == 34
+        for key in F9465_UNMAPPED_KEYS:
+            assert key not in F9465_FIELDS, key
+            assert key not in F9465_CHECKBOX_FIELDS, key
+
 
 # ---------------------------------------------------------------------------
 # Ground truth: every mapped name/type/on-state exists in the source PDF
 # ---------------------------------------------------------------------------
+
+def _printed_revision(pdf_bytes: bytes) -> str:
+    """Footer string ``Form 9465 (Rev. M-YYYY)`` from the page text."""
+    import fitz
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        text = "\n".join(doc[i].get_text() for i in range(len(doc)))
+    finally:
+        doc.close()
+    match = re.search(r"Form 9465 \(Rev\. [^)]+\)", text)
+    return match.group(0) if match else ""
+
+
+def _widget_ap_on_states(pdf_path) -> dict[str, set[str]]:
+    """Terminal widget qualified name -> /AP /N keys other than /Off."""
+    from pypdf import PdfReader
+    from pypdf.generic import IndirectObject
+
+    def resolve(obj):
+        return obj.get_object() if isinstance(obj, IndirectObject) else obj
+
+    found: dict[str, set[str]] = {}
+    reader = PdfReader(str(pdf_path))
+    for page in reader.pages:
+        annots = page.get("/Annots")
+        if not annots:
+            continue
+        for ref in resolve(annots):
+            annot = resolve(ref)
+            if str(annot.get("/Subtype")) != "/Widget":
+                continue
+            parts: list[str] = []
+            node = annot
+            seen: set[int] = set()
+            while node is not None and id(node) not in seen:
+                seen.add(id(node))
+                partial = node.get("/T")
+                if partial:
+                    parts.append(str(partial))
+                parent = node.get("/Parent")
+                node = resolve(parent) if parent is not None else None
+            parts.reverse()
+            ap = annot.get("/AP")
+            if ap is None:
+                continue
+            normal = resolve(ap).get("/N")
+            if normal is None:
+                continue
+            normal = resolve(normal)
+            if not hasattr(normal, "keys"):
+                continue
+            on_states = {str(key) for key in normal.keys() if str(key) != "/Off"}
+            found[".".join(parts)] = on_states
+    return found
+
 
 class TestSourcePdfGroundTruth:
     def test_map_matches_source_acroform(self):
@@ -136,19 +248,49 @@ class TestSourcePdfGroundTruth:
             f"{src} missing — run scripts/download_irs_forms.sh; the field map "
             "can only be validated against the official PDF"
         )
-        fields = PdfReader(str(src)).get_fields()
+        pdf_bytes = src.read_bytes()
+        digest = hashlib.sha256(pdf_bytes).hexdigest()
+        printed = _printed_revision(pdf_bytes)
+        # Revision gate runs before any field assertion. Either the bytes we
+        # verified, or the same printed revision, may proceed; a PDF that
+        # matches neither is a new revision and must fail loudly.
+        assert digest == F9465_PINNED_SHA256 or printed == F9465_PINNED_REVISION, (
+            f"Form 9465 revision changed: map verified against "
+            f"{F9465_PINNED_REVISION}, PDF is {printed or 'unrecognized'}"
+        )
+        if digest == F9465_PINNED_SHA256:
+            assert printed == F9465_PINNED_REVISION, (
+                f"pinned sha256 matched but printed revision was {printed!r}"
+            )
+
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        assert len(reader.pages) == F9465_PINNED_PAGE_COUNT, (
+            f"Form 9465 page count changed: map verified against "
+            f"{F9465_PINNED_PAGE_COUNT}, PDF has {len(reader.pages)}"
+        )
+        fields = reader.get_fields()
         assert fields, "f9465.pdf has no AcroForm fields — wrong file?"
+        assert len(fields) == F9465_PINNED_FIELD_COUNT, (
+            f"Form 9465 field count changed: map verified against "
+            f"{F9465_PINNED_FIELD_COUNT}, PDF has {len(fields)}"
+        )
 
         for key, name in F9465_FIELDS.items():
             assert name in fields, f"text key {key!r}: {name} not in PDF"
             assert fields[name].get("/FT") == "/Tx", f"{name} is not a text field"
 
+        ap_on = _widget_ap_on_states(src)
         for key, (name, on_state) in F9465_CHECKBOX_FIELDS.items():
             assert name in fields, f"checkbox key {key!r}: {name} not in PDF"
             assert fields[name].get("/FT") == "/Btn", f"{name} is not a button"
             states = fields[name].get("/_States_") or []
             assert f"/{on_state}" in [str(s) for s in states], (
                 f"{key!r}: on-state /{on_state} not among {states} for {name}"
+            )
+            # The value we write is the widget's /AP /N export, and that
+            # appearance is the only non-Off state (the baked mark is one X).
+            assert ap_on.get(name) == {f"/{on_state}"}, (
+                f"{key!r}: /AP /N on-states {ap_on.get(name)} != /{on_state}"
             )
 
 
@@ -169,6 +311,9 @@ _TEXT_INPUTS: dict[str, str] = {
     "address": "1420 Palmetto Ave",
     "apt": "12B",
     "city_state_zip": "Folly Beach, SC 29439",
+    "foreign_country": "Freedonia",
+    "foreign_province": "Eastmarch",
+    "foreign_postal_code": "FX-4401",
     "business_name_2": "Quimby Surf LLC",
     "business_ein_2": "81-4455667",
     "home_phone_3": "843-555-0141",
@@ -181,29 +326,16 @@ _TEXT_INPUTS: dict[str, str] = {
     "total_liability_7": "19,000",
     "payment_with_request_8": "1,050",
     "amount_owed_9": "17,950",
-    "divided_by_72_10": "249.31",
     "monthly_payment_11a": "425",
-    "revised_monthly_payment_11b": "455",
     "payment_day_12": "16",
-    "county_15": "Charleston",
-    "dependents_17": "2",
-    "age_65_older_18": "0",
-    "net_income_20": "2,850",
-    "spouse_net_income_22": "1,975",
-    "vehicles_23": "3",
-    "car_payments_24": "1",
-    "health_premiums_25c": "310",
-    "court_payments_26c": "215",
-    "dependent_care_27": "480",
 }
 # Short numeric counts whose digits also occur in the form's printed text —
 # these are verified by exact-word COUNT DELTA against a blank render instead
-# of raw substring search.
-_WORD_DELTA_KEYS = {"tax_periods", "additional_bal_6", "work_ext_4",
-                    "monthly_payment_11a", "revised_monthly_payment_11b",
-                    "payment_day_12", "dependents_17", "age_65_older_18",
-                    "vehicles_23", "car_payments_24", "health_premiums_25c",
-                    "court_payments_26c", "dependent_care_27"}
+# of raw substring search. "2024" is an example year printed on the form.
+_WORD_DELTA_KEYS = {
+    "tax_periods", "additional_bal_6", "work_ext_4",
+    "monthly_payment_11a", "payment_day_12",
+}
 
 
 def _inputs(pairs: dict[str, str]) -> dict:
@@ -279,11 +411,13 @@ class TestF9465Render:
                 assert value in filled_pypdf, f"{key}={value!r} missing (pypdf)"
                 assert value in filled_fitz, f"{key}={value!r} missing (fitz)"
 
-    def test_page1_and_page2_both_carry_values(self, filled_pdf):
+    def test_the_only_page_carries_identity_and_payment_lines(self, filled_pdf):
+        # Rev. 12-2026 is one page. Part II (county, spouse net income) is gone.
         pages = _fitz_pages_text(filled_pdf)
-        assert len(pages) == 2
+        assert len(pages) == 1
         assert "Quimby" in pages[0] and "1420 Palmetto Ave" in pages[0]
-        assert "Charleston" in pages[1] and "1,975" in pages[1]
+        assert "Freedonia" in pages[0] and "1,050" in pages[0]
+        assert "425" in pages[0]  # printed line 10, monthly_payment_11a
 
     def test_output_is_flattened_no_editable_fields(self, filled_pdf):
         # House invariant: values are BAKED and the AcroForm is dropped, so
@@ -315,32 +449,34 @@ class TestF9465Render:
             {
                 "total_owed_5":   {"value": "18,400", "source_ref": "calc#1", "origin": "computed"},
                 "additional_bal_6": {"value": "", "source_ref": "calc#1", "origin": "computed"},
-                "county_15":      {"value": "   ", "source_ref": "intake#1", "origin": "user_entered"},
+                "best_time_call_3": {"value": "   ", "source_ref": "intake#1", "origin": "user_entered"},
+                # Removed lines must not land on a surviving widget.
+                "county_15": {"value": "Charleston", "source_ref": "intake#1", "origin": "user_entered"},
+                "divided_by_72_10": {"value": "249.31", "source_ref": "calc#1", "origin": "computed"},
+                "revised_monthly_payment_11b": {
+                    "value": "455", "source_ref": "intake#1", "origin": "user_entered",
+                },
                 "not_a_real_key": {"value": "31337", "source_ref": "x", "origin": "x"},
-                "payroll_deduction_14": {"value": "false", "source_ref": "x", "origin": "x"},
-                "marital_single_16a": {"value": "no", "source_ref": "x", "origin": "x"},
+                "payroll_deduction_14": {"value": "true", "source_ref": "x", "origin": "x"},
+                "marital_single_16a": {"value": "yes", "source_ref": "x", "origin": "x"},
                 "bad_payload":    "not-a-dict",
             },
         )
         text = _pypdf_text(pdf)
         fitz_text = "\n".join(_fitz_pages_text(pdf))
+        both = text + "\n" + fitz_text
         assert "18,400" in text and "18,400" in fitz_text
-        assert "31337" not in text and "31337" not in fitz_text
-        # No checkbox was legitimately set -> no baked X anywhere.
+        assert "31337" not in both
+        for dropped in ("Charleston", "249.31", "455"):
+            assert dropped not in both, dropped
+        # Truthy values on removed checkbox keys must not bake an X.
         assert _fitz_words(pdf).count("X") == _fitz_words(blank_pdf).count("X")
 
     @pytest.mark.parametrize(
         "key,page_index",
         [
             ("address_new_1b", 0),
-            ("cannot_increase_11b_433f", 0),   # regression: nested BulletedList name
-            ("low_income_no_debit_13c", 0),
-            ("payroll_deduction_14", 0),
-            ("marital_married_16a", 1),
-            ("paid_monthly_19", 1),
-            ("spouse_paid_twice_month_21", 1),
-            ("health_insurance_no_25a", 1),
-            ("court_deducted_yes_26b", 1),
+            ("low_income_no_debit_13c", 0),  # printed line 12c, was 13c / c1_3
         ],
     )
     def test_each_checkbox_bakes_exactly_one_x(self, blank_pdf, key, page_index):
