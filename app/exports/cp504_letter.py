@@ -185,7 +185,7 @@ def _body_paragraphs(inputs: dict[str, Any], tax_year: int | None) -> list[str]:
         paras.append(
             "I am requesting an installment agreement so that I can pay this balance "
             "over time rather than in a single payment." + offer + " I am enclosing a "
-            "completed Form 9465, Installment Agreement Request, with this letter and "
+            "completed Form 9465, Payment Plan Request, with this letter and "
             "ask that you set up the agreement and confirm the terms in writing."
         )
         paras.append(

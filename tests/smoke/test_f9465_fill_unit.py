@@ -293,6 +293,28 @@ class TestSourcePdfGroundTruth:
                 f"{key!r}: /AP /N on-states {ap_on.get(name)} != /{on_state}"
             )
 
+    def test_registry_title_matches_printed_title(self):
+        """Catalog title is the title printed on the pinned revision."""
+        import fitz
+
+        from app.exports.form_registry import get_spec
+
+        src = _f9465_form_path(None)
+        pdf_bytes = src.read_bytes()
+        assert _printed_revision(pdf_bytes) == F9465_PINNED_REVISION
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            lines = [ln.strip() for ln in doc[0].get_text().splitlines() if ln.strip()]
+        finally:
+            doc.close()
+        # Header order: "Form 9465", "(Rev. December 2026)", printed title,
+        # then "Department of the Treasury".
+        treasury = lines.index("Department of the Treasury")
+        printed_title = lines[treasury - 1]
+        spec = get_spec("9465")
+        assert spec is not None and spec.kind == "9465"
+        assert spec.title == f"Form 9465 — {printed_title}"
+
 
 # ---------------------------------------------------------------------------
 # Render round-trip (requires the repo's official PDF; never skips)
