@@ -217,7 +217,18 @@ else
     echo "  WARN  Form 843 not available at $F843_URL — skipping."
 fi
 
-# Form 9465 (Installment Agreement Request) — current revision.
+# Form 9465 (Payment Plan Request) — current revision.
+# Pinned 2026-11-05 in app/exports/f9465_field_map.py against the PDF this URL
+# returned that morning (170,094 bytes):
+#   printed footer "Form 9465 (Rev. 12-2026)" (header "Rev. December 2026"),
+#   1 page, 40 AcroForm entries (PdfReader.get_fields, parents included),
+#   sha256 2c1253f4902d2ae20a3041d04b64e206f618cbd9d4500ae0aa3d859fc063191a,
+#   OMB No. 1545-0074, Cat. No. 14842Y.
+# The Rev. September 2020 file (2 pages, unpadded f1_1.. names) is no longer
+# what this URL serves. A revision change must fail
+# tests/smoke/test_f9465_fill_unit.py::TestSourcePdfGroundTruth
+# before any field assertion:
+#   "Form 9465 revision changed: map verified against <rev>, PDF is <rev>"
 F9465_URL="https://www.irs.gov/pub/irs-pdf/f9465.pdf"
 F9465_DEST="$FORMS_DIR/f9465.pdf"
 if head_check "$F9465_URL"; then
