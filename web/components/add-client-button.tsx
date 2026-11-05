@@ -17,6 +17,8 @@ type AddClientResponse = {
   } | null;
 };
 
+type ClientKind = "business" | "individual";
+
 // CPA-originated client onboarding. Provisions a brand-new client workspace
 // with the caller seated as its `owner` (the practice runs the books end to
 // end: bank connections, invitations, period close) and, if an owner email is
@@ -31,6 +33,7 @@ export function AddClientButton({
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [businessName, setBusinessName] = useState("");
+  const [clientKind, setClientKind] = useState<ClientKind>("business");
   const [ownerEmail, setOwnerEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,6 +41,7 @@ export function AddClientButton({
 
   function reset() {
     setBusinessName("");
+    setClientKind("business");
     setOwnerEmail("");
     setError(null);
     setSuccess(null);
@@ -54,6 +58,7 @@ export function AddClientButton({
         body: JSON.stringify({
           business_name: businessName.trim(),
           owner_email: ownerEmail.trim() || null,
+          client_kind: clientKind,
         }),
       });
       if (!res.ok) {
@@ -139,6 +144,44 @@ export function AddClientButton({
                 periods right away. Add the client&apos;s email to send them an
                 invitation so they hold owner-level access to their own books too.
               </Dialog.Description>
+
+              <div>
+                <span className="text-xs font-medium uppercase tracking-wider text-ink-tertiary">
+                  This client is
+                </span>
+                <div
+                  role="radiogroup"
+                  aria-label="Client kind"
+                  className="mt-1.5 grid grid-cols-2 gap-2"
+                >
+                  {(
+                    [
+                      ["business", "Business"],
+                      ["individual", "Individual"],
+                    ] as const
+                  ).map(([value, label]) => {
+                    const active = clientKind === value;
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        onClick={() => setClientKind(value)}
+                        className={cn(
+                          "rounded-md border px-3 py-2 text-sm font-medium transition",
+                          "focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60",
+                          active
+                            ? "border-brand-500/60 bg-brand-500/[0.08] text-ink-primary"
+                            : "border-default bg-canvas text-ink-secondary hover:bg-white/[0.04]"
+                        )}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
               <label className="block">
                 <span className="text-xs font-medium uppercase tracking-wider text-ink-tertiary">
