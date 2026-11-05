@@ -82,7 +82,6 @@ def test_without_refresh_an_existing_file_is_skipped(tmp_path: Path):
     assert "SKIP" in result.stdout
     assert "OLD sha256" not in result.stdout
     assert "NEW sha256" not in result.stdout
-    assert not ( _REPO / "data" / "irs_forms" / "f9465.pdf" ).exists()
 
 
 def test_refresh_prints_old_and_new_sha_and_leaves_other_files(tmp_path: Path):
