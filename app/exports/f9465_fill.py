@@ -1,4 +1,4 @@
-"""Form 9465 (Installment Agreement Request) form-fill renderer.
+"""Form 9465 (Payment Plan Request) form-fill renderer.
 
 Part of the autonomous professional-substitute suite. This renderer FILLS THE
 OFFICIAL FORM FROM CALLER-PROVIDED, PROVENANCE-BEARING INPUTS — it does NOT
@@ -10,22 +10,41 @@ tax-calculation engine.
 
 What Form 9465 is
 -----------------
-The application an individual files with the IRS to request an installment
-agreement (payment plan) for outstanding tax liabilities.
+The one-page application an individual files with the IRS to request a
+long-term payment plan (an installment agreement) for outstanding tax
+liabilities. Rev. 12-2026 prints the title "Payment Plan Request" (the body
+heading is "Long-Term Payment Plan Request"). The pin is
+``F9465_PINNED_REVISION`` in ``f9465_field_map``. There is no Part II.
+
+Line numbers on Rev. 12-2026
+----------------------------
+Lines 1a–9 keep the Rev. 9-2020 captions (identity through amount owed). The
+monthly amount is line 10 (logical key ``monthly_payment_11a``). The payment
+day is line 11 (key ``payment_day_12``). Direct debit is line 12a (routing)
+and line 12b (account). The low-income can't-pay-by-debit box is line 12c
+(key ``low_income_no_debit_13c``).
 
 Conservative blank-fill
 -----------------------
 Any line whose input is absent is left blank. We never guess, never insert a
-zero, and never derive one line from another (e.g. line 8 monthly payment is
-taken from the caller, not computed from lines 5 and 6).
+zero, and never derive one line from another (e.g. the line 10 monthly
+payment is taken from the caller, not computed from lines 5 and 6 and not as
+line 9 divided by 72).
 
 Taxpayer-completed fields
 -------------------------
-The taxpayer's SSN(s) and bank routing/account numbers are intentionally LEFT
-BLANK by this renderer even if values were supplied — they are identity/payment
-items the taxpayer must enter themselves. (Form 9465 has no signature line in
-the fillable portion, but requires physical signature on the printed form.)
-See ``TAXPAYER_COMPLETED_KEYS``.
+The taxpayer's SSN(s) and bank routing/account numbers (lines 12a and 12b)
+are intentionally LEFT BLANK by this renderer even if values were supplied —
+they are identity/payment items the taxpayer must enter themselves. (Form
+9465 has no signature line in the fillable portion, but requires physical
+signature on the printed form.) See ``TAXPAYER_COMPLETED_KEYS``.
+
+Keys this revision does not map
+-------------------------------
+The old Part II (the whole second page) and the removed page-1 lines (the
+÷72 box, line 11b, the 433-F bullet, and line 14 payroll deduction) are
+``F9465_UNMAPPED_KEYS``. A caller that still sends one of those keys is
+skipped: nothing is written.
 
 XFA-hybrid form
 ---------------
@@ -45,14 +64,16 @@ Usage
         inputs={
             "request_forms":       {"value": "1040", "source_ref": "intake#1", "origin": "user_entered"},
             "tax_periods":         {"value": "2024", "source_ref": "intake#1", "origin": "user_entered"},
-            "first_name":          {"value": "Aaron J", "source_ref": "intake#1", "origin": "user_entered"},
-            "last_name":           {"value": "Stransky", "source_ref": "intake#1", "origin": "user_entered"},
-            "address":             {"value": "123 Main St", "source_ref": "intake#1", "origin": "user_entered"},
-            "city_state_zip":      {"value": "Columbia, SC 29201", "source_ref": "intake#1", "origin": "user_entered"},
+            "first_name":          {"value": "Avery R", "source_ref": "intake#1", "origin": "user_entered"},
+            "last_name":           {"value": "Quimby", "source_ref": "intake#1", "origin": "user_entered"},
+            "address":             {"value": "1420 Palmetto Ave", "source_ref": "intake#1", "origin": "user_entered"},
+            "city_state_zip":      {"value": "Folly Beach, SC 29439", "source_ref": "intake#1", "origin": "user_entered"},
             "total_owed_5":        {"value": "12,000", "source_ref": "calc#1", "origin": "computed"},
-            "monthly_payment_11a": {"value": "500", "source_ref": "intake#1", "origin": "user_entered"},
-            "payment_day_12":      {"value": "15", "source_ref": "intake#1", "origin": "user_entered"},
-            "marital_single_16a":  {"value": "true", "source_ref": "intake#1", "origin": "user_entered"},
+            "monthly_payment_11a": {"value": "500", "source_ref": "intake#1", "origin": "user_entered"},  # line 10
+            "payment_day_12":      {"value": "15", "source_ref": "intake#1", "origin": "user_entered"},  # line 11
+            "address_new_1b":      {"value": "true", "source_ref": "intake#1", "origin": "user_entered"},
+            # Part II keys (e.g. "marital_single_16a") are in F9465_UNMAPPED_KEYS
+            # on this revision and are skipped.
         },
     )
 """
@@ -72,9 +93,10 @@ from app.exports.f9465_field_map import (
     TAXPAYER_COMPLETED_KEYS,
 )
 
-# Truthy strings that set a checkbox / radio choice (1b, the 433-F bullet,
-# 13c, 14, and the Part II choice keys). Anything else (incl. "false"/"no"/
-# blank) leaves the box /Off (conservative).
+# Truthy strings that set a checkbox on this revision (line 1b, and printed
+# line 12c). The Rev. 9-2020 433-F bullet, line 14, and Part II choice keys
+# are in F9465_UNMAPPED_KEYS and are skipped, not written. Anything else
+# (incl. "false"/"no"/blank) leaves the box /Off (conservative).
 _TRUE_VALUES = {"true", "1", "yes", "y", "x", "on", "checked"}
 
 
@@ -118,21 +140,25 @@ def render_9465(
     inputs:
         ``{field_key: {"value": str, "source_ref": str, "origin": str}}`` where
         ``field_key`` is a LOGICAL key from ``F9465_FIELDS`` (e.g.
-        ``"first_name"``, ``"total_owed_5"``, ``"monthly_payment_11a"``) OR a
-        checkbox/choice key from ``F9465_CHECKBOX_FIELDS``
-        (``"address_new_1b"``, ``"marital_single_16a"``, etc.) whose truthy
-        value ("true"/"1"/"yes"/"x") sets that box. Radio-style questions
-        (16a/16b/19/21/25a/25b/26a/26b) are one key per choice — pass at most
-        one truthy choice per question. Provenance (``source_ref``) is
-        validated upstream; this renderer trusts the caller. A blank/empty
-        value is skipped.
+        ``"first_name"``, ``"total_owed_5"``, ``"monthly_payment_11a"`` which
+        is printed line 10, ``"payment_day_12"`` which is printed line 11) OR
+        a checkbox key from ``F9465_CHECKBOX_FIELDS`` (``"address_new_1b"``
+        on line 1b, ``"low_income_no_debit_13c"`` on printed line 12c) whose
+        truthy value ("true"/"1"/"yes"/"x") sets that box. This revision has
+        those two checkboxes, both on the single page. Provenance
+        (``source_ref``) is validated upstream; this renderer trusts the
+        caller. A blank/empty value is skipped.
 
         Notes:
           - ``ssn``, ``spouse_ssn``, ``routing_number``, ``account_number`` are
             NEVER filled here even if supplied (identity/payment items for the
-            taxpayer; security sensitive).
-          - An unknown / unmapped key is silently skipped (conservative — never
-            invent a field, never write to a line we don't recognize).
+            taxpayer; security sensitive). Routing and account are lines 12a
+            and 12b.
+          - Keys in ``F9465_UNMAPPED_KEYS`` (old Part II, including the
+            16a/16b/19/21/25/26 choices, plus the removed ÷72, 11b, 433-F,
+            and line 14 keys) and any other unknown key are silently skipped
+            (conservative — never invent a field, never write to a line this
+            revision does not have).
 
     Raises
     ------
@@ -173,8 +199,9 @@ def render_9465(
             continue
 
         # Ordinary text line: map the logical key to its AcroForm field name.
-        # Unknown / unmapped keys are skipped (conservative — never invent a
-        # field, never write to a line we don't recognize).
+        # Unknown keys, including every key in F9465_UNMAPPED_KEYS (old Part II
+        # and the lines Rev. 12-2026 removed), are skipped — never invent a
+        # field, never write to a line this revision does not have.
         acro_name = F9465_FIELDS.get(key)
         if acro_name:
             field_values[acro_name] = value
