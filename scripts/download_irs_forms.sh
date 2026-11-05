@@ -8,9 +8,13 @@
 #   bash scripts/download_irs_forms.sh          # TY 2024 only (default)
 #   bash scripts/download_irs_forms.sh 2023     # also fetch TY 2023
 #   bash scripts/download_irs_forms.sh 2023 2024
+#   bash scripts/download_irs_forms.sh --refresh f9465
 #
 # The script is idempotent — if a file already exists it prints a checksum
-# and skips the download.
+# and skips the download. ``--refresh <form>`` (the filename stem, e.g.
+# ``f9465``) re-downloads that one file even when it is already present and
+# prints the old and new sha256. Every other file keeps the skip behaviour.
+# A year-specific file is named in full (``--refresh f1120_2024``).
 #
 # IRS form URLs (stable; the IRS keeps old-year forms in the same path):
 #   https://www.irs.gov/pub/irs-pdf/f1120.pdf       — current year Form 1120
@@ -21,10 +25,43 @@
 # Requirements: curl (or wget), sha256sum (or shasum on macOS).
 set -euo pipefail
 
-FORMS_DIR="$(cd "$(dirname "$0")/.." && pwd)/data/irs_forms"
+# Tests point this at a temp directory. Unset, the path is the repo's
+# data/irs_forms, same as before the flag existed.
+if [[ -n "${IRS_FORMS_DOWNLOAD_DIR:-}" ]]; then
+    FORMS_DIR="${IRS_FORMS_DOWNLOAD_DIR}"
+else
+    FORMS_DIR="$(cd "$(dirname "$0")/.." && pwd)/data/irs_forms"
+fi
 mkdir -p "$FORMS_DIR"
 
-YEARS=("${@:-2024}")
+REFRESH_FORM=""
+REFRESH_HITS=0
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --refresh)
+            if [[ $# -lt 2 || -z "${2:-}" || "${2}" == --* ]]; then
+                echo "ERROR: --refresh requires a form name (for example f9465)." >&2
+                exit 2
+            fi
+            REFRESH_FORM="$2"
+            shift 2
+            ;;
+        --*)
+            echo "ERROR: unknown option $1 (expected --refresh <form>)." >&2
+            exit 2
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            shift
+            ;;
+    esac
+done
+if [[ ${#POSITIONAL[@]} -eq 0 ]]; then
+    YEARS=(2024)
+else
+    YEARS=("${POSITIONAL[@]}")
+fi
 
 # Detect checksum tool
 if command -v sha256sum &>/dev/null; then
@@ -45,14 +82,52 @@ else
     exit 1
 fi
 
+# True when ``dest`` is the form named by ``--refresh``.
+_refresh_this() {
+    [[ -n "${REFRESH_FORM}" ]] || return 1
+    local base stem want
+    base="$(basename "$1")"
+    stem="${base%.pdf}"
+    want="${REFRESH_FORM%.pdf}"
+    [[ "$want" == "$stem" || "$want" == "$base" ]]
+}
+
+_sha256_of() {
+    $CKSUM "$1" | awk 'NR==1 { print $1 }'
+}
+
 download_form() {
     local dest="$1"
     local url="$2"
     local label="$3"
 
-    if [[ -f "$dest" ]]; then
+    if _refresh_this "$dest"; then
+        REFRESH_HITS=$((REFRESH_HITS + 1))
+    fi
+
+    if [[ -f "$dest" ]] && ! _refresh_this "$dest"; then
         echo "  SKIP  $label — already present ($dest)"
         $CKSUM "$dest"
+        return 0
+    fi
+
+    # Re-download into a temp file so a failed fetch leaves the old PDF in place.
+    if [[ -f "$dest" ]]; then
+        local old_sha tmp new_sha
+        old_sha="$(_sha256_of "$dest")"
+        echo "  REFRESH $label — re-downloading even though it is present"
+        echo "        $url"
+        echo "        -> $dest"
+        echo "  OLD sha256 ${old_sha}"
+        tmp="$(mktemp "${dest}.XXXXXX")"
+        if ! $DOWNLOAD_CMD "$tmp" "$url"; then
+            rm -f "$tmp"
+            exit 1
+        fi
+        mv "$tmp" "$dest"
+        new_sha="$(_sha256_of "$dest")"
+        echo "  NEW sha256 ${new_sha}"
+        echo "  OK    $label downloaded."
         return 0
     fi
 
@@ -239,6 +314,11 @@ fi
 
 
 
+
+if [[ -n "${REFRESH_FORM}" && "${REFRESH_HITS}" -eq 0 ]]; then
+    echo "ERROR: --refresh ${REFRESH_FORM} did not match a form this script downloads." >&2
+    exit 1
+fi
 
 echo ""
 echo "Done. Forms cached in: $FORMS_DIR"
