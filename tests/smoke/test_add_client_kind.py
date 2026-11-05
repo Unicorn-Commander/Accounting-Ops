@@ -124,12 +124,13 @@ def test_individual_invitation_says_invited_to_name_without_business():
 
 
 def test_setup_assistant_asks_for_client_name():
-    """The DBA prompt is now the client name. Skip-lists are not data here,
-    so the question flow itself is otherwise untouched."""
+    """Client name is an Everyone question. Business-only vs individual-only
+    sections are marked so the assistant can skip correctly."""
     text = _PERSONA.read_text(encoding="utf-8")
     assert "Client name (business or person)?" in text
     assert "Business name (DBA)?" not in text
-    # The sole-prop branch is still prose, not a skippable question table.
-    assert "skip_if" not in text
-    assert "#### Sole Proprietorship" in text
+    assert "### Everyone" in text
+    assert "### Business only" in text
+    assert "### Individual only" in text
+    assert "##### Sole Proprietorship" in text
     assert "#### Personal household" in text
