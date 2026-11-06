@@ -1,10 +1,19 @@
 """Contract tests for Accounting-Ops MCP OAuth discovery and HTTP edge behavior."""
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from fastapi.testclient import TestClient
 
 from app.config import get_settings
 from app.main import app
+from app.oauth_discovery import normalise_mcp_resource
+
+
+def _resource_metadata_url(www_authenticate: str) -> str:
+    marker = 'resource_metadata="'
+    start = www_authenticate.index(marker) + len(marker)
+    return www_authenticate[start:www_authenticate.index('"', start)]
 
 
 def test_settings_parse_expected_audiences_and_mcp_origins(monkeypatch):
@@ -43,12 +52,14 @@ def test_protected_resource_metadata_is_available_at_both_paths(monkeypatch):
     try:
         client = TestClient(app, raise_server_exceptions=False)
         responses = [
-            client.get("/.well-known/oauth-protected-resource"),
-            client.get("/.well-known/oauth-protected-resource/mcp"),
+            client.get("/.well-known/oauth-protected-resource", follow_redirects=False),
+            client.get("/.well-known/oauth-protected-resource/mcp", follow_redirects=False),
+            client.get("/.well-known/oauth-protected-resource/mcp/", follow_redirects=False),
         ]
     finally:
         get_settings.cache_clear()
 
+    bodies = []
     for response in responses:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("application/json")
@@ -64,29 +75,38 @@ def test_protected_resource_metadata_is_available_at_both_paths(monkeypatch):
         }
         # Clients request exactly these; Keycloak's DCR policy refuses any other scope, and `mcp` carries the audience.
         assert response.json()["scopes_supported"] == ["openid", "profile", "email", "offline_access", "mcp"]
-        assert response.json()["resource"] == (
-            "https://accounting-ops.unicorncommander.ai/mcp"
-        )
         assert response.json()["authorization_servers"] == [
             "https://auth.unicorncommander.ai/realms/uchub"
         ]
+        bodies.append(response.json())
+
+    canonical = "https://accounting-ops.unicorncommander.ai/mcp/"
+    assert bodies[0] == bodies[1] == bodies[2]
+    assert bodies[0]["resource"] == canonical
 
 
-def test_protected_resource_options_and_slash_form_names_itself():
+def test_protected_resource_options_and_slash_form_names_the_canonical_resource():
     client = TestClient(app, raise_server_exceptions=False)
     options = client.options("/.well-known/oauth-protected-resource/mcp")
     slash = client.get(
         "/.well-known/oauth-protected-resource/mcp/",
         follow_redirects=False,
     )
+    bare = client.get(
+        "/.well-known/oauth-protected-resource/mcp",
+        follow_redirects=False,
+    )
 
     assert options.status_code == 200
     assert options.headers["access-control-allow-origin"] == "*"
     assert set(options.json()) >= {"resource", "authorization_servers"}
-    # No redirect: the slash form answers 200 and names the slash URL.
+    # No redirect: the slash form answers 200 and names the same resource.
     assert slash.status_code == 200
     assert "location" not in slash.headers
-    assert slash.json()["resource"].endswith("/mcp/")
+    canonical = f"{str(get_settings().public_base_url).rstrip('/')}/mcp/"
+    assert slash.json()["resource"] == canonical
+    assert bare.json()["resource"] == canonical
+    assert options.json()["resource"] == canonical
 
 
 def test_legacy_mcp_manifest_points_at_oauth_discovery():
@@ -96,9 +116,9 @@ def test_legacy_mcp_manifest_points_at_oauth_discovery():
     assert response.status_code == 200
     auth = response.json()["auth"]
     settings = get_settings()
-    assert auth["resource"] == f"{settings.public_base_url.rstrip('/')}/mcp"
+    assert auth["resource"] == f"{settings.public_base_url.rstrip('/')}/mcp/"
     assert auth["resource_metadata"].endswith(
-        "/.well-known/oauth-protected-resource/mcp"
+        "/.well-known/oauth-protected-resource/mcp/"
     )
     assert auth["authorization_servers"] == [str(settings.keycloak_realm_url)]
 
@@ -155,14 +175,25 @@ def test_mcp_cors_preflight_and_disallowed_origin_are_before_auth():
     assert browser_unauthorized.headers["access-control-expose-headers"] == "Mcp-Session-Id"
 
 
-def test_both_mcp_paths_serve_without_redirect_and_point_at_their_own_metadata():
+def test_both_mcp_paths_serve_without_redirect_and_name_one_resource():
     """Every existing AO MCP client uses /mcp/; behind Traefik the app sees http,
-    so a redirect built from the request would downgrade them to http (10-26)."""
-    client = TestClient(app, raise_server_exceptions=False)
-    slash = client.post("/mcp/", json={}, follow_redirects=False)
-    bare = client.post("/mcp", json={}, follow_redirects=False)
+    so a redirect built from the request would downgrade them to http (10-26).
 
-    assert slash.status_code == 401 and bare.status_code == 401
-    assert "location" not in slash.headers and "location" not in bare.headers
-    assert 'oauth-protected-resource/mcp/"' in slash.headers["www-authenticate"]
-    assert 'oauth-protected-resource/mcp"' in bare.headers["www-authenticate"]
+    Both spellings still serve. The 401 names one resource_metadata URL, and
+    that document's resource equals the challenged URL after normalisation.
+    """
+    client = TestClient(app, raise_server_exceptions=False)
+    public = str(get_settings().public_base_url).rstrip("/")
+    canonical = f"{public}/mcp/"
+
+    for path in ("/mcp/", "/mcp"):
+        denied = client.post(path, json={}, follow_redirects=False)
+        assert denied.status_code == 401
+        assert "location" not in denied.headers
+        meta_url = _resource_metadata_url(denied.headers["www-authenticate"])
+        assert meta_url == f"{public}/.well-known/oauth-protected-resource/mcp/"
+        resolved = client.get(urlsplit(meta_url).path, follow_redirects=False)
+        assert resolved.status_code == 200
+        challenged = f"{public}{path}"
+        assert resolved.json()["resource"] == normalise_mcp_resource(challenged)
+        assert resolved.json()["resource"] == canonical
