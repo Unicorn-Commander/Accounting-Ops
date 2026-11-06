@@ -19,6 +19,7 @@ import base64
 import json
 import time
 
+import jwt
 import pytest
 
 import app.security.brigade_jwt as bj
@@ -58,31 +59,27 @@ def _make_ed25519_keys(kid: str):
 def _make_rsa_keys(kid: str):
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
-    from jose.backends.cryptography_backend import CryptographyRSAKey
 
     priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    pub_pem = (
-        priv.public_key()
-        .public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        .decode()
-    )
     priv_pem = priv.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     ).decode()
-    jwk = CryptographyRSAKey(pub_pem, "RS256").to_dict()
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(priv.public_key()))
     jwk["kid"] = kid
+    jwk["alg"] = "RS256"
     jwk["use"] = "sig"
-    return priv_pem, jwk
+    pub_pem = priv.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+    return priv_pem, pub_pem, jwk
 
 
 _ED_PRIV, _ED_JWK = _make_ed25519_keys(KID_ED)
 _ED_OTHER_PRIV, _ED_OTHER_JWK = _make_ed25519_keys("brigade-ed25519-other")  # NOT in JWKS
-_RS_PRIV, _RS_JWK = _make_rsa_keys(KID_RS)
+_RS_PRIV, _RS_PUBLIC_PEM, _RS_JWK = _make_rsa_keys(KID_RS)
 
 
 def _b64url(data: bytes) -> str:
@@ -90,18 +87,11 @@ def _b64url(data: bytes) -> str:
 
 
 def _mint_ed25519(priv, claims: dict, *, kid: str = KID_ED, alg: str = "EdDSA") -> str:
-    """Sign an ed25519 JWT manually (jose doesn't do EdDSA)."""
-    header = {"alg": alg, "typ": "JWT", "kid": kid}
-    h = _b64url(json.dumps(header, separators=(",", ":")).encode())
-    p = _b64url(json.dumps(claims, separators=(",", ":")).encode())
-    signing_input = f"{h}.{p}".encode("ascii")
-    sig = priv.sign(signing_input)
-    return f"{h}.{p}.{_b64url(sig)}"
+    """Sign an Ed25519 JWT with PyJWT."""
+    return jwt.encode(claims, priv, algorithm=alg, headers={"kid": kid})
 
 
 def _mint_rs256(priv_pem: str, claims: dict, *, kid: str = KID_RS) -> str:
-    from jose import jwt
-
     return jwt.encode(claims, priv_pem, algorithm="RS256", headers={"kid": kid})
 
 
@@ -258,16 +248,16 @@ async def test_alg_none_rejected():
 
 
 async def test_alg_hs256_rejected():
-    """HS-family algs must be rejected (no shared secrets with Brigade)."""
-    import hashlib
-    import hmac
-
+    """HS-family algs must be rejected, even when signed with a public key."""
     header = {"alg": "HS256", "typ": "JWT", "kid": KID_ED}
     payload = _base_claims()
     h = _b64url(json.dumps(header, separators=(",", ":")).encode())
     p = _b64url(json.dumps(payload, separators=(",", ":")).encode())
     signing_input = f"{h}.{p}".encode("ascii")
-    sig = hmac.new(b"any-secret", signing_input, hashlib.sha256).digest()
+    import hashlib
+    import hmac
+
+    sig = hmac.new(_RS_PUBLIC_PEM.encode(), signing_input, hashlib.sha256).digest()
     token = f"{h}.{p}.{_b64url(sig)}"
     assert await bj.verify_brigade_jwt(token) is None
 

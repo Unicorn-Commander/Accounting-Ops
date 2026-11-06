@@ -71,14 +71,10 @@ from typing import Annotated, Any
 from uuid import UUID
 
 import httpx
+import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
-try:
-    from jose import JWTError, jwt
-except ImportError:  # pragma: no cover - exercised only without python-jose installed
-    JWTError = Exception  # type: ignore[assignment]
-    jwt = None  # type: ignore[assignment]
+from jwt.exceptions import PyJWTError
 
 from app.config import get_settings
 
@@ -158,6 +154,10 @@ class AuthContext:
 # TTL chosen so a rotated key propagates within 5 minutes of next request.
 _JWKS_CACHE_TTL_SEC = 300
 _jwks_cache: dict[str, Any] = {"keys": None, "fetched_at": 0.0}
+
+# Keycloak publishes RSA signing keys; never let the token choose a different
+# algorithm family for the public-key verifier.
+_KEYCLOAK_ACCEPTED_ALGS = ("RS256",)
 
 
 async def _fetch_jwks() -> dict[str, Any]:
@@ -580,8 +580,6 @@ def _try_authenticate_local(token: str) -> AuthContext | None:
             "— local login disabled (set the secret to enable self-host auth)."
         )
         return None
-    if jwt is None:  # pragma: no cover - jose always present in practice
-        return None
     try:
         claims = jwt.decode(
             token,
@@ -773,12 +771,6 @@ async def authenticate_token(token: str) -> AuthContext:
     if local_ctx is not None:
         return local_ctx
 
-    if jwt is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="python-jose is required for token validation",
-        )
-
     # Brigade-issued token path — verifier returns None when the feature is OFF
     # (BRIGADE_TRUSTED_ISSUER unset / unreachable / token isn't Brigade-issued).
     # In those cases we fall through to the Keycloak path below unchanged.
@@ -846,6 +838,11 @@ async def authenticate_token(token: str) -> AuthContext:
     settings = get_settings()
     try:
         header = jwt.get_unverified_header(token)
+        if header.get("alg") not in _KEYCLOAK_ACCEPTED_ALGS:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unsupported signing algorithm",
+            )
         kid = header.get("kid")
         if not kid:
             raise HTTPException(
@@ -865,13 +862,13 @@ async def authenticate_token(token: str) -> AuthContext:
         # Strictly validate signature + issuer + expiry here. We do our OWN
         # audience check below against the configurable accepted_audience, so
         # `verify_aud` stays off in jwt.decode: Keycloak routinely stamps
-        # aud="account" on tokens, and jose's built-in check has no notion of
+        # aud="account" on tokens, and PyJWT's built-in check has no notion of
         # "also accept via resource_access". (Signature/issuer/exp are NOT
         # weakened — they are enforced exactly as before.)
         claims = jwt.decode(
             token,
-            key,
-            algorithms=[header["alg"]],
+            jwt.PyJWK.from_dict(key, algorithm="RS256").key,
+            algorithms=list(_KEYCLOAK_ACCEPTED_ALGS),
             issuer=str(settings.keycloak_realm_url),
             options={"verify_at_hash": False, "verify_aud": False},
         )
@@ -929,7 +926,7 @@ async def authenticate_token(token: str) -> AuthContext:
         if brigade_ctx is not None:
             return brigade_ctx
         raise
-    except (JWTError, httpx.HTTPError, KeyError) as exc:
+    except (PyJWTError, httpx.HTTPError, KeyError) as exc:
         # Keycloak verifier couldn't authenticate this token. Before giving up,
         # try the Brigade JWT verifier — it covers a different issuer + audience
         # + signing scheme. A success here returns a clean AuthContext; a miss

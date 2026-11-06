@@ -20,13 +20,14 @@ Four required cases per spec:
 from __future__ import annotations
 
 import contextlib
+import json
 import time
 from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+import jwt
 from fastapi import HTTPException
-from jose import jwt
 
 import app.auth as auth_module
 import app.tenancy as tenancy_module
@@ -54,7 +55,6 @@ TEST_WORKSPACE_SLUG = "test-workspace"
 def _make_keypair():
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
-    from jose.backends.cryptography_backend import CryptographyRSAKey
 
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     private_pem = private_key.private_bytes(
@@ -62,16 +62,9 @@ def _make_keypair():
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     ).decode()
-    public_pem = (
-        private_key.public_key()
-        .public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        .decode()
-    )
-    jwk = CryptographyRSAKey(public_pem, "RS256").to_dict()
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key()))
     jwk["kid"] = KID
+    jwk["alg"] = "RS256"
     jwk["use"] = "sig"
     return private_pem, jwk
 

@@ -21,13 +21,14 @@ workspace existence check + the seam service + the DB session patched.
 from __future__ import annotations
 
 import contextlib
+import json
 import time
 from uuid import uuid4
 
 import httpx
+import jwt
 import pytest
 from fastapi import HTTPException
-from jose import jwt
 
 import app.api.quotes_seam as seam_api
 import app.auth as auth_module
@@ -50,17 +51,14 @@ ENTITY_ID = uuid4()
 def _make_keypair():
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
-    from jose.backends.cryptography_backend import CryptographyRSAKey
 
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     private_pem = private_key.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption(),
     ).decode()
-    public_pem = private_key.public_key().public_bytes(
-        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
-    jwk = CryptographyRSAKey(public_pem, "RS256").to_dict()
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key()))
     jwk["kid"] = KID
+    jwk["alg"] = "RS256"
     jwk["use"] = "sig"
     return private_pem, jwk
 
@@ -92,7 +90,7 @@ def _human_claims(azp: str = CUSTOMER_OPS, **overrides) -> dict:
     now = int(time.time())
     claims = {
         "iss": ISSUER, "sub": str(uuid4()), "azp": azp, "aud": APP_AUD,
-        "preferred_username": "aaron", "email": "aaron@example.invalid", "email_verified": True,
+        "preferred_username": "jordan", "email": "jordan@example.invalid", "email_verified": True,
         "sid": str(uuid4()), "session_state": str(uuid4()),
         "iat": now, "exp": now + 300, "scope": "openid",
     }
