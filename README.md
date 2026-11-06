@@ -21,6 +21,13 @@
 </p>
 <p align="center"><sub>The dashboard, shown with synthetic demo books. All screenshots below use fictional data.</sub></p>
 
+## Watch the demo
+
+<p align="center">
+  <a href="https://unicorncommander.com/products/accounting-ops"><img src="https://unicorncommander.com/media/products/accounting-ops/demo-poster.jpg" width="100%" alt="Accounting-Ops demo video: click to watch on the product page"></a>
+</p>
+<p align="center"><sub>55 seconds on a synthetic company's books. Narrated in a machine voice rendered on our own hardware. <a href="https://unicorncommander.com/products/accounting-ops">Watch it on the product page</a>.</sub></p>
+
 ## What is Accounting-Ops?
 
 Accounting-Ops is an open-source accounting application for business owners, bookkeepers,
