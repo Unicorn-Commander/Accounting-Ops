@@ -49,13 +49,49 @@ async def test_manifest_has_all_top_level_fields():
     assert m["$schema"].endswith("mcps-schema-v1.json")
     assert m["name"] == "Accounting-Ops"
     assert m["version"]
-    assert m["mcp_endpoint"].endswith("/mcp")
+    assert m["mcp_endpoint"].endswith("/mcp/")
     assert m["tool_namespace"] == "account"
     assert m["contact"] == "support@magicunicorn.dev"
     assert m["resources"] == []
     assert m["prompts"] == []
     assert isinstance(m["tools"], list)
     assert len(m["tools"]) > 0
+
+
+async def test_manifest_mcp_endpoint_equals_prm_resource(monkeypatch):
+    """Brigade mcp_endpoint is the resource string the slash-form PRM names.
+
+    That document is what the /mcp/ 401 points at. Both spellings are …/mcp/.
+    """
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://accounting-ops.example.com")
+    from fastapi import FastAPI
+
+    from app.config import get_settings
+    from app.oauth_discovery import router as oauth_router
+
+    get_settings.cache_clear()
+    discovery._reset_cache_for_tests()
+    app = FastAPI()
+    app.include_router(discovery.router)
+    app.include_router(oauth_router)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as c:
+            manifest_response = await c.get("/.well-known/mcps.json")
+            prm_response = await c.get(
+                "/.well-known/oauth-protected-resource/mcp/",
+                follow_redirects=False,
+            )
+        assert manifest_response.status_code == 200
+        assert prm_response.status_code == 200
+        manifest = manifest_response.json()
+        assert manifest["mcp_endpoint"] == prm_response.json()["resource"]
+        assert manifest["mcp_endpoint"] == "https://accounting-ops.example.com/mcp/"
+    finally:
+        get_settings.cache_clear()
+        discovery._reset_cache_for_tests()
 
 
 async def test_manifest_auth_block():

@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import APIRouter
 
 from app.config import get_settings
+from app.oauth_discovery import canonical_mcp_url
 
 _log = logging.getLogger("acctops.discovery")
 
@@ -282,11 +283,17 @@ async def _build_manifest() -> dict[str, Any]:
     tools_out.sort(key=lambda t: t["name"])
 
     base = settings.public_base_url.rstrip("/")
+    # One spelling with the protected-resource metadata: …/mcp/.
+    # canonical_mcp_url() is that string once the helper always returns it.
+    # Until then the helper's default is the bare path, so add the slash.
+    mcp_endpoint = canonical_mcp_url()
+    if not mcp_endpoint.endswith("/"):
+        mcp_endpoint = f"{mcp_endpoint}/"
     return {
         "$schema": "https://brigade.unicorncommander.ai/.well-known/mcps-schema-v1.json",
         "name": "Accounting-Ops",
         "version": "0.1.0",
-        "mcp_endpoint": f"{base}/mcp",
+        "mcp_endpoint": mcp_endpoint,
         "tool_namespace": "account",
         "auth": {
             "type": "pat",
