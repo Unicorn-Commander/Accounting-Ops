@@ -12,7 +12,7 @@
     "test:journal-review": "tsx --tsconfig tests/tsconfig.smoke.json tests/journal-proposal.smoke.tsx && tsx --tsconfig tests/tsconfig.smoke.json tests/scoped-activity.smoke.tsx"
   },
   "dependencies": {
-    "@auth/core": "^0.38.0",
+    "@auth/core": "0.41.3",
     "@radix-ui/react-collapsible": "^1.1.1",
     "@radix-ui/react-dialog": "^1.1.2",
     "@radix-ui/react-slot": "^1.1.0",
