@@ -30,6 +30,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+import jwt
 import pytest
 from fastapi import HTTPException
 
@@ -234,16 +235,14 @@ def test_authcontext_default_denies_autoprovision():
 
 def test_local_mode_context_may_autoprovision(monkeypatch):
     """CE self-host: the single admin still auto-provisions on first request."""
-    from jose import jwt as jose_jwt
-
-    secret = "unit-test-local-secret"
+    secret = "unit-test-local-secret-" + "x" * 9
     settings = SimpleNamespace(
         is_local_auth=True,
         local_auth_secret=secret,
         accepted_audience="accounting-ops",
     )
     monkeypatch.setattr(auth_mod, "get_settings", lambda: settings)
-    token = jose_jwt.encode(
+    token = jwt.encode(
         {
             "sub": "admin",
             "uc_uid": "admin",
@@ -258,3 +257,54 @@ def test_local_mode_context_may_autoprovision(monkeypatch):
     assert ctx is not None
     assert ctx.uc_uid == "admin"
     assert ctx.may_autoprovision is True
+
+
+@pytest.mark.parametrize(
+    ("claim", "value"),
+    [
+        ("iss", "https://wrong.example"),
+        ("aud", "wrong-audience"),
+        ("exp", datetime.now(timezone.utc) - timedelta(minutes=5)),
+    ],
+    ids=["wrong-issuer", "wrong-audience", "expired"],
+)
+def test_local_mode_rejects_invalid_claims(monkeypatch, claim, value):
+    secret = "unit-test-local-secret-" + "x" * 9
+    settings = SimpleNamespace(
+        is_local_auth=True,
+        local_auth_secret=secret,
+        accepted_audience="accounting-ops",
+    )
+    monkeypatch.setattr(auth_mod, "get_settings", lambda: settings)
+    claims = {
+        "sub": "admin",
+        "uc_uid": "admin",
+        "iss": auth_mod._LOCAL_TOKEN_ISSUER,
+        "aud": "accounting-ops",
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
+    }
+    claims[claim] = value
+    token = jwt.encode(claims, secret, algorithm="HS256")
+    assert auth_mod._try_authenticate_local(token) is None
+
+
+def test_local_mode_rejects_alg_none(monkeypatch):
+    secret = "unit-test-local-secret-" + "x" * 9
+    settings = SimpleNamespace(
+        is_local_auth=True,
+        local_auth_secret=secret,
+        accepted_audience="accounting-ops",
+    )
+    monkeypatch.setattr(auth_mod, "get_settings", lambda: settings)
+    token = jwt.encode(
+        {
+            "sub": "admin",
+            "uc_uid": "admin",
+            "iss": auth_mod._LOCAL_TOKEN_ISSUER,
+            "aud": "accounting-ops",
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
+        },
+        None,
+        algorithm="none",
+    )
+    assert auth_mod._try_authenticate_local(token) is None

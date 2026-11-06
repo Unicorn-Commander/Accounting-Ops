@@ -15,11 +15,15 @@ network.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import time
 
+import jwt
 import pytest
 from fastapi import HTTPException
-from jose import jwt
 
 import app.auth as auth
 from app.auth import authenticate_token
@@ -41,7 +45,6 @@ KID = "test-signing-kid"
 def _make_keypair():
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
-    from jose.backends.cryptography_backend import CryptographyRSAKey
 
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     private_pem = private_key.private_bytes(
@@ -57,22 +60,36 @@ def _make_keypair():
         )
         .decode()
     )
-    jwk = CryptographyRSAKey(public_pem, "RS256").to_dict()
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key()))
     jwk["kid"] = KID
+    jwk["alg"] = "RS256"
     jwk["use"] = "sig"
-    return private_pem, jwk
+    return private_pem, public_pem, jwk
 
 
-_PRIVATE_PEM, _PUBLIC_JWK = _make_keypair()
+_PRIVATE_PEM, _PUBLIC_PEM, _PUBLIC_JWK = _make_keypair()
 # A SECOND keypair whose public half is NOT in the served JWKS — used to mint a
 # token with a valid structure but a signature our key set can't verify.
-_OTHER_PRIVATE_PEM, _ = _make_keypair()
+_OTHER_PRIVATE_PEM, _, _ = _make_keypair()
 
 
 def _mint(private_pem: str, claims: dict, *, kid: str = KID) -> str:
     return jwt.encode(
         claims, private_pem, algorithm="RS256", headers={"kid": kid}
     )
+
+
+def _mint_hs256_with_public_key(claims: dict) -> str:
+    """Build the algorithm-confusion token that the verifier must reject."""
+    header = {"alg": "HS256", "kid": KID, "typ": "JWT"}
+
+    def _segment(value: dict) -> str:
+        raw = json.dumps(value, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    signing_input = f"{_segment(header)}.{_segment(claims)}".encode()
+    signature = hmac.new(_PUBLIC_PEM.encode(), signing_input, hashlib.sha256).digest()
+    return f"{signing_input.decode()}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode()}"
 
 
 def _base_claims(**overrides) -> dict:
@@ -264,6 +281,22 @@ async def test_expired_token_rejected():
 
 async def test_missing_kid_rejected():
     token = jwt.encode(_base_claims(aud=APP_AUD), _PRIVATE_PEM, algorithm="RS256")
+    with pytest.raises(HTTPException) as exc:
+        await authenticate_token(token)
+    assert exc.value.status_code == 401
+
+
+async def test_alg_none_rejected():
+    token = jwt.encode(
+        _base_claims(aud=APP_AUD), None, algorithm="none", headers={"kid": KID}
+    )
+    with pytest.raises(HTTPException) as exc:
+        await authenticate_token(token)
+    assert exc.value.status_code == 401
+
+
+async def test_hs256_with_public_key_rejected():
+    token = _mint_hs256_with_public_key(_base_claims(aud=APP_AUD))
     with pytest.raises(HTTPException) as exc:
         await authenticate_token(token)
     assert exc.value.status_code == 401

@@ -39,18 +39,21 @@ Rate limit:
 """
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import json
 import logging
 import os
 import time
 from typing import Any
 
 import httpx
-
-from app.config import get_settings
+import jwt
+from jwt.exceptions import (
+    ExpiredSignatureError,
+    InvalidAudienceError,
+    InvalidIssuerError,
+    InvalidSignatureError,
+    MissingRequiredClaimError,
+    PyJWTError,
+)
 
 _log = logging.getLogger("acctops.brigade_jwt")
 
@@ -66,7 +69,7 @@ _jwks_cache: dict[str, Any] = {"keys": None, "fetched_at": 0.0}
 _ACCEPTED_ALGS = frozenset({"EdDSA", "RS256"})
 
 # Clock skew tolerance (seconds). Keep modest — same order of magnitude as the
-# Keycloak path's implicit jose default.
+# Keycloak path's explicit PyJWT clock-skew policy.
 _CLOCK_SKEW_SEC = 30
 
 
@@ -140,54 +143,6 @@ def _reset_cache_for_tests() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Base64url + JWT parse helpers
-# ---------------------------------------------------------------------------
-
-
-def _b64url_decode(value: str) -> bytes:
-    pad = "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode(value + pad)
-
-
-def _b64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def _split_jwt(token: str) -> tuple[str, str, str]:
-    """Return (header_b64, payload_b64, signature_b64); raise ValueError on shape."""
-    if not isinstance(token, str):
-        raise ValueError("token must be str")
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise ValueError("JWT must have three segments")
-    if not all(parts):
-        raise ValueError("JWT segments must be non-empty")
-    return parts[0], parts[1], parts[2]
-
-
-def _decode_header(header_b64: str) -> dict[str, Any]:
-    try:
-        raw = _b64url_decode(header_b64)
-        header = json.loads(raw)
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid JWT header: {exc}") from exc
-    if not isinstance(header, dict):
-        raise ValueError("JWT header must be a JSON object")
-    return header
-
-
-def _decode_payload(payload_b64: str) -> dict[str, Any]:
-    try:
-        raw = _b64url_decode(payload_b64)
-        payload = json.loads(raw)
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid JWT payload: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("JWT payload must be a JSON object")
-    return payload
-
-
-# ---------------------------------------------------------------------------
 # Key material loading (from a JWK)
 # ---------------------------------------------------------------------------
 
@@ -195,73 +150,12 @@ def _decode_payload(payload_b64: str) -> dict[str, Any]:
 def _load_jwk_for_alg(jwk: dict[str, Any], alg: str):
     """Return a verifying key object for ``alg`` from a JWK dict.
 
-    Validates the JWK's ``kty`` matches the algorithm family. Returns an object
-    consumed by ``_verify_signature`` (ed25519: cryptography Ed25519PublicKey;
-    RS256: jose JWK / cryptography RSA public key).
+    PyJWT validates the JWK's key type against the requested algorithm and
+    returns the cryptography public-key object used for verification.
     """
-    kty = jwk.get("kty")
-    if alg == "EdDSA":
-        # OKP / Ed25519. RFC 8037.
-        if kty != "OKP":
-            raise ValueError(f"EdDSA requires kty=OKP, got kty={kty!r}")
-        if jwk.get("crv") != "Ed25519":
-            raise ValueError(f"EdDSA requires crv=Ed25519, got crv={jwk.get('crv')!r}")
-        x = jwk.get("x")
-        if not isinstance(x, str):
-            raise ValueError("EdDSA JWK missing 'x' (base64url raw public key)")
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-        raw = _b64url_decode(x)
-        if len(raw) != 32:
-            raise ValueError(f"Ed25519 raw key must be 32 bytes, got {len(raw)}")
-        return Ed25519PublicKey.from_public_bytes(raw)
-    if alg == "RS256":
-        if kty != "RSA":
-            raise ValueError(f"RS256 requires kty=RSA, got kty={kty!r}")
-        # Reuse python-jose's RSA loader (already a dependency, exact same
-        # path the Keycloak verifier uses for RSA tokens).
-        try:
-            from jose.backends.cryptography_backend import CryptographyRSAKey
-        except ImportError as exc:  # pragma: no cover
-            raise RuntimeError("python-jose[cryptography] required for RS256") from exc
-        return CryptographyRSAKey(jwk, "RS256")
-    raise ValueError(f"unsupported alg {alg!r}")
-
-
-# ---------------------------------------------------------------------------
-# Signature verification
-# ---------------------------------------------------------------------------
-
-
-def _verify_signature(
-    alg: str, key: Any, signing_input: bytes, signature: bytes
-) -> bool:
-    """Constant-time-ish signature verification for ``alg``.
-
-    Returns True on success, False on any verification failure. Never raises
-    on a verification miss — caller decides the HTTP status.
-    """
-    if alg == "EdDSA":
-        from cryptography.exceptions import InvalidSignature
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-        if not isinstance(key, Ed25519PublicKey):
-            return False
-        try:
-            key.verify(signature, signing_input)
-            return True
-        except InvalidSignature:
-            return False
-        except Exception:  # pragma: no cover - defensive
-            return False
-    if alg == "RS256":
-        try:
-            # jose JWK objects expose ``verify(message, signature) -> bool``.
-            ok = key.verify(signing_input, signature)
-            return bool(ok)
-        except Exception:  # pragma: no cover - defensive
-            return False
-    return False
+    if alg not in _ACCEPTED_ALGS:
+        raise ValueError(f"unsupported alg {alg!r}")
+    return jwt.PyJWK.from_dict(jwk, algorithm=alg).key
 
 
 # ---------------------------------------------------------------------------
@@ -295,19 +189,14 @@ async def verify_brigade_jwt(token: str) -> dict[str, Any] | None:
         _log.debug("brigade jwt verify: empty/non-string token")
         return None
 
-    # 1. Shape
+    # 1. Header — PyJWT parses the JWT shape without trusting its claims.
     try:
-        header_b64, payload_b64, signature_b64 = _split_jwt(token)
-    except ValueError as exc:
+        header = jwt.get_unverified_header(token)
+    except (PyJWTError, TypeError, ValueError) as exc:
         _log.debug("brigade jwt verify: bad shape: %s", exc)
         return None
 
     # 2. Header — alg allowlist + kid required
-    try:
-        header = _decode_header(header_b64)
-    except ValueError as exc:
-        _log.debug("brigade jwt verify: %s", exc)
-        return None
     alg = header.get("alg")
     if alg not in _ACCEPTED_ALGS:
         _log.debug("brigade jwt verify: alg %r not in allowlist", alg)
@@ -335,52 +224,50 @@ async def verify_brigade_jwt(token: str) -> dict[str, Any] | None:
             _log.debug("brigade jwt verify: unknown kid %r after refresh", kid)
             return None
 
-    # 4. Signature verification
+    # 4. Signature and claim verification. The allowlist is explicit and the
+    # issuer/audience checks remain enforced by PyJWT. Expiry, nbf, and iat are
+    # checked below to preserve the old numeric-type and clock-skew decisions.
     try:
         verifying_key = _load_jwk_for_alg(key_jwk, alg)
-    except (ValueError, RuntimeError) as exc:
+    except (PyJWTError, TypeError, ValueError) as exc:
         _log.debug("brigade jwt verify: bad JWK for alg %r: %s", alg, exc)
         return None
+
     try:
-        signature = _b64url_decode(signature_b64)
-    except ValueError as exc:
-        _log.debug("brigade jwt verify: bad signature encoding: %s", exc)
-        return None
-    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
-    if not _verify_signature(alg, verifying_key, signing_input, signature):
+        claims = jwt.decode(
+            token,
+            verifying_key,
+            algorithms=sorted(_ACCEPTED_ALGS),
+            issuer=_brigade_trusted_issuer(),
+            audience=_brigade_expected_audience(),
+            leeway=_CLOCK_SKEW_SEC,
+            options={
+                "verify_exp": False,
+                "verify_iat": False,
+                "verify_nbf": False,
+            },
+        )
+    except InvalidSignatureError:
         _log.info("brigade jwt verify: signature verification FAILED for kid=%r", kid)
         return None
-
-    # 5. Claims — only after the signature is good.
-    try:
-        claims = _decode_payload(payload_b64)
-    except ValueError as exc:
+    except InvalidIssuerError:
+        _log.info("brigade jwt verify: issuer mismatch")
+        return None
+    except InvalidAudienceError:
+        _log.info("brigade jwt verify: audience mismatch")
+        return None
+    except ExpiredSignatureError:
+        _log.info("brigade jwt verify: token expired")
+        return None
+    except MissingRequiredClaimError as exc:
+        _log.debug("brigade jwt verify: %s", exc)
+        return None
+    except PyJWTError as exc:
         _log.debug("brigade jwt verify: %s", exc)
         return None
 
-    # iss
-    expected_iss = _brigade_trusted_issuer()
-    if claims.get("iss") != expected_iss:
-        _log.info(
-            "brigade jwt verify: issuer mismatch (got %r want %r)",
-            claims.get("iss"),
-            expected_iss,
-        )
-        return None
-
-    # aud — string OR list-of-strings. MUST include the configured audience.
-    expected_aud = _brigade_expected_audience()
-    aud = claims.get("aud")
-    aud_list = aud if isinstance(aud, list) else [aud] if aud else []
-    if expected_aud not in aud_list:
-        _log.info(
-            "brigade jwt verify: audience mismatch (got %r want %r)",
-            aud,
-            expected_aud,
-        )
-        return None
-
-    # Time-based claims (with small skew tolerance).
+    # Time-based claims not delegated to PyJWT so malformed values keep the
+    # previous fail-closed/fail-open decisions exactly as documented above.
     now = time.time()
     exp = claims.get("exp")
     if not isinstance(exp, (int, float)):
