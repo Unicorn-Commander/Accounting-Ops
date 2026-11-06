@@ -23,11 +23,13 @@ agent rather than leaking a Starlette ``HTTPException`` through the MCP channel.
 """
 from __future__ import annotations
 
+import logging
 from contextvars import ContextVar
 from uuid import UUID
 
 from fastapi import Depends, HTTPException
 from starlette.datastructures import Headers
+from starlette.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
 from app.auth import AuthContext, authenticate_token, validate_bearer_token
@@ -47,6 +49,7 @@ from app.oauth_discovery import mcp_unauthorized_response
 _current_auth: ContextVar[AuthContext | None] = ContextVar(
     "mcp_current_auth", default=None
 )
+_log = logging.getLogger("acctops.mcp_auth")
 
 
 def current_auth() -> AuthContext | None:
@@ -118,6 +121,27 @@ class MCPAuthMiddleware:
             await self._deny(scope, receive, send, token_present=True)
             return
 
+        # The MCP transport bypasses FastAPI dependencies, so this is the
+        # authenticated first-call hook for entitled users. It is a no-op when
+        # AO_ENTITLED_PROVISIONING is off, when the caller already has a
+        # workspace, or when Ops-Center returns a definitive no-entitlement.
+        try:
+            from app.api.onboarding import (
+                ensure_entitled_workspace,
+            )
+
+            provisioning = await ensure_entitled_workspace(ctx, token)
+        except Exception as exc:  # noqa: BLE001 - never crash the MCP gate
+            _log.warning(
+                "entitled workspace provisioning failed before MCP call (%s)",
+                exc.__class__.__name__,
+            )
+            await self._provisioning_unavailable(scope, receive, send)
+            return
+        if provisioning.state == "unavailable":
+            await self._provisioning_unavailable(scope, receive, send)
+            return
+
         reset = _current_auth.set(ctx)
         try:
             await self.app(scope, receive, send)
@@ -157,6 +181,19 @@ class MCPAuthMiddleware:
         # (…/mcp/), not the spelling of this request. The mount-root adapter
         # rewrites `path`, so the request path is not a safe signal anyway.
         response = mcp_unauthorized_response(token_present=token_present)
+        await response(scope, receive, send)
+
+    @staticmethod
+    async def _provisioning_unavailable(scope, receive, send) -> None:
+        from app.api.onboarding import ENTITLED_PROVISIONING_UNAVAILABLE_DETAIL
+
+        response = JSONResponse(
+            {
+                "error": "entitled_workspace_unavailable",
+                "detail": ENTITLED_PROVISIONING_UNAVAILABLE_DETAIL,
+            },
+            status_code=503,
+        )
         await response(scope, receive, send)
 
 

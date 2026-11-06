@@ -10,11 +10,16 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import text
 
 from app.auth import AuthContext, validate_bearer_token
+from app.api.onboarding import (
+    ENTITLED_PROVISIONING_UNAVAILABLE_DETAIL,
+    ensure_entitled_workspace,
+)
 from app.db import SessionLocal
+from app.security.entitlements import bearer_from_header
 
 # Re-exported for the existing importers (app.tools.connectors,
 # app.tools.setup_assistant, app.api.clients). This module used to carry a
@@ -36,6 +41,7 @@ router = APIRouter(tags=["workspaces"])
 
 @router.get("/api/me/workspaces")
 async def list_my_workspaces(
+    request: Request,
     auth: AuthContext = Depends(validate_bearer_token),
 ) -> list[dict[str, Any]]:
     """Return all workspaces the authenticated user has a membership in.
@@ -52,6 +58,16 @@ async def list_my_workspaces(
     WorkspaceSwitcher); `role_canonical` is added additively so federation
     consumers get the canonical role without breaking the existing UI contract.
     """
+    entitled = await ensure_entitled_workspace(
+        auth,
+        bearer_from_header(request.headers.get("authorization")),
+    )
+    if entitled.state == "unavailable":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=entitled.detail or ENTITLED_PROVISIONING_UNAVAILABLE_DETAIL,
+        )
+
     user_id = await _ensure_user_account(
         auth.uc_uid, autoprovision=auth.may_autoprovision
     )
