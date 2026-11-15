@@ -1470,3 +1470,92 @@ async def test_work_inbox_excludes_inactive_books_and_totals(inactive_membership
                 await session.execute(text("DELETE FROM tax_review_queue WHERE id = :id"), {"id": tax_review})
                 await session.execute(text("DELETE FROM approval_queue WHERE id = :id"), {"id": approval})
                 await session.execute(text("DELETE FROM entity WHERE id = :id"), {"id": entity})
+
+
+async def test_a_paused_owner_does_not_count_when_the_last_active_owner_is_removed(pg_flag_off):
+    pg = pg_flag_off
+    wid = pg.workspaces[0]
+    owner_uid, _ = await pg.person()
+    await pg.seat(wid, owner_uid, role="owner")
+    paused_uid, _ = await pg.person()
+    await pg.seat(wid, paused_uid, status="suspended", role="owner")
+    # An administrator who is not the target: the refusal below is the owner count, not "yourself".
+    actor = tenancy.WorkspaceContext(
+        wid, "fictional", "owner", "another-owner@example.com", None, None, False
+    )
+    with pytest.raises(HTTPException) as exc:
+        await members.remove_member(wid, owner_uid, actor)
+    assert exc.value.status_code == 400 and "last owner" in exc.value.detail
+    assert await _membership(pg, wid, owner_uid) == ("owner", "active")
+    # With a second ACTIVE owner the same removal goes through.
+    second_uid, _ = await pg.person()
+    await pg.seat(wid, second_uid, role="owner")
+    await members.remove_member(wid, owner_uid, actor)
+    assert await _membership(pg, wid, owner_uid) == ("owner", "revoked")
+
+
+async def test_a_removal_cancels_the_invitation_that_person_had_not_accepted(pg_flag_off, monkeypatch):
+    from starlette.requests import Request
+
+    pg = pg_flag_off
+    wid, other_wid = pg.workspaces[0], pg.workspaces[1]
+    uid, subject = await pg.person()
+    await pg.sql("UPDATE public.user_account SET email = 'Robin@Example.com' WHERE id = :u", u=uid)
+    await pg.seat(wid, uid, role="accountant")
+    owner, owner_subject = await pg.person()
+    await pg.seat(wid, owner, role="owner")
+    # Three invitations nobody accepted: the removed person's for this workspace, the same
+    # person's for another workspace, and somebody else's for this one. Only the first goes.
+    token = "fictional-invitation-" + uuid4().hex
+    mine, elsewhere, somebody = uuid4(), uuid4(), uuid4()
+    for invitation, workspace_id, email, secret in (
+        (mine, wid, "robin@example.com", token),
+        (elsewhere, other_wid, "robin@example.com", "fictional-invitation-" + uuid4().hex),
+        (somebody, wid, "sam@example.com", "fictional-invitation-" + uuid4().hex),
+    ):
+        await pg.sql(
+            """
+            INSERT INTO public.workspace_invitation
+                (id, workspace_id, email, role, token_hash, expires_at, created_by_uc_uid)
+            VALUES (:id, :w, :email, CAST('admin' AS workspace_role), :hash,
+                    now() + interval '1 day', 'owner@example.com')
+            """,
+            id=invitation, w=workspace_id, email=email,
+            hash=hashlib.sha256(secret.encode()).hexdigest(),
+        )
+
+    async def cancelled(invitation):
+        return (await pg.sql(
+            "SELECT cancelled_at IS NOT NULL FROM public.workspace_invitation WHERE id = :id",
+            id=invitation,
+        )).scalar_one()
+
+    actor = tenancy.WorkspaceContext(wid, "fictional", "owner", owner_subject, None, None, False)
+    await members.remove_member(wid, uid, actor)
+    assert [await cancelled(mine), await cancelled(elsewhere), await cancelled(somebody)] == [
+        True, False, False,
+    ]
+    audits = (await pg.sql(
+        "SELECT invitation_id, target_user_id, actor_uc_uid FROM public.membership_audit "
+        "WHERE workspace_id = :w AND action = 'invitation_cancel'", w=wid,
+    )).all()
+    assert [(str(row[0]), str(row[1]), row[2]) for row in audits] == [
+        (str(mine), str(uid), owner_subject)
+    ]
+    # The old link does not bring the removed person back.
+    caller = auth.AuthContext(
+        subject, None, (), {"email": "robin@example.com", "email_verified": True}
+    )
+    monkeypatch.setattr(auth, "authenticate_token", AsyncMock(return_value=caller))
+    monkeypatch.setattr(members, "_token_email_verified", lambda _: True)
+    request = Request({"type": "http", "headers": [(b"authorization", b"Bearer fictional")]})
+    with pytest.raises(HTTPException) as exc:
+        await members.accept_invitation(request=request, token=token)
+    assert exc.value.status_code == 410
+    assert await _membership(pg, wid, uid) == ("accountant", "revoked")
+    # A second removal (the control plane's, say) finds nothing left to cancel and adds no receipt for it.
+    await member_removal.remove_person(wid, subject=subject)
+    assert len((await pg.sql(
+        "SELECT 1 FROM public.membership_audit WHERE workspace_id = :w AND action = 'invitation_cancel'",
+        w=wid,
+    )).all()) == 1
