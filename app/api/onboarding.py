@@ -300,14 +300,19 @@ async def ensure_entitled_workspace(
             "unavailable", detail=ENTITLED_PROVISIONING_UNAVAILABLE_DETAIL
         )
 
+    # Who gets a seat from the organization's member list is ONE rule under both
+    # switches (app.api.provisioning.role_after): the organization's owner and its
+    # admin, and an ordinary member only when PROVISIONING_MEMBER_ROLE names the
+    # role they start with. Nothing is created for anyone else: these are a
+    # company's books, and an owner lets the others in by invitation.
+    from app.api.provisioning import role_after
+
+    role = role_after(entitlement.org_role or "", None, None)
+    if role is None:
+        return EntitledProvisioningResult("not_entitled")
     await _backfill_user_profile(user_id, auth.claims)
     workspace_id = _workspace_id_for_org(entitlement.org_id)
     display_name = _org_workspace_display_name(entitlement.org_id, entitlement.org_name)
-    role = (
-        "owner"
-        if (entitlement.org_role or "").strip().lower() == "owner"
-        else "accountant"
-    )
     await _provision_workspace_with_membership(
         user_id=user_id,
         workspace_id=workspace_id,

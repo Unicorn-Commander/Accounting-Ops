@@ -1384,18 +1384,40 @@ async def test_flag_off_entitled_signin_preserves_nonactive_membership(pg_flag_o
     assert exc.value.status_code == 403
 
 
-async def test_flag_off_entitled_first_join_still_works(pg_flag_off, monkeypatch):
+@pytest.mark.parametrize(
+    "org_role,setting,seated",
+    [
+        ("owner", None, "owner"),
+        ("admin", None, "admin"),
+        # An ordinary member of the organization is not let into its books by this path...
+        ("member", None, None),
+        # ...unless the deployment names the role they start with.
+        ("member", "viewer", "viewer"),
+    ],
+)
+async def test_flag_off_entitled_first_join_follows_the_one_seating_rule(
+    pg_flag_off, monkeypatch, org_role, setting, seated
+):
     pg = pg_flag_off
     monkeypatch.setenv("AO_ENTITLED_PROVISIONING", "1")
+    if setting is not None:
+        monkeypatch.setenv("PROVISIONING_MEMBER_ROLE", setting)
     wid = pg.workspaces[0]
     uid, subject = await pg.person()
-    client = SimpleNamespace(fetch=AsyncMock(return_value=_answering(str(wid), "member")))
+    client = SimpleNamespace(fetch=AsyncMock(return_value=_answering(str(wid), org_role)))
     result = await onboarding.ensure_entitled_workspace(
         _signed_in(subject), "fictional", entitlement_client=client,
     )
+    if seated is None:
+        assert result.state == "not_entitled" and result.workspace_id is None
+        assert await _membership(pg, wid, uid) is None
+        with pytest.raises(HTTPException) as exc:
+            await tenancy._resolve_membership(subject, wid)
+        assert exc.value.status_code == 403
+        return
     assert result.workspace_id == wid
-    assert await _membership(pg, wid, uid) == ("accountant", "active")
-    assert (await tenancy._resolve_membership(subject, wid))[0] == "accountant"
+    assert await _membership(pg, wid, uid) == (seated, "active")
+    assert (await tenancy._resolve_membership(subject, wid))[0] == seated
 
 
 async def test_work_inbox_excludes_inactive_books_and_totals(inactive_memberships):

@@ -139,26 +139,68 @@ async def test_entitled_first_call_provisions_once_and_second_reuses(
     assert server.authorization_headers == [f"Bearer {_BEARER}"]
 
 
-async def test_entitled_member_uses_fallback_name_and_accountant_role(
+async def test_entitled_admin_uses_fallback_name_and_is_seated_as_admin(
     fake_ops_client, in_memory_provisioning
 ):
     server, client = fake_ops_client
     server.payload = {
         "org_id": _ORG_ID,
         "tier": "founder_workspace",
-        "role": "member",
+        "role": "admin",
         "entitlements": ["accounting_ops_access"],
     }
     _user_id, workspaces, memberships, _provision_calls = in_memory_provisioning
 
     result = await onboarding.ensure_entitled_workspace(
-        _auth("fictional-member"), _BEARER, entitlement_client=client
+        _auth("fictional-admin"), _BEARER, entitlement_client=client
     )
 
     workspace_id = UUID(_ORG_ID)
     assert result.display_name == f"Workspace {_ORG_ID[:8]}"
     assert workspaces[workspace_id]["display_name"] == f"Workspace {_ORG_ID[:8]}"
-    assert memberships[(next(iter(memberships))[0], workspace_id)] == "accountant"
+    assert memberships[(next(iter(memberships))[0], workspace_id)] == "admin"
+
+
+@pytest.mark.parametrize(
+    "org_role,setting,seated",
+    [
+        # Being on the organization's member list is not a seat in its books...
+        ("member", None, None),
+        ("billing_admin", None, None),
+        ("manager", "", None),
+        ("member", "owner", None),  # ...and the setting cannot name an administering role.
+        # ...unless the deployment names the role an ordinary member starts with.
+        ("member", "viewer", "viewer"),
+        ("member", " Accountant ", "accountant"),
+    ],
+)
+async def test_an_ordinary_member_gets_no_seat_unless_the_setting_names_a_role(
+    fake_ops_client, in_memory_provisioning, monkeypatch, org_role, setting, seated
+):
+    server, client = fake_ops_client
+    server.payload = {
+        "org_id": _ORG_ID,
+        "tier": "founder_workspace",
+        "role": org_role,
+        "entitlements": ["accounting_ops_access"],
+    }
+    if setting is None:
+        monkeypatch.delenv("PROVISIONING_MEMBER_ROLE", raising=False)
+    else:
+        monkeypatch.setenv("PROVISIONING_MEMBER_ROLE", setting)
+    _user_id, workspaces, memberships, provision_calls = in_memory_provisioning
+
+    result = await onboarding.ensure_entitled_workspace(
+        _auth("fictional-member"), _BEARER, entitlement_client=client
+    )
+
+    if seated is None:
+        # Nothing is created: no workspace for the organization, no membership.
+        assert result.state == "not_entitled" and result.workspace_id is None
+        assert provision_calls == [] and workspaces == {} and memberships == {}
+    else:
+        assert result.state == "provisioned"
+        assert memberships[(next(iter(memberships))[0], UUID(_ORG_ID))] == seated
 
 
 async def test_concurrent_entitled_first_calls_converge_on_one_workspace(
