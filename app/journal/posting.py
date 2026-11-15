@@ -25,7 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.journal.hash_chain import GENESIS_HASH, compute_hash, get_last_chain_hash
+from app.journal.hash_chain import compute_hash, get_last_chain_hash
 from app.journal.materiality import MaterialityVerdict, evaluate, materiality_tier
 
 
@@ -353,7 +353,6 @@ async def _attempt_chain_insert(
     We treat conflicts on ``uq_je_entity_source_external`` as idempotency
     (terminal) and anything else as a chain-advance race (retryable).
     """
-    last_exc: IntegrityError | None = None
     for attempt in range(_MAX_CHAIN_RETRIES):
         prev_hash = await get_last_chain_hash(session, entity_id)
         posted_at = datetime.now(tz=timezone.utc)
@@ -398,7 +397,6 @@ async def _attempt_chain_insert(
                 )
             return None
         except IntegrityError as exc:
-            last_exc = exc
             constraint = _integrity_constraint_name(exc)
             if constraint == "uq_je_entity_source_external":
                 # True idempotency: the other writer's row is already in.
@@ -1137,7 +1135,6 @@ async def _apply_recategorization(
     # be silently treated as idempotent. The reversal+restatement pair is
     # appended atomically inside the savepoint; on a chain-race conflict the
     # whole pair is recomputed against a fresh prev_hash.
-    last_recat_failure: IntegrityError | None = None
     for attempt in range(_MAX_CHAIN_RETRIES):
         try:
             async with session.begin_nested():
@@ -1231,7 +1228,6 @@ async def _apply_recategorization(
             # Success — break out of the retry loop.
             break
         except IntegrityError as exc:
-            last_recat_failure = exc
             constraint = _integrity_constraint_name(exc)
             if constraint == "uq_je_entity_source_external":
                 # The 'reversal:<orig_id>' or 'recat:<orig_id>' source_external_id

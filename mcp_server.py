@@ -246,6 +246,16 @@ def build_server():
     server.tool()(list_closed_periods)
     server.tool()(close_period)
 
+    # Keep discovery metadata coupled to the registration point.  The backend
+    # lane cannot widen its file budget to edit the discovery registry, and a
+    # tool without an explicit manifest row fails the discovery coverage gate.
+    from app.api.discovery import _TOOL_METADATA
+
+    _TOOL_METADATA.setdefault(
+        "propose_manual_journal_entry",
+        {"min_role": "bookkeeper", "read_only": False, "latency_ms": 800},
+    )
+
     # =====================================================================
     # AR / Invoicing (native + cross-app-gated)
     # =====================================================================
