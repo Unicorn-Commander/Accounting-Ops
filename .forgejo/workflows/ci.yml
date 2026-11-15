@@ -84,6 +84,47 @@ jobs:
         run: pytest -v
 
   # ---------------------------------------------------------------------------
+  # Web smoke tier. No app server and no docker. web/package.json already
+  # defines these scripts, and until now they ran only by hand:
+  #   test:smoke           tests/cpa-export.smoke.ts
+  #   test:journal-review  tests/journal-proposal.smoke.tsx
+  #                        tests/scoped-activity.smoke.tsx
+  # A non-zero exit from either script fails this job. Nothing is swallowed
+  # with `|| true`.
+  #
+  # web/package.json has no `engines` field. Node 22 matches web/Dockerfile
+  # (`FROM node:22-slim`) and `@types/node` ^22, and it satisfies Next 15
+  # (`^18.18.0 || ^19.8.0 || >=20`). Same runner rules as the unit job: no
+  # container override, because actions/checkout needs git on the image.
+  # ---------------------------------------------------------------------------
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install web dependencies
+        run: |
+          set -euo pipefail
+          cd web
+          npm ci
+
+      - name: Run web smoke tests
+        run: |
+          set -euo pipefail
+          cd web
+          echo "Node $(node --version), npm $(npm --version)"
+          echo "Running npm run test:smoke (tests/cpa-export.smoke.ts)"
+          npm run test:smoke
+          echo "test:smoke passed"
+          echo "Running npm run test:journal-review (tests/journal-proposal.smoke.tsx, tests/scoped-activity.smoke.tsx)"
+          npm run test:journal-review
+          echo "test:journal-review passed"
+
+  # ---------------------------------------------------------------------------
   # Integration tier — builds the images and runs the real pipeline against a
   # live postgres + garage + app stack stood up with docker compose.
   #
