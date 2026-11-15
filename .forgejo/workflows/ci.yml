@@ -181,7 +181,7 @@ jobs:
         # publication or dind NAT hop.
         run: |
           python3 scripts/integration_env.py test -- \
-            -m integration tests/integration/test_db_rls_roles.py -v -rs --junitxml=itest-results.xml
+            -m integration tests/integration/test_db_rls_roles.py tests/integration/test_provisioning_contract_pg.py -v -rs --junitxml=itest-results.xml
           # A skipped module passes green. This suite skips itself when the stack
           # or the runtime role is missing, which is exactly how CI ran 0 RLS
           # tests for months. Fail unless every test executed and passed.

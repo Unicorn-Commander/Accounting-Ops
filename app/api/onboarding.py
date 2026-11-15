@@ -39,6 +39,7 @@ from app.security.entitlements import (
     entitled_provisioning_enabled,
 )
 from app.tenancy import _ensure_user_account
+from app.security.provisioning_token import provisioning_enabled
 
 router = APIRouter(tags=["onboarding"])
 _log = logging.getLogger("acctops.onboarding")
@@ -165,6 +166,8 @@ async def _upsert_workspace_membership(
         f"status = 'active', {role_sql}" if activate_membership else role_sql
     )
 
+    if provisioning_enabled():
+        update_sql += " WHERE workspace_membership.status = 'active'"
     async with SessionLocal() as session:
         async with session.begin():
             await session.execute(
@@ -257,6 +260,10 @@ async def ensure_entitled_workspace(
     The stable workspace id plus the provisioner's idempotent registry insert and
     membership upsert make concurrent first calls converge on one workspace.
     """
+    if provisioning_enabled():
+        from app.api.provisioning import ensure_jit_membership
+
+        return await ensure_jit_membership(auth, bearer, entitlement_client)
     if not _entitled_provisioning_is_eligible(auth, bearer):
         return EntitledProvisioningResult("disabled")
 

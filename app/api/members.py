@@ -194,7 +194,12 @@ async def list_members(
     workspace_id: UUID,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> list[dict[str, Any]]:
-    """Active members of this workspace. Requires ``admin`` role floor."""
+    """Members of this workspace, with ``status`` (active or suspended). Requires ``admin`` role floor.
+
+    A removed membership is kept as a ``revoked`` row (the runtime role has no
+    DELETE on this table, and the control-plane removal relies on the row) and is
+    not a member: it is not listed.
+    """
     require_role(workspace, "admin")
     async with SessionLocal() as session:
         async with session.begin():
@@ -209,6 +214,7 @@ async def list_members(
                             u.email             AS email,
                             u.display_name      AS display_name,
                             m.role::text        AS role,
+                            m.status            AS status,
                             m.entity_scope      AS entity_scope,
                             m.invited_by_uc_uid AS invited_by_uc_uid,
                             m.created_at        AS created_at,
@@ -216,6 +222,7 @@ async def list_members(
                         FROM public.workspace_membership m
                         JOIN public.user_account u ON u.id = m.user_id
                         WHERE m.workspace_id = :wid
+                          AND m.status != 'revoked'
                         ORDER BY m.role, COALESCE(u.email, u.uc_uid)
                         """
                     ),
@@ -290,6 +297,7 @@ async def update_member(
                             FROM public.workspace_membership
                             WHERE workspace_id = :wid
                               AND role IN ('owner', 'client_owner')
+                              AND status != 'revoked'
                             """
                         ),
                         {"wid": str(workspace.workspace_id)},
@@ -354,6 +362,13 @@ async def remove_member(
     The user_account row is preserved (the user may still belong to other
     workspaces).
     """
+    from app.security.provisioning_token import provisioning_enabled
+
+    if provisioning_enabled():
+        from app.security.member_removal import remove_person
+
+        receipt = await remove_person(workspace.workspace_id, user_id=user_id, actor=workspace)
+        return {"ok": True, "removed_user_id": str(user_id), **receipt}
     require_role(workspace, "admin")
 
     async with SessionLocal() as session:
@@ -935,7 +950,7 @@ async def accept_invitation(
                 await session.execute(
                     text(
                         """
-                        SELECT role::text AS role, entity_scope
+                        SELECT role::text AS role, entity_scope, status
                         FROM public.workspace_membership
                         WHERE workspace_id = :wid AND user_id = :uid
                         """
@@ -945,8 +960,41 @@ async def accept_invitation(
             ).first()
 
             import json
+            from app.security.provisioning_token import provisioning_enabled
+
             invite_rank = _ROLE_RANK.get(inv.role, -1)
-            if existing_row is None:
+            if (
+                existing_row is not None
+                and existing_row.status == "revoked"
+                and provisioning_enabled()
+            ):
+                # With the control-plane contract on, removal leaves a revoked row
+                # instead of deleting it. An accepted invitation is an owner's own
+                # decision to let the person in again: the membership starts over
+                # with exactly what the invitation says, as a new one would. For
+                # the audit row below, a removed membership ranks under every role.
+                existing_rank = -1
+                await session.execute(
+                    text(
+                        """
+                        UPDATE public.workspace_membership
+                           SET role = CAST(:role AS workspace_role),
+                               entity_scope = CAST(:scope AS jsonb),
+                               status = 'active',
+                               invited_by_uc_uid = :inv_by
+                         WHERE workspace_id = :wid AND user_id = :uid
+                           AND status = 'revoked'
+                        """
+                    ),
+                    {
+                        "wid": str(inv.workspace_id),
+                        "uid": str(user_id),
+                        "role": inv.role,
+                        "scope": json.dumps(inv.entity_scope) if inv.entity_scope is not None else None,
+                        "inv_by": "invitation",
+                    },
+                )
+            elif existing_row is None:
                 # Brand-new membership.
                 await session.execute(
                     text(

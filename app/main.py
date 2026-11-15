@@ -69,6 +69,7 @@ from app.oauth_discovery import (
     router as oauth_discovery_router,
 )
 from app.rate_limit import RateLimitMiddleware
+from app.security.provisioning_token import provisioning_available
 
 settings = get_settings()
 
@@ -402,3 +403,10 @@ async def me(auth: AuthContext = Depends(validate_bearer_token)) -> dict:
         "agent_id": auth.agent_id,
         "scopes": auth.scopes,
     }
+
+# Disabled routes are absent from the router and OpenAPI, like unknown paths.
+
+if provisioning_available():
+    from app.api.provisioning import router as provisioning_router
+
+    app.include_router(provisioning_router)
