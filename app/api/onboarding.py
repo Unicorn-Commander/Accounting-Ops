@@ -153,11 +153,15 @@ async def _upsert_workspace_membership(
 ) -> None:
     """Attach a user to a workspace without allowing a concurrent demotion."""
     if preserve_existing_role:
+        # Inside ON CONFLICT DO UPDATE an unqualified column is ambiguous between the
+        # stored row and EXCLUDED: PostgreSQL refuses the whole statement, on a first
+        # join too. Name the stored row.
         role_sql = """
             role = CASE
-                WHEN role IN ('owner', 'client_owner', 'admin') THEN role
+                WHEN workspace_membership.role IN ('owner', 'client_owner', 'admin')
+                    THEN workspace_membership.role
                 WHEN EXCLUDED.role = 'owner' THEN EXCLUDED.role
-                ELSE role
+                ELSE workspace_membership.role
             END
         """
     else:
