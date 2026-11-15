@@ -148,7 +148,7 @@ async def _owner_max_scopes(owner_user_id: UUID) -> set[str]:
                         SELECT DISTINCT role::text AS role
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
-                        WHERE m.user_id = :uid AND w.status = 'active'
+                        WHERE m.user_id = :uid AND m.status = 'active' AND w.status = 'active'
                         """
                     ),
                     {"uid": str(owner_user_id)},
@@ -195,7 +195,7 @@ async def _validate_workspace_scope(
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :uid
-                          AND w.status = 'active'
+                          AND m.status = 'active' AND w.status = 'active'
                           AND m.workspace_id = ANY(:ws)
                         """
                     ),
@@ -460,7 +460,7 @@ async def pat_meta(
                             m.role::text AS role
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
-                        WHERE m.user_id = :uid AND w.status = 'active'
+                        WHERE m.user_id = :uid AND m.status = 'active' AND w.status = 'active'
                         ORDER BY w.display_name
                         """
                     ),

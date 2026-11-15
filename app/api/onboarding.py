@@ -83,7 +83,7 @@ async def _first_active_workspace(user_id: uuid.UUID) -> dict[str, Any] | None:
                                w.display_name AS display_name
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
-                        WHERE m.user_id = :uid AND w.status = 'active'
+                        WHERE m.user_id = :uid AND m.status = 'active' AND w.status = 'active'
                         ORDER BY w.display_name
                         LIMIT 1
                         """
@@ -166,8 +166,8 @@ async def _upsert_workspace_membership(
         f"status = 'active', {role_sql}" if activate_membership else role_sql
     )
 
-    if provisioning_enabled():
-        update_sql += " WHERE workspace_membership.status = 'active'"
+    # This upsert cannot undo a removal or pause, regardless of the feature flag.
+    update_sql += " WHERE workspace_membership.status = 'active'"
     async with SessionLocal() as session:
         async with session.begin():
             await session.execute(

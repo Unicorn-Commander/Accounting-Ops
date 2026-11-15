@@ -270,6 +270,7 @@ async def update_member(
                         FROM public.workspace_membership m
                         JOIN public.user_account u ON u.id = m.user_id
                         WHERE m.workspace_id = :wid AND m.user_id = :uid
+                          AND m.status = 'active'
                         """
                     ),
                     {"wid": str(workspace.workspace_id), "uid": str(user_id)},
@@ -297,7 +298,7 @@ async def update_member(
                             FROM public.workspace_membership
                             WHERE workspace_id = :wid
                               AND role IN ('owner', 'client_owner')
-                              AND status != 'revoked'
+                              AND status = 'active'
                             """
                         ),
                         {"wid": str(workspace.workspace_id)},

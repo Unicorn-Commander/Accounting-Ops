@@ -311,7 +311,7 @@ def test_short_secret_warning_is_once_and_does_not_expose_value(monkeypatch, cap
 
 
 @pytest.mark.parametrize("activate", [True, False])
-async def test_paused_upsert_guard_only_when_enabled(monkeypatch, activate):
+async def test_nonactive_upsert_guard_with_either_flag(monkeypatch, activate):
     statements = []
 
     class FakeSession:
@@ -337,8 +337,8 @@ async def test_paused_upsert_guard_only_when_enabled(monkeypatch, activate):
     await onboarding._upsert_workspace_membership(
         uuid4(), uuid4(), "owner", preserve_existing_role=False, activate_membership=activate
     )
-    assert "WHERE workspace_membership.status" not in statements[-1]
-    assert ("status = 'active'" in statements[-1]) is activate
+    assert "WHERE workspace_membership.status = 'active'" in statements[-1]
+    assert ("SET status = 'active'," in statements[-1]) is activate
 
 
 def test_wrong_signature_fails():

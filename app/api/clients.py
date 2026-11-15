@@ -112,7 +112,7 @@ async def list_my_clients(
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :user_id
-                          AND w.status = 'active'
+                          AND m.status = 'active' AND w.status = 'active'
                         ORDER BY m.last_active_at DESC NULLS LAST, w.display_name
                         """
                     ),
@@ -206,7 +206,7 @@ async def cpa_recent_activity(
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :user_id
-                          AND w.status = 'active'
+                          AND m.status = 'active' AND w.status = 'active'
                         """
                     ),
                     {"user_id": user_id},
@@ -355,7 +355,7 @@ async def list_my_clients_triage(
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :user_id
-                          AND w.status = 'active'
+                          AND m.status = 'active' AND w.status = 'active'
                         ORDER BY w.display_name
                         """
                     ),
@@ -746,7 +746,7 @@ async def _caller_account(
                         SELECT DISTINCT m.role::text AS role
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
-                        WHERE m.user_id = :uid AND w.status = 'active'
+                        WHERE m.user_id = :uid AND m.status = 'active' AND w.status = 'active'
                         """
                     ),
                     {"uid": user_id},

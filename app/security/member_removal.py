@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """One transactional removal policy for control-plane and local member deletion."""
 
+import json
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -126,9 +127,9 @@ async def remove_person(
         await session.execute(
             text("""
             INSERT INTO public.membership_audit (
-                workspace_id, actor_uc_uid, action, target_user_id, old_role,
+                workspace_id, actor_uc_uid, action, target_user_id, old_role, old_entity_scope,
                 revoked_pat_count, static_service_token_count, occurred_at
-            ) VALUES (:wid, :actor, 'removal', :uid, :role, :revoked_pat_count,
+            ) VALUES (:wid, :actor, 'removal', :uid, :role, CAST(:scope AS jsonb), :revoked_pat_count,
                       :static_service_token_count, clock_timestamp())
         """),
             {
@@ -136,6 +137,10 @@ async def remove_person(
                 **receipt,
                 "actor": actor.user_uc_uid if actor else "ops-center",
                 "role": member.role if member else None,
+                "scope": (
+                    json.dumps(member.entity_scope)
+                    if member and member.entity_scope is not None else None
+                ),
             },
         )
         return receipt
