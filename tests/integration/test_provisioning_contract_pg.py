@@ -26,10 +26,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app import auth, db, tenancy
-from app.api import members, onboarding, provisioning, workspaces
+from agents.sentinel.checks import pending_invitations
+from app.api import clients, members, onboarding, personal_access_tokens, provisioning, work_inbox, workspaces
 from app.security import member_removal, provisioning_token, uc_api_key
 from app.security.entitlements import EntitlementResult
 from app.security.pat import generate_secret
+from app.workspace_session import workspace_session
 from scripts import provision_workspace as shared
 
 pytestmark = pytest.mark.integration
@@ -167,6 +169,9 @@ async def pg(monkeypatch, stack):
         provisioning_token,
         members,
         workspaces,
+        clients,
+        personal_access_tokens,
+        work_inbox,
     ):
         monkeypatch.setattr(module, "SessionLocal", maker)
     monkeypatch.setattr(shared, "_admin_engine", lambda: owner)
@@ -1058,7 +1063,7 @@ async def _removal_audits(pg, wid):
     return (
         await pg.sql(
             "SELECT target_user_id, actor_uc_uid, old_role, revoked_pat_count, "
-            "static_service_token_count FROM public.membership_audit "
+            "static_service_token_count, old_entity_scope FROM public.membership_audit "
             "WHERE workspace_id = :w AND action = 'removal' ORDER BY occurred_at",
             w=wid,
         )
@@ -1072,6 +1077,12 @@ async def test_flag_off_removal_revokes_row_and_scoped_pat_with_receipt(pg_flag_
     uid, subject = await pg.person()
     await pg.seat(wid, owner, role="owner")
     await pg.seat(wid, uid, role="accountant")
+    scope = [str(uuid4())]
+    await pg.sql(
+        "UPDATE public.workspace_membership SET entity_scope = CAST(:scope AS jsonb) "
+        "WHERE workspace_id = :w AND user_id = :u",
+        scope=json.dumps(scope), w=wid, u=uid,
+    )
     await pg.seat(other, uid)
     scoped, _ = await pg.pat(uid, [wid])
     elsewhere, _ = await pg.pat(uid, [other])
@@ -1093,7 +1104,7 @@ async def test_flag_off_removal_revokes_row_and_scoped_pat_with_receipt(pg_flag_
     assert not await pg.revoked(elsewhere)
     assert not await pg.revoked(unscoped)
     assert [tuple(row) for row in await _removal_audits(pg, wid)] == [
-        (uid, owner_subject, "accountant", 1, 1)
+        (uid, owner_subject, "accountant", 1, 1, scope)
     ]
     assert str(uid) not in {row["user_id"] for row in await members.list_members(wid, actor)}
 
@@ -1194,13 +1205,268 @@ async def test_flag_off_invitation_restarts_revoked_row_with_invited_role_and_sc
 
 @pytest.mark.parametrize("status", ["revoked", "suspended"])
 @pytest.mark.parametrize("activate", [True, False])
-async def test_flag_off_onboarding_upsert_can_reactivate_nonactive_rows(pg_flag_off, status, activate):
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_onboarding_upsert_preserves_nonactive_rows(
+    pg_flag_off, monkeypatch, status, activate, enabled
+):
     pg = pg_flag_off
+    monkeypatch.setenv("PROVISIONING_ENABLED", str(enabled).lower())
     wid = pg.workspaces[0]
     uid, _ = await pg.person()
     await pg.seat(wid, uid, role="accountant", status=status)
     await onboarding._upsert_workspace_membership(
         uid, wid, "viewer", preserve_existing_role=False, activate_membership=activate,
     )
-    # Characterization only: no policy change to onboarding in this fix lane.
-    assert await _membership(pg, wid, uid) == ("viewer", "active" if activate else status)
+    assert await _membership(pg, wid, uid) == ("accountant", status)
+
+
+@pytest.fixture
+async def inactive_memberships(pg_flag_off):
+    """One caller, both retained statuses, and a separate active seat as control."""
+    pg = pg_flag_off
+    revoked, suspended = pg.workspaces
+    uid, subject = await pg.person()
+    await pg.seat(revoked, uid, status="revoked", role="owner")
+    await pg.seat(suspended, uid, status="suspended", role="accountant")
+    # pg.create() is flag-gated; register the active control via the shared provisioner.
+    active = uuid4()
+    pg.workspaces.append(active)
+    await shared.provision_workspace(
+        None, active, "Fictional Active Books", slug=f"fixture-{active}", entities=None,
+    )
+    await pg.seat(active, uid, role="viewer")
+    return SimpleNamespace(
+        pg=pg, uid=uid, subject=subject, auth=_signed_in(subject),
+        revoked=revoked, suspended=suspended, active=active,
+    )
+
+
+@pytest.mark.parametrize("reader", ["list_my_clients", "list_my_clients_triage"])
+async def test_client_lists_exclude_inactive_memberships(inactive_memberships, reader):
+    seats = inactive_memberships
+    result = await getattr(clients, reader)(auth=seats.auth)
+    assert [(w["id"], w["role"]) for w in result["workspaces"]] == [
+        (str(seats.active), "viewer")
+    ]
+    assert result["persona"] == "client"
+
+
+async def test_client_activity_excludes_inactive_memberships(inactive_memberships, monkeypatch):
+    seats = inactive_memberships
+    # Observe real workspace sessions: an empty audit table must not mask an unauthorized read.
+    from contextlib import asynccontextmanager
+
+    opened = []
+
+    @asynccontextmanager
+    async def observed(maker, wid):
+        opened.append(str(wid))
+        async with workspace_session(maker, wid) as session:
+            yield session
+
+    monkeypatch.setattr(clients, "workspace_session", observed)
+    assert await clients.cpa_recent_activity(days=30, auth=seats.auth) == {"items": [], "days": 30}
+    assert opened == [str(seats.active)]
+
+
+async def test_client_roles_exclude_inactive_memberships(inactive_memberships):
+    seats = inactive_memberships
+    uid, _, roles, _ = await clients._caller_account(seats.subject)
+    assert uid == seats.uid
+    assert roles == ["viewer"]
+
+
+async def test_pat_scope_ceiling_excludes_inactive_memberships(inactive_memberships):
+    seats = inactive_memberships
+    assert await personal_access_tokens._owner_max_scopes(seats.uid) == {"accounting:read"}
+    with pytest.raises(HTTPException) as exc:
+        await personal_access_tokens.mint_pat(
+            personal_access_tokens.CreatePATRequest(
+                name="Fictional write key", scopes=["accounting:write"], ttl_days=30,
+            ),
+            auth=seats.auth,
+        )
+    assert exc.value.status_code == 403
+
+
+async def test_pat_workspace_scope_excludes_inactive_memberships(inactive_memberships):
+    seats = inactive_memberships
+    assert await personal_access_tokens._validate_workspace_scope(
+        seats.uid, [str(seats.active)]
+    ) == (seats.active,)
+    for wid in (seats.revoked, seats.suspended):
+        with pytest.raises(HTTPException) as exc:
+            await personal_access_tokens.mint_pat(
+                personal_access_tokens.CreatePATRequest(
+                    name="Fictional removed workspace", scopes=["accounting:read"],
+                    workspace_scope=[str(wid)], ttl_days=30,
+                ),
+                auth=seats.auth,
+            )
+        assert exc.value.status_code == 403
+    assert (await seats.pg.sql(
+        "SELECT count(*) FROM public.personal_access_token WHERE owner_user_id = :u", u=seats.uid,
+    )).scalar_one() == 0
+
+
+async def test_pat_workspace_list_excludes_inactive_memberships(inactive_memberships):
+    seats = inactive_memberships
+    result = await personal_access_tokens.pat_meta(auth=seats.auth)
+    assert [(w["id"], w["role"]) for w in result["workspaces"]] == [
+        (str(seats.active), "viewer")
+    ]
+
+
+async def test_first_workspace_excludes_inactive_memberships(inactive_memberships):
+    seats = inactive_memberships
+    assert (await onboarding._first_active_workspace(seats.uid))["id"] == str(seats.active)
+    await seats.pg.sql(
+        "DELETE FROM public.workspace_membership WHERE workspace_id = :w AND user_id = :u",
+        w=seats.active, u=seats.uid,
+    )
+    assert await onboarding._first_active_workspace(seats.uid) is None
+
+
+async def test_update_member_rejects_inactive_targets(inactive_memberships):
+    seats = inactive_memberships
+    for wid, role, status in (
+        (seats.revoked, "owner", "revoked"),
+        (seats.suspended, "accountant", "suspended"),
+    ):
+        actor = tenancy.WorkspaceContext(wid, "fictional", "owner", "owner@example.com", None, None, False)
+        with pytest.raises(HTTPException) as exc:
+            await members.update_member(wid, seats.uid, members.MemberPatch(role="bookkeeper"), actor)
+        assert exc.value.status_code == 404
+        assert "No such member" in exc.value.detail
+        assert await _membership(seats.pg, wid, seats.uid) == (role, status)
+        assert (await seats.pg.sql(
+            "SELECT count(*) FROM public.membership_audit WHERE workspace_id = :w", w=wid,
+        )).scalar_one() == 0
+
+
+async def test_pending_invitations_counts_only_active_members(pg_flag_off, monkeypatch):
+    pg = pg_flag_off
+    wid = pg.workspaces[0]
+    for status in ("active", "revoked", "suspended"):
+        uid, _ = await pg.person()
+        await pg.seat(wid, uid, status=status, role="accountant")
+    action = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(pending_invitations, "execute_action", action)
+    async with async_sessionmaker(pg.runtime)() as session:
+        ctx = SimpleNamespace(workspace_id=wid, session=session)
+        result = await pending_invitations.run(ctx)
+    assert result["findings"] == 1
+    assert action.await_args.kwargs["details"] == {"admin_like_count": 1}
+
+
+@pytest.mark.parametrize("status", ["revoked", "suspended"])
+async def test_flag_off_entitled_signin_preserves_nonactive_membership(pg_flag_off, monkeypatch, status):
+    pg = pg_flag_off
+    monkeypatch.setenv("AO_ENTITLED_PROVISIONING", "1")
+    wid = pg.workspaces[0]
+    uid, subject = await pg.person()
+    await pg.seat(wid, uid, role="accountant", status=status)
+    before = (await pg.sql(
+        "SELECT * FROM public.workspace_membership WHERE workspace_id = :w AND user_id = :u",
+        w=wid, u=uid,
+    )).one()
+    client = SimpleNamespace(fetch=AsyncMock(return_value=_answering(str(wid), "owner")))
+    await onboarding.ensure_entitled_workspace(_signed_in(subject), "fictional", entitlement_client=client)
+    client.fetch.assert_awaited_once_with("fictional")
+    after = (await pg.sql(
+        "SELECT * FROM public.workspace_membership WHERE workspace_id = :w AND user_id = :u",
+        w=wid, u=uid,
+    )).one()
+    assert tuple(after) == tuple(before)
+    assert await onboarding._first_active_workspace(uid) is None
+    with pytest.raises(HTTPException) as exc:
+        await tenancy._resolve_membership(subject, wid)
+    assert exc.value.status_code == 403
+
+
+async def test_flag_off_entitled_first_join_still_works(pg_flag_off, monkeypatch):
+    pg = pg_flag_off
+    monkeypatch.setenv("AO_ENTITLED_PROVISIONING", "1")
+    wid = pg.workspaces[0]
+    uid, subject = await pg.person()
+    client = SimpleNamespace(fetch=AsyncMock(return_value=_answering(str(wid), "member")))
+    result = await onboarding.ensure_entitled_workspace(
+        _signed_in(subject), "fictional", entitlement_client=client,
+    )
+    assert result.workspace_id == wid
+    assert await _membership(pg, wid, uid) == ("accountant", "active")
+    assert (await tenancy._resolve_membership(subject, wid))[0] == "accountant"
+
+
+async def test_work_inbox_excludes_inactive_books_and_totals(inactive_memberships):
+    seats = inactive_memberships
+    pg = seats.pg
+    owner_maker = async_sessionmaker(pg.owner)
+    seeded = []
+    try:
+        for wid in (seats.active, seats.revoked, seats.suspended):
+            entity, approval, tax_review = uuid4(), uuid4(), uuid4()
+            async with workspace_session(owner_maker, wid) as session:
+                await session.execute(text("""
+                    INSERT INTO entity (id, workspace_id, slug, display_name, kind)
+                    VALUES (:id, :w, 'fictional', 'Fictional Entity', 'c_corp')
+                """), {"id": entity, "w": wid})
+                await session.execute(text("""
+                    INSERT INTO approval_queue (
+                        id, workspace_id, entity_id, subject_type, subject_id,
+                        amount, currency_code, status, reasoning, requested_by_identity, payload
+                    ) VALUES (
+                        :id, :w, :e, 'bank_transaction_import', :subject,
+                        123.45, 'USD', 'pending', 'Fictional pending review', 'alex@example.com',
+                        CAST(:payload AS jsonb)
+                    )
+                """), {
+                    "id": approval, "w": wid, "e": entity, "subject": uuid4(),
+                    "payload": json.dumps({
+                        "payee": "Fictional Vendor", "description": "Fictional expense",
+                        "amount_cents": 12345,
+                    }),
+                })
+                await session.execute(text("""
+                    INSERT INTO tax_review_queue (
+                        id, workspace_id, entity_id, tax_year, item_type, content,
+                        confidence, status, submitter_kind, submitter_id
+                    ) VALUES (
+                        :id, :w, :e, 2025, 'memo', CAST(:content AS jsonb),
+                        'low', 'pending', 'human', 'alex@example.com'
+                    )
+                """), {
+                    "id": tax_review, "w": wid, "e": entity,
+                    "content": json.dumps({"text": "Fictional confidential tax review"}),
+                })
+            seeded.append((wid, entity, approval, tax_review))
+            await pg.seat(wid, seats.uid, role="accountant")
+
+        # Positive control catches missing tables, RLS failures, or swallowed query errors.
+        before = await work_inbox.work_inbox(max_total=100, max_per_workspace=100, auth=seats.auth)
+        assert {item["id"] for item in before["items"]} == {
+            str(item_id) for _, _, approval, tax in seeded for item_id in (approval, tax)
+        }
+        assert before["totals"]["total"] == 6
+        actor = tenancy.WorkspaceContext(
+            seats.revoked, "fictional", "owner", "owner@example.com", None, None, False,
+        )
+        await members.remove_member(seats.revoked, seats.uid, actor)
+        await pg.seat(seats.suspended, seats.uid, role="accountant", status="suspended")
+        after = await work_inbox.work_inbox(max_total=100, max_per_workspace=100, auth=seats.auth)
+        assert {item["workspace_id"] for item in after["items"]} == {str(seats.active)}
+        assert after["totals"] == {
+            "total": 2,
+            "by_item_type": {"approval": 1, "tax_review": 1},
+            "by_workspace": [{
+                "workspace_id": str(seats.active), "display_name": "Fictional Active Books", "count": 2,
+            }],
+        }
+        assert not after["truncated"] and after["dropped"] == 0
+    finally:
+        # Delete only this test's fictional fixtures as the disposable DB owner.
+        for wid, entity, approval, tax_review in seeded:
+            async with workspace_session(owner_maker, wid) as session:
+                await session.execute(text("DELETE FROM tax_review_queue WHERE id = :id"), {"id": tax_review})
+                await session.execute(text("DELETE FROM approval_queue WHERE id = :id"), {"id": approval})
+                await session.execute(text("DELETE FROM entity WHERE id = :id"), {"id": entity})
