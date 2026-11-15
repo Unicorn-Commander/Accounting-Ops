@@ -354,6 +354,13 @@ async def remove_member(
     The user_account row is preserved (the user may still belong to other
     workspaces).
     """
+    from app.security.provisioning_token import provisioning_enabled
+
+    if provisioning_enabled():
+        from app.security.member_removal import remove_person
+
+        receipt = await remove_person(workspace.workspace_id, user_id=user_id, actor=workspace)
+        return {"ok": True, "removed_user_id": str(user_id), **receipt}
     require_role(workspace, "admin")
 
     async with SessionLocal() as session:
