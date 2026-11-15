@@ -19,6 +19,14 @@ import {
 } from "@/components/primitives";
 import { ApprovalActions } from "@/components/approval-actions";
 import { JournalProposalDetails, canReviewJournalProposal } from "@/components/journal-proposal-details";
+import {
+  ManualJournalProposalDetails,
+  decideManualJournalProposal,
+  isManualJournalSubject,
+  withoutManualJournalApprovals,
+  withoutManualJournalClusterReview,
+  withoutManualJournalRecommendations,
+} from "@/components/manual-journal-proposal-details";
 import { BankTxnBatchPanel } from "@/components/bank-txn-batch-panel";
 import { RecommendationsView } from "@/app/approvals/recommendations-view";
 import { ClusterReview } from "@/components/approvals/cluster-review";
@@ -62,26 +70,39 @@ function subjectLabel(a: Approval): string {
   if (a.subject_type === "journal_recategorization") return "Recategorization";
   if (a.subject_type === "compliance_rule") return "Compliance rule";
   if (a.subject_type === "journal_entry_post") return "Journal entry";
+  if (isManualJournalSubject(a.subject_type)) return "Manual journal";
   return a.subject_type;
 }
 
 function ApprovalCard({
   approval,
   workspaceId,
-  canDecide
+  canDecide,
+  actorRole
 }: {
   approval: Approval;
   workspaceId: string;
   canDecide: boolean;
+  actorRole: string;
 }) {
   const p = approval.payload ?? {};
   const tier = (p.materiality_tier ?? "") as "L" | "M" | "H" | "";
   const isRecat = approval.subject_type === "journal_recategorization";
   const isJournal = approval.subject_type === "journal_entry_post";
+  const isManual = isManualJournalSubject(approval.subject_type);
   const journalScopeMatches = p.workspace_id === workspaceId && p.entity_id === approval.entity_id;
-  const journalReviewable = !isJournal || (
+  const journalReviewable = !isManual && (!isJournal || (
     canReviewJournalProposal(p) && journalScopeMatches
-  );
+  ));
+  const manualDecision = isManual
+    ? decideManualJournalProposal({
+        payload: p,
+        workspaceId,
+        entityId: approval.entity_id,
+        actor: { role: actorRole, kind: "human" },
+        mode: "individual",
+      })
+    : null;
 
   return (
     <Card>
@@ -89,9 +110,10 @@ function ApprovalCard({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="inline-flex items-center gap-1.5 text-sm font-semibold">
-              {isRecat ? <FileText size={14} /> : <ShieldCheck size={14} />}
+              {isRecat || isManual ? <FileText size={14} /> : <ShieldCheck size={14} />}
               {subjectLabel(approval)}
             </span>
+            {isManual && <StatusChip tone="pending">Non-cash</StatusChip>}
             {tier && (tier === "L" || tier === "M" || tier === "H") && (
               <MaterialityBadge level={tier} />
             )}
@@ -129,6 +151,13 @@ function ApprovalCard({
             {approval.reasoning}
           </p>
 
+          {isManual && manualDecision && (
+            <ManualJournalProposalDetails
+              payload={p}
+              decision={manualDecision}
+              entityLabel={approval.entity_display_name}
+            />
+          )}
           {isJournal && journalScopeMatches && <JournalProposalDetails payload={p} />}
           {isJournal && !journalScopeMatches &&
             <p role="alert" className="mt-3 text-sm text-ink-secondary">This request's workspace or entity does not match the approval. Review is unavailable.</p>}
@@ -141,10 +170,10 @@ function ApprovalCard({
         </div>
 
         <div className="shrink-0">
-          {journalReviewable && <ApprovalActions
+          {(isManual ? Boolean(manualDecision?.allowed) : journalReviewable) && <ApprovalActions
             workspaceId={workspaceId}
             approvalId={approval.id}
-            canDecide={canDecide}
+            canDecide={isManual ? true : canDecide}
           />}
         </div>
       </div>
@@ -288,7 +317,17 @@ export default async function ApprovalsPage({
 
   const approvals = data?.approvals ?? [];
   const skippedApprovals = skippedData?.approvals ?? [];
-  const skippedCount = skippedData?.total ?? skippedApprovals.length;
+  const manualApprovalIds = new Set(
+    approvals
+      .filter((approval) => isManualJournalSubject(approval.subject_type))
+      .map((approval) => approval.id)
+  );
+  const skippedVisible = withoutManualJournalApprovals(skippedApprovals);
+  const skippedCount = Math.max(
+    0,
+    (skippedData?.total ?? skippedApprovals.length)
+      - (skippedApprovals.length - skippedVisible.length)
+  );
   const canDecide = workspace
     ? ["owner", "admin"].includes(workspace.role)
     : false;
@@ -305,13 +344,20 @@ export default async function ApprovalsPage({
   );
 
   const totalPending = approvals.length;
-  const recCount = recsData?.recommendations.length ?? 0;
-  const recClusters = recsData?.clusters ?? [];
-  const recRows = recsData?.recommendations ?? [];
+  const recView = withoutManualJournalRecommendations(
+    recsData?.recommendations ?? [],
+    recsData?.clusters ?? [],
+    manualApprovalIds
+  );
+  const clustersForReview = clusters
+    ? withoutManualJournalClusterReview(clusters, manualApprovalIds)
+    : null;
+  const recCount = recView.recommendations.length;
 
-  // Review-tab count = number of (cluster + singleton) decisions remaining
-  const reviewCount = clusters
-    ? clusters.clusters.length + clusters.singletons.length
+  // Review-tab count = number of (cluster + singleton) decisions remaining.
+  // Manual journal proposals stay on individual cards, never in this bulk count.
+  const reviewCount = clustersForReview
+    ? clustersForReview.clusters.length + clustersForReview.singletons.length
     : 0;
 
   return (
@@ -402,11 +448,11 @@ export default async function ApprovalsPage({
                   </>
                 }
               />
-            ) : activeTab === "review" && clusters ? (
+            ) : activeTab === "review" && clustersForReview ? (
               /* ---- Cluster cards + singleton swipe (default tab) ---- */
               <>
                 <ClusterReview
-                  data={clusters}
+                  data={clustersForReview}
                   categories={categories}
                   workspaceId={workspace.id}
                   canDecide={canDecide}
@@ -428,6 +474,7 @@ export default async function ApprovalsPage({
                           approval={a}
                           workspaceId={workspace.id}
                           canDecide={canDecide}
+                          actorRole={workspace.role}
                         />
                       ))}
                     </div>
@@ -437,15 +484,15 @@ export default async function ApprovalsPage({
             ) : activeTab === "recommendations" ? (
               /* ---- AI Recommendations tab (legacy view) ---- */
               <RecommendationsView
-                recommendations={recRows}
-                clusters={recClusters}
+                recommendations={recView.recommendations}
+                clusters={recView.clusters}
                 workspaceId={workspace.id}
                 canDecide={canDecide}
               />
             ) : activeTab === "skipped" ? (
               /* ---- Skipped queue (decide later) ---- */
               <SkippedQueue
-                approvals={skippedApprovals}
+                approvals={skippedVisible}
                 workspaceId={workspace.id}
                 canDecide={canDecide}
               />
@@ -493,6 +540,7 @@ export default async function ApprovalsPage({
                           approval={a}
                           workspaceId={workspace.id}
                           canDecide={canDecide}
+                          actorRole={workspace.role}
                         />
                       ))}
                     </div>

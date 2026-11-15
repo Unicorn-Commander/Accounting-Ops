@@ -9,7 +9,7 @@
     "start": "next start -H 0.0.0.0",
     "lint": "next lint",
     "test:smoke": "tsx tests/cpa-export.smoke.ts",
-    "test:journal-review": "tsx --tsconfig tests/tsconfig.smoke.json tests/journal-proposal.smoke.tsx && tsx --tsconfig tests/tsconfig.smoke.json tests/scoped-activity.smoke.tsx"
+    "test:journal-review": "tsx --tsconfig tests/tsconfig.smoke.json tests/journal-proposal.smoke.tsx && tsx --tsconfig tests/tsconfig.smoke.json tests/scoped-activity.smoke.tsx && tsx --tsconfig tests/tsconfig.smoke.json tests/manual-journal-proposal.smoke.tsx"
   },
   "dependencies": {
     "@auth/core": "0.41.3",
