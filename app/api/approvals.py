@@ -178,6 +178,30 @@ class SkipRequest(BaseModel):
     note: str | None = None
 
 
+def _require_manual_proposal_human(auth: AuthContext, workspace: WorkspaceContext) -> None:
+    """Require a verified owner/admin interactive human for manual journals."""
+    if workspace.role not in {"owner", "admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Manual journal proposals require an owner or admin human reviewer",
+        )
+    if (
+        not isinstance(auth, AuthContext)
+        or not auth.may_autoprovision
+        or auth.agent_id is not None
+        or auth.is_trusted_m2m
+        or auth.uc_uid != workspace.user_uc_uid
+        or auth.claims.get("azp") != get_settings().keycloak_client_id
+        or "clientId" in auth.claims
+        or "client_id" in auth.claims
+        or type(auth.claims.get("auth_time")) is not int
+        or auth.claims.get("auth_time", 0) <= 0
+        or not (auth.claims.get("sid") or auth.claims.get("session_state"))
+        or str(auth.claims.get("preferred_username", "")).startswith("service-account-")
+    ):
+        raise HTTPException(status_code=403, detail="Manual journal proposal requires a human session")
+
+
 @router.post("/api/workspaces/{workspace_id}/approvals/{approval_id}/decide")
 async def decide_approval(
     workspace_id: UUID,
@@ -250,6 +274,9 @@ async def decide_approval(
         # Collected inside the transaction; the graph projection runs AFTER the
         # workspace_session below commits (best-effort, never blocks the request).
         applied: dict = {}
+
+        if subject_type == "manual_journal_entry_proposal":
+            _require_manual_proposal_human(auth, workspace)
 
         if subject_type == "journal_entry_post":
             if (not isinstance(auth, AuthContext) or not auth.may_autoprovision
@@ -324,6 +351,20 @@ async def decide_approval(
                 try:
                     applied = await apply_proposal(session, workspace_id=workspace_id,
                         entity_id=entity_id, payload=payload, approving_human=workspace.user_uc_uid)
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+            elif subject_type == "manual_journal_entry_proposal":
+                from app.journal.manual_proposal import apply_manual_proposal
+
+                try:
+                    applied = await apply_manual_proposal(
+                        session,
+                        workspace_id=workspace_id,
+                        entity_id=entity_id,
+                        approval_id=approval_id,
+                        payload=payload,
+                        approving_human=workspace.user_uc_uid,
+                    )
                 except ValueError as exc:
                     raise HTTPException(status_code=409, detail=str(exc)) from exc
             elif subject_type == "bank_transaction_import":
@@ -482,6 +523,31 @@ def _project_approval_decision(
                 amount_cents=int(amt) if amt is not None else 0,
                 effective_date=payload.get("effective_date"),
                 payee=payload.get("payee"),
+            )
+    elif subject_type == "manual_journal_entry_proposal":
+        from app.journal.materiality import MaterialityVerdict, materiality_tier
+        from app.journal.projection import project_journal_entry_posted
+
+        for index, je_id in enumerate(applied.get("journal_entry_ids") or [], start=1):
+            pair = (payload.get("pairs") or [])[index - 1]
+            outcome = PostingOutcome(
+                journal_entry_id=UUID(str(je_id)),
+                materiality=MaterialityVerdict(
+                    outcome="auto_post",
+                    tier=materiality_tier(int(pair["amount_cents"])),
+                    reason="human_approved_manual_journal",
+                ),
+            )
+            project_journal_entry_posted(
+                workspace_id=workspace_id,
+                entity_id=entity_id,
+                outcome=outcome,
+                category="Manual journal",
+                amount_cents=int(pair["amount_cents"]),
+                effective_date=payload.get("effective_date"),
+                source="manual-agent-approved",
+                source_external_id=f"{subject_id}:{index}",
+                payee=None,
             )
     elif subject_type in ("bank_transaction_import", "journal_entry_post"):
         if subject_type == "journal_entry_post":
@@ -825,7 +891,9 @@ async def skip_approval(
         if row is None:
             raise HTTPException(status_code=404, detail="Approval not found")
 
-        if row["subject_type"] == "journal_entry_post":
+        if row["subject_type"] in {
+            "journal_entry_post", "manual_journal_entry_proposal"
+        }:
             raise HTTPException(status_code=409, detail="Journal proposals require explicit individual review")
 
         entity_id = UUID(row["entity_id"])

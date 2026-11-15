@@ -505,7 +505,8 @@ async def bulk_decide(
                 await session.execute(
                     text(
                         """
-                        SELECT ar.approval_id::text AS approval_id, aq.payload
+                        SELECT ar.approval_id::text AS approval_id,
+                               aq.subject_type, aq.payload
                         FROM approval_recommendation ar
                         JOIN approval_queue aq ON aq.id = ar.approval_id
                         WHERE ar.cluster_id = :cid
@@ -525,7 +526,8 @@ async def bulk_decide(
         approval_ids = [
             r["approval_id"]
             for r in cluster_rows
-            if not _payload_flags(r["payload"])
+            if r["subject_type"] != "manual_journal_entry_proposal"
+            and not _payload_flags(r["payload"])
         ]
     else:
         approval_ids = body.approval_ids or []
@@ -584,7 +586,9 @@ async def bulk_decide(
                         "approval_id": aid, "ok": False, "error": "not_found"
                     })
                     continue
-                if row["subject_type"] == "journal_entry_post":
+                if row["subject_type"] in {
+                    "journal_entry_post", "manual_journal_entry_proposal"
+                }:
                     failed += 1
                     results.append({"approval_id": aid, "ok": False,
                         "error": "journal_proposal_requires_individual_review"})
@@ -638,9 +642,47 @@ async def bulk_decide(
             "results": results,
         }
 
+    # Manual journal proposals are never eligible for a bulk decision.  They
+    # require the single-item owner/admin human-session check.
+    ordinary_ids: list[str] = []
+    manual_ids: list[str] = []
+    async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        subject_rows = (
+            await session.execute(
+                text(
+                    "SELECT id::text, subject_type FROM approval_queue "
+                    "WHERE id = ANY(:ids) AND status = 'pending'"
+                ),
+                {"ids": approval_ids},
+            )
+        ).mappings().all()
+    manual_set = {
+        row["id"] for row in subject_rows
+        if row["subject_type"] == "manual_journal_entry_proposal"
+    }
+    for aid in approval_ids:
+        (manual_ids if aid in manual_set else ordinary_ids).append(aid)
+    if manual_ids and not ordinary_ids:
+        return {
+            "ok": True,
+            "decision": decision,
+            "total": len(approval_ids),
+            "approved": 0,
+            "rejected": 0,
+            "failed": len(manual_ids),
+            "results": [
+                {
+                    "approval_id": aid,
+                    "ok": False,
+                    "error": "manual_journal_proposal_requires_individual_review",
+                }
+                for aid in manual_ids
+            ],
+        }
+
     # ---- Build per-item decisions payload ----
     decisions_payload: list[dict[str, Any]] = []
-    for aid in approval_ids:
+    for aid in ordinary_ids:
         item: dict[str, Any] = {
             "approval_id": aid,
             "decision": decision,
@@ -657,6 +699,17 @@ async def bulk_decide(
         decisions=decisions_payload,
         default_note=body.note,
     )
+    if manual_ids:
+        result["total"] += len(manual_ids)
+        result["failed"] += len(manual_ids)
+        result["results"].extend(
+            {
+                "approval_id": aid,
+                "ok": False,
+                "error": "manual_journal_proposal_requires_individual_review",
+            }
+            for aid in manual_ids
+        )
 
     return {
         "ok": True,
