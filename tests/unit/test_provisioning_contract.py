@@ -2,6 +2,7 @@
 # and the Accounting-Ops contributors.
 # SPDX-License-Identifier: Apache-2.0
 """Offline contract checks. Database/lock proofs live in the PostgreSQL suite."""
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -21,21 +22,45 @@ _NOW = 1700000000
 
 
 def claims(**changes):
-    return {"iss": "ops-center", "aud": "accounting-ops", "iat": _NOW,
-            "exp": _NOW + 60, "jti": str(uuid4()), **changes}
+    return {
+        "iss": "ops-center",
+        "aud": "accounting-ops",
+        "iat": _NOW,
+        "exp": _NOW + 60,
+        "jti": str(uuid4()),
+        **changes,
+    }
 
 
-@pytest.mark.parametrize("change", [
-    {"iss": "other"}, {"aud": "other"}, {"aud": ["accounting-ops"]},
-    {"exp": _NOW}, {"exp": _NOW - 1}, {"exp": _NOW + 61},
-    {"iat": _NOW + 6}, {"iat": None}, {"exp": None}, {"jti": None},
-    {"jti": ""}, {"jti": "x" * 256}, {"iat": True}, {"iat": str(_NOW)},
-    {"nbf": _NOW + 1}, {"iat": _NOW + 5, "exp": _NOW + 5},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"iss": "other"},
+        {"aud": "other"},
+        {"aud": ["accounting-ops"]},
+        {"exp": _NOW},
+        {"exp": _NOW - 1},
+        {"exp": _NOW + 61},
+        {"iat": _NOW + 6},
+        {"iat": None},
+        {"exp": None},
+        {"jti": None},
+        {"jti": ""},
+        {"jti": "x" * 256},
+        {"iat": True},
+        {"iat": str(_NOW)},
+        {"nbf": _NOW + 1},
+        {"iat": _NOW + 5, "exp": _NOW + 5},
+    ],
+)
 def test_invalid_claims(change):
     with pytest.raises(HTTPException) as exc:
-        tokens.verify_claims(jwt.encode(claims(**change), _SECRET, algorithm="HS256"),
-                             _SECRET, "accounting-ops", _NOW)
+        tokens.verify_claims(
+            jwt.encode(claims(**change), _SECRET, algorithm="HS256"),
+            _SECRET,
+            "accounting-ops",
+            _NOW,
+        )
     assert exc.value.status_code == 401
 
 
@@ -44,15 +69,17 @@ def test_required_claims(missing):
     body = claims()
     del body[missing]
     with pytest.raises(HTTPException):
-        tokens.verify_claims(jwt.encode(body, _SECRET, algorithm="HS256"),
-                             _SECRET, "accounting-ops", _NOW)
+        tokens.verify_claims(
+            jwt.encode(body, _SECRET, algorithm="HS256"), _SECRET, "accounting-ops", _NOW
+        )
 
 
 @pytest.mark.parametrize("algorithm", ["HS384", "HS512"])
 def test_algorithm_is_fixed(algorithm):
     with pytest.raises(HTTPException):
-        tokens.verify_claims(jwt.encode(claims(), _SECRET, algorithm=algorithm),
-                             _SECRET, "accounting-ops", _NOW)
+        tokens.verify_claims(
+            jwt.encode(claims(), _SECRET, algorithm=algorithm), _SECRET, "accounting-ops", _NOW
+        )
 
 
 def test_future_iat_boundary_and_strict_expiry():
@@ -62,25 +89,31 @@ def test_future_iat_boundary_and_strict_expiry():
         tokens.verify_claims(token, _SECRET, "accounting-ops", _NOW + 65)
 
 
-@pytest.mark.parametrize("enabled,secret", [("false", _SECRET), ("true", "short"),
-                                           ("true", "")])
-@pytest.mark.parametrize("method,path", [
-    ("POST", ""), ("GET", "/00000000-0000-0000-0000-000000000001"),
-    ("PATCH", "/00000000-0000-0000-0000-000000000001"),
-    ("DELETE", "/00000000-0000-0000-0000-000000000001/members/alex@example.com"),
-])
+@pytest.mark.parametrize("enabled,secret", [("false", _SECRET), ("true", "short"), ("true", "")])
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", ""),
+        ("GET", "/00000000-0000-0000-0000-000000000001"),
+        ("PATCH", "/00000000-0000-0000-0000-000000000001"),
+        ("DELETE", "/00000000-0000-0000-0000-000000000001/members/alex@example.com"),
+    ],
+)
 async def test_disabled_routes_no_queries(monkeypatch, enabled, secret, method, path):
     monkeypatch.setenv("PROVISIONING_ENABLED", enabled)
     monkeypatch.setenv("PROVISIONING_JWT_SECRET", secret)
+
     def forbidden():
         pytest.fail("disabled provisioning touched the database")
+
     monkeypatch.setattr(tokens, "SessionLocal", forbidden)
     monkeypatch.setattr(provisioning, "SessionLocal", forbidden)
     app = FastAPI()
     if tokens.provisioning_available():
         app.include_router(provisioning.router)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
-                                base_url="https://accounting.example.com") as client:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://accounting.example.com"
+    ) as client:
         reply = await client.request(method, "/api/v1/provisioning/workspaces" + path)
     assert reply.status_code == 404
     assert reply.json() == {"detail": "Not Found"}
@@ -88,12 +121,15 @@ async def test_disabled_routes_no_queries(monkeypatch, enabled, secret, method, 
 
 async def test_dependency_reads_clock_once_and_passes_snapshot(monkeypatch):
     from starlette.requests import Request
+
     monkeypatch.setenv("PROVISIONING_ENABLED", "true")
     monkeypatch.setenv("PROVISIONING_JWT_SECRET", _SECRET)
     readings = []
+
     def now():
         readings.append(1)
         return _NOW
+
     monkeypatch.setattr(tokens.time, "time", now)
     consume = AsyncMock()
     monkeypatch.setattr(tokens, "consume_jti", consume)
@@ -111,9 +147,13 @@ def test_full_payload_ignores_owner_email(email):
     if email is not None:
         owner["email"] = email
     body = provisioning.WorkspaceCreate(
-        org_id=str(uuid4()), slug="fictional-books", display_name="Fictional Books",
-        plan_tier="fixture", entitlements=["accounting_ops_access"],
-        owner=owner, timezone="UTC",
+        org_id=str(uuid4()),
+        slug="fictional-books",
+        display_name="Fictional Books",
+        plan_tier="fixture",
+        entitlements=["accounting_ops_access"],
+        owner=owner,
+        timezone="UTC",
     )
     assert body.owner.model_dump() == {"subject": "alex-subject"}
 
@@ -131,8 +171,9 @@ async def test_flag_off_keeps_existing_workspace_early_return(monkeypatch):
     monkeypatch.setattr(onboarding, "_ensure_user_account", AsyncMock(return_value=uid))
     monkeypatch.setattr(onboarding, "_first_active_workspace", AsyncMock(return_value={"id": wid}))
     fetch = AsyncMock(side_effect=AssertionError("flag off fetched new entitlement"))
-    auth = AuthContext("alex", None, (), {"iss": "https://identity.example.com"},
-                       may_autoprovision=True)
+    auth = AuthContext(
+        "alex", None, (), {"iss": "https://identity.example.com"}, may_autoprovision=True
+    )
     result = await onboarding.ensure_entitled_workspace(
         auth, "fictional-bearer", entitlement_client=SimpleNamespace(fetch=fetch)
     )
@@ -154,6 +195,7 @@ async def test_own_delete_flag_off_does_not_call_new_policy(monkeypatch):
     from app.api import members
     from app.security import member_removal
     from app.tenancy import WorkspaceContext
+
     monkeypatch.delenv("PROVISIONING_ENABLED", raising=False)
     policy = AsyncMock(side_effect=AssertionError("new policy invoked"))
     monkeypatch.setattr(member_removal, "remove_person", policy)
@@ -162,3 +204,78 @@ async def test_own_delete_flag_off_does_not_call_new_policy(monkeypatch):
         await members.remove_member(ctx.workspace_id, uuid4(), ctx)
     assert exc.value.status_code == 403
     policy.assert_not_called()
+
+
+@pytest.mark.parametrize("replayed,count,expected", [(True, 1, 401), (False, 10000, 503)])
+async def test_replay_store_fails_closed(monkeypatch, replayed, count, expected):
+    class FakeSession:
+        def __init__(self):
+            self.statements = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        def begin(self):
+            return self
+
+        async def execute(self, statement, params=None):
+            self.statements.append(str(statement))
+            return SimpleNamespace(
+                first=lambda: (1,) if replayed else None, scalar_one=lambda: count
+            )
+
+    session = FakeSession()
+    monkeypatch.setattr(tokens, "SessionLocal", lambda: session)
+    with pytest.raises(HTTPException) as exc:
+        await tokens.consume_jti("fixture-jti", _NOW + 60, _NOW)
+    assert exc.value.status_code == expected
+    assert not any("INSERT" in sql for sql in session.statements)
+
+
+def test_short_secret_warning_is_once_and_does_not_expose_value(monkeypatch, caplog):
+    tokens._warn_secret.cache_clear()
+    monkeypatch.setenv("PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("PROVISIONING_JWT_SECRET", "fictional-short-value")
+    assert not tokens.provisioning_available()
+    assert not tokens.provisioning_available()
+    assert caplog.text.count("PROVISIONING_JWT_SECRET") == 1
+    assert "fictional-short-value" not in caplog.text
+
+
+async def test_paused_upsert_guard_only_when_enabled(monkeypatch):
+    statements = []
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        def begin(self):
+            return self
+
+        async def execute(self, sql, params):
+            statements.append(str(sql))
+
+    monkeypatch.setattr(onboarding, "SessionLocal", FakeSession)
+    monkeypatch.setenv("PROVISIONING_ENABLED", "true")
+    await onboarding._upsert_workspace_membership(
+        uuid4(), uuid4(), "owner", preserve_existing_role=False
+    )
+    assert "WHERE workspace_membership.status = 'active'" in statements[-1]
+    monkeypatch.setenv("PROVISIONING_ENABLED", "false")
+    await onboarding._upsert_workspace_membership(
+        uuid4(), uuid4(), "owner", preserve_existing_role=False
+    )
+    assert "WHERE workspace_membership.status" not in statements[-1]
+
+
+def test_wrong_signature_fails():
+    token = jwt.encode(claims(), _SECRET + "different", algorithm="HS256")
+    with pytest.raises(HTTPException) as exc:
+        tokens.verify_claims(token, _SECRET, "accounting-ops", _NOW)
+    assert exc.value.status_code == 401

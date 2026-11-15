@@ -2,6 +2,7 @@
 # and the Accounting-Ops contributors.
 # SPDX-License-Identifier: Apache-2.0
 """Opt-in control-plane authentication; replay protection shared by all workers."""
+
 import hashlib
 import json
 import logging
@@ -68,14 +69,16 @@ async def consume_jti(jti: str, expires: int, now: float) -> None:
         await session.execute(
             text("DELETE FROM public.provisioning_replay WHERE expires_at <= :now"), {"now": now}
         )
-        if (await session.execute(
-            text("SELECT 1 FROM public.provisioning_replay WHERE digest = :digest"),
-            {"digest": digest},
-        )).first():
+        if (
+            await session.execute(
+                text("SELECT 1 FROM public.provisioning_replay WHERE digest = :digest"),
+                {"digest": digest},
+            )
+        ).first():
             raise HTTPException(401, "Replayed provisioning token")
-        count = (await session.execute(
-            text("SELECT count(*) FROM public.provisioning_replay")
-        )).scalar_one()
+        count = (
+            await session.execute(text("SELECT count(*) FROM public.provisioning_replay"))
+        ).scalar_one()
         if count >= REPLAY_CAPACITY:
             raise HTTPException(503, "Provisioning replay store is full")
         await session.execute(
@@ -92,7 +95,9 @@ async def require_provisioning_token(request: Request) -> None:
         raise HTTPException(401, "Provisioning bearer required")
     now = time.time()
     claims = verify_claims(
-        token, os.environ["PROVISIONING_JWT_SECRET"],
-        os.getenv("PROVISIONING_JWT_AUDIENCE", "accounting-ops"), now,
+        token,
+        os.environ["PROVISIONING_JWT_SECRET"],
+        os.getenv("PROVISIONING_JWT_AUDIENCE", "accounting-ops"),
+        now,
     )
     await consume_jti(claims["jti"], claims["exp"], now)
