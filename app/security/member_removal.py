@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """One transactional removal policy for control-plane and local member deletion."""
 
+import json
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -26,6 +27,11 @@ async def remove_person(
     entitlement reads. Local callers must have a non-revoked membership target
     before any changes or credential counts; only the control plane may clean
     credentials left behind by an earlier local removal.
+
+    A removal also ends what could undo it: an invitation sent to this person
+    for this workspace and not yet accepted is cancelled, so an old link does
+    not bring them back. The owner's next invitation starts the membership again.
+    A paused owner cannot act, so only active owners count as "the last owner".
     """
     if actor is not None:
         require_role(actor, "admin")
@@ -79,7 +85,7 @@ async def remove_person(
                         text("""
                     SELECT count(*) FROM public.workspace_membership
                     WHERE workspace_id = :wid AND role IN ('owner', 'client_owner')
-                      AND status != 'revoked'
+                      AND status = 'active'
                 """),
                         {"wid": workspace_id},
                     )
@@ -126,9 +132,9 @@ async def remove_person(
         await session.execute(
             text("""
             INSERT INTO public.membership_audit (
-                workspace_id, actor_uc_uid, action, target_user_id, old_role,
+                workspace_id, actor_uc_uid, action, target_user_id, old_role, old_entity_scope,
                 revoked_pat_count, static_service_token_count, occurred_at
-            ) VALUES (:wid, :actor, 'removal', :uid, :role, :revoked_pat_count,
+            ) VALUES (:wid, :actor, 'removal', :uid, :role, CAST(:scope AS jsonb), :revoked_pat_count,
                       :static_service_token_count, clock_timestamp())
         """),
             {
@@ -136,6 +142,36 @@ async def remove_person(
                 **receipt,
                 "actor": actor.user_uc_uid if actor else "ops-center",
                 "role": member.role if member else None,
+                "scope": (
+                    json.dumps(member.entity_scope)
+                    if member and member.entity_scope is not None else None
+                ),
             },
         )
+        # Invitation emails are lower-cased on write. A person with no email on
+        # file has nothing to match; acceptance needs a verified email anyway.
+        cancelled = (
+            await session.execute(
+                text("""
+            UPDATE public.workspace_invitation SET cancelled_at = clock_timestamp()
+            WHERE workspace_id = :wid AND accepted_at IS NULL AND cancelled_at IS NULL
+              AND email = (SELECT lower(email) FROM public.user_account WHERE id = :uid)
+            RETURNING id
+        """),
+                params,
+            )
+        ).all()
+        for invitation in cancelled:
+            await session.execute(
+                text("""
+                INSERT INTO public.membership_audit (
+                    workspace_id, actor_uc_uid, action, target_user_id, invitation_id, occurred_at
+                ) VALUES (:wid, :actor, 'invitation_cancel', :uid, :invitation, clock_timestamp())
+            """),
+                {
+                    **params,
+                    "actor": actor.user_uc_uid if actor else "ops-center",
+                    "invitation": invitation.id,
+                },
+            )
         return receipt

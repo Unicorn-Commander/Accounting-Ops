@@ -270,6 +270,7 @@ async def update_member(
                         FROM public.workspace_membership m
                         JOIN public.user_account u ON u.id = m.user_id
                         WHERE m.workspace_id = :wid AND m.user_id = :uid
+                          AND m.status = 'active'
                         """
                     ),
                     {"wid": str(workspace.workspace_id), "uid": str(user_id)},
@@ -297,7 +298,7 @@ async def update_member(
                             FROM public.workspace_membership
                             WHERE workspace_id = :wid
                               AND role IN ('owner', 'client_owner')
-                              AND status != 'revoked'
+                              AND status = 'active'
                             """
                         ),
                         {"wid": str(workspace.workspace_id)},
@@ -356,78 +357,15 @@ async def remove_member(
     user_id: UUID,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict[str, Any]:
-    """Remove a member from a workspace.
+    """Revoke membership and scoped PATs, preserving the row and audit receipt.
 
-    Removing an owner/admin requires ``owner`` privileges. Cannot self-remove.
-    The user_account row is preserved (the user may still belong to other
-    workspaces).
+    Removing an owner/admin requires ``owner`` privileges. Cannot self-remove
+    or remove the last owner. This policy applies regardless of provisioning.
     """
-    from app.security.provisioning_token import provisioning_enabled
+    from app.security.member_removal import remove_person
 
-    if provisioning_enabled():
-        from app.security.member_removal import remove_person
-
-        receipt = await remove_person(workspace.workspace_id, user_id=user_id, actor=workspace)
-        return {"ok": True, "removed_user_id": str(user_id), **receipt}
-    require_role(workspace, "admin")
-
-    async with SessionLocal() as session:
-        async with session.begin():
-            row = (
-                await session.execute(
-                    text(
-                        """
-                        SELECT m.role::text AS role, u.uc_uid, m.entity_scope
-                        FROM public.workspace_membership m
-                        JOIN public.user_account u ON u.id = m.user_id
-                        WHERE m.workspace_id = :wid AND m.user_id = :uid
-                        """
-                    ),
-                    {"wid": str(workspace.workspace_id), "uid": str(user_id)},
-                )
-            ).first()
-            if row is None:
-                raise HTTPException(status_code=404, detail="No such member")
-            if row.uc_uid == workspace.user_uc_uid:
-                raise HTTPException(
-                    status_code=400, detail="Cannot remove yourself"
-                )
-            if row.role in {"owner", "admin", "client_owner"}:
-                require_role(workspace, "owner")
-            if row.role in {"owner", "client_owner"}:
-                count_row = (
-                    await session.execute(
-                        text(
-                            """
-                            SELECT count(*) AS c FROM public.workspace_membership
-                            WHERE workspace_id = :wid
-                              AND role IN ('owner', 'client_owner')
-                            """
-                        ),
-                        {"wid": str(workspace.workspace_id)},
-                    )
-                ).first()
-                if count_row and count_row.c <= 1:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Cannot remove the last owner",
-                    )
-            await session.execute(
-                text(
-                    "DELETE FROM public.workspace_membership "
-                    "WHERE workspace_id = :wid AND user_id = :uid"
-                ),
-                {"wid": str(workspace.workspace_id), "uid": str(user_id)},
-            )
-            await _write_membership_audit(
-                session,
-                workspace=workspace,
-                action="removal",
-                target_user_id=user_id,
-                old_role=row.role,
-                old_entity_scope=row.entity_scope,
-            )
-    return {"ok": True, "removed_user_id": str(user_id)}
+    receipt = await remove_person(workspace.workspace_id, user_id=user_id, actor=workspace)
+    return {"ok": True, "removed_user_id": str(user_id), **receipt}
 
 
 # ---------------------------------------------------------------------------
@@ -960,16 +898,11 @@ async def accept_invitation(
             ).first()
 
             import json
-            from app.security.provisioning_token import provisioning_enabled
 
             invite_rank = _ROLE_RANK.get(inv.role, -1)
-            if (
-                existing_row is not None
-                and existing_row.status == "revoked"
-                and provisioning_enabled()
-            ):
-                # With the control-plane contract on, removal leaves a revoked row
-                # instead of deleting it. An accepted invitation is an owner's own
+            if existing_row is not None and existing_row.status == "revoked":
+                # Removal leaves a revoked row instead of deleting it.
+                # An accepted invitation is an owner's own
                 # decision to let the person in again: the membership starts over
                 # with exactly what the invitation says, as a new one would. For
                 # the audit row below, a removed membership ranks under every role.

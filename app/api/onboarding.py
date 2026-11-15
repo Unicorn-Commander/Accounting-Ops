@@ -83,7 +83,7 @@ async def _first_active_workspace(user_id: uuid.UUID) -> dict[str, Any] | None:
                                w.display_name AS display_name
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
-                        WHERE m.user_id = :uid AND w.status = 'active'
+                        WHERE m.user_id = :uid AND m.status = 'active' AND w.status = 'active'
                         ORDER BY w.display_name
                         LIMIT 1
                         """
@@ -153,11 +153,15 @@ async def _upsert_workspace_membership(
 ) -> None:
     """Attach a user to a workspace without allowing a concurrent demotion."""
     if preserve_existing_role:
+        # Inside ON CONFLICT DO UPDATE an unqualified column is ambiguous between the
+        # stored row and EXCLUDED: PostgreSQL refuses the whole statement, on a first
+        # join too. Name the stored row.
         role_sql = """
             role = CASE
-                WHEN role IN ('owner', 'client_owner', 'admin') THEN role
+                WHEN workspace_membership.role IN ('owner', 'client_owner', 'admin')
+                    THEN workspace_membership.role
                 WHEN EXCLUDED.role = 'owner' THEN EXCLUDED.role
-                ELSE role
+                ELSE workspace_membership.role
             END
         """
     else:
@@ -166,8 +170,8 @@ async def _upsert_workspace_membership(
         f"status = 'active', {role_sql}" if activate_membership else role_sql
     )
 
-    if provisioning_enabled():
-        update_sql += " WHERE workspace_membership.status = 'active'"
+    # This upsert cannot undo a removal or pause, regardless of the feature flag.
+    update_sql += " WHERE workspace_membership.status = 'active'"
     async with SessionLocal() as session:
         async with session.begin():
             await session.execute(
@@ -296,14 +300,19 @@ async def ensure_entitled_workspace(
             "unavailable", detail=ENTITLED_PROVISIONING_UNAVAILABLE_DETAIL
         )
 
+    # Who gets a seat from the organization's member list is ONE rule under both
+    # switches (app.api.provisioning.role_after): the organization's owner and its
+    # admin, and an ordinary member only when PROVISIONING_MEMBER_ROLE names the
+    # role they start with. Nothing is created for anyone else: these are a
+    # company's books, and an owner lets the others in by invitation.
+    from app.api.provisioning import role_after
+
+    role = role_after(entitlement.org_role or "", None, None)
+    if role is None:
+        return EntitledProvisioningResult("not_entitled")
     await _backfill_user_profile(user_id, auth.claims)
     workspace_id = _workspace_id_for_org(entitlement.org_id)
     display_name = _org_workspace_display_name(entitlement.org_id, entitlement.org_name)
-    role = (
-        "owner"
-        if (entitlement.org_role or "").strip().lower() == "owner"
-        else "accountant"
-    )
     await _provision_workspace_with_membership(
         user_id=user_id,
         workspace_id=workspace_id,

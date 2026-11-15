@@ -389,7 +389,7 @@ async def work_inbox(
         }
 
     # Memberships: id, display_name, role, entity_scope. Same gate every other
-    # surface uses — the caller only ever sees workspaces they have a row in.
+    # surface uses — the caller only ever sees workspaces they actively belong to.
     async with SessionLocal() as session:
         async with session.begin():
             rows = (
@@ -404,7 +404,7 @@ async def work_inbox(
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :user_id
-                          AND w.status = 'active'
+                          AND m.status = 'active' AND w.status = 'active'
                         ORDER BY w.display_name
                         """
                     ),

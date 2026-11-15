@@ -21,6 +21,7 @@ async def run(ctx: ActionContext, **_) -> dict[str, Any]:
                 SELECT count(*)::int AS c
                 FROM public.workspace_membership
                 WHERE workspace_id = :wid AND role IN ('accountant', 'admin', 'owner')
+                  AND status = 'active'
                 """
             ),
             {"wid": str(ctx.workspace_id)},

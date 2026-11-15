@@ -235,7 +235,9 @@ def member_start_role() -> str | None:
     people the control plane names as owner or admin get in at sign-in and everyone
     else is let in by an owner here (an invitation, or a role an owner set), not by
     being on the organization's member list. The older AO_ENTITLED_PROVISIONING
-    path gave every such member "accountant"; saying so here is now a choice.
+    path was written to give every such member "accountant" (it never seated
+    anyone: PostgreSQL refused its statement); it follows this rule now, so
+    saying "accountant" here is a choice under either switch.
     """
     role = os.getenv("PROVISIONING_MEMBER_ROLE", "").strip().lower()
     return role if role in _BOOKS_ROLES else None
