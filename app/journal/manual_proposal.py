@@ -20,12 +20,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import text
 
-from app.journal.posting import (
-    AccountPair,
-    PostingRefusal,
-    assert_period_open,
-    post_manual_journal_pair,
-)
+from app.journal.posting import PostingRefusal, assert_period_open, post_manual_journal_pair
 
 
 SUBJECT_TYPE = "manual_journal_entry_proposal"
@@ -133,6 +128,11 @@ def _digest_request(request: ManualJournalRequest) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _digest_pairs(pairs: list[dict[str, Any]]) -> str:
+    encoded = json.dumps(pairs, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _pair_lines(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Walk debit and credit cursors in submitted order, preserving the rule."""
     debits = [line for line in lines if line["side"] == "debit"]
@@ -165,6 +165,16 @@ def _pair_lines(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return pairs
 
 
+def _is_cash_or_linked(row: Any) -> bool:
+    if row.get("linked_external_account_id") is not None:
+        return True
+    number = str(row.get("account_number") or "")
+    name = str(row.get("account_name") or "").strip().lower()
+    return number in {"1010", "1011", "1020", "2200"} or name.startswith(
+        ("cash", "credit card", "bank")
+    )
+
+
 async def _resolve_accounts(session, *, workspace_id: str, entity_id: str, request: ManualJournalRequest):
     resolved: dict[str, _ResolvedAccount] = {}
     for line in request.lines:
@@ -174,7 +184,8 @@ async def _resolve_accounts(session, *, workspace_id: str, entity_id: str, reque
             await session.execute(
                 text(
                     """
-                    SELECT id::text AS id, account_number, canonical_form,
+                    SELECT id::text AS id, account_number, account_name, account_type,
+                           canonical_form,
                            linked_external_account_id
                     FROM chart_of_account
                     WHERE workspace_id = :wid AND entity_id = :eid
@@ -190,7 +201,7 @@ async def _resolve_accounts(session, *, workspace_id: str, entity_id: str, reque
                 f"Account code {line.account_code!r} must resolve to exactly one active entity account"
             )
         row = rows[0]
-        if row["linked_external_account_id"] is not None:
+        if _is_cash_or_linked(row):
             raise ValueError("manual journal proposals cannot use designated cash or linked bank accounts")
         resolved[line.account_code] = _ResolvedAccount(
             account_id=str(row["id"]),
@@ -208,7 +219,8 @@ async def _validate_current_accounts(session, *, workspace_id: str, entity_id: s
             await session.execute(
                 text(
                     """
-                    SELECT id::text AS id, account_number, canonical_form,
+                    SELECT id::text AS id, account_number, account_name, account_type,
+                           canonical_form,
                            linked_external_account_id
                     FROM chart_of_account
                     WHERE workspace_id = :wid AND entity_id = :eid
@@ -220,7 +232,7 @@ async def _validate_current_accounts(session, *, workspace_id: str, entity_id: s
         ).mappings().first()
         if row is None or row["account_number"] != account["account_code"] or row["canonical_form"] != account["canonical_form"]:
             raise ValueError("manual journal proposal account changed or is inactive")
-        if row["linked_external_account_id"] is not None:
+        if _is_cash_or_linked(row):
             raise ValueError("manual journal proposal account became a cash or linked bank account")
 
 
@@ -294,6 +306,7 @@ async def enqueue_manual_proposal(
         "entity_id": eid,
         "idempotency_key": request.idempotency_key,
         "request_digest": digest,
+        "pairs_digest": _digest_pairs(pairs),
         "effective_date": request.effective_date,
         "memo": request.memo,
         "lines": lines,
@@ -365,6 +378,7 @@ async def apply_manual_proposal(
     required = {
         "version", "subject_type", "workspace_id", "entity_id", "idempotency_key",
         "request_digest", "effective_date", "memo", "lines", "pairs",
+        "pairs_digest",
         "evidence_links", "proposer_user_uc_uid", "proposer_agent_id",
         "reasoning_trace", "model_version", "total_debit_cents",
     }
@@ -382,11 +396,31 @@ async def apply_manual_proposal(
     if await assert_period_open(session, entity_id=eid, effective_date=dt.date.fromisoformat(request.effective_date)) is not None:
         raise ValueError("Period closed; manual journal proposal remains pending")
 
-    expected_pairs = _pair_lines(payload["lines"])
-    if payload["pairs"] != expected_pairs:
+    pairs = payload["pairs"]
+    if not isinstance(pairs, list) or not pairs or _digest_pairs(pairs) != payload["pairs_digest"]:
+        raise ValueError("Manual journal proposal pairing changed")
+    debit_accounts = {
+        line["resolved_account"]["canonical_form"]
+        for line in payload["lines"]
+        if line["side"] == "debit"
+    }
+    credit_accounts = {
+        line["resolved_account"]["canonical_form"]
+        for line in payload["lines"]
+        if line["side"] == "credit"
+    }
+    if any(
+        not isinstance(pair, dict)
+        or set(pair) != {"debit_account", "credit_account", "amount_cents"}
+        or pair["debit_account"] not in debit_accounts
+        or pair["credit_account"] not in credit_accounts
+        or type(pair["amount_cents"]) is not int
+        or pair["amount_cents"] <= 0
+        for pair in pairs
+    ) or sum(pair["amount_cents"] for pair in pairs) != payload["total_debit_cents"]:
         raise ValueError("Manual journal proposal pairing changed")
     journal_entry_ids: list[str] = []
-    for index, pair in enumerate(payload["pairs"], start=1):
+    for index, pair in enumerate(pairs, start=1):
         result = await post_manual_journal_pair(
             session,
             workspace_id=wid,

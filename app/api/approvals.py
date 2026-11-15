@@ -552,7 +552,6 @@ def _project_approval_decision(
     elif subject_type in ("bank_transaction_import", "journal_entry_post"):
         if subject_type == "journal_entry_post":
             payload = payload["request"]
-        from app.journal.posting import PostingOutcome
         from app.journal.materiality import MaterialityVerdict
         from app.journal.projection import project_journal_entry_posted
 
