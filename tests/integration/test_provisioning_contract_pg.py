@@ -1118,6 +1118,9 @@ async def test_flag_off_removal_rejections_change_and_count_nothing(pg_flag_off,
     pid, _ = await pg.pat(uid, [wid])
     if target in {"self", "last_owner"}:
         await pg.seat(wid, uid, role="owner")
+        if target == "last_owner":
+            former_owner, _ = await pg.person()
+            await pg.seat(wid, former_owner, role="owner", status="revoked")
     elif target == "revoked":
         await pg.seat(wid, uid, status="revoked")
     before = await _membership(pg, wid, uid)
