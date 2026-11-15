@@ -185,7 +185,10 @@ async def list_approval_clusters(
     scope_restriction = assert_entity_in_scope(workspace, entity_id)
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
-        where: list[str] = ["aq.status = 'pending'"]
+        where: list[str] = [
+            "aq.status = 'pending'",
+            "aq.subject_type <> 'manual_journal_entry_proposal'",
+        ]
         params: dict[str, Any] = {}
 
         if entity_id:
@@ -232,6 +235,7 @@ async def list_approval_clusters(
         today_where: list[str] = [
             "aq.status <> 'pending'",
             "aq.decided_at >= date_trunc('day', now())",
+            "aq.subject_type <> 'manual_journal_entry_proposal'",
         ]
         if "eid" in params:
             today_where.append("ar.entity_id = :eid")

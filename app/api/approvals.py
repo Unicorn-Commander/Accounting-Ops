@@ -989,7 +989,9 @@ async def unskip_approval(
         if row is None:
             raise HTTPException(status_code=404, detail="Approval not found")
 
-        if row["subject_type"] == "journal_entry_post":
+        if row["subject_type"] in {
+            "journal_entry_post", "manual_journal_entry_proposal"
+        }:
             raise HTTPException(status_code=409, detail="Journal proposals require explicit individual review")
 
         entity_id = UUID(row["entity_id"])
