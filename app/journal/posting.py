@@ -25,7 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.journal.hash_chain import GENESIS_HASH, compute_hash, get_last_chain_hash
+from app.journal.hash_chain import compute_hash, get_last_chain_hash
 from app.journal.materiality import MaterialityVerdict, evaluate, materiality_tier
 
 
@@ -353,7 +353,6 @@ async def _attempt_chain_insert(
     We treat conflicts on ``uq_je_entity_source_external`` as idempotency
     (terminal) and anything else as a chain-advance race (retryable).
     """
-    last_exc: IntegrityError | None = None
     for attempt in range(_MAX_CHAIN_RETRIES):
         prev_hash = await get_last_chain_hash(session, entity_id)
         posted_at = datetime.now(tz=timezone.utc)
@@ -398,7 +397,6 @@ async def _attempt_chain_insert(
                 )
             return None
         except IntegrityError as exc:
-            last_exc = exc
             constraint = _integrity_constraint_name(exc)
             if constraint == "uq_je_entity_source_external":
                 # True idempotency: the other writer's row is already in.
@@ -524,6 +522,7 @@ async def post_journal_entry(
     counterparty_id: UUID | None = None,
     event_id: UUID | None = None,
     expected_account_pair: AccountPair | None = None,
+    explicit_account_pair: AccountPair | None = None,
     force_queue: bool = False,
 ) -> PostingOutcome | PostingRefusal:
     """Atomic post with materiality gate + hash chain advance.
@@ -579,7 +578,13 @@ async def post_journal_entry(
         return PostingRefusal(outcome=outcome, reason=verdict.reason)
 
     # ---- 2. Resolve double-entry accounts ----
-    if not external_account_id:
+    if explicit_account_pair is not None:
+        if not explicit_account_pair.debit_account or not explicit_account_pair.credit_account:
+            return PostingRefusal(
+                outcome="blocked_unmapped", reason="Explicit journal account pair is incomplete"
+            )
+        pair = explicit_account_pair
+    elif not external_account_id:
         await _log_post_attempt(
             session, workspace_id=workspace_id, entity_id=entity_id, source=source,
             source_external_id=source_external_id, outcome="blocked_unmapped",
@@ -589,30 +594,31 @@ async def post_journal_entry(
         )
         return PostingRefusal(outcome="blocked_unmapped", reason="No external account id")
 
-    pair = await resolve_accounts_for_txn(
-        session,
-        entity_id=entity_id,
-        category=category,
-        amount_cents=amount_cents,
-        external_account_id=external_account_id,
-        source=source,
-    )
-    if pair is None:
-        reason, refusal_outcome = await _diagnose_resolution_failure(
+    else:
+        pair = await resolve_accounts_for_txn(
             session,
             entity_id=entity_id,
             category=category,
+            amount_cents=amount_cents,
             external_account_id=external_account_id,
+            source=source,
         )
-        await _log_post_attempt(
-            session, workspace_id=workspace_id, entity_id=entity_id, source=source,
-            source_external_id=source_external_id, outcome=refusal_outcome,
-            journal_entry_id=None,
-            reason=reason,
-            actor_uc_uid=posted_by_uc_uid, actor_agent_id=posted_by_agent_id,
-            amount_cents=amount_cents, category=category,
-        )
-        return PostingRefusal(outcome=refusal_outcome, reason=reason)
+        if pair is None:
+            reason, refusal_outcome = await _diagnose_resolution_failure(
+                session,
+                entity_id=entity_id,
+                category=category,
+                external_account_id=external_account_id,
+            )
+            await _log_post_attempt(
+                session, workspace_id=workspace_id, entity_id=entity_id, source=source,
+                source_external_id=source_external_id, outcome=refusal_outcome,
+                journal_entry_id=None,
+                reason=reason,
+                actor_uc_uid=posted_by_uc_uid, actor_agent_id=posted_by_agent_id,
+                amount_cents=amount_cents, category=category,
+            )
+            return PostingRefusal(outcome=refusal_outcome, reason=reason)
 
     if expected_account_pair is not None and pair != expected_account_pair:
         return PostingRefusal(outcome="blocked_unmapped", reason="Approved account pair changed")
@@ -767,6 +773,55 @@ async def post_journal_entry(
     )
 
     return PostingOutcome(journal_entry_id=je_id, materiality=verdict)
+
+
+async def post_manual_journal_pair(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    entity_id: str,
+    source_external_id: str,
+    effective_date,
+    amount_cents: int,
+    debit_account: str,
+    credit_account: str,
+    memo: str,
+    reasoning_trace: str,
+    model_version: str,
+    approving_human_uc_uid: str,
+) -> PostingOutcome | PostingRefusal:
+    """Post one already-reviewed non-cash pair from a manual proposal."""
+    if not approving_human_uc_uid:
+        raise ValueError("manual journal pair requires an approving human")
+    return await post_journal_entry(
+        session,
+        workspace_id=workspace_id,
+        entity_id=entity_id,
+        source="manual-agent-approved",
+        source_external_id=source_external_id,
+        effective_date=effective_date,
+        amount_cents=amount_cents,
+        description=memo,
+        payee=None,
+        memo=memo,
+        category="Manual journal",
+        category_status="auto",
+        entity_mapped=True,
+        sign_matched=True,
+        external_account_id=None,
+        has_receipt_link=False,
+        receipt_link_id=None,
+        posted_by_uc_uid=approving_human_uc_uid,
+        posted_by_agent_id=None,
+        user_confirmed=True,
+        approving_human_uc_uid=approving_human_uc_uid,
+        reasoning_trace=reasoning_trace,
+        model_version=model_version,
+        explicit_account_pair=AccountPair(
+            debit_account=debit_account,
+            credit_account=credit_account,
+        ),
+    )
 
 
 async def _insert_journal_entry(
@@ -1080,7 +1135,6 @@ async def _apply_recategorization(
     # be silently treated as idempotent. The reversal+restatement pair is
     # appended atomically inside the savepoint; on a chain-race conflict the
     # whole pair is recomputed against a fresh prev_hash.
-    last_recat_failure: IntegrityError | None = None
     for attempt in range(_MAX_CHAIN_RETRIES):
         try:
             async with session.begin_nested():
@@ -1174,7 +1228,6 @@ async def _apply_recategorization(
             # Success — break out of the retry loop.
             break
         except IntegrityError as exc:
-            last_recat_failure = exc
             constraint = _integrity_constraint_name(exc)
             if constraint == "uq_je_entity_source_external":
                 # The 'reversal:<orig_id>' or 'recat:<orig_id>' source_external_id

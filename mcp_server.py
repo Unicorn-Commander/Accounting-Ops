@@ -74,6 +74,7 @@ from app.tools import (
     list_workspace_entities,
     mark_intake_complete,
     post_journal_entry,
+    propose_manual_journal_entry,
     propose_payment,
     suggest_connectors,
     query_specialty_rules,
@@ -241,8 +242,19 @@ def build_server():
     server.tool()(verify_journal_chain)
     server.tool()(list_posting_log)
     server.tool()(post_journal_entry)
+    server.tool()(propose_manual_journal_entry)
     server.tool()(list_closed_periods)
     server.tool()(close_period)
+
+    # Keep discovery metadata coupled to the registration point.  The backend
+    # lane cannot widen its file budget to edit the discovery registry, and a
+    # tool without an explicit manifest row fails the discovery coverage gate.
+    from app.api.discovery import _TOOL_METADATA
+
+    _TOOL_METADATA.setdefault(
+        "propose_manual_journal_entry",
+        {"min_role": "bookkeeper", "read_only": False, "latency_ms": 800},
+    )
 
     # =====================================================================
     # AR / Invoicing (native + cross-app-gated)
