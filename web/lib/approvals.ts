@@ -12,11 +12,36 @@ const INTERNAL_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL ??
   "http://app:8000";
 
+export const MANUAL_JOURNAL_ENTRY_PROPOSAL = "manual_journal_entry_proposal" as const;
+
 export type ApprovalSubjectType =
   | "journal_recategorization"
   | "compliance_rule"
   | "journal_entry_post"
-  | "bank_transaction_import";
+  | "bank_transaction_import"
+  | typeof MANUAL_JOURNAL_ENTRY_PROPOSAL;
+
+export type ManualJournalSide = "debit" | "credit";
+
+export type ManualJournalResolvedAccount = {
+  account_id: string;
+  account_code: string;
+  canonical_form: string;
+};
+
+export type ManualJournalProposalLine = {
+  account_code: string;
+  side: ManualJournalSide;
+  amount_cents: number;
+  canonical_form: string;
+  resolved_account: ManualJournalResolvedAccount;
+};
+
+export type ManualJournalProposalPair = {
+  debit_account: string;
+  credit_account: string;
+  amount_cents: number;
+};
 
 export type ApprovalPayload = {
   version?: number;
@@ -66,6 +91,20 @@ export type ApprovalPayload = {
   credit_account_hint?: string;
   block_reason?: string;
   llm_suggested?: boolean;
+  // manual_journal_entry_proposal (version 1 envelope)
+  subject_type?: string;
+  idempotency_key?: string;
+  request_digest?: string;
+  pairs_digest?: string;
+  memo?: string;
+  lines?: ManualJournalProposalLine[];
+  pairs?: ManualJournalProposalPair[];
+  evidence_links?: string[];
+  proposer_user_uc_uid?: string;
+  proposer_agent_id?: string | null;
+  total_debit_cents?: number;
+  reasoning_trace?: string;
+  model_version?: string;
 };
 
 export type Approval = {
