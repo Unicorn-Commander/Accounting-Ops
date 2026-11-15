@@ -282,31 +282,36 @@ def test_wrong_signature_fails():
 
 
 @pytest.mark.parametrize(
-    "answer,stored,status,members_read,expected",
+    "answer,stored,status,member_role,expected",
     [
         # The control plane decides who administers, whatever is stored here.
-        ("owner", None, None, False, "owner"),
-        (" Admin ", "viewer", "active", False, "admin"),
-        ("owner", "accountant", "revoked", False, "owner"),
+        ("owner", None, None, "", "owner"),
+        (" Admin ", "viewer", "active", "", "admin"),
+        ("owner", "accountant", "revoked", "", "owner"),
         # Not an administrator: a bookkeeping role an owner set here survives...
-        ("member", "accountant", "active", False, "accountant"),
-        ("manager", "cpa", "active", False, "cpa"),
-        ("billing_admin", "bookkeeper", "active", False, "bookkeeper"),
-        ("unknown-role", "client_user", "active", False, "client_user"),
+        ("member", "accountant", "active", "", "accountant"),
+        ("manager", "cpa", "active", "", "cpa"),
+        ("billing_admin", "bookkeeper", "active", "viewer", "bookkeeper"),
+        ("unknown-role", "client_user", "active", "", "client_user"),
         # ...and an administrator the control plane no longer names goes to the least privilege.
-        ("member", "owner", "active", False, "viewer"),
-        ("member", "admin", "active", False, "viewer"),
-        ("member", "client_owner", "active", False, "viewer"),
-        # No seat, or a removed one: nothing from the answer alone, read-only when the setting says so.
-        ("member", None, None, False, None),
-        ("member", "accountant", "revoked", False, None),
-        ("", None, None, False, None),
-        ("member", None, None, True, "viewer"),
-        ("member", "accountant", "revoked", True, "viewer"),
+        ("member", "owner", "active", "", "viewer"),
+        ("member", "admin", "active", "accountant", "viewer"),
+        ("member", "client_owner", "active", "", "viewer"),
+        # No seat, or a removed one: nothing from the answer alone, or the role the deployment names.
+        ("member", None, None, "", None),
+        ("member", "accountant", "revoked", "", None),
+        ("", None, None, "", None),
+        ("member", None, None, "viewer", "viewer"),
+        ("member", "accountant", "revoked", "viewer", "viewer"),
+        ("manager", None, None, " Accountant ", "accountant"),
+        # The setting names a bookkeeping role or nothing: never an administrator.
+        ("member", None, None, "owner", None),
+        ("member", None, None, "admin", None),
+        ("member", None, None, "true", None),
     ],
 )
-def test_role_after_an_answer(monkeypatch, answer, stored, status, members_read, expected):
-    monkeypatch.setenv("PROVISIONING_MEMBERS_READ", "true" if members_read else "")
+def test_role_after_an_answer(monkeypatch, answer, stored, status, member_role, expected):
+    monkeypatch.setenv("PROVISIONING_MEMBER_ROLE", member_role)
     assert provisioning.role_after(answer, stored, status) == expected
 
 
@@ -372,3 +377,34 @@ def test_answers_are_remembered_within_a_bound(monkeypatch):
     provisioning._remember("person-8", "not_entitled", 60.0)
     assert set(provisioning._answers) == {"person-4", "person-8"}
     provisioning.forget_answers()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # An organization with no owner row, and a plan tier that is null in the control plane's table.
+        {"owner": {"subject": "", "email": ""}, "plan_tier": None},
+        # Only what this app uses.
+        {},
+        # Fields the control plane may add later, and ones it sends in another shape.
+        {"owner": {"subject": "alex-subject", "phone": "fictional"}, "region": "example", "slug": 7},
+        # A long organization name: accepted here, cut where the workspace is named.
+        {"display_name": "Fictional " * 25},
+    ],
+)
+def test_the_payload_is_never_refused_over_a_field_this_app_does_not_use(payload):
+    body = provisioning.WorkspaceCreate(
+        **{"org_id": str(uuid4()), "display_name": "Fictional Books", **payload}
+    )
+    assert body.owner.subject == payload.get("owner", {}).get("subject", "")
+    assert set(body.model_dump()) == {"org_id", "display_name", "owner"}
+
+
+@pytest.mark.parametrize("payload", [{"org_id": ""}, {"display_name": ""}, {"display_name": None}])
+def test_the_two_fields_this_app_needs_are_still_required(payload):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        provisioning.WorkspaceCreate(
+            **{"org_id": str(uuid4()), "display_name": "Fictional Books", **payload}
+        )

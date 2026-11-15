@@ -30,18 +30,25 @@ router = APIRouter(
 
 
 class Owner(BaseModel):
-    subject: str = Field(min_length=1, max_length=255)
+    # Ops-Center sends "" for an organization that has no owner row. It is used
+    # for one thing only, the proof that takes over a workspace from before the
+    # control plane, and an empty subject proves nothing.
+    subject: str = Field(default="", max_length=255)
     # Email is ignored (including absent/empty), never persisted or logged.
 
 
 class WorkspaceCreate(BaseModel):
+    """What this app takes from the control plane's payload.
+
+    The rest of it (slug, plan_tier, entitlements, timezone, owner.email, and
+    whatever is added later) is accepted and ignored: the workspace is keyed by
+    the organization id, gets a slug of its own, and reads entitlements at
+    sign-in. A field this app does not use must never be a reason to answer 422.
+    """
+
     org_id: str = Field(min_length=1, max_length=255)
-    slug: str
-    display_name: str = Field(min_length=1, max_length=120)
-    plan_tier: str
-    entitlements: list[str]
-    owner: Owner
-    timezone: str
+    display_name: str = Field(min_length=1, max_length=255)
+    owner: Owner = Field(default_factory=Owner)
 
 
 class WorkspacePatch(BaseModel):
@@ -125,8 +132,12 @@ async def ensure_workspace(session, org_id: str, display_name: str, subject: str
 async def create_workspace(body: WorkspaceCreate, idempotency_key: str = Header()):
     if idempotency_key != f"{body.org_id}:accounting-ops":
         raise HTTPException(400, "Invalid Idempotency-Key")
+    from app.api.onboarding import _org_workspace_display_name
+
     async with SessionLocal() as session, session.begin():
-        row, _ = await ensure_workspace(session, body.org_id, body.display_name, body.owner.subject)
+        # The same name, cut the same way, whether this call or a sign-in makes the workspace.
+        name = _org_workspace_display_name(body.org_id, body.display_name)
+        row, _ = await ensure_workspace(session, body.org_id, name, body.owner.subject)
         return workspace_status(row)
 
 
@@ -216,15 +227,18 @@ def _remember(subject: str, kind: str, seconds: float, org_id: str = "", org_rol
     _answers[subject] = _Answer(kind, now + seconds, org_id, org_role)
 
 
-def members_start_read_only() -> bool:
-    """Whether an ordinary member of the organization gets a read-only seat by themselves.
+def member_start_role() -> str | None:
+    """The bookkeeping role an ordinary member of the organization starts with; None is no seat.
 
-    Off unless PROVISIONING_MEMBERS_READ says so. These are a company's books:
-    the people the control plane names as owner or admin get in at sign-in, and
-    everyone else is let in by an owner here (an invitation, or a role an owner
-    set), not by being on the organization's member list.
+    PROVISIONING_MEMBER_ROLE names it: viewer, client_user, bookkeeper, accountant
+    or cpa. Unset, or anything else, is None: these are a company's books, so the
+    people the control plane names as owner or admin get in at sign-in and everyone
+    else is let in by an owner here (an invitation, or a role an owner set), not by
+    being on the organization's member list. The older AO_ENTITLED_PROVISIONING
+    path gave every such member "accountant"; saying so here is now a choice.
     """
-    return os.getenv("PROVISIONING_MEMBERS_READ", "").strip().lower() in {"1", "true", "yes", "on"}
+    role = os.getenv("PROVISIONING_MEMBER_ROLE", "").strip().lower()
+    return role if role in _BOOKS_ROLES else None
 
 
 def role_after(answer_role: str, stored_role: str | None, stored_status: str | None) -> str | None:
@@ -236,15 +250,15 @@ def role_after(answer_role: str, stored_role: str | None, stored_status: str | N
     taken down to the least privilege. Which bookkeeping role an ordinary member
     has is this workspace's own business: an owner here may have made them an
     accountant, and that survives the next answer. A person with no seat, or a
-    removed one, starts read-only when members_start_read_only() and otherwise
-    gets nothing from the answer alone.
+    removed one, starts at member_start_role(), which is no seat unless the
+    deployment names a role.
     """
     decided = {"owner": "owner", "admin": "admin"}.get((answer_role or "").strip().lower())
     if decided:
         return decided
     if stored_status == "active":
         return stored_role if stored_role in _BOOKS_ROLES else "viewer"
-    return "viewer" if members_start_read_only() else None
+    return member_start_role()
 
 
 async def _seat(session, workspace_id: UUID, user_id):

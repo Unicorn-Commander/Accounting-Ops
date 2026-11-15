@@ -152,7 +152,7 @@ async def pg(monkeypatch, stack):
     monkeypatch.setenv("PROVISIONING_ENABLED", "true")
     monkeypatch.setenv("PROVISIONING_JWT_SECRET", _SECRET)
     monkeypatch.delenv("AO_ENTITLED_PROVISIONING", raising=False)
-    monkeypatch.delenv("PROVISIONING_MEMBERS_READ", raising=False)
+    monkeypatch.delenv("PROVISIONING_MEMBER_ROLE", raising=False)
     # Each sign-in in these tests asks the control plane again, as if the last
     # answer had aged out; the tests about remembering an answer set their own.
     provisioning.forget_answers()
@@ -491,23 +491,23 @@ async def test_own_delete_uses_same_policy_and_preserves_self_and_last_owner(pg)
 
 
 @pytest.mark.parametrize(
-    "role,members_read,expected",
+    "role,member_role,expected",
     [
-        ("owner", False, "owner"),
-        ("admin", False, "admin"),
+        ("owner", None, "owner"),
+        ("admin", None, "admin"),
         # Not an administrator: no seat in the books from the answer alone...
-        ("manager", False, None),
-        ("member", False, None),
-        ("billing_admin", False, None),
-        ("unknown", False, None),
-        # ...unless the deployment says ordinary members start read-only.
-        ("member", True, "viewer"),
-        ("unknown", True, "viewer"),
+        ("manager", None, None),
+        ("member", None, None),
+        ("billing_admin", None, None),
+        ("unknown", None, None),
+        # ...unless the deployment names the role an ordinary member starts with.
+        ("member", "viewer", "viewer"),
+        ("unknown", "viewer", "viewer"),
     ],
 )
-async def test_jit_role_comes_from_answer_not_claims(pg, monkeypatch, role, members_read, expected):
-    if members_read:
-        monkeypatch.setenv("PROVISIONING_MEMBERS_READ", "true")
+async def test_jit_role_comes_from_answer_not_claims(pg, monkeypatch, role, member_role, expected):
+    if member_role:
+        monkeypatch.setenv("PROVISIONING_MEMBER_ROLE", member_role)
     body = await pg.create()
     wid = pg.workspaces[-1]
     uid, subject = await pg.person()
@@ -828,12 +828,12 @@ async def test_a_role_set_here_survives_the_next_answer_and_administrators_follo
     assert await _membership(pg, wid, uid) == ("bookkeeper", "active")
 
 
-@pytest.mark.parametrize("members_read", [False, True])
-async def test_an_ordinary_member_gets_a_seat_only_when_the_setting_says_so(
-    pg, monkeypatch, members_read
+@pytest.mark.parametrize("member_role", [None, "viewer", "accountant"])
+async def test_an_ordinary_member_gets_a_seat_only_when_the_setting_names_a_role(
+    pg, monkeypatch, member_role
 ):
-    if members_read:
-        monkeypatch.setenv("PROVISIONING_MEMBERS_READ", "true")
+    if member_role:
+        monkeypatch.setenv("PROVISIONING_MEMBER_ROLE", member_role)
     body = pg.body()  # the control plane has not created this workspace yet
     wid = pg.workspaces[-1]
     uid, subject = await pg.person()
@@ -848,20 +848,21 @@ async def test_an_ordinary_member_gets_a_seat_only_when_the_setting_says_so(
     made = (
         await pg.sql("SELECT count(*) FROM public.workspace WHERE id = :w", w=wid)
     ).scalar_one()
-    if members_read:
+    if member_role:
         assert result.state == "provisioned" and made == 1
-        assert await _membership(pg, wid, uid) == ("viewer", "active")
+        assert await _membership(pg, wid, uid) == (member_role, "active")
     else:
         # In the organization, no seat in its books: no membership and no workspace made for them.
         assert result.state == "not_entitled" and made == 0
         assert await _membership(pg, wid, uid) is None
     # Removed by the control plane, then still on the organization's list at the next sign-in.
     await pg.create(body)
-    await pg.seat(wid, uid, role="accountant")
+    await pg.seat(wid, uid, role="cpa")
     assert (await pg.remove(wid, subject)).status_code == 204
     await sign_in()
+    # Coming back is starting again: the role the deployment names, not the one held before.
     assert await _membership(pg, wid, uid) == (
-        ("viewer", "active") if members_read else ("accountant", "revoked")
+        (member_role, "active") if member_role else ("cpa", "revoked")
     )
 
 
@@ -1001,3 +1002,35 @@ async def test_an_accepted_invitation_starts_a_removed_membership_again(pg, monk
     assert (str(uid), "active", "bookkeeper") in {
         (row["user_id"], row["status"], row["role"]) for row in listed
     }
+
+
+async def test_an_organization_without_an_owner_row_still_gets_its_workspace(pg):
+    # What Ops-Center sends for such an organization: an empty subject. Also a null plan tier
+    # and a name longer than this app keeps.
+    long_name = "Fictional " * 25
+    body = {
+        **pg.body(),
+        "owner": {"subject": "", "email": ""},
+        "plan_tier": None,
+        "display_name": long_name,
+    }
+    wid = pg.workspaces[-1]
+    reply = await pg.client.post(
+        "/api/v1/provisioning/workspaces", json=body, headers=pg.headers(body)
+    )
+    assert reply.status_code == 200, reply.text
+    assert reply.json() == {"workspace_id": body["org_id"], "status": "active"}
+    assert (
+        await pg.sql("SELECT display_name FROM public.workspace WHERE id = :w", w=wid)
+    ).scalar_one() == long_name.strip()[:120]
+    assert (
+        await pg.sql(
+            "SELECT count(*) FROM public.workspace_membership WHERE workspace_id = :w", w=wid
+        )
+    ).scalar_one() == 0
+    # An empty subject proves nothing: a workspace from before the control plane is not taken over with it.
+    await pg.sql("UPDATE public.workspace SET uc_org_id = NULL WHERE id = :w", w=wid)
+    reply = await pg.client.post(
+        "/api/v1/provisioning/workspaces", json=body, headers=pg.headers(body)
+    )
+    assert reply.status_code == 409
