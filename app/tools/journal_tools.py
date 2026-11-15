@@ -33,6 +33,11 @@ from app.journal import (
     PostingRefusal,
     post_journal_entry as _journal_post,
 )
+from app.journal.manual_proposal import (
+    ManualJournalRequest,
+    SUBJECT_TYPE as MANUAL_PROPOSAL_SUBJECT,
+    enqueue_manual_proposal,
+)
 from app.journal.hash_chain import chain_summary, verify_chain
 from app.journal.posting import CATEGORY_TO_ACCOUNT
 from app.mcp_auth import authorize_workspace
@@ -767,6 +772,90 @@ async def post_journal_entry(
             str(result.existing_entry_id) if result.existing_entry_id else None
         ),
     }
+
+
+async def propose_manual_journal_entry(
+    workspace_id: UUID,
+    entity_id: UUID,
+    idempotency_key: str,
+    effective_date: str,
+    memo: str,
+    lines: list[dict[str, Any]],
+    evidence_links: list[str] | None = None,
+    reasoning_trace: str = "",
+    model_version: str = "",
+) -> dict[str, Any]:
+    """Queue a non-cash manual journal proposal for human approval.
+
+    This tool only resolves accounts and inserts an immutable approval queue
+    envelope.  It never calls ``post_journal_entry`` and never writes a ledger
+    row.  Approval is a separate owner/admin human-session operation.
+
+    Role floor: bookkeeper.  The entity-scoped workspace authorization still
+    applies to agent and service identities through the normal token policy.
+    """
+    ctx = await authorize_workspace(workspace_id, entity_id, min_role="bookkeeper")
+    assert_entity_in_scope(ctx, entity_id)
+    request = ManualJournalRequest(
+        idempotency_key=idempotency_key,
+        effective_date=effective_date,
+        memo=memo,
+        lines=lines,
+        evidence_links=evidence_links or [],
+        reasoning_trace=reasoning_trace,
+        model_version=model_version,
+    ).checked()
+
+    async with workspace_session(SessionLocal, workspace_id) as session:
+        approval_id, pending, total_debit_cents, replay = await enqueue_manual_proposal(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            request=request,
+            proposer_user_uc_uid=ctx.user_uc_uid,
+            proposer_agent_id=ctx.agent_id,
+        )
+        if replay:
+            return {
+                "approval_id": approval_id,
+                "pending": pending,
+                "total_debit_cents": total_debit_cents,
+            }
+        response = {
+            "approval_id": approval_id,
+            "pending": True,
+            "total_debit_cents": total_debit_cents,
+        }
+        audit_id = await write_decision_audit(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            ctx=ctx,
+            tool_name="propose_manual_journal_entry",
+            request_payload={
+                "idempotency_key": request.idempotency_key,
+                "effective_date": request.effective_date,
+                "memo": request.memo,
+                "lines": request.model_dump(mode="json")["lines"],
+                "evidence_links": list(request.evidence_links),
+                "model_version": request.model_version,
+            },
+            response_payload={**response, "subject_type": MANUAL_PROPOSAL_SUBJECT},
+            reasoning=request.reasoning_trace,
+            outcome="pending",
+        )
+
+    project_decision_audit(
+        workspace_id=workspace_id,
+        entity_id=entity_id,
+        audit_id=audit_id,
+        ctx=ctx,
+        tool_name="propose_manual_journal_entry",
+        outcome="pending",
+        reasoning=request.reasoning_trace,
+        subject_id=approval_id,
+    )
+    return response
 
 
 async def close_period(

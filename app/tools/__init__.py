@@ -45,6 +45,7 @@ from app.tools.journal_tools import (
     list_journal_entries,
     list_posting_log,
     post_journal_entry,
+    propose_manual_journal_entry,
     verify_journal_chain,
 )
 from app.tools.payments import propose_payment
@@ -159,6 +160,7 @@ __all__ = [
     "list_workspace_entities",
     "mark_intake_complete",
     "post_journal_entry",
+    "propose_manual_journal_entry",
     "propose_payment",
     "suggest_connectors",
     "query_specialty_rules",

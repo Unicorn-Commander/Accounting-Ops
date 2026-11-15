@@ -74,6 +74,7 @@ from app.tools import (
     list_workspace_entities,
     mark_intake_complete,
     post_journal_entry,
+    propose_manual_journal_entry,
     propose_payment,
     suggest_connectors,
     query_specialty_rules,
@@ -241,6 +242,7 @@ def build_server():
     server.tool()(verify_journal_chain)
     server.tool()(list_posting_log)
     server.tool()(post_journal_entry)
+    server.tool()(propose_manual_journal_entry)
     server.tool()(list_closed_periods)
     server.tool()(close_period)
 
