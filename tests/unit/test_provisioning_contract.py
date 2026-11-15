@@ -191,19 +191,84 @@ async def test_flag_on_delegates_even_without_old_flag(monkeypatch):
     jit.assert_awaited_once_with(auth, "fictional-bearer", None)
 
 
-async def test_own_delete_flag_off_does_not_call_new_policy(monkeypatch):
+@pytest.mark.parametrize("enabled", [None, "false", "true"])
+async def test_own_delete_always_calls_removal_policy(monkeypatch, enabled):
     from app.api import members
     from app.security import member_removal
     from app.tenancy import WorkspaceContext
 
-    monkeypatch.delenv("PROVISIONING_ENABLED", raising=False)
-    policy = AsyncMock(side_effect=AssertionError("new policy invoked"))
+    if enabled is None:
+        monkeypatch.delenv("PROVISIONING_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("PROVISIONING_ENABLED", enabled)
+    receipt = {"revoked_pat_count": 2, "static_service_token_count": 1}
+    policy = AsyncMock(return_value=receipt)
     monkeypatch.setattr(member_removal, "remove_person", policy)
-    ctx = WorkspaceContext(uuid4(), "fictional", "viewer", "alex", None, None, False)
-    with pytest.raises(HTTPException) as exc:
-        await members.remove_member(ctx.workspace_id, uuid4(), ctx)
-    assert exc.value.status_code == 403
-    policy.assert_not_called()
+
+    def forbidden():
+        pytest.fail("member route bypassed the transactional removal policy")
+
+    monkeypatch.setattr(members, "SessionLocal", forbidden)
+    ctx = WorkspaceContext(uuid4(), "fictional", "owner", "alex@example.com", None, None, False)
+    uid = uuid4()
+    result = await members.remove_member(ctx.workspace_id, uid, ctx)
+    policy.assert_awaited_once_with(ctx.workspace_id, user_id=uid, actor=ctx)
+    assert result == {"ok": True, "removed_user_id": str(uid), **receipt}
+
+
+async def test_invitation_flag_off_restarts_revoked_membership(monkeypatch):
+    from starlette.requests import Request
+
+    from app import auth
+    from app.api import members
+
+    monkeypatch.delenv("PROVISIONING_ENABLED", raising=False)
+    wid, uid = uuid4(), uuid4()
+    scope = [str(uuid4())]
+    invitation = SimpleNamespace(
+        id=uuid4(), workspace_id=wid, email="robin@example.com", role="bookkeeper",
+        entity_scope=scope, expires_at=None, accepted_at=None, cancelled_at=None,
+        workspace_name="Fictional Books", workspace_slug="fictional",
+    )
+    rows = iter([
+        invitation,
+        SimpleNamespace(id=uid, email=invitation.email),
+        SimpleNamespace(role="accountant", entity_scope=None, status="revoked"),
+    ])
+    writes = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        def begin(self):
+            return self
+
+        async def execute(self, statement, params):
+            sql = str(statement).strip()
+            if sql.startswith("SELECT"):
+                return SimpleNamespace(first=lambda: next(rows))
+            writes.append((sql, params))
+
+    caller = AuthContext("robin@example.com", None, (), {"email_verified": True})
+    monkeypatch.setattr(auth, "authenticate_token", AsyncMock(return_value=caller))
+    monkeypatch.setattr(members, "_token_email_verified", lambda _: True)
+    monkeypatch.setattr(members, "SessionLocal", Session)
+    monkeypatch.setattr(members, "_write_membership_audit", AsyncMock())
+    request = Request({"type": "http", "headers": [(b"authorization", b"Bearer fictional")]})
+    reply = await members.accept_invitation(request=request, token="fictional-invitation")
+    assert reply["status"] == "accepted"
+    membership_writes = [(sql, params) for sql, params in writes if "workspace_membership" in sql]
+    assert len(membership_writes) == 1
+    sql, params = membership_writes[0]
+    assert "status = 'active'" in sql
+    assert params["role"] == "bookkeeper"
+    import json
+
+    assert json.loads(params["scope"]) == scope
 
 
 @pytest.mark.parametrize("replayed,count,expected", [(True, 1, 401), (False, 10000, 503)])
@@ -245,7 +310,8 @@ def test_short_secret_warning_is_once_and_does_not_expose_value(monkeypatch, cap
     assert "fictional-short-value" not in caplog.text
 
 
-async def test_paused_upsert_guard_only_when_enabled(monkeypatch):
+@pytest.mark.parametrize("activate", [True, False])
+async def test_paused_upsert_guard_only_when_enabled(monkeypatch, activate):
     statements = []
 
     class FakeSession:
@@ -264,14 +330,15 @@ async def test_paused_upsert_guard_only_when_enabled(monkeypatch):
     monkeypatch.setattr(onboarding, "SessionLocal", FakeSession)
     monkeypatch.setenv("PROVISIONING_ENABLED", "true")
     await onboarding._upsert_workspace_membership(
-        uuid4(), uuid4(), "owner", preserve_existing_role=False
+        uuid4(), uuid4(), "owner", preserve_existing_role=False, activate_membership=activate
     )
     assert "WHERE workspace_membership.status = 'active'" in statements[-1]
-    monkeypatch.setenv("PROVISIONING_ENABLED", "false")
+    monkeypatch.delenv("PROVISIONING_ENABLED", raising=False)
     await onboarding._upsert_workspace_membership(
-        uuid4(), uuid4(), "owner", preserve_existing_role=False
+        uuid4(), uuid4(), "owner", preserve_existing_role=False, activate_membership=activate
     )
     assert "WHERE workspace_membership.status" not in statements[-1]
+    assert ("status = 'active'" in statements[-1]) is activate
 
 
 def test_wrong_signature_fails():

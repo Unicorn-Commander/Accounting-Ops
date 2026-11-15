@@ -1034,3 +1034,170 @@ async def test_an_organization_without_an_owner_row_still_gets_its_workspace(pg)
         "/api/v1/provisioning/workspaces", json=body, headers=pg.headers(body)
     )
     assert reply.status_code == 409
+
+
+@pytest.fixture
+async def pg_flag_off(pg, monkeypatch):
+    # Setup uses the existing disposable harness; all behavior below runs with
+    # the flag absent, through sessions bound to accounting_ops_app.
+    await pg.create()
+    await pg.create()
+    monkeypatch.delenv("PROVISIONING_ENABLED", raising=False)
+    async with pg.runtime.connect() as connection:
+        privileges = (
+            await connection.execute(text("""
+                SELECT has_table_privilege(current_user, 'public.workspace_membership', 'DELETE'),
+                       has_table_privilege(current_user, 'public.workspace_membership', 'UPDATE')
+            """))
+        ).one()
+        assert tuple(privileges) == (False, True)
+    return pg
+
+
+async def _removal_audits(pg, wid):
+    return (
+        await pg.sql(
+            "SELECT target_user_id, actor_uc_uid, old_role, revoked_pat_count, "
+            "static_service_token_count FROM public.membership_audit "
+            "WHERE workspace_id = :w AND action = 'removal' ORDER BY occurred_at",
+            w=wid,
+        )
+    ).all()
+
+
+async def test_flag_off_removal_revokes_row_and_scoped_pat_with_receipt(pg_flag_off, monkeypatch):
+    pg = pg_flag_off
+    wid, other = pg.workspaces
+    owner, owner_subject = await pg.person()
+    uid, subject = await pg.person()
+    await pg.seat(wid, owner, role="owner")
+    await pg.seat(wid, uid, role="accountant")
+    await pg.seat(other, uid)
+    scoped, _ = await pg.pat(uid, [wid])
+    elsewhere, _ = await pg.pat(uid, [other])
+    unscoped, _ = await pg.pat(uid, None)
+    monkeypatch.setattr(member_removal, "_load_service_tokens", lambda: {
+        "fictional-service": {"uc_uid": subject},
+        "fictional-other-service": {"uc_uid": "other@example.com"},
+    })
+    actor = tenancy.WorkspaceContext(wid, "fictional", "owner", owner_subject, None, None, False)
+
+    # On main this reaches DELETE, which accounting_ops_app is not granted.
+    reply = await members.remove_member(wid, uid, actor)
+    assert reply == {
+        "ok": True, "removed_user_id": str(uid),
+        "revoked_pat_count": 1, "static_service_token_count": 1,
+    }
+    assert await _membership(pg, wid, uid) == ("accountant", "revoked")
+    assert await pg.revoked(scoped)
+    assert not await pg.revoked(elsewhere)
+    assert not await pg.revoked(unscoped)
+    assert [tuple(row) for row in await _removal_audits(pg, wid)] == [
+        (uid, owner_subject, "accountant", 1, 1)
+    ]
+    assert str(uid) not in {row["user_id"] for row in await members.list_members(wid, actor)}
+
+    # A second local removal cannot count credentials or append another receipt.
+    def forbidden():
+        pytest.fail("already removed member's credentials counted")
+
+    monkeypatch.setattr(member_removal, "_load_service_tokens", forbidden)
+    with pytest.raises(HTTPException) as exc:
+        await members.remove_member(wid, uid, actor)
+    assert exc.value.status_code == 404
+    assert len(await _removal_audits(pg, wid)) == 1
+    assert not await pg.revoked(elsewhere)
+    assert not await pg.revoked(unscoped)
+
+
+@pytest.mark.parametrize("target", ["self", "last_owner", "nonmember", "revoked", "unknown"])
+async def test_flag_off_removal_rejections_change_and_count_nothing(pg_flag_off, monkeypatch, target):
+    pg = pg_flag_off
+    wid = pg.workspaces[0]
+    uid, subject = await pg.person()
+    pid, _ = await pg.pat(uid, [wid])
+    if target in {"self", "last_owner"}:
+        await pg.seat(wid, uid, role="owner")
+    elif target == "revoked":
+        await pg.seat(wid, uid, status="revoked")
+    before = await _membership(pg, wid, uid)
+    actor = tenancy.WorkspaceContext(
+        wid, "fictional", "owner",
+        subject if target == "self" else "another-owner@example.com", None, None, False,
+    )
+
+    def forbidden():
+        pytest.fail("rejected removal counted credentials")
+
+    monkeypatch.setattr(member_removal, "_load_service_tokens", forbidden)
+    with pytest.raises(HTTPException) as exc:
+        await members.remove_member(wid, uuid4() if target == "unknown" else uid, actor)
+    assert exc.value.status_code == (400 if target in {"self", "last_owner"} else 404)
+    assert not await pg.revoked(pid)
+    assert await _membership(pg, wid, uid) == before
+    assert await _removal_audits(pg, wid) == []
+
+
+@pytest.mark.parametrize("initial_status", ["active", "revoked"])
+async def test_flag_off_invitation_restarts_revoked_row_with_invited_role_and_scope(
+    pg_flag_off, monkeypatch, initial_status
+):
+    from starlette.requests import Request
+
+    pg = pg_flag_off
+    wid = pg.workspaces[0]
+    uid, subject = await pg.person()
+    # Seed the tombstone independently so this tests the invitation gate even
+    # before the removal route is fixed.
+    await pg.seat(wid, uid, role="accountant", status=initial_status)
+    owner, owner_subject = await pg.person()
+    await pg.seat(wid, owner, role="owner")
+    actor = tenancy.WorkspaceContext(wid, "fictional", "owner", owner_subject, None, None, False)
+    if initial_status == "active":
+        await members.remove_member(wid, uid, actor)
+    assert str(uid) not in {row["user_id"] for row in await members.list_members(wid, actor)}
+    scope = [str(uuid4())]
+    token, invitation = "fictional-invitation-" + uuid4().hex, uuid4()
+    await pg.sql(
+        """
+        INSERT INTO public.workspace_invitation
+            (id, workspace_id, email, role, entity_scope, token_hash, expires_at, created_by_uc_uid)
+        VALUES (:id, :w, 'robin@example.com', CAST('bookkeeper' AS workspace_role),
+                CAST(:scope AS jsonb), :hash, now() + interval '1 day', 'owner@example.com')
+        """,
+        id=invitation, w=wid, scope=json.dumps(scope),
+        hash=hashlib.sha256(token.encode()).hexdigest(),
+    )
+    caller = auth.AuthContext(
+        subject, None, (), {"email": "robin@example.com", "email_verified": True}
+    )
+    monkeypatch.setattr(auth, "authenticate_token", AsyncMock(return_value=caller))
+    monkeypatch.setattr(members, "_token_email_verified", lambda _: True)
+    request = Request({"type": "http", "headers": [(b"authorization", b"Bearer fictional")]})
+    reply = await members.accept_invitation(request=request, token=token)
+    assert reply["status"] == "accepted"
+    assert await _membership(pg, wid, uid) == ("bookkeeper", "active")
+    assert (
+        await pg.sql(
+            "SELECT entity_scope FROM public.workspace_membership "
+            "WHERE workspace_id = :w AND user_id = :u", w=wid, u=uid,
+        )
+    ).scalar_one() == scope
+    assert (str(uid), "active", "bookkeeper") in {
+        (row["user_id"], row["status"], row["role"])
+        for row in await members.list_members(wid, actor)
+    }
+
+
+@pytest.mark.parametrize("status", ["revoked", "suspended"])
+@pytest.mark.parametrize("activate", [True, False])
+async def test_flag_off_onboarding_upsert_can_reactivate_nonactive_rows(pg_flag_off, status, activate):
+    pg = pg_flag_off
+    wid = pg.workspaces[0]
+    uid, _ = await pg.person()
+    await pg.seat(wid, uid, role="accountant", status=status)
+    await onboarding._upsert_workspace_membership(
+        uid, wid, "viewer", preserve_existing_role=False, activate_membership=activate,
+    )
+    # Characterization only: no policy change to onboarding in this fix lane.
+    assert await _membership(pg, wid, uid) == ("viewer", "active" if activate else status)
