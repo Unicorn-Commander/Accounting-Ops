@@ -279,3 +279,96 @@ def test_wrong_signature_fails():
     with pytest.raises(HTTPException) as exc:
         tokens.verify_claims(token, _SECRET, "accounting-ops", _NOW)
     assert exc.value.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "answer,stored,status,members_read,expected",
+    [
+        # The control plane decides who administers, whatever is stored here.
+        ("owner", None, None, False, "owner"),
+        (" Admin ", "viewer", "active", False, "admin"),
+        ("owner", "accountant", "revoked", False, "owner"),
+        # Not an administrator: a bookkeeping role an owner set here survives...
+        ("member", "accountant", "active", False, "accountant"),
+        ("manager", "cpa", "active", False, "cpa"),
+        ("billing_admin", "bookkeeper", "active", False, "bookkeeper"),
+        ("unknown-role", "client_user", "active", False, "client_user"),
+        # ...and an administrator the control plane no longer names goes to the least privilege.
+        ("member", "owner", "active", False, "viewer"),
+        ("member", "admin", "active", False, "viewer"),
+        ("member", "client_owner", "active", False, "viewer"),
+        # No seat, or a removed one: nothing from the answer alone, read-only when the setting says so.
+        ("member", None, None, False, None),
+        ("member", "accountant", "revoked", False, None),
+        ("", None, None, False, None),
+        ("member", None, None, True, "viewer"),
+        ("member", "accountant", "revoked", True, "viewer"),
+    ],
+)
+def test_role_after_an_answer(monkeypatch, answer, stored, status, members_read, expected):
+    monkeypatch.setenv("PROVISIONING_MEMBERS_READ", "true" if members_read else "")
+    assert provisioning.role_after(answer, stored, status) == expected
+
+
+async def test_a_remembered_no_needs_neither_the_database_nor_the_control_plane(monkeypatch):
+    from app import tenancy
+
+    provisioning.forget_answers()
+    monkeypatch.setattr(tenancy, "_ensure_user_account", AsyncMock(return_value=uuid4()))
+    monkeypatch.setattr(
+        provisioning, "SessionLocal", lambda: pytest.fail("a remembered answer opened a session")
+    )
+    fetch = AsyncMock(side_effect=AssertionError("a remembered answer asked again"))
+    auth = AuthContext(
+        "alex", None, (), {"iss": "https://identity.example.com"}, may_autoprovision=True
+    )
+    provisioning._remember("alex", "not_entitled", 60.0)
+    result = await provisioning.ensure_jit_membership(
+        auth, "fictional-bearer", SimpleNamespace(fetch=fetch)
+    )
+    assert result.state == "not_entitled"
+    fetch.assert_not_called()
+    provisioning.forget_answers()
+
+
+@pytest.mark.parametrize(
+    "auth,bearer",
+    [
+        (AuthContext("alex", None, (), {"iss": "https://identity.example.com"}), "fictional"),
+        (AuthContext("alex", None, (), {"iss": "ao-local"}, may_autoprovision=True), "fictional"),
+        (
+            AuthContext(
+                "alex", None, (), {"iss": "https://identity.example.com"}, may_autoprovision=True
+            ),
+            None,
+        ),
+    ],
+)
+async def test_a_caller_who_cannot_be_provisioned_is_never_looked_up(monkeypatch, auth, bearer):
+    from app import tenancy
+
+    monkeypatch.setattr(
+        tenancy, "_ensure_user_account", AsyncMock(side_effect=AssertionError("looked up"))
+    )
+    fetch = AsyncMock(side_effect=AssertionError("asked the control plane"))
+    result = await provisioning.ensure_jit_membership(auth, bearer, SimpleNamespace(fetch=fetch))
+    assert result.state == "disabled"
+
+
+def test_answers_are_remembered_within_a_bound(monkeypatch):
+    provisioning.forget_answers()
+    monkeypatch.setattr(provisioning, "_ANSWER_LIMIT", 4)
+    clock = [1000.0]
+    monkeypatch.setattr(provisioning, "_clock", lambda: clock[0])
+    for index in range(4):
+        provisioning._remember(f"person-{index}", "not_entitled", 60.0)
+    # Full of answers that are still fresh: they all go, the new one stays.
+    provisioning._remember("person-4", "not_entitled", 60.0)
+    assert set(provisioning._answers) == {"person-4"}
+    # Full of answers that have aged out: only those go.
+    for index in range(5, 8):
+        provisioning._remember(f"person-{index}", "not_entitled", 1.0)
+    clock[0] += 5
+    provisioning._remember("person-8", "not_entitled", 60.0)
+    assert set(provisioning._answers) == {"person-4", "person-8"}
+    provisioning.forget_answers()

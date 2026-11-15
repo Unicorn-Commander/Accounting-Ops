@@ -152,6 +152,12 @@ async def pg(monkeypatch, stack):
     monkeypatch.setenv("PROVISIONING_ENABLED", "true")
     monkeypatch.setenv("PROVISIONING_JWT_SECRET", _SECRET)
     monkeypatch.delenv("AO_ENTITLED_PROVISIONING", raising=False)
+    monkeypatch.delenv("PROVISIONING_MEMBERS_READ", raising=False)
+    # Each sign-in in these tests asks the control plane again, as if the last
+    # answer had aged out; the tests about remembering an answer set their own.
+    provisioning.forget_answers()
+    monkeypatch.setattr(provisioning, "ANSWER_FRESH_SECONDS", 0.0)
+    monkeypatch.setattr(provisioning, "RETRY_AFTER_FAILURE_SECONDS", 0.0)
     for module in (
         db,
         tenancy,
@@ -485,17 +491,23 @@ async def test_own_delete_uses_same_policy_and_preserves_self_and_last_owner(pg)
 
 
 @pytest.mark.parametrize(
-    "role,expected",
+    "role,members_read,expected",
     [
-        ("owner", "owner"),
-        ("admin", "admin"),
-        ("manager", "viewer"),
-        ("member", "viewer"),
-        ("billing_admin", "viewer"),
-        ("unknown", "viewer"),
+        ("owner", False, "owner"),
+        ("admin", False, "admin"),
+        # Not an administrator: no seat in the books from the answer alone...
+        ("manager", False, None),
+        ("member", False, None),
+        ("billing_admin", False, None),
+        ("unknown", False, None),
+        # ...unless the deployment says ordinary members start read-only.
+        ("member", True, "viewer"),
+        ("unknown", True, "viewer"),
     ],
 )
-async def test_jit_role_comes_from_answer_not_claims(pg, role, expected):
+async def test_jit_role_comes_from_answer_not_claims(pg, monkeypatch, role, members_read, expected):
+    if members_read:
+        monkeypatch.setenv("PROVISIONING_MEMBERS_READ", "true")
     body = await pg.create()
     wid = pg.workspaces[-1]
     uid, subject = await pg.person()
@@ -511,14 +523,18 @@ async def test_jit_role_comes_from_answer_not_claims(pg, role, expected):
             return_value=EntitlementResult("entitled", org_id=body["org_id"], org_role=role)
         )
     )
-    await onboarding.ensure_entitled_workspace(ctx, "fixture", entitlement_client=client)
+    result = await onboarding.ensure_entitled_workspace(ctx, "fixture", entitlement_client=client)
     assert (
         await pg.sql(
             "SELECT role::text FROM public.workspace_membership WHERE workspace_id = :w AND user_id = :u",
             w=wid,
             u=uid,
         )
-    ).scalar_one() == expected
+    ).scalar_one_or_none() == expected
+    if expected is None:
+        # The group claim that names the workspace decided nothing either.
+        assert result.state == "not_entitled"
+        return
     # A later answer demotes in place, it never removes/re-adds or restores PATs.
     old_id = (
         await pg.sql(
@@ -760,3 +776,228 @@ async def test_concurrent_creation_calls_shared_provisioner_once(pg, monkeypatch
     assert [reply.status_code for reply in results] == [200, 200]
     assert results[0].json() == results[1].json()
     assert provision.await_count == 1
+
+
+def _signed_in(subject):
+    return auth.AuthContext(
+        subject, None, (), {"iss": "https://identity.example.com"}, may_autoprovision=True
+    )
+
+
+def _answering(org_id, role):
+    return EntitlementResult("entitled", org_id=org_id, org_role=role)
+
+
+async def _membership(pg, wid, uid):
+    row = (
+        await pg.sql(
+            "SELECT role::text, status FROM public.workspace_membership "
+            "WHERE workspace_id = :w AND user_id = :u",
+            w=wid,
+            u=uid,
+        )
+    ).first()
+    return tuple(row) if row else None
+
+
+async def test_a_role_set_here_survives_the_next_answer_and_administrators_follow_it(pg):
+    body = await pg.create()
+    wid = pg.workspaces[-1]
+    uid, subject = await pg.person()
+    client = SimpleNamespace(fetch=AsyncMock(return_value=_answering(body["org_id"], "member")))
+
+    async def sign_in():
+        return await onboarding.ensure_entitled_workspace(
+            _signed_in(subject), "fixture", entitlement_client=client
+        )
+
+    # An owner here made the person an accountant: the control plane's "member" leaves that alone.
+    await pg.seat(wid, uid, role="accountant")
+    assert (await sign_in()).state == "existing"
+    assert await _membership(pg, wid, uid) == ("accountant", "active")
+    # Who administers follows the answer, up and down.
+    client.fetch.return_value = _answering(body["org_id"], "admin")
+    await sign_in()
+    assert await _membership(pg, wid, uid) == ("admin", "active")
+    client.fetch.return_value = _answering(body["org_id"], "member")
+    await sign_in()
+    assert await _membership(pg, wid, uid) == ("viewer", "active")
+    # And the owner's next choice sticks again.
+    await pg.seat(wid, uid, role="bookkeeper")
+    await sign_in()
+    assert await _membership(pg, wid, uid) == ("bookkeeper", "active")
+
+
+@pytest.mark.parametrize("members_read", [False, True])
+async def test_an_ordinary_member_gets_a_seat_only_when_the_setting_says_so(
+    pg, monkeypatch, members_read
+):
+    if members_read:
+        monkeypatch.setenv("PROVISIONING_MEMBERS_READ", "true")
+    body = pg.body()  # the control plane has not created this workspace yet
+    wid = pg.workspaces[-1]
+    uid, subject = await pg.person()
+    client = SimpleNamespace(fetch=AsyncMock(return_value=_answering(body["org_id"], "member")))
+
+    async def sign_in():
+        return await onboarding.ensure_entitled_workspace(
+            _signed_in(subject), "fixture", entitlement_client=client
+        )
+
+    result = await sign_in()
+    made = (
+        await pg.sql("SELECT count(*) FROM public.workspace WHERE id = :w", w=wid)
+    ).scalar_one()
+    if members_read:
+        assert result.state == "provisioned" and made == 1
+        assert await _membership(pg, wid, uid) == ("viewer", "active")
+    else:
+        # In the organization, no seat in its books: no membership and no workspace made for them.
+        assert result.state == "not_entitled" and made == 0
+        assert await _membership(pg, wid, uid) is None
+    # Removed by the control plane, then still on the organization's list at the next sign-in.
+    await pg.create(body)
+    await pg.seat(wid, uid, role="accountant")
+    assert (await pg.remove(wid, subject)).status_code == 204
+    await sign_in()
+    assert await _membership(pg, wid, uid) == (
+        ("viewer", "active") if members_read else ("accountant", "revoked")
+    )
+
+
+async def test_a_remembered_answer_saves_the_call_and_never_brings_anyone_back(pg, monkeypatch):
+    monkeypatch.setattr(provisioning, "ANSWER_FRESH_SECONDS", 60.0)
+    body = await pg.create()
+    wid = pg.workspaces[-1]
+    uid, subject = await pg.person()
+    client = SimpleNamespace(fetch=AsyncMock(return_value=_answering(body["org_id"], "owner")))
+
+    async def sign_in():
+        return await onboarding.ensure_entitled_workspace(
+            _signed_in(subject), "fixture", entitlement_client=client
+        )
+
+    for _ in range(3):
+        result = await sign_in()
+    assert client.fetch.await_count == 1
+    assert result.state == "existing" and result.workspace_id == wid
+    assert await _membership(pg, wid, uid) == ("owner", "active")
+    # A removal while that answer is still remembered: what is remembered changes nothing.
+    # The next sign-in asks again, under the person's lock, and the answer is now "no".
+    pid, _ = await pg.pat(uid, [wid])
+    assert (await pg.remove(wid, subject)).status_code == 204
+    client.fetch.return_value = EntitlementResult("not_entitled")
+    assert (await sign_in()).state == "not_entitled"
+    assert client.fetch.await_count == 2
+    assert await _membership(pg, wid, uid) == ("owner", "revoked")
+    # That "no" is remembered too.
+    await sign_in()
+    assert client.fetch.await_count == 2
+    assert await _membership(pg, wid, uid) == ("owner", "revoked")
+    # Only a fresh "yes" brings the person back, and never the key that was revoked.
+    provisioning.forget_answers()
+    client.fetch.return_value = _answering(body["org_id"], "owner")
+    await sign_in()
+    assert client.fetch.await_count == 3
+    assert await _membership(pg, wid, uid) == ("owner", "active")
+    assert await pg.revoked(pid)
+
+
+async def test_the_control_plane_being_down_locks_out_nobody_who_is_already_in(pg, monkeypatch):
+    monkeypatch.setattr(provisioning, "RETRY_AFTER_FAILURE_SECONDS", 60.0)
+    await pg.create()
+    wid = pg.workspaces[-1]
+    uid, subject = await pg.person()
+    await pg.seat(wid, uid, role="accountant")
+    _, newcomer = await pg.person()
+    down = SimpleNamespace(fetch=AsyncMock(side_effect=RuntimeError("fictional outage")))
+
+    async def sign_in(who):
+        return await onboarding.ensure_entitled_workspace(
+            _signed_in(who), "fixture", entitlement_client=down
+        )
+
+    result = await sign_in(subject)
+    assert result.state == "existing" and result.workspace_id == wid
+    assert (await sign_in(newcomer)).state == "unavailable"
+    # A lookup that failed is not repeated straight away, and the answers stay the same.
+    assert (await sign_in(subject)).state == "existing"
+    assert (await sign_in(newcomer)).state == "unavailable"
+    assert down.fetch.await_count == 2
+    assert await _membership(pg, wid, uid) == ("accountant", "active")
+    # "No verdict" in an answer is the same as no answer.
+    provisioning.forget_answers()
+    silent = SimpleNamespace(fetch=AsyncMock(return_value=EntitlementResult("unavailable")))
+    result = await onboarding.ensure_entitled_workspace(
+        _signed_in(subject), "fixture", entitlement_client=silent
+    )
+    assert result.state == "existing" and result.workspace_id == wid
+
+
+async def test_a_removed_member_is_not_listed_and_does_not_count_as_an_owner(pg):
+    await pg.create()
+    wid = pg.workspaces[-1]
+    owner_uid, owner_subject = await pg.person()
+    await pg.seat(wid, owner_uid, role="owner")
+    gone_uid, _ = await pg.person()
+    await pg.seat(wid, gone_uid, role="owner")
+    paused_uid, _ = await pg.person()
+    await pg.seat(wid, paused_uid, status="suspended", role="bookkeeper")
+    actor = tenancy.WorkspaceContext(wid, "fixture", "owner", owner_subject, None, None, False)
+    await members.remove_member(wid, gone_uid, actor)
+    listed = await members.list_members(wid, actor)
+    assert {(row["user_id"], row["status"]) for row in listed} == {
+        (str(owner_uid), "active"),
+        (str(paused_uid), "suspended"),
+    }
+    # The removed owner's row is kept, revoked. It is not an owner: the one who is left cannot be demoted.
+    assert await _membership(pg, wid, gone_uid) == ("owner", "revoked")
+    other = tenancy.WorkspaceContext(
+        wid, "fixture", "owner", "another-owner@example.com", None, None, False
+    )
+    with pytest.raises(HTTPException) as exc:
+        await members.update_member(wid, owner_uid, members.MemberPatch(role="viewer"), other)
+    assert exc.value.status_code == 400 and "last owner" in exc.value.detail
+    assert await _membership(pg, wid, owner_uid) == ("owner", "active")
+
+
+async def test_an_accepted_invitation_starts_a_removed_membership_again(pg, monkeypatch):
+    from starlette.requests import Request
+
+    await pg.create()
+    wid = pg.workspaces[-1]
+    owner_uid, owner_subject = await pg.person()
+    await pg.seat(wid, owner_uid, role="owner")
+    uid, subject = await pg.person()
+    await pg.seat(wid, uid, role="accountant")
+    actor = tenancy.WorkspaceContext(wid, "fixture", "owner", owner_subject, None, None, False)
+    await members.remove_member(wid, uid, actor)
+    assert await _membership(pg, wid, uid) == ("accountant", "revoked")
+    # The owner invites the same person again, as a bookkeeper this time (a LOWER role than
+    # the removed row had: a removed membership is not a membership to be "promoted" from).
+    token, invitation = "fictional-invitation-token-" + uuid4().hex, uuid4()
+    await pg.sql(
+        """
+        INSERT INTO public.workspace_invitation
+            (id, workspace_id, email, role, token_hash, expires_at, created_by_uc_uid)
+        VALUES (:id, :w, 'robin@example.com', CAST('bookkeeper' AS workspace_role), :hash,
+                now() + interval '1 day', :by)
+    """,
+        id=invitation,
+        w=wid,
+        hash=hashlib.sha256(token.encode()).hexdigest(),
+        by=owner_subject,
+    )
+    caller = auth.AuthContext(
+        subject, None, (), {"email": "robin@example.com", "email_verified": True}
+    )
+    monkeypatch.setattr(auth, "authenticate_token", AsyncMock(return_value=caller))
+    monkeypatch.setattr(members, "_token_email_verified", lambda claims: True)
+    request = Request({"type": "http", "headers": [(b"authorization", b"Bearer fictional")]})
+    reply = await members.accept_invitation(request=request, token=token)
+    assert reply["status"] == "accepted"
+    assert await _membership(pg, wid, uid) == ("bookkeeper", "active")
+    listed = await members.list_members(wid, actor)
+    assert (str(uid), "active", "bookkeeper") in {
+        (row["user_id"], row["status"], row["role"]) for row in listed
+    }
