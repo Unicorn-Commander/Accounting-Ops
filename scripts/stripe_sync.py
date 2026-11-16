@@ -50,7 +50,7 @@ from app.connectors.stripe import StripeApiError, StripeClient, load_stripe_cred
 from app.connectors.stripe.client import paginate_balance_transactions
 from app.connectors.stripe.mapper import (
     DEFAULT_REVENUE_ACCOUNT,
-    enqueue_quarantined_balance_transaction,
+    enqueue_blocked_balance_transaction,
     map_and_post_balance_transaction,
 )
 from app.connectors.stripe.reconcile import reconcile_one_entity
@@ -212,7 +212,6 @@ async def _load_sync_position(
     int | None,
     int | None,
     dict[str, int],
-    dict[str, dict[str, Any]],
 ]:
     """Load the durable Stripe chain position and its fixed time window."""
     async with workspace_session(SessionLocal, workspace_id) as session:
@@ -229,7 +228,7 @@ async def _load_sync_position(
             )
         ).first()
     if r is None:
-        return None, None, None, None, {}, {}
+        return None, None, None, None, {}
     state = r.state if isinstance(r.state, dict) else {}
     cursor = state.get("_stripe_continuation_cursor")
 
@@ -263,21 +262,12 @@ async def _load_sync_position(
         and str(value).isdigit()
         and int(value) > 0
     }
-    quarantined_items = state.get("_stripe_quarantined_items")
-    if not isinstance(quarantined_items, dict):
-        quarantined_items = {}
-    quarantined_items = {
-        str(key): value
-        for key, value in quarantined_items.items()
-        if isinstance(key, str) and isinstance(value, dict)
-    }
     return (
         r.last_sync_at,
         cursor if isinstance(cursor, str) else None,
         window_gte,
         window_lt,
         failure_counts,
-        quarantined_items,
     )
 
 
@@ -291,7 +281,6 @@ async def _record_sync_outcome(
     window_gte: int | None,
     window_lt: int | None,
     failure_counts: dict[str, int] | None = None,
-    quarantined_items: dict[str, dict[str, Any]] | None = None,
     instance_name: str = "default",
 ) -> None:
     """Upsert connector_state with the latest run's summary."""
@@ -310,10 +299,6 @@ async def _record_sync_outcome(
         state["_stripe_failure_counts"] = failure_counts
     else:
         state.pop("_stripe_failure_counts", None)
-    if quarantined_items:
-        state["_stripe_quarantined_items"] = quarantined_items
-    else:
-        state.pop("_stripe_quarantined_items", None)
     async with workspace_session(SessionLocal, workspace_id) as session:
         result = await session.execute(
             text(
@@ -408,7 +393,6 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         "posted": 0,
         "queued": 0,
         "skipped": 0,
-        "quarantined": 0,
         "flagged_for_cpa": 0,
         "errors": [],
     }
@@ -434,7 +418,6 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         window_gte,
         window_lt,
         failure_counts,
-        quarantined_items,
     ) = await _load_sync_position(workspace_id, entity_id)
     loaded_window_lt = window_lt
     if window_gte is None:
@@ -499,7 +482,6 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 window_gte=window_gte if window_lt is not None else None,
                 window_lt=window_lt,
                 failure_counts=failure_counts,
-                quarantined_items=quarantined_items,
             )
             return summary
     window_lt = bts.window_lt or window_lt
@@ -515,7 +497,6 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
-            quarantined_items=quarantined_items,
         )
     summary["balance_transactions_seen"] = len(bts)
     _log.info(
@@ -530,10 +511,6 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     async with workspace_session(SessionLocal, workspace_id) as session:
         for bt in bts:
             bt_id = bt.get("id")
-            if isinstance(bt_id, str) and bt_id in quarantined_items:
-                summary["quarantined"] += 1
-                last_processed = bt
-                continue
             try:
                 # Keep every statement for one balance transaction inside its
                 # own savepoint. A DBAPI error aborts the current PostgreSQL
@@ -566,12 +543,11 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 ):
                     processing_error = True
                     break
+                # The mapper savepoint has now rolled back. Keep the failed
+                # item at the head of the chain and raise a visible alert.
                 try:
-                    # The mapper savepoint has now rolled back. Use a fresh
-                    # savepoint for the quarantine insert, so it is legal to
-                    # issue SQL after a DBAPI error and remains item-scoped.
                     async with session.begin_nested():
-                        approval_id = await enqueue_quarantined_balance_transaction(
+                        await enqueue_blocked_balance_transaction(
                             session,
                             workspace_id=str(workspace_id),
                             entity_id=str(entity_id),
@@ -579,29 +555,29 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                             actor_uc_uid="agent:stripe_sync",
                             error=error_text,
                         )
-                except Exception as quarantine_exc:
+                except Exception as alert_exc:
                     summary["errors"].append(
-                        "quarantine "
-                        f"{bt_id}: {quarantine_exc.__class__.__name__}: "
-                        f"{quarantine_exc}"
+                        "blocked alert "
+                        f"{bt_id}: {alert_exc.__class__.__name__}: {alert_exc}"
                     )
-                    processing_error = True
-                    break
-                quarantined_items[bt_id] = {
-                    "approval_id": str(approval_id),
+                blocked_item = {
+                    "id": bt_id,
+                    "amount": bt.get("amount"),
+                    "currency": bt.get("currency"),
                     "error": error_text,
                 }
-                failure_counts.pop(bt_id, None)
-                summary["quarantined"] += 1
-                last_processed = bt
-                _log.warning(
-                    "stripe_sync_quarantined workspace=%s entity=%s id=%s "
-                    "after three consecutive failures",
+                summary["blocked_item"] = blocked_item
+                _log.error(
+                    "stripe_sync_blocked_item workspace=%s entity=%s id=%s "
+                    "amount=%s currency=%s error=%s",
                     workspace_id,
                     entity_id,
                     bt_id,
+                    bt.get("amount"),
+                    bt.get("currency"),
+                    error_text,
                 )
-                continue
+                break
             last_processed = bt
             if isinstance(bt_id, str):
                 failure_counts.pop(bt_id, None)
@@ -635,7 +611,26 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
-            quarantined_items=quarantined_items,
+        )
+        return summary
+
+    if "blocked_item" in summary:
+        summary["last_outcome"] = "blocked_item"
+        summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+        _, next_cursor = _durable_position_after_item(
+            last_processed,
+            fallback_last_sync=last_sync,
+            fallback_cursor=continuation_cursor,
+        )
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync,
+            continuation_cursor=next_cursor,
+            window_gte=window_gte,
+            window_lt=window_lt,
+            failure_counts=failure_counts,
         )
         return summary
 
@@ -664,7 +659,6 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         window_gte=next_window_gte,
         window_lt=next_window_lt,
         failure_counts=failure_counts,
-        quarantined_items=quarantined_items,
     )
 
     # ---- 3. Reconcile Stripe payouts ↔ BoA deposits ----
@@ -690,7 +684,6 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         window_gte=next_window_gte,
         window_lt=next_window_lt,
         failure_counts=failure_counts,
-        quarantined_items=quarantined_items,
     )
     return summary
 

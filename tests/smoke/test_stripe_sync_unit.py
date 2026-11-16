@@ -160,7 +160,7 @@ def _install_worker(
     session = _IdempotentSession()
     initial = list(position or (None, None, None, None))
     if len(initial) == 4:
-        initial.extend([{}, {}])
+        initial.append({})
     current: list[Any] = initial
     records: list[dict[str, Any]] = []
 
@@ -177,7 +177,6 @@ def _install_worker(
             kwargs["window_gte"],
             kwargs["window_lt"],
             dict(kwargs["failure_counts"]),
-            dict(kwargs["quarantined_items"]),
         ]
         records.append(dict(kwargs["outcome_summary"]))
 
@@ -381,13 +380,16 @@ async def test_sync_below_cap_uses_stripe_window_end_and_clears_continuation(mon
 
 
 @pytest.mark.asyncio
-async def test_poison_item_quarantines_on_third_pass_and_keeps_other_rows(monkeypatch):
+async def test_poison_item_blocks_on_third_pass_and_retries_before_advancing(monkeypatch):
     created = int((FIXED_NOW - timedelta(days=2)).timestamp())
     seen: list[str] = []
+    attempts = 0
 
     async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        nonlocal attempts
         seen.append(txn["id"])
-        if txn["id"] == "txn_00002":
+        if txn["id"] == "txn_00002" and attempts < 3:
+            attempts += 1
             raise RuntimeError("fictional deterministic mapper failure")
         return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
 
@@ -400,11 +402,27 @@ async def test_poison_item_quarantines_on_third_pass_and_keeps_other_rows(monkey
     first = await stripe_sync._sync_one_workspace(workspace_id)
     second = await stripe_sync._sync_one_workspace(workspace_id)
     third = await stripe_sync._sync_one_workspace(workspace_id)
+    assert third["last_outcome"] == "blocked_item"
+    assert third["blocked_item"] == {
+        "id": "txn_00002",
+        "amount": 1000,
+        "currency": "usd",
+        "error": "RuntimeError: fictional deterministic mapper failure",
+    }
+    assert position[1] == "txn_00001"
+    assert position[4] == {"txn_00002": 3}
+    assert len(session.approvals) == 1
+    assert session.approvals[0]["reasoning"] == (
+        "(blocked) Stripe txn_00002 1000: "
+        "RuntimeError: fictional deterministic mapper failure"
+    )
+
+    fourth = await stripe_sync._sync_one_workspace(workspace_id)
 
     assert first["last_outcome"] == "processing_error"
     assert second["last_outcome"] == "processing_error"
-    assert third["last_outcome"] == "ok"
-    assert seen.count("txn_00002") == 3
+    assert fourth["last_outcome"] == "ok"
+    assert seen.count("txn_00002") == 4
     assert {txn_id for txn_id in seen} == {
         "txn_00000",
         "txn_00001",
@@ -413,10 +431,8 @@ async def test_poison_item_quarantines_on_third_pass_and_keeps_other_rows(monkey
     }
     assert position[1] is None
     assert position[4] == {}
-    assert set(position[5]) == {"txn_00002"}
     assert len(session.approvals) == 1
-    assert "fictional deterministic mapper failure" in session.approvals[0]["reasoning"]
-    assert records[-1]["quarantined"] == 1
+    assert any(record.get("last_outcome") == "blocked_item" for record in records)
 
 
 @pytest.mark.asyncio
