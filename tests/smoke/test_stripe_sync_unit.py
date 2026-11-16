@@ -333,6 +333,65 @@ async def test_sync_does_not_advance_window_past_mapping_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_mapper_refusal_stops_chain_without_advancing_past_item(monkeypatch):
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
+    seen: list[str] = []
+
+    async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        seen.append(txn["id"])
+        if txn["id"] == "txn_00001":
+            return SimpleNamespace(
+                outcome="blocked_unknown_account",
+                reason="missing fictional revenue account",
+                fee_journal_entry_id=None,
+            )
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    workspace_id, _, _, position, records = _install_worker(
+        monkeypatch, _transactions(3, created), mapper=mapper
+    )
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert seen == ["txn_00000", "txn_00001"]
+    assert summary["last_outcome"] == "processing_error"
+    assert position[1] == "txn_00000"
+    assert position[0] is None
+    assert position[0] != datetime.fromtimestamp(created + 1, tz=timezone.utc)
+    assert position[4] == {"txn_00001": 1}
+    assert records[-1]["errors"]
+
+
+@pytest.mark.asyncio
+async def test_mapper_refusal_does_not_clear_existing_three_failure_count(monkeypatch):
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
+
+    async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        if txn["id"] == "txn_00001":
+            return SimpleNamespace(
+                outcome="blocked_unknown_account",
+                reason="missing fictional revenue account",
+                fee_journal_entry_id=None,
+            )
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    workspace_id, _, session, position, _ = _install_worker(
+        monkeypatch,
+        _transactions(3, created),
+        mapper=mapper,
+        position=(None, None, None, None, {"txn_00001": 3}),
+    )
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "blocked_item"
+    assert position[1] == "txn_00000"
+    assert position[4] == {"txn_00001": 3}
+    assert len(session.approvals) == 1
+    assert "blocked_unknown_account" in session.approvals[0]["reasoning"]
+
+
+@pytest.mark.asyncio
 async def test_db_error_rolls_back_only_current_item_savepoint(monkeypatch):
     created = int((FIXED_NOW - timedelta(days=2)).timestamp())
     seen: list[str] = []

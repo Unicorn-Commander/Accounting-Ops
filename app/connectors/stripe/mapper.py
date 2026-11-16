@@ -369,6 +369,48 @@ async def enqueue_blocked_balance_transaction(
     stripe_balance_txn_id = str(txn.get("id") or "?")
     stripe_type = str(txn.get("type") or "?").strip().lower()
     amount_cents = _amount_to_cents(txn.get("amount"))
+    reason = (
+        f"(blocked) Stripe {stripe_balance_txn_id} {txn.get('amount', '?')}: "
+        f"{error}"
+    )
+    existing = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text FROM approval_queue
+                WHERE entity_id = :eid
+                  AND subject_type = 'stripe_post_balance_transaction'
+                  AND status = 'pending'
+                  AND payload ->> 'stripe_balance_txn_id' = :stripe_id
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "stripe_id": stripe_balance_txn_id},
+        )
+    ).first()
+    if existing:
+        await session.execute(
+            text(
+                """
+                UPDATE approval_queue
+                SET reasoning = :reasoning,
+                    payload = payload || CAST(:payload AS jsonb)
+                WHERE id = :id AND status = 'pending'
+                """
+            ),
+            {
+                "id": str(existing.id),
+                "reasoning": reason,
+                "payload": json.dumps({
+                    "debit_account": "(blocked)",
+                    "credit_account": "(blocked)",
+                    "blocked": True,
+                    "failure_detail": error,
+                }),
+            },
+        )
+        return UUID(str(existing.id))
     return await _enqueue_for_review(
         session,
         workspace_id=workspace_id,
@@ -383,10 +425,7 @@ async def enqueue_blocked_balance_transaction(
         description=_opaque_description(txn),
         raw_txn=txn,
         actor_uc_uid=actor_uc_uid,
-        reason=(
-            f"(blocked) Stripe {stripe_balance_txn_id} {txn.get('amount', '?')}: "
-            f"{error}"
-        ),
+        reason=reason,
     )
 
 

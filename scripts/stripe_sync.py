@@ -68,6 +68,18 @@ DEFAULT_BACKFILL_DAYS = 30
 DEFAULT_LOOP_INTERVAL_S = int(os.getenv("STRIPE_SYNC_INTERVAL_S", "3600"))
 STRIPE_WINDOW_OVERLAP_S = 24 * 60 * 60
 
+# A mapper refusal is not proof that the item was handled. Only these
+# outcomes mean that the external_ref is safe to move past: a journal entry
+# was written, a duplicate was confirmed, or main intentionally queued the
+# item for a human review path.
+_ADVANCE_MAPPER_OUTCOMES = frozenset({
+    "posted",
+    "blocked_idempotent",
+    "queued_for_confirm",
+    "queued_first_run",
+    "flagged_for_cpa",
+})
+
 
 # ---------------------------------------------------------------------------
 # Workspace + entity discovery
@@ -578,8 +590,62 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                     error_text,
                 )
                 break
+            if result.outcome not in _ADVANCE_MAPPER_OUTCOMES:
+                error_text = (
+                    f"mapper refusal {result.outcome}: "
+                    f"{result.reason or 'no reason supplied'}"
+                )
+                if isinstance(bt_id, str) and bt_id:
+                    failure_counts[bt_id] = min(
+                        failure_counts.get(bt_id, 0) + 1, 3
+                    )
+                summary["errors"].append(
+                    f"map_and_post {bt.get('id', '?')}: {error_text}"
+                )
+                if (
+                    not isinstance(bt_id, str)
+                    or not bt_id
+                    or failure_counts.get(bt_id, 0) < 3
+                ):
+                    processing_error = True
+                    break
+                try:
+                    async with session.begin_nested():
+                        await enqueue_blocked_balance_transaction(
+                            session,
+                            workspace_id=str(workspace_id),
+                            entity_id=str(entity_id),
+                            txn=bt,
+                            actor_uc_uid="agent:stripe_sync",
+                            error=error_text,
+                        )
+                except Exception as alert_exc:
+                    summary["errors"].append(
+                        "blocked alert "
+                        f"{bt_id}: {alert_exc.__class__.__name__}: {alert_exc}"
+                    )
+                summary["blocked_item"] = {
+                    "id": bt_id,
+                    "amount": bt.get("amount"),
+                    "currency": bt.get("currency"),
+                    "error": error_text,
+                }
+                _log.error(
+                    "stripe_sync_blocked_item workspace=%s entity=%s id=%s "
+                    "amount=%s currency=%s error=%s",
+                    workspace_id,
+                    entity_id,
+                    bt_id,
+                    bt.get("amount"),
+                    bt.get("currency"),
+                    error_text,
+                )
+                break
+
             last_processed = bt
             if isinstance(bt_id, str):
+                # A failure counter is cleared only after this same item
+                # reaches an advancing outcome.
                 failure_counts.pop(bt_id, None)
             if result.outcome == "posted":
                 summary["posted"] += 1

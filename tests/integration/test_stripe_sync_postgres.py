@@ -1,6 +1,7 @@
 """Real PostgreSQL proof for Stripe item savepoint isolation."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -151,7 +152,10 @@ async def test_db_error_rolls_back_only_failed_stripe_item(
     assert failed == 0
     assert state["last_sync_at"] is None
     assert state["cursor"] == first_id
-    assert state["state"]["_stripe_failure_counts"] == {failed_id: 1}
+    state_json = state["state"]
+    if isinstance(state_json, str):
+        state_json = json.loads(state_json)
+    assert state_json["_stripe_failure_counts"] == {failed_id: 1}
 
 
 async def _reconciliation() -> dict[str, int]:

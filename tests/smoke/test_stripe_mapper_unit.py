@@ -164,6 +164,17 @@ class _StubSession:
             self.approvals.append(approval)
             return _StubResult([])
 
+        # blocked alert refreshes the existing pending approval in place
+        if "UPDATE approval_queue" in sql:
+            for approval in self.approvals:
+                if approval["id"] == params.get("id"):
+                    approval["reasoning"] = params["reasoning"]
+                    payload = json.loads(approval["payload"])
+                    payload.update(json.loads(params["payload"]))
+                    approval["payload"] = json.dumps(payload)
+                    break
+            return _StubResult([])
+
         # Fallback
         return _StubResult([])
 
@@ -410,6 +421,36 @@ async def test_first_run_reread_does_not_enqueue_duplicate_approval():
     assert second.outcome == "queued_first_run"
     assert second.approval_id == first.approval_id
     assert len(session.approvals) == 1
+
+
+@pytest.mark.asyncio
+async def test_blocked_alert_updates_existing_pending_approval():
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
+    bt = _bt("txn_blocked_existing", "charge", amount=999)
+
+    first = await stripe_mapper.map_and_post_balance_transaction(
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
+    )
+    blocked = await stripe_mapper.enqueue_blocked_balance_transaction(
+        session,
+        workspace_id="wid",
+        entity_id="eid",
+        txn=bt,
+        actor_uc_uid="jane",
+        error="blocked_unknown_account: missing revenue account",
+    )
+
+    assert blocked == first.approval_id
+    assert len(session.approvals) == 1
+    assert session.approvals[0]["reasoning"] == (
+        "(blocked) Stripe txn_blocked_existing 999: "
+        "blocked_unknown_account: missing revenue account"
+    )
+    payload = json.loads(session.approvals[0]["payload"])
+    assert payload["blocked"] is True
+    assert payload["failure_detail"] == (
+        "blocked_unknown_account: missing revenue account"
+    )
 
 
 @pytest.mark.asyncio
