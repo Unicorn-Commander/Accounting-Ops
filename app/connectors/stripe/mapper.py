@@ -291,6 +291,24 @@ async def _enqueue_for_review(
     PII guard: we never persist customer email / card last4 / metadata; only
     the Stripe-controlled keyset (sans 'source', 'customer', 'metadata').
     """
+    existing = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text FROM approval_queue
+                WHERE entity_id = :eid
+                  AND subject_type = 'stripe_post_balance_transaction'
+                  AND payload ->> 'stripe_balance_txn_id' = :stripe_id
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "stripe_id": stripe_balance_txn_id},
+        )
+    ).first()
+    if existing:
+        return UUID(str(existing.id))
+
     approval_id = uuid4()
     subject_id = uuid4()
     safe_keys = sorted([
@@ -335,6 +353,40 @@ async def _enqueue_for_review(
         },
     )
     return approval_id
+
+
+async def enqueue_quarantined_balance_transaction(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    entity_id: str,
+    txn: dict[str, Any],
+    actor_uc_uid: str,
+    error: str,
+) -> UUID:
+    """Put a repeatedly failing transaction on the normal human review path."""
+    stripe_balance_txn_id = str(txn.get("id") or "?")
+    stripe_type = str(txn.get("type") or "?").strip().lower()
+    amount_cents = _amount_to_cents(txn.get("amount"))
+    return await _enqueue_for_review(
+        session,
+        workspace_id=workspace_id,
+        entity_id=entity_id,
+        stripe_balance_txn_id=stripe_balance_txn_id,
+        stripe_type=stripe_type,
+        amount_cents=amount_cents,
+        debit_account="(quarantined)",
+        credit_account="(quarantined)",
+        effective_date=_effective_date(txn),
+        payee=_opaque_payee(txn),
+        description=_opaque_description(txn),
+        raw_txn=txn,
+        actor_uc_uid=actor_uc_uid,
+        reason=(
+            "Stripe transaction quarantined after three consecutive mapper "
+            f"failures: {stripe_balance_txn_id}; error={error}"
+        ),
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -880,5 +932,6 @@ __all__ = (
     "ACCT_PROCESSOR_FEES",
     "ACCT_CASH_PRIMARY_DEFAULT",
     "DEFAULT_REVENUE_ACCOUNT",
+    "enqueue_quarantined_balance_transaction",
     "map_and_post_balance_transaction",
 )
