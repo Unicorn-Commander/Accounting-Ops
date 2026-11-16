@@ -225,6 +225,7 @@ async def _load_sync_position(
     int | None,
     int | None,
     dict[str, int],
+    dict[str, Any] | None,
 ]:
     """Load the durable Stripe chain position and its fixed time window."""
     async with workspace_session(SessionLocal, workspace_id) as session:
@@ -241,9 +242,12 @@ async def _load_sync_position(
             )
         ).first()
     if r is None:
-        return None, None, None, None, {}
+        return None, None, None, None, {}, None
     state = r.state if isinstance(r.state, dict) else {}
     cursor = state.get("_stripe_continuation_cursor")
+    blocked_item = state.get("blocked_item")
+    if not isinstance(blocked_item, dict) or not isinstance(blocked_item.get("id"), str):
+        blocked_item = None
 
     def _epoch(value: Any) -> int | None:
         if isinstance(value, bool):
@@ -258,7 +262,7 @@ async def _load_sync_position(
     # Cursors written by the first revision predate fixed windows. Re-read
     # from the time overlap rather than carrying a cursor whose filter can no
     # longer be reconstructed safely.
-    if window_gte is None or window_lt is None:
+    if (window_gte is None or window_lt is None) and blocked_item is None:
         cursor = None
         window_gte = None
         window_lt = None
@@ -281,6 +285,7 @@ async def _load_sync_position(
         window_gte,
         window_lt,
         failure_counts,
+        blocked_item,
     )
 
 
@@ -294,25 +299,52 @@ async def _record_sync_outcome(
     window_gte: int | None,
     window_lt: int | None,
     failure_counts: dict[str, int] | None = None,
+    blocked_item: dict[str, Any] | None = None,
+    clear_blocked_item: bool = False,
     instance_name: str = "default",
 ) -> None:
-    """Upsert connector_state with the latest run's summary."""
-    state = dict(outcome_summary)
-    if continuation_cursor is None:
-        state.pop("_stripe_continuation_cursor", None)
-    else:
-        state["_stripe_continuation_cursor"] = continuation_cursor
-    if window_gte is None or window_lt is None:
-        state.pop("window_gte", None)
-        state.pop("window_lt", None)
-    else:
-        state["window_gte"] = window_gte
-        state["window_lt"] = window_lt
-    if failure_counts:
-        state["_stripe_failure_counts"] = failure_counts
-    else:
-        state.pop("_stripe_failure_counts", None)
+    """Upsert connector_state, preserving durable safety state between runs."""
     async with workspace_session(SessionLocal, workspace_id) as session:
+        existing = (
+            await session.execute(
+                text(
+                    """
+                    SELECT state FROM connector_state
+                    WHERE entity_id = :eid AND connector_name = 'stripe_api'
+                      AND connector_instance_name = :instance
+                    LIMIT 1
+                    """
+                ),
+                {"eid": str(entity_id), "instance": instance_name},
+            )
+        ).first()
+        prior_state = existing.state if existing and isinstance(existing.state, dict) else {}
+        state = dict(prior_state)
+        state.update(
+            {
+                key: value
+                for key, value in outcome_summary.items()
+                if key != "blocked_item"
+            }
+        )
+        if blocked_item is not None:
+            state["blocked_item"] = blocked_item
+        elif clear_blocked_item:
+            state.pop("blocked_item", None)
+        if continuation_cursor is None:
+            state.pop("_stripe_continuation_cursor", None)
+        else:
+            state["_stripe_continuation_cursor"] = continuation_cursor
+        if window_gte is None or window_lt is None:
+            state.pop("window_gte", None)
+            state.pop("window_lt", None)
+        else:
+            state["window_gte"] = window_gte
+            state["window_lt"] = window_lt
+        if failure_counts:
+            state["_stripe_failure_counts"] = failure_counts
+        else:
+            state.pop("_stripe_failure_counts", None)
         result = await session.execute(
             text(
                 """
@@ -392,6 +424,26 @@ def _is_missing_starting_after_error(exc: StripeApiError) -> bool:
     )
 
 
+async def _journal_entry_exists(
+    session: Any, *, entity_id: UUID, source_external_id: str
+) -> bool:
+    """Confirm an idempotent mapper result has a durable journal row."""
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT 1 FROM journal_entry
+                WHERE entity_id = :eid AND source = 'stripe_api'
+                  AND source_external_id = :ext
+                LIMIT 1
+                """
+            ),
+            {"eid": str(entity_id), "ext": source_external_id},
+        )
+    ).first()
+    return row is not None
+
+
 # ---------------------------------------------------------------------------
 # Per-workspace sync
 # ---------------------------------------------------------------------------
@@ -431,7 +483,9 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         window_gte,
         window_lt,
         failure_counts,
+        blocked_item,
     ) = await _load_sync_position(workspace_id, entity_id)
+    loaded_continuation_cursor = continuation_cursor
     loaded_window_lt = window_lt
     if window_gte is None:
         start_date = (
@@ -486,15 +540,22 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         if bts is None:
             summary["last_outcome"] = "api_error_balance_transactions"
             summary["errors"].append(f"list_balance_transactions: {exc}")
+            if blocked_item is not None:
+                summary["blocked_item"] = blocked_item
             await _record_sync_outcome(
                 workspace_id,
                 entity_id,
                 outcome_summary=summary,
                 last_sync_at=last_sync,
-                continuation_cursor=continuation_cursor,
+                continuation_cursor=(
+                    loaded_continuation_cursor
+                    if blocked_item is not None
+                    else continuation_cursor
+                ),
                 window_gte=window_gte if window_lt is not None else None,
                 window_lt=window_lt,
                 failure_counts=failure_counts,
+                blocked_item=blocked_item,
             )
             return summary
     window_lt = bts.window_lt or window_lt
@@ -510,6 +571,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            blocked_item=blocked_item,
         )
     summary["balance_transactions_seen"] = len(bts)
     _log.info(
@@ -517,12 +579,41 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         workspace_id, entity_id, len(bts), start_date.isoformat(),
     )
 
+    retrying_blocked = blocked_item is not None
+    items_to_process = bts
+    if retrying_blocked:
+        blocked_id = blocked_item["id"]
+        exact_item = next(
+            (item for item in bts if item.get("id") == blocked_id),
+            None,
+        )
+        if exact_item is None:
+            summary["blocked_item"] = blocked_item
+            summary["last_outcome"] = "blocked_item"
+            summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+            summary["errors"].append(
+                f"persisted blocked Stripe item {blocked_id} was not returned"
+            )
+            await _record_sync_outcome(
+                workspace_id,
+                entity_id,
+                outcome_summary=summary,
+                last_sync_at=last_sync,
+                continuation_cursor=loaded_continuation_cursor,
+                window_gte=window_gte,
+                window_lt=window_lt,
+                failure_counts=failure_counts,
+                blocked_item=blocked_item,
+            )
+            return summary
+        items_to_process = [exact_item]
+
     # ---- 2. Map + post each ----
     revenue_account = cred.default_revenue_account or DEFAULT_REVENUE_ACCOUNT
     last_processed: dict[str, Any] | None = None
     processing_error = False
     async with workspace_session(SessionLocal, workspace_id) as session:
-        for bt in bts:
+        for bt in items_to_process:
             bt_id = bt.get("id")
             try:
                 # Keep every statement for one balance transaction inside its
@@ -591,10 +682,31 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                     error_text,
                 )
                 break
-            if result.outcome not in _ADVANCE_MAPPER_OUTCOMES:
+            result_outcome = result.outcome
+            result_reason = getattr(result, "reason", None) or "no reason supplied"
+            if result.outcome == "blocked_idempotent":
+                try:
+                    confirmed = await _journal_entry_exists(
+                        session,
+                        entity_id=entity_id,
+                        source_external_id=bt_id,
+                    )
+                except Exception as exc:
+                    confirmed = False
+                    result_reason = (
+                        "could not confirm idempotency journal entry: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    )
+                if not confirmed:
+                    result_outcome = "unconfirmed_idempotent"
+                    if result_reason == "no reason supplied":
+                        result_reason = (
+                            "mapper returned blocked_idempotent without a "
+                            "journal_entry for this Stripe transaction"
+                        )
+            if result_outcome not in _ADVANCE_MAPPER_OUTCOMES:
                 error_text = (
-                    f"mapper refusal {result.outcome}: "
-                    f"{result.reason or 'no reason supplied'}"
+                    f"mapper refusal {result_outcome}: {result_reason}"
                 )
                 if isinstance(bt_id, str) and bt_id:
                     failure_counts[bt_id] = min(
@@ -643,20 +755,35 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 )
                 break
 
+            if retrying_blocked and result_outcome not in {"posted", "blocked_idempotent"}:
+                error_text = (
+                    f"persisted blocked item returned non-posting outcome: "
+                    f"{result_outcome}"
+                )
+                if isinstance(bt_id, str) and bt_id:
+                    failure_counts[bt_id] = min(
+                        failure_counts.get(bt_id, 0) + 1, 3
+                    )
+                summary["errors"].append(
+                    f"map_and_post {bt.get('id', '?')}: {error_text}"
+                )
+                processing_error = True
+                break
+
             last_processed = bt
             if isinstance(bt_id, str):
                 # A failure counter is cleared only after this same item
                 # reaches an advancing outcome.
                 failure_counts.pop(bt_id, None)
-            if result.outcome == "posted":
+            if result_outcome == "posted":
                 summary["posted"] += 1
                 if result.fee_journal_entry_id:
                     summary["posted"] += 1  # sidecar fee entry counts too
-            elif result.outcome in ("queued_for_confirm", "queued_first_run"):
+            elif result_outcome in ("queued_for_confirm", "queued_first_run"):
                 summary["queued"] += 1
-            elif result.outcome == "flagged_for_cpa":
+            elif result_outcome == "flagged_for_cpa":
                 summary["flagged_for_cpa"] += 1
-            elif result.outcome == "blocked_idempotent":
+            elif result_outcome == "blocked_idempotent":
                 pass
             else:
                 summary["skipped"] += 1
@@ -678,6 +805,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            blocked_item=blocked_item,
         )
         return summary
 
@@ -698,6 +826,31 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            blocked_item=summary.get("blocked_item") or blocked_item,
+        )
+        return summary
+
+    if retrying_blocked:
+        # A persisted block owns the pass. Even after the exact item succeeds,
+        # leave the fixed window and last_sync_at in place so the next pass
+        # continues from this item and nothing after it is skipped.
+        summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+        summary["last_outcome"] = "ok"
+        _, next_cursor = _durable_position_after_item(
+            last_processed,
+            fallback_last_sync=last_sync,
+            fallback_cursor=loaded_continuation_cursor,
+        )
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync,
+            continuation_cursor=next_cursor,
+            window_gte=window_gte,
+            window_lt=window_lt,
+            failure_counts=failure_counts,
+            clear_blocked_item=True,
         )
         return summary
 
@@ -726,6 +879,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         window_gte=next_window_gte,
         window_lt=next_window_lt,
         failure_counts=failure_counts,
+        clear_blocked_item=False,
     )
 
     # ---- 3. Reconcile Stripe payouts ↔ BoA deposits ----
@@ -751,6 +905,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         window_gte=next_window_gte,
         window_lt=next_window_lt,
         failure_counts=failure_counts,
+        clear_blocked_item=False,
     )
     return summary
 

@@ -159,8 +159,10 @@ def _install_worker(
     )
     session = _IdempotentSession()
     initial = list(position or (None, None, None, None))
-    if len(initial) == 4:
+    while len(initial) < 5:
         initial.append({})
+    if len(initial) < 6:
+        initial.append(None)
     current: list[Any] = initial
     records: list[dict[str, Any]] = []
 
@@ -171,12 +173,19 @@ def _install_worker(
         return tuple(current)
 
     async def record_cursor(*args: Any, **kwargs: Any) -> None:
+        if kwargs.get("blocked_item") is not None:
+            next_blocked = dict(kwargs["blocked_item"])
+        elif kwargs.get("clear_blocked_item"):
+            next_blocked = None
+        else:
+            next_blocked = current[5]
         current[:] = [
             kwargs["last_sync_at"],
             kwargs["continuation_cursor"],
             kwargs["window_gte"],
             kwargs["window_lt"],
             dict(kwargs["failure_counts"]),
+            next_blocked,
         ]
         records.append(dict(kwargs["outcome_summary"]))
 
@@ -292,6 +301,67 @@ async def test_deleted_continuation_restarts_the_same_pinned_window(monkeypatch)
     assert "starting_after" not in http.calls[1]["params"]
     assert position[1] is None
     assert records[-1]["last_outcome"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_persisted_block_survives_deleted_cursor_and_missing_item(monkeypatch):
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
+    blocked = {
+        "id": "txn_missing",
+        "amount": 1000,
+        "currency": "usd",
+        "error": "RuntimeError: fictional failure",
+    }
+    workspace_id, _, session, position, records = _install_worker(
+        monkeypatch,
+        _transactions(2, created),
+        position=(
+            None,
+            "txn_deleted_cursor",
+            created - 10,
+            created + 1,
+            {"txn_missing": 3},
+            blocked,
+        ),
+    )
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "blocked_item"
+    assert not session.posted_entries
+    assert position[0] is None
+    assert position[1] == "txn_deleted_cursor"
+    assert position[2] == created - 10
+    assert position[3] == created + 1
+    assert position[4] == {"txn_missing": 3}
+    assert position[5] == blocked
+    assert records[-1]["blocked_item"] == blocked
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_idempotent_result_stops_chain(monkeypatch):
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
+
+    async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        return SimpleNamespace(
+            outcome="blocked_idempotent",
+            fee_journal_entry_id=None,
+            reason="Concurrent post / duplicate",
+        )
+
+    workspace_id, _, session, position, records = _install_worker(
+        monkeypatch,
+        _transactions(2, created),
+        mapper=mapper,
+    )
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "processing_error"
+    assert not session.posted_entries
+    assert position[1] is None
+    assert position[4] == {"txn_00000": 1}
+    assert records[-1]["errors"]
 
 
 @pytest.mark.asyncio
@@ -507,10 +577,12 @@ async def test_poison_item_blocks_on_third_pass_and_retries_before_advancing(mon
     )
 
     fourth = await stripe_sync._sync_one_workspace(workspace_id)
+    fifth = await stripe_sync._sync_one_workspace(workspace_id)
 
     assert first["last_outcome"] == "processing_error"
     assert second["last_outcome"] == "processing_error"
     assert fourth["last_outcome"] == "ok"
+    assert fifth["last_outcome"] == "ok"
     assert seen.count("txn_00002") == 4
     assert {txn_id for txn_id in seen} == {
         "txn_00000",
@@ -518,6 +590,7 @@ async def test_poison_item_blocks_on_third_pass_and_retries_before_advancing(mon
         "txn_00002",
         "txn_00003",
     }
+    assert seen[-1] == "txn_00003"
     assert position[1] is None
     assert position[4] == {}
     assert len(session.approvals) == 1

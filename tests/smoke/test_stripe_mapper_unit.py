@@ -22,6 +22,7 @@ import json
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.connectors.stripe import mapper as stripe_mapper
 
@@ -177,6 +178,17 @@ class _StubSession:
 
         # Fallback
         return _StubResult([])
+
+
+class _NonIdempotencyIntegritySession(_StubSession):
+    async def execute(self, query, params=None):
+        if "INSERT INTO journal_entry" in str(query):
+            original = RuntimeError("duplicate hash-chain value")
+            original.diag = type(
+                "Diag", (), {"constraint_name": "uq_je_entity_this_hash"}
+            )()
+            raise IntegrityError("insert journal_entry", {}, original)
+        return await super().execute(query, params)
 
 
 def _bt(
@@ -371,6 +383,17 @@ async def test_idempotent_hit_returns_blocked_idempotent():
     )
     assert result.outcome == "blocked_idempotent"
     assert result.journal_entry_id is not None
+
+
+@pytest.mark.asyncio
+async def test_non_idempotency_integrity_error_is_not_a_duplicate():
+    session = _NonIdempotencyIntegritySession(accounts=_ACCOUNTS, existing_posts=31)
+    bt = _bt("txn_hash_race", "charge", amount=999)
+
+    with pytest.raises(IntegrityError):
+        await stripe_mapper.map_and_post_balance_transaction(
+            session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
+        )
 
 
 @pytest.mark.asyncio

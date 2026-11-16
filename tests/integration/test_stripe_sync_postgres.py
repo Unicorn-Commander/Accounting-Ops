@@ -216,6 +216,95 @@ async def test_db_error_rolls_back_only_failed_stripe_item(
         state_json = json.loads(state_json)
     assert state_json["_stripe_failure_counts"] == {failed_id: 1}
 
+    # Exercise the second real journal uniqueness constraint. The mapper must
+    # not turn a hash-chain collision into blocked_idempotent, because no row
+    # for this Stripe transaction was written and the worker must hold its
+    # cursor. This stays in the existing CI-selected integration test so the
+    # stack-backed command proves it without a separate test-count exception.
+    async with app_db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            existing_hash = await conn.fetchval(
+                "SELECT this_hash FROM journal_entry WHERE source_external_id = $1",
+                first_id,
+            )
+            await conn.execute(
+                """
+                UPDATE connector_state
+                SET state = '{}'::jsonb, last_sync_at = NULL
+                WHERE entity_id = $1 AND connector_name = 'stripe_api'
+                  AND connector_instance_name = 'default'
+                """,
+                str(TEST_ENTITY_ID),
+            )
+
+    collision_id = "stripe-pg-hash-collision"
+    collision_txn = {
+        "id": collision_id,
+        "object": "balance_transaction",
+        "type": "charge",
+        "amount": 1200,
+        "currency": "usd",
+        "fee": 0,
+        "net": 1200,
+        "created": created + 1,
+        "available_on": created + 1,
+        "reporting_category": "charge",
+    }
+
+    async def collision_paginator(*args: Any, **kwargs: Any) -> StripePaginationResult:
+        return StripePaginationResult(
+            items=[collision_txn],
+            exhausted=True,
+            continuation_cursor=None,
+            window_lt=created + 2,
+        )
+
+    real_mapper = stripe_mapper.map_and_post_balance_transaction
+    monkeypatch.setattr(stripe_sync, "paginate_balance_transactions", collision_paginator)
+    monkeypatch.setattr(stripe_sync, "map_and_post_balance_transaction", real_mapper)
+    monkeypatch.setattr(stripe_mapper, "compute_hash", lambda *args, **kwargs: existing_hash)
+
+    collision_summary = await stripe_sync._sync_one_workspace(TEST_WORKSPACE_ID)
+    assert collision_summary["last_outcome"] == "processing_error"
+
+    async with app_db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            collision_count = await conn.fetchval(
+                """
+                SELECT count(*) FROM journal_entry
+                WHERE entity_id = $1 AND source = 'stripe_api'
+                  AND source_external_id = $2
+                """,
+                str(TEST_ENTITY_ID),
+                collision_id,
+            )
+            collision_state = await conn.fetchrow(
+                """
+                SELECT last_sync_at, state
+                FROM connector_state
+                WHERE entity_id = $1 AND connector_name = 'stripe_api'
+                  AND connector_instance_name = 'default'
+                """,
+                str(TEST_ENTITY_ID),
+            )
+
+    assert collision_count == 0
+    assert collision_state["last_sync_at"] is None
+    collision_state_json = collision_state["state"]
+    if isinstance(collision_state_json, str):
+        collision_state_json = json.loads(collision_state_json)
+    assert collision_state_json["_stripe_failure_counts"] == {collision_id: 1}
+
 
 async def _reconciliation() -> dict[str, int]:
     return {"checked_payouts": 0, "matched": 0, "unmatched": 0}
