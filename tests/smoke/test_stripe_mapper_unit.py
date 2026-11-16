@@ -132,7 +132,10 @@ class _StubSession:
             stripe_id = params.get("stripe_id")
             for approval in self.approvals:
                 payload = json.loads(approval["payload"])
-                if payload.get("stripe_balance_txn_id") == stripe_id:
+                if (
+                    approval.get("status", "pending") == "pending"
+                    and payload.get("stripe_balance_txn_id") == stripe_id
+                ):
                     return _StubResult([_Row({"id": approval["id"]})])
             return _StubResult([])
 
@@ -156,7 +159,9 @@ class _StubSession:
 
         # approval_queue insert
         if "INSERT INTO approval_queue" in sql:
-            self.approvals.append(dict(params))
+            approval = dict(params)
+            approval["status"] = "pending"
+            self.approvals.append(approval)
             return _StubResult([])
 
         # Fallback
@@ -405,6 +410,26 @@ async def test_first_run_reread_does_not_enqueue_duplicate_approval():
     assert second.outcome == "queued_first_run"
     assert second.approval_id == first.approval_id
     assert len(session.approvals) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decided_status", ["approved", "rejected"])
+async def test_decided_approval_does_not_suppress_new_pending_approval(
+    decided_status: str,
+):
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
+    bt = _bt("txn_decided_then_reread", "charge", amount=999)
+
+    first = await stripe_mapper.map_and_post_balance_transaction(
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
+    )
+    session.approvals[0]["status"] = decided_status
+    second = await stripe_mapper.map_and_post_balance_transaction(
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
+    )
+
+    assert first.approval_id != second.approval_id
+    assert len(session.approvals) == 2
 
 
 @pytest.mark.asyncio

@@ -298,6 +298,7 @@ async def _enqueue_for_review(
                 SELECT id::text FROM approval_queue
                 WHERE entity_id = :eid
                   AND subject_type = 'stripe_post_balance_transaction'
+                  AND status = 'pending'
                   AND payload ->> 'stripe_balance_txn_id' = :stripe_id
                 ORDER BY created_at ASC
                 LIMIT 1
@@ -355,7 +356,7 @@ async def _enqueue_for_review(
     return approval_id
 
 
-async def enqueue_quarantined_balance_transaction(
+async def enqueue_blocked_balance_transaction(
     session: AsyncSession,
     *,
     workspace_id: str,
@@ -375,16 +376,16 @@ async def enqueue_quarantined_balance_transaction(
         stripe_balance_txn_id=stripe_balance_txn_id,
         stripe_type=stripe_type,
         amount_cents=amount_cents,
-        debit_account="(quarantined)",
-        credit_account="(quarantined)",
+        debit_account="(blocked)",
+        credit_account="(blocked)",
         effective_date=_effective_date(txn),
         payee=_opaque_payee(txn),
         description=_opaque_description(txn),
         raw_txn=txn,
         actor_uc_uid=actor_uc_uid,
         reason=(
-            "Stripe transaction quarantined after three consecutive mapper "
-            f"failures: {stripe_balance_txn_id}; error={error}"
+            f"(blocked) Stripe {stripe_balance_txn_id} {txn.get('amount', '?')}: "
+            f"{error}"
         ),
     )
 
@@ -932,6 +933,6 @@ __all__ = (
     "ACCT_PROCESSOR_FEES",
     "ACCT_CASH_PRIMARY_DEFAULT",
     "DEFAULT_REVENUE_ACCOUNT",
-    "enqueue_quarantined_balance_transaction",
+    "enqueue_blocked_balance_transaction",
     "map_and_post_balance_transaction",
 )
