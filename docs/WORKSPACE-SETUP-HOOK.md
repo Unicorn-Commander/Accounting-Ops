@@ -27,9 +27,10 @@ The Ops-Center workspace-setup hook enables Control-Plane provisioning of worksp
 - **Effect**: Determines role for non-administrators via `member_start_role()`
 
 ### `OPS_CENTER_BASE_URL`
-- If set, Ops-Center provides JIT answers; if empty, local policy applies
-- **Code**: `app/api/provisioning.py:339-348`
-- **Effect**: Controls whether `ensure_jit_membership` makes external API calls
+- Read through `get_settings().ops_center_base_url` (`app/security/entitlements.py:64-65`)
+- If set, Ops-Center provides JIT answers; if empty, no Ops-Center URL means section (4) applies
+- **Code**: `app/security/entitlements.py:64-65,70-71`
+- **Effect**: Controls whether `ensure_jit_membership` calls Ops-Center; empty means Ops-Center is never reached
 
 ## (2) Ops-Center Token Format
 
@@ -74,9 +75,8 @@ All routes are mounted under `/api/v1/provisioning/workspaces` only when `provis
 ## (4) Changes When PROVISIONING_ENABLED is On
 
 ### With OPS_CENTER_BASE_URL Empty
-- **Effect**: `ensure_jit_membership` returns disabled (code never calls Ops-Center)
-- **Code**: `app/api/provisioning.py:347`
-- **Membership**: `_without_an_answer` keeps every active member as is (code: `app/api/provisioning.py:282-307`)
+- **Effect**: `ensure_jit_membership` calls Ops-Center; `OpsCenterEntitlementsClient.fetch` returns "unavailable" immediately (`app/security/entitlements.py:70-71`) because the base URL is unset, then `_without_an_answer` keeps every active member as is (code: `app/api/provisioning.py:282-307`)
+- **Membership**: `_without_an_answer` keeps every active member as is; a person with no existing membership gets "unavailable" (try again)
 
 ### With OPS_CENTER_BASE_URL Set
 - **Effect**: Ops-Center answers determine memberships
