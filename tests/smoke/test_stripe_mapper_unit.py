@@ -373,27 +373,6 @@ async def test_first_run_guard_queues_first_30():
     payload = _json.loads(session.approvals[0]["payload"])
     assert payload["action"] == "stripe_post_balance_transaction"
     assert payload["stripe_type"] == "charge"
-    assert payload["stripe_txn"]["id"] == "txn_first_run"
-
-
-@pytest.mark.asyncio
-async def test_human_approval_bypasses_first_run_and_uses_account_override():
-    session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
-    bt = _bt("txn_human_approved", "charge", amount=999)
-    result = await stripe_mapper.map_and_post_balance_transaction(
-        session,
-        workspace_id="wid",
-        entity_id="eid",
-        txn=bt,
-        actor_uc_uid="reviewer",
-        account_override=("6100·Chosen Debit", "4300·Chosen Credit"),
-        human_approved=True,
-    )
-
-    assert result.outcome == "posted"
-    assert session.approvals == []
-    assert session.posted_entries[0]["debit"] == "6100·Chosen Debit"
-    assert session.posted_entries[0]["credit"] == "4300·Chosen Credit"
 
 
 @pytest.mark.asyncio

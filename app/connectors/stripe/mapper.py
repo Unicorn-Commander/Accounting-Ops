@@ -327,18 +327,6 @@ async def _enqueue_for_review(
         "description": description,
         "raw_txn_keys": safe_keys,
     }
-    # Keep the small Stripe-controlled subset needed to reattempt this action
-    # from the approval endpoint. Never persist source objects, metadata, or
-    # any customer-facing fields from the API response.
-    review_txn = {
-        key: raw_txn[key]
-        for key in (
-            "id", "object", "type", "amount", "currency", "fee", "net",
-            "status", "created", "available_on", "reporting_category",
-        )
-        if key in raw_txn and isinstance(raw_txn[key], (bool, int, float, str))
-    }
-    payload["stripe_txn"] = review_txn
     await session.execute(
         text(
             """
@@ -415,8 +403,6 @@ async def map_and_post_balance_transaction(
     actor_uc_uid: str,
     actor_agent_id: str | None = None,
     revenue_account: str = DEFAULT_REVENUE_ACCOUNT,
-    account_override: tuple[str, str] | None = None,
-    human_approved: bool = False,
 ) -> MapResult:
     """Map ONE Stripe balance_transaction to a journal entry and post it.
 
@@ -586,61 +572,50 @@ async def map_and_post_balance_transaction(
     elif stripe_type in (
         "application_fee", "application_fee_refund", "adjustment", "transfer",
     ):
-        if human_approved and account_override:
-            debit_canonical, credit_canonical = account_override
-            category = "Stripe · CPA Review"
-        else:
-            # Connect-platform constructs or balance corrections — these need
-            # CPA eyes. We DO NOT auto-post; we enqueue with a clear reason.
-            approval_id = await _enqueue_for_review(
-                session,
-                workspace_id=workspace_id,
-                entity_id=entity_id,
-                stripe_balance_txn_id=bt_id,
-                stripe_type=stripe_type,
-                amount_cents=amount_cents,
-                debit_account="(undecided)",
-                credit_account="(undecided)",
-                effective_date=_effective_date(txn),
-                payee=_opaque_payee(txn),
-                description=_opaque_description(txn),
-                raw_txn=txn,
-                actor_uc_uid=actor_uc_uid,
-                reason=(
-                    f"Stripe type '{stripe_type}' requires CPA review. "
-                    "Adjustment / Connect platform fee / transfer — no default mapping."
-                ),
-            )
-            await _log_post_attempt(
-                session, workspace_id=workspace_id, entity_id=entity_id,
-                source=STRIPE_SOURCE, source_external_id=bt_id,
-                outcome="queued_for_confirm", journal_entry_id=None,
-                reason=f"Stripe type '{stripe_type}' flagged for CPA",
-                actor_uc_uid=actor_uc_uid, actor_agent_id=actor_agent_id,
-                amount_cents=amount_cents, category="Stripe · CPA Review",
-            )
-            return MapResult(
-                outcome="flagged_for_cpa",
-                stripe_balance_txn_id=bt_id,
-                stripe_type=stripe_type,
-                approval_id=approval_id,
-                reason=f"Stripe type '{stripe_type}' needs CPA decision",
-            )
+        # Connect-platform constructs or balance corrections — these need CPA
+        # eyes. We DO NOT auto-post; we enqueue with a clear reason.
+        approval_id = await _enqueue_for_review(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            stripe_balance_txn_id=bt_id,
+            stripe_type=stripe_type,
+            amount_cents=amount_cents,
+            debit_account="(undecided)",
+            credit_account="(undecided)",
+            effective_date=_effective_date(txn),
+            payee=_opaque_payee(txn),
+            description=_opaque_description(txn),
+            raw_txn=txn,
+            actor_uc_uid=actor_uc_uid,
+            reason=(
+                f"Stripe type '{stripe_type}' requires CPA review. "
+                "Adjustment / Connect platform fee / transfer — no default mapping."
+            ),
+        )
+        await _log_post_attempt(
+            session, workspace_id=workspace_id, entity_id=entity_id,
+            source=STRIPE_SOURCE, source_external_id=bt_id,
+            outcome="queued_for_confirm", journal_entry_id=None,
+            reason=f"Stripe type '{stripe_type}' flagged for CPA",
+            actor_uc_uid=actor_uc_uid, actor_agent_id=actor_agent_id,
+            amount_cents=amount_cents, category="Stripe · CPA Review",
+        )
+        return MapResult(
+            outcome="flagged_for_cpa",
+            stripe_balance_txn_id=bt_id,
+            stripe_type=stripe_type,
+            approval_id=approval_id,
+            reason=f"Stripe type '{stripe_type}' needs CPA decision",
+        )
     else:
-        if human_approved and account_override:
-            debit_canonical, credit_canonical = account_override
-            category = "Stripe · CPA Review"
-        else:
-            # Unknown type — refuse to post; let a human classify.
-            return MapResult(
-                outcome="blocked_unknown_type",
-                stripe_balance_txn_id=bt_id,
-                stripe_type=stripe_type,
-                reason=f"Unhandled Stripe balance_transaction type: {stripe_type!r}",
-            )
-
-    if account_override:
-        debit_canonical, credit_canonical = account_override
+        # Unknown type — refuse to post; let a human classify.
+        return MapResult(
+            outcome="blocked_unknown_type",
+            stripe_balance_txn_id=bt_id,
+            stripe_type=stripe_type,
+            reason=f"Unhandled Stripe balance_transaction type: {stripe_type!r}",
+        )
 
     # ---- 3. Effective date ----
     eff_date = _effective_date(txn)
@@ -698,7 +673,7 @@ async def map_and_post_balance_transaction(
     existing_stripe_count = await _count_existing_stripe_posts(
         session, entity_id=entity_id
     )
-    if existing_stripe_count < FIRST_RUN_REVIEW_LIMIT and not human_approved:
+    if existing_stripe_count < FIRST_RUN_REVIEW_LIMIT:
         approval_id = await _enqueue_for_review(
             session,
             workspace_id=workspace_id,
@@ -743,7 +718,7 @@ async def map_and_post_balance_transaction(
         entity_mapped=True,
         sign_matched=True,
         has_receipt_link=False,
-        user_confirmed=human_approved,
+        user_confirmed=False,
     )
     if verdict.outcome != "auto_post":
         approval_id = await _enqueue_for_review(
