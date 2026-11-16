@@ -63,7 +63,9 @@ class _StripeHttp:
             ids = [txn["id"] for txn in filtered]
             if starting_after not in ids:
                 raise StripeApiError(
-                    "fictional invalid starting_after", status_code=400
+                    "fictional invalid starting_after",
+                    status_code=400,
+                    body='{"error":{"code":"resource_missing","param":"starting_after"}}',
                 )
             start = ids.index(starting_after) + 1
         else:
@@ -133,8 +135,9 @@ def _install_worker(
     transactions: list[dict[str, Any]],
     *,
     mapper: Any = None,
-    position: tuple[datetime | None, str | None, int | None, int | None]
+    position: tuple[Any, ...]
     | None = None,
+    reconcile: Any = None,
 ):
     workspace_id = uuid4()
     entity_id = uuid4()
@@ -152,7 +155,10 @@ def _install_worker(
         _http_factory=lambda: http,
     )
     session = _IdempotentSession()
-    current: list[Any] = list(position or (None, None, None, None))
+    initial = list(position or (None, None, None, None))
+    if len(initial) == 4:
+        initial.extend([{}, {}])
+    current: list[Any] = initial
     records: list[dict[str, Any]] = []
 
     async def load_credential(*args: Any, **kwargs: Any) -> StripeCredentialBlob:
@@ -167,6 +173,8 @@ def _install_worker(
             kwargs["continuation_cursor"],
             kwargs["window_gte"],
             kwargs["window_lt"],
+            dict(kwargs["failure_counts"]),
+            dict(kwargs["quarantined_items"]),
         ]
         records.append(dict(kwargs["outcome_summary"]))
 
@@ -175,6 +183,8 @@ def _install_worker(
         yield session
 
     async def fake_reconcile(*args: Any, **kwargs: Any) -> dict[str, int]:
+        if reconcile is not None:
+            return await reconcile(*args, **kwargs)
         return {"checked_payouts": 0, "matched": 0, "unmatched": 0}
 
     monkeypatch.setattr(stripe_sync, "load_stripe_credential", load_credential)
@@ -336,3 +346,108 @@ async def test_sync_below_cap_uses_stripe_window_end_and_clears_continuation(mon
     assert position[1] is None
     assert position[2] is None
     assert position[3] is None
+
+
+@pytest.mark.asyncio
+async def test_poison_item_quarantines_on_third_pass_and_keeps_other_rows(monkeypatch):
+    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    seen: list[str] = []
+
+    async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        seen.append(txn["id"])
+        if txn["id"] == "txn_00002":
+            raise RuntimeError("fictional deterministic mapper failure")
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    workspace_id, _, session, position, records = _install_worker(
+        monkeypatch,
+        _transactions(4, created),
+        mapper=mapper,
+    )
+
+    first = await stripe_sync._sync_one_workspace(workspace_id)
+    second = await stripe_sync._sync_one_workspace(workspace_id)
+    third = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert first["last_outcome"] == "processing_error"
+    assert second["last_outcome"] == "processing_error"
+    assert third["last_outcome"] == "ok"
+    assert seen.count("txn_00002") == 3
+    assert {txn_id for txn_id in seen} == {
+        "txn_00000",
+        "txn_00001",
+        "txn_00002",
+        "txn_00003",
+    }
+    assert position[1] is None
+    assert position[4] == {}
+    assert set(position[5]) == {"txn_00002"}
+    assert len(session.approvals) == 1
+    assert "fictional deterministic mapper failure" in session.approvals[0]["reasoning"]
+    assert records[-1]["quarantined"] == 1
+
+
+@pytest.mark.asyncio
+async def test_non_missing_400_does_not_restart_continuation(monkeypatch):
+    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    window_gte = created - 10
+    window_lt = created + 1
+    workspace_id, _, _, position, records = _install_worker(
+        monkeypatch,
+        _transactions(2, created),
+        position=(
+            datetime.fromtimestamp(window_gte, tz=timezone.utc),
+            "txn_cursor",
+            window_gte,
+            window_lt,
+        ),
+    )
+    calls = 0
+
+    async def bad_request(*args: Any, **kwargs: Any):
+        nonlocal calls
+        calls += 1
+        raise StripeApiError(
+            "fictional invalid limit",
+            status_code=400,
+            body='{"error":{"code":"invalid_request_error","param":"limit"}}',
+        )
+
+    monkeypatch.setattr(stripe_sync, "paginate_balance_transactions", bad_request)
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "api_error_balance_transactions"
+    assert calls == 1
+    assert position[1] == "txn_cursor"
+    assert records[-1]["errors"]
+
+
+@pytest.mark.asyncio
+async def test_capped_progress_is_saved_before_reconcile_failure(monkeypatch):
+    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+
+    async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    workspace_id, _, _, position, records = _install_worker(
+        monkeypatch,
+        _transactions(5001, created),
+        mapper=mapper,
+    )
+    observed: list[Any] = []
+
+    async def failing_reconcile(*args: Any, **kwargs: Any):
+        observed.append(tuple(position))
+        raise RuntimeError("fictional reconcile failure")
+
+    monkeypatch.setattr(stripe_sync, "reconcile_one_entity", failing_reconcile)
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "ok"
+    assert observed[0][1] == "txn_04999"
+    assert observed[0][3] == created + 1
+    assert position[1] == "txn_04999"
+    assert position[3] == created + 1
+    assert "reconcile: RuntimeError" in records[-1]["errors"][-1]
