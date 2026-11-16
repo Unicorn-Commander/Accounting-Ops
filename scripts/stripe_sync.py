@@ -541,66 +541,66 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 # this boundary, earlier posts are lost when the outer
                 # workspace transaction exits.
                 async with session.begin_nested():
-                    try:
-                        result = await map_and_post_balance_transaction(
+                    result = await map_and_post_balance_transaction(
+                        session,
+                        workspace_id=str(workspace_id),
+                        entity_id=str(entity_id),
+                        txn=bt,
+                        actor_uc_uid="agent:stripe_sync",
+                        actor_agent_id="stripe_sync_worker",
+                        revenue_account=revenue_account,
+                    )
+            except Exception as exc:
+                error_text = f"{exc.__class__.__name__}: {exc}"
+                if isinstance(bt_id, str) and bt_id:
+                    failure_counts[bt_id] = min(
+                        failure_counts.get(bt_id, 0) + 1, 3
+                    )
+                summary["errors"].append(
+                    f"map_and_post {bt.get('id', '?')}: {error_text}"
+                )
+                if (
+                    not isinstance(bt_id, str)
+                    or not bt_id
+                    or failure_counts.get(bt_id, 0) < 3
+                ):
+                    processing_error = True
+                    break
+                try:
+                    # The mapper savepoint has now rolled back. Use a fresh
+                    # savepoint for the quarantine insert, so it is legal to
+                    # issue SQL after a DBAPI error and remains item-scoped.
+                    async with session.begin_nested():
+                        approval_id = await enqueue_quarantined_balance_transaction(
                             session,
                             workspace_id=str(workspace_id),
                             entity_id=str(entity_id),
                             txn=bt,
                             actor_uc_uid="agent:stripe_sync",
-                            actor_agent_id="stripe_sync_worker",
-                            revenue_account=revenue_account,
+                            error=error_text,
                         )
-                    except Exception as exc:
-                        error_text = f"{exc.__class__.__name__}: {exc}"
-                        if isinstance(bt_id, str) and bt_id:
-                            failure_counts[bt_id] = min(
-                                failure_counts.get(bt_id, 0) + 1, 3
-                            )
-                        summary["errors"].append(
-                            f"map_and_post {bt.get('id', '?')}: {error_text}"
-                        )
-                        if (
-                            not isinstance(bt_id, str)
-                            or not bt_id
-                            or failure_counts.get(bt_id, 0) < 3
-                        ):
-                            raise
-                        try:
-                            approval_id = await enqueue_quarantined_balance_transaction(
-                                session,
-                                workspace_id=str(workspace_id),
-                                entity_id=str(entity_id),
-                                txn=bt,
-                                actor_uc_uid="agent:stripe_sync",
-                                error=error_text,
-                            )
-                        except Exception as quarantine_exc:
-                            summary["errors"].append(
-                                "quarantine "
-                                f"{bt_id}: {quarantine_exc.__class__.__name__}: "
-                                f"{quarantine_exc}"
-                            )
-                            raise
-                        quarantined_items[bt_id] = {
-                            "approval_id": str(approval_id),
-                            "error": error_text,
-                        }
-                        failure_counts.pop(bt_id, None)
-                        summary["quarantined"] += 1
-                        result = None
-                        _log.warning(
-                            "stripe_sync_quarantined workspace=%s entity=%s id=%s "
-                            "after three consecutive failures",
-                            workspace_id,
-                            entity_id,
-                            bt_id,
-                        )
-            except Exception:
-                processing_error = True
-                break
-            if result is None:
+                except Exception as quarantine_exc:
+                    summary["errors"].append(
+                        "quarantine "
+                        f"{bt_id}: {quarantine_exc.__class__.__name__}: "
+                        f"{quarantine_exc}"
+                    )
+                    processing_error = True
+                    break
+                quarantined_items[bt_id] = {
+                    "approval_id": str(approval_id),
+                    "error": error_text,
+                }
+                failure_counts.pop(bt_id, None)
+                summary["quarantined"] += 1
                 last_processed = bt
+                _log.warning(
+                    "stripe_sync_quarantined workspace=%s entity=%s id=%s "
+                    "after three consecutive failures",
+                    workspace_id,
+                    entity_id,
+                    bt_id,
+                )
                 continue
             last_processed = bt
             if isinstance(bt_id, str):
