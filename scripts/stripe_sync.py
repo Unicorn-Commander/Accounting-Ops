@@ -78,6 +78,7 @@ _ADVANCE_MAPPER_OUTCOMES = frozenset({
     "queued_for_confirm",
     "queued_first_run",
     "flagged_for_cpa",
+    "skipped_zero_amount",
 })
 
 

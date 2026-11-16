@@ -363,6 +363,36 @@ async def test_mapper_refusal_stops_chain_without_advancing_past_item(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_zero_amount_mapper_outcome_advances_without_failure(monkeypatch):
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
+    seen: list[str] = []
+
+    async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        seen.append(txn["id"])
+        if txn["id"] == "txn_00001":
+            return SimpleNamespace(
+                outcome="skipped_zero_amount",
+                reason="Amount is zero",
+                fee_journal_entry_id=None,
+            )
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    workspace_id, _, _, position, records = _install_worker(
+        monkeypatch, _transactions(3, created), mapper=mapper
+    )
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert seen == ["txn_00000", "txn_00001", "txn_00002"]
+    assert summary["last_outcome"] == "ok"
+    assert summary["posted"] == 2
+    assert summary["skipped"] == 1
+    assert position[1] is None
+    assert position[4] == {}
+    assert not records[-1]["errors"]
+
+
+@pytest.mark.asyncio
 async def test_mapper_refusal_does_not_clear_existing_three_failure_count(monkeypatch):
     created = int((FIXED_NOW - timedelta(days=2)).timestamp())
 
