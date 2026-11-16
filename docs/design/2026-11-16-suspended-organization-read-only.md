@@ -1,0 +1,563 @@
+# A suspended or archived organization cannot change its books
+
+Design for second review (Persephone, interactive session), 2026-11-16. Design only: this document adds no code, no migration and no test. Nothing in it authorizes a deployment. Build work follows in the lanes of section 11, each flag-guarded and off by default.
+
+Base: `main` at `1d3a5d2`. Every file and line in this document is from that commit. Where a statement rests on an assumption rather than on a line of code, the sentence says "assumed".
+
+## 0. Summary
+
+The control plane (Ops-Center) tells this app when an organization is `active`, `suspended` or `archived` through `PATCH /api/v1/provisioning/workspaces/{id}` (`app/api/provisioning.py:153-167`). The app stores the answer in `public.workspace.control_plane_state` (`migrations/public/versions/0020_provisioning_state.py:16-26`) and does nothing with it. The module docstring says so: "Control-plane state is recorded only. There is no shared HTTP/MCP write gate" (`app/api/provisioning.py:4-7`). Today a suspended organization can post journal entries, approve transactions, issue invoices, launch tax runs, mint invitations and connect bank accounts exactly as an active one.
+
+The design puts the gate in two layers:
+
+1. An application refusal with a clear message, at the three places every request already passes: `resolve_workspace` for HTTP (`app/tenancy.py:455-487`), `authorize_workspace` for MCP (`app/mcp_auth.py:222-313`), and `workspace_session` for workers (`app/workspace_session.py:113-127`). A refused write answers HTTP 409 with code `workspace_read_only`. The verdict for every writing route and tool lives in one registry that a guard test checks against the app's own route list.
+2. A database backstop: a statement-level trigger on every `books` table that holds book data, which reads the workspace's state in the same transaction as the write and raises when the state is not `active`. A path that forgets the dependency fails closed. The bookkeeping of a read (audit rows, access logs, sign-in rows) is not under the trigger, so reads, sign-in and the audit trail keep working. Section 4.4 proves this on a scratch PostgreSQL under the runtime role.
+
+The inventory in section 3 has 95 writing HTTP routes, 79 MCP tools (33 of them write), 18 workers, runners and operator scripts, 6 inbound machine rails and 20 writes that happen on sign-in or on a GET. Counts by verdict are in section 3.7. The questions that need a decision are in section 12.
+
+## 1. Two states, two names
+
+This app already has a column called `status` on `public.workspace`, of enum type `workspace_status` with values `provisioning`, `active`, `suspended`, `archived` (`migrations/public/versions/0001_public_initial.py:33`). In this app `status = 'suspended'` has exactly one meaning: a legal erasure closed the workspace. It is written by one statement, `UPDATE public.workspace SET status = 'suspended'` in `revoke_access` (`app/data_rights/erasure.py:370`), on the admin connection only (the runtime role has no UPDATE grant on that column, `migrations/public/versions/0003_rls_and_runtime_grants.py:89`). It is read by `_resolve_membership`, which requires `w.status = 'active'` (`app/tenancy.py:331-338`), so after an erasure nobody resolves a membership and every request answers 403 "No active membership for this workspace" (`app/tenancy.py:344-348`). The erasure docs call this "the hard access kill" (`docs/DATA-RIGHTS.md`, section "The two tiers").
+
+The control plane's state is a different thing. It means "the organization stopped paying" or "the organization closed its account", and its holder still has rights: to sign in, to read, to export, to erase. That is why migration 0020 gave it its own column instead of reusing the enum (`migrations/public/versions/0020_provisioning_state.py:16-26`).
+
+In this document and in the code the two are never read as one another:
+
+| Column | Writer | Values | Meaning | Reader today |
+|---|---|---|---|---|
+| `public.workspace.status` | erasure Tier 2 (admin role), provisioning (`scripts/provision_workspace.py:168-171` sets `active`) | `provisioning`, `active`, `suspended`, `archived` | `suspended` = erased and closed; nobody may enter | `_resolve_membership` (`app/tenancy.py:337`), `_workspace_exists` (`app/tenancy.py:533`), `list_my_workspaces` (`app/api/workspaces.py:94`), the sentinel's workspace list (`agents/sentinel/run_sentinel.py:110`, `:123`), the sync workers (`scripts/ebay_sync.py:123`, `scripts/stripe_sync.py:124`) |
+| `public.workspace.control_plane_state` | the control plane's PATCH (`app/api/provisioning.py:155-164`, runtime role, column grant `0020_provisioning_state.py:29`) | `active`, `suspended`, `archived` | `suspended` or `archived` = the books are read-only for users; the holder keeps reads, export, erasure | only `workspace_status()` in `app/api/provisioning.py:58-62` |
+
+How they combine:
+
+| `status` | `control_plane_state` | What happens |
+|---|---|---|
+| `active` | `active` | normal |
+| `active` | `suspended` | this design: reads, sign-in, export, erasure work; user writes refused with `workspace_read_only`, state `suspended` |
+| `active` | `archived` | same refusals, state `archived`; export and erasure still work; no automatic purge (section 7) |
+| `suspended` (erased) | any | unchanged: 403 at membership resolution for everyone; the erasure purger still runs (`scripts/purge_due_erasures.py:238-240` deliberately has no status filter); the control plane's calls still accepted (section 8) |
+| `provisioning` | any | unchanged: 403 at membership resolution until provisioning marks `active` |
+
+Vocabulary for the rest of this document: "books state" means `control_plane_state`. "Erased" means `status = 'suspended'`. The error codes differ too: a refused write in a suspended organization says `workspace_read_only`; an erased workspace keeps answering the existing 403. The database backstop uses distinct SQLSTATEs for the two (section 4.4), so a log line can never confuse them.
+
+One place does read one as the other today, on the wire: `workspace_status()` returns `row.status` to the control plane whenever `status != 'active'` (`app/api/provisioning.py:58-62`). After an erasure, `GET /api/v1/provisioning/workspaces/{id}` therefore answers `"status": "suspended"` to Ops-Center, which uses the same word for its own state. This is listed in section 13; it is not fixed here.
+
+## 2. The contract rules that bind this design
+
+The common provisioning contract lives in the Ops-Center repository (`docs/design/2026-11-15-apps-in-onboarding.md`, section D). This sandbox cannot reach that repository. The rules below are quoted from the task statement. Rule 18 was named by the task but not quoted; this design could not read it and does not claim to meet it. The reviewer should check section D for anything rule 18 adds.
+
+Rule 6: "Suspended means read-only, and reads include what a read needs. Sign-in, the audit trail, view counters and other bookkeeping of a read keep working in a suspended or archived workspace; a legal erasure runs in every state; only user writes are refused. One app's write lock made sign-in itself fail."
+
+Rule 7: "The control plane's calls are accepted in every workspace state" (the state PATCH and the member DELETE).
+
+Rule 15, as paraphrased by the task: if Ops-Center is down nothing changes; the state only moves on its PATCH.
+
+The design's own two rules of thumb, derived from rule 6:
+
+- A write that narrows access is not a "user write" in the sense of the rule. Removing a member, revoking a token, cancelling an invitation, deleting a bank credential: these make a stopped organization safer and are allowed in every state. Each one is listed in the inventory with that reason and gets its own test.
+- A write that widens access, or changes a figure in the books, or spends money on the organization's behalf (an LLM call, a provider call), is a user write and is refused.
+
+## 3. The inventory
+
+Column keys. Resolver: `RW` = `resolve_workspace` (`app/tenancy.py:455`); `RE` = `resolve_entity` (`app/tenancy.py:613`, which calls `RW`); `RQ` = `resolve_workspace_for_quotes_seam` (`app/api/quotes_seam.py:76`); `PT` = `require_provisioning_token` (`app/security/provisioning_token.py:90`); `U` = user-scoped, bearer only, no workspace in the path; `WH` = unauthenticated webhook or callback with a signature or signed-state check; `N` = none. Session: `ws` = `workspace_session` or `entity_session` on the runtime role with the RLS GUC set (`app/workspace_session.py:113-154`); `pub` = bare `SessionLocal()`, public schema, runtime role (`app/db.py:27`); `adm` = the owner engine on `ADMIN_DATABASE_URL` (`scripts/provision_workspace.py:56-57`, `app/data_rights/erasure.py:364`, `:444`); `none` = no database write.
+
+Verdicts: **R** = REFUSED when the books state is `suspended` or `archived`. **B** = ALLOWED because a read needs it, or because the route writes nothing. **A** = ALLOWED always (erasure, the control plane's own calls, export of the organization's own data, writes that narrow access, writes that have no workspace as their subject). **D** = DECIDE; the question is in section 12.
+
+### 3.1 HTTP routes with a writing method
+
+95 decorators in 39 files on `main` at `1d3a5d2`, counted with `grep -rn -E '@[a-zA-Z_]+\.(post|put|patch|delete)\(' app/`. The task's figure of 93 in 38 files excludes `app/a2a/server.py:17` and the enterprise-only `app/api/test_brigade_jwt.py:63`. Both are listed here. The router prefix is empty everywhere except `app/api/provisioning.py:25-29`, `app/api/tools.py`, `app/api/esign.py:66`, `app/api/test_brigade_jwt.py:30` and `app/a2a/server.py:9`; paths below are the full paths.
+
+| # | Method and path | Decorator | Resolver | Role floor | Session | Writes | Verdict | Why |
+|---|---|---|---|---|---|---|---|---|
+| 1 | PUT `/api/workspaces/{wid}/account-mappings` | `app/api/account_mappings.py:168` | RW | accountant `:175` | ws `:177` | upsert `account_entity_mapping` `:194-227` | R | changes how transactions post |
+| 2 | POST `.../ai-activity/{audit_id}/undo` | `app/api/ai_activity.py:1033` | RW | accountant `:1068` | ws `:1101` | UPDATE `tax_review_queue` `:1200-1215`, INSERT `decision_audit` `:1296` | R | changes review state |
+| 3 | POST `.../ai-activity/{audit_id}/challenge` | `app/api/ai_activity.py:1342` | RW | viewer `:1358` | ws `:1366` | INSERT `tax_review_queue` `:1496`, `decision_audit` `:1543` | R | files a review item |
+| 4 | POST `.../approvals/bulk-decide` | `app/api/approval_clusters.py:454` | RW | accountant `:487`; admin inside the tool (`app/tools/approvals.py:273`) | ws | everything row 5 writes, per item; skip path UPDATE `approval_queue` `:629` | R | posts money |
+| 5 | POST `.../approvals/{approval_id}/decide` | `app/api/approvals.py:205` | RW | accountant `:231` | ws `:240` | UPDATE `approval_queue`, INSERT `journal_entry`, `posting_log`, `decision_audit`; rules | R | posts money |
+| 6 | POST `.../approvals/{approval_id}/skip` | `app/api/approvals.py:860` | RW | accountant `:874` | ws `:876` | UPDATE `approval_queue` `:931`, `decision_audit` | R | changes the queue |
+| 7 | POST `.../approvals/{approval_id}/unskip` | `app/api/approvals.py:960` | RW | accountant `:971` | ws `:973` | UPDATE `approval_queue` `:1015` | R | changes the queue |
+| 8 | POST `.../category-overrides` | `app/api/category_overrides.py:63` | RW | accountant `:72` | ws `:78` | upsert `category_override` `:79-105`; FalkorDB | R | changes categorization |
+| 9 | DELETE `.../category-overrides/{id}` | `app/api/category_overrides.py:133` | RW | accountant `:139` | ws `:140` | DELETE `category_override` `:142` | R | changes categorization |
+| 10 | POST `.../chat/sessions` | `app/api/chat.py:238` | RW | viewer `:254` | ws `:270` | INSERT `agent_session` `:281` | D | question 1: chat while suspended; recommended R |
+| 11 | POST `.../chat/sessions/{id}/messages` | `app/api/chat.py:456` | RW | viewer `:477` | ws `:480`, `:874` | INSERT and UPDATE `chat_message`, `agent_session`; LLM call `agents/chat/runner.py:196`; tools under the user's bearer | D | question 1; recommended R (spends inference for a stopped organization) |
+| 12 | POST `.../chat/sessions/{id}/cancel` | `app/api/chat.py:937` | RW | viewer `:950` | none | in-process flag `:97` | B | no write |
+| 13 | POST `.../chat/sessions/{id}/save-as-memo` | `app/api/chat.py:966` | RW | bookkeeper `:982` | ws `:984` | INSERT `tax_review_queue` `:1060` | R | files a review item |
+| 14 | POST `/api/me/clients` | `app/api/clients.py:833` | U | practitioner role anywhere `:867-875` | adm (`scripts/provision_workspace.py:56-57`), pub `:921` | new `public.workspace`, membership, invitation, `email_outbox` | A | creates a new workspace; the gate has no subject. Whether a suspended organization may create one is Ops-Center's entitlement decision, not this app's |
+| 15 | POST `.../counterparties` | `app/api/contacts.py:95` | RW | accountant `:104` | ws `:105` | upsert `counterparty` (`app/contacts/service.py:188`, `:204`) | R | master data |
+| 16 | POST `.../counterparties/parse` | `app/api/contacts.py:122` | RW | accountant `:129` | none | pure parse | B | no write |
+| 17 | POST `.../counterparties/sync-contact-ops` | `app/api/contacts.py:155` | RW | accountant `:168` | none | outbound read of Contact-Ops `app/contacts/contact_ops_client.py:230` | B | preview only, no write |
+| 18 | POST `.../counterparties/import` | `app/api/contacts.py:191` | RW | accountant `:198` | ws `:200` | bulk upsert `counterparty` | R | master data |
+| 19 | POST `.../credentials` | `app/api/credentials.py:58` | RW | admin `:64` | pub `:65` | upsert `public.tenant_credentials` (`app/security/credentials.py:97`), `credential_access_log` | R | widens: adds a bank credential |
+| 20 | POST `.../credentials/simplefin/claim` | `app/api/credentials.py:79` | RW | admin `:91` | pub `:134` | outbound claim, then as row 19 | R | widens |
+| 21 | DELETE `.../credentials/{credential_id}` | `app/api/credentials.py:203` | RW | admin `:212` | pub `:213` | DELETE `public.tenant_credentials` (`credentials.py:295`), access log | A | narrows: removes a bank token |
+| 22 | PUT `.../data-rights/retention` | `app/api/data_rights.py:115` | RW | owner `:122` | pub `:132`, ws `:141` | `public.workspace.setup_progress` jsonb (`retention.py:183`), `decision_audit` | D | question 2; recommended A (part of the owner's data rights) |
+| 23 | POST `.../data-rights/exports` | `app/api/data_rights.py:204` | RW | owner `:214` | pub `:218`, ws `:232`, background | job record in `setup_progress`, `decision_audit`, object put (`export.py:370`) | A | export of the organization's own data |
+| 24 | POST `.../data-rights/erasure` | `app/api/data_rights.py:372` | RW | owner `:385` | pub, ws, adm | Tier 1 and Tier 2 (section 8.1) | A | legal erasure runs in every state |
+| 25 | POST `.../entities/{eid}/documents/upload` | `app/api/documents.py:138` | RW | client_user `:157` | ws `:206`, `:267`, background task `:416` into `_run_tax_extraction` `:536` | object put `:237`, INSERT `receipt` `:280`, `approval_queue` `:359`, `decision_audit` `:384`, `document_extraction` `:566` | R | adds a document and a queue item |
+| 26 | DELETE `.../connectors/ebay` | `app/api/ebay_oauth.py:585` | RW | admin `:594` | pub `:596` | DELETE `tenant_credentials` | A | narrows |
+| 27 | POST `.../work-products/{wp_id}/efile-package` | `app/api/efile.py:101` | RW | accountant `:119` | none | XML in memory, nothing stored or sent | B | no write |
+| 28 | POST `.../engagement/policy` | `app/api/engagement.py:74` | RW | admin `:83` | ws `:108` | INSERT or UPDATE `engagement_policy` (`app/engagement/policy.py:105`, `:186`) | R | settings that gate rails |
+| 29 | POST `.../signature-requests` | `app/api/esign.py:108` | RW | accountant `:116` | ws `:127` | INSERT `signature_request` (`app/esign/service.py:156`), outbound provider call `provider.py:255` | R | sends a return to a third party |
+| 30 | POST `.../signature-requests/{sr_id}/mark-signed` | `app/api/esign.py:260` | RW | accountant `:269` | ws `:283` | object put or file write (`service.py:86`, `:102`), UPDATE `signature_request` `:335` | R | changes a work product |
+| 31 | POST `.../signature-requests/{sr_id}/cancel` | `app/api/esign.py:304` | RW | accountant `:312` | ws `:314` | UPDATE `signature_request` `:386` | R | user write; nothing is sent during suspension anyway (section 6) |
+| 32 | POST `.../inference/byok` | `app/api/inference_settings.py:159` | RW | admin `:174` | pub `:196` | upsert `tenant_credentials` | R | widens: adds a key |
+| 33 | DELETE `.../inference/byok` | `app/api/inference_settings.py:227` | RW | owner `:238` | pub `:241` | DELETE `tenant_credentials` | A | narrows |
+| 34 | POST `.../invoices` | `app/api/invoices.py:255` | RW | accountant `:267` | ws `:300` | `invoice`, `invoice_line`, `public.invoice_pay_token`, `journal_entry` when posting (`app/ar/invoicing.py:692-931`) | R | posts money |
+| 35 | POST `.../invoices/{id}/void` | `app/api/invoices.py:369` | RW | accountant `:377` | ws `:381` | reversing `journal_entry`, UPDATE `invoice` (`invoicing.py:1392-1495`) | R | posts money |
+| 36 | POST `.../invoices/{id}/payments` | `app/api/invoices.py:399` | RW | accountant `:410` | ws `:413` | `invoice_payment`, `journal_entry` (`invoicing.py:1242-1380`) | R | posts money |
+| 37 | POST `.../invoices/{id}/issue` | `app/api/invoices.py:453` | RW | accountant `:461` | ws `:464`, `:475`, `:597` | `journal_entry`, UPDATE `invoice`, Stripe Checkout call (`checkout.py:97`), Email-Ops call (`email_draft.py:64`) | R | posts money and contacts third parties |
+| 38 | POST `.../coa/seed` | `app/api/journal.py:89` | RW | accountant `:97` | ws `:98` | INSERT `chart_of_account` (`accounts.py:150`) | R | changes the chart |
+| 39 | POST `.../coa/link` | `app/api/journal.py:122` | RW | accountant `:132` | ws `:133` | UPDATE `chart_of_account` (`accounts.py:189`) | R | changes the chart |
+| 40 | POST `.../coa` | `app/api/journal.py:181` | RW | accountant `:188` | ws `:199` | INSERT `chart_of_account` `:223` | R | changes the chart |
+| 41 | PATCH `.../coa/{account_id}` | `app/api/journal.py:250` | RW | accountant `:260` | ws `:268` | UPDATE `chart_of_account` `:313` | R | changes the chart |
+| 42 | DELETE `.../coa/{account_id}` | `app/api/journal.py:337` | RW | accountant `:346` | ws `:348` | UPDATE `chart_of_account SET is_active = false` `:399` | R | changes the chart |
+| 43 | POST `.../journal-entries` | `app/api/journal.py:444` | RW | bookkeeper `:455` | ws `:458` | `post_journal_entry` (`app/journal/posting.py:496`): INSERT `journal_entry` `:868`, `posting_log` `:1605` | R | posts money |
+| 44 | POST `.../entities/{eid}/close-period` | `app/api/journal.py:826` | RW | admin `:852` | ws `:857` | INSERT `closed_period` `:900` | R | changes the books |
+| 45 | PATCH `.../members/{user_id}` | `app/api/members.py:235` | RW | admin `:252`, owner for elevated roles `:256` | pub `:260` | UPDATE `workspace_membership` `:332`, `membership_audit` | R | changes who may act; removal (row 46) is the way to narrow |
+| 46 | DELETE `.../members/{user_id}` | `app/api/members.py:354` | RW | admin, owner for owners (`member_removal.py:37`, `:76`) | pub (`member_removal.py:38`) | revoke membership `:99`, revoke PATs `:107`, cancel invitations `:156`, `membership_audit` | A | narrows; must keep revoking tokens in a suspended workspace (section 8.2) |
+| 47 | POST `.../invitations` | `app/api/members.py:425` | RW | admin `:436`, owner for manual links `:438` | pub `:462` | INSERT `workspace_invitation` `:513`, `email_outbox` (`mailer.py:137`) | R | widens access |
+| 48 | POST `.../invitations/{id}/cancel` | `app/api/members.py:626` | RW | admin `:632` | pub `:633` | UPDATE `workspace_invitation` `:638` | A | narrows |
+| 49 | POST `.../invitations/{id}/resend` | `app/api/members.py:659` | RW | admin `:670` | pub `:674` | rotates token `:697`, `email_outbox` | R | re-widens |
+| 50 | POST `/api/invitations/accept` (same body as GET `:737`) | `app/api/members.py:1031` | U | token-bound `:830`, `:875` | pub `:774` | INSERT `user_account` `:857`, membership `:913-960`, `workspace_invitation` `:978`, `membership_audit` `:995` | R | widens; the route must read the invitation's workspace state itself (section 4.2) |
+| 51 | POST `/api/onboarding/provision-first-workspace` | `app/api/onboarding.py:334` | U | no active workspace `:382` or entitlement | adm, pub | new workspace and owner membership | A | creates a new workspace; no subject |
+| 52 | POST `.../open-items/document-received` | `app/api/open_items.py:621` | RW | accountant `:637` | ws `:644` | INSERT `tax_review_queue` `:668` | R | files a review item |
+| 53 | POST `.../open-items/decision` | `app/api/open_items.py:712` | RW | accountant `:726` | ws `:734` | INSERT `tax_review_queue` `:757` | R | files a review item |
+| 54 | POST `/api/me/personal-access-tokens` | `app/api/personal_access_tokens.py:310` | U | Keycloak session `:317`; membership check on `workspace_scope` `:356` | pub `:369` | INSERT `personal_access_token` (`pat.py:303`) | D | question 3: a token is a write that widens access; recommended R when `workspace_scope` names a suspended or archived workspace, allowed otherwise because the gate refuses at use |
+| 55 | POST `/api/me/personal-access-tokens/{pat_id}/revoke` | `app/api/personal_access_tokens.py:395` | U | owner of the token | pub `:402` | UPDATE `revoked_at` (`pat.py:345`) | A | narrows |
+| 56 | DELETE `/api/me/personal-access-tokens/{pat_id}` | `app/api/personal_access_tokens.py:412` | U | owner of the token | pub `:426` | DELETE `personal_access_token` (`pat.py:363`) | A | narrows |
+| 57 | POST `.../entities/{eid}/quotes/accepted` | `app/api/quotes_seam.py:160` | RQ `:76` (Customer-Ops machine token, or RW) | bookkeeper `:176`; `QUOTES_ENABLED` `:175` | ws `:181` | draft `invoice`, `invoice_line`, `invoice_schedules`, `bill`, `counterparty`; may void a prior version (`app/ar/quotes_seam.py:1196-1297`) | R | changes the books; the 409 carries the seam's `{code, reason, federated}` body (section 5.3) |
+| 58 | POST `.../invoice-schedules/run` | `app/api/quotes_seam.py:223` | RW | bookkeeper `:237` | ws `:251` | draft invoices and bills (`quotes_seam.py:1617-1836`) | R | changes the books |
+| 59 | POST `.../sentinel/config` | `app/api/sentinel.py:113` | RW | admin `:119` | ws `:146` | INSERT or UPDATE `sentinel_config` (`agents/sentinel/config.py:166`, `:175`) | R | settings |
+| 60 | POST `.../sentinel/findings/{id}/acknowledge` | `app/api/sentinel.py:262` | RW | accountant `:269` | ws `:270` | UPDATE `sentinel_finding` `:294` | R | changes review state |
+| 61 | POST `.../sentinel/scheduled-actions/{id}/cancel` | `app/api/sentinel.py:346` | RW | admin `:352` | ws `:353` | UPDATE `sentinel_scheduled_action` `:370` | R | changes state; the sentinel does not run for a suspended workspace anyway |
+| 62 | POST `.../sentinel/run` | `app/api/sentinel.py:432` | RW | admin `:449` | background `run_workspace_cycle` (`run_sentinel.py:328`) | check runs, findings, memos, scheduled actions, `decision_audit` | R | runs the daemon on demand |
+| 63 | POST `.../setup/bootstrap` | `app/api/setup.py:99` | RW | accountant `:121` | ws | INSERT `entity`, `chart_of_account`, `decision_audit` (`create_entity_with_coa.py:209-305`) | R | creates an entity |
+| 64 | PATCH `.../setup-progress` | `app/api/setup.py:227` | RW | accountant `:246` | pub `:260` | UPDATE `public.workspace.setup_progress` `:299` | R | a user write, even though it is not a books table (the backstop does not cover it; the application gate does) |
+| 65 | POST `.../specialist-runs` | `app/api/specialist_runs.py:101` | RW | accountant `:114` | ws `:117` | INSERT `specialist_run` `:122` | R | starts a tax run |
+| 66 | PATCH `.../specialist-runs/{run_id}/finish` | `app/api/specialist_runs.py:161` | RW | accountant `:175` | ws `:187` | UPDATE `specialist_run` `:224` | R | see section 6 for a run already in flight |
+| 67 | PATCH `.../specialty-rules/{rule_id}` | `app/api/specialty_rules.py:273` | RW | accountant `:290` | ws `:299` | UPDATE `compliance_rule` `:330`, `:347`, `decision_audit` `:380` | R | changes categorization |
+| 68 | POST `.../connectors/stripe/key` | `app/api/stripe_oauth.py:193` | RW | admin `:210` | pub `:262` | Stripe account call `:98-117`, upsert `tenant_credentials` | R | widens |
+| 69 | POST `.../connectors/stripe/webhook-secret` | `app/api/stripe_oauth.py:291` | RW | admin `:311` | pub `:325`, `:368` | upsert `tenant_credentials` | R | widens |
+| 70 | DELETE `.../connectors/stripe` | `app/api/stripe_oauth.py:521` | RW | admin `:535` | pub `:536` | DELETE `tenant_credentials` | A | narrows |
+| 71 | POST `/api/connectors/stripe/webhook` | `app/api/stripe_oauth.py:717` | WH (per-workspace secret `:798`) | none | pub `:780`, ws (`_record_webhook_delivery` `:660`) | UPDATE `connector_state.state` webhook log `:703`; the posting itself happens on the next sync pass (`:730-733`) | R | the log write is refused with 409; Stripe retries; nothing is lost because the sync re-fetches by cursor (section 6.3) |
+| 72 | POST `/api/stripe/webhook` | `app/api/stripe_webhook.py:23` | WH (one shared secret, `checkout.py:27`) | none | ws `:49` with the workspace id from Stripe metadata `:42` | `record_payment`: `invoice_payment`, `journal_entry`, UPDATE `invoice` (`invoicing.py:1242-1380`) | R | posts money; 409 so Stripe retries; after Stripe's retry window a person records the payment on resume (section 6.3) |
+| 73 | POST `.../submission/{channel}/propose` | `app/api/submission.py:130` | RW | bookkeeper `:140` | ws `:152` | none except a lazy default `engagement_policy` row (`policy.py:105`) | B | propose only; the lazy default row is handled in section 4.3 |
+| 74 | POST `.../tax-filing-submissions` | `app/api/tax_filing_submissions.py:182` | RW | accountant `:195` | ws `:220` | INSERT `tax_filing_submission` `:225` | R | tax record |
+| 75 | PATCH `.../tax-filing-submissions/{id}` | `app/api/tax_filing_submissions.py:450` | RW | accountant `:458` | ws `:491` | UPDATE `tax_filing_submission` `:507` | R | tax record |
+| 76 | POST `.../tax-filing-submissions/{id}/refresh-tracking` | `app/api/tax_filing_submissions.py:540` | RW | viewer `:549` | ws `:551` | USPS call (`usps_tracking.py:246`), UPDATE `tax_filing_submission` `:595` | R | changes status and calls a third party |
+| 77 | POST `.../tax-narrative/{tax_year}` | `app/api/tax_narrative.py:227` | RW | accountant `:247` | subprocess | narrative generator under the server's service token `:274`; writes a memo through MCP `draft_memo` | R | spends inference; writes a memo |
+| 78 | POST `.../tax-review-queue/{item_id}/resolve` | `app/api/tax_review.py:253` | RW | accountant `:280` | ws `:292` | UPDATE `tax_review_queue` `:328` | R | changes review state |
+| 79 | POST `.../tax/{tax_year}/specialist-runs/launch` | `app/api/tax_run_launch.py:751` (path `:700`) | RW | accountant, unscoped `:713-727`; `AO_TAX_RUN_LAUNCH_ENABLED` `:123` | ws | INSERT `specialist_run` `:365`, subprocess coordinator `:604`, drafts on disk `:565-585`, UPDATE `specialist_run` `:431`, `:458` | R | starts a tax run |
+| 80 | POST `.../specialist-runs/{run_id}/cancel` | `app/api/tax_run_launch.py:804` | RW | accountant `:810` | ws (`db_cancel` `:481`) | UPDATE `specialist_run` `:486`, kills the worker `:552` | R | section 6.1 says what happens to a run in flight |
+| 81 | POST `/api/test/brigade-jwt-verify` | `app/api/test_brigade_jwt.py:63` | U | admin scope `:37-56` | none | none | B | diagnostic, no write, no workspace; enterprise only (`app/main.py:244-258`) |
+| 82 | POST `.../entities/{eid}/runway` | `app/api/tools.py:213` | RE | viewer inside the tool (`reporting.py:114`) | none | none | B | a read served over POST |
+| 83 | POST `.../transactions/{id}/categorize` | `app/api/tools.py:228` | RE | bookkeeper `:234` | ws (tool) | `post_correction`: `journal_entry`, `approval_queue`, `posting_log` (`posting.py:1289-1435`), `decision_audit` | R | posts money |
+| 84 | POST `.../approvals/ai-categorize` | `app/api/tools.py:247` | RE | bookkeeper `:260` | ws (tool) | UPDATE `approval_queue.payload` (`ai_categorize.py:171-225`), LLM calls | R | spends inference; changes the queue |
+| 85 | POST `.../receipts/link` | `app/api/tools.py:270` | RE | bookkeeper `:274` | ws (tool) | INSERT `recon_link` (`receipts.py:112`) | R | links a document |
+| 86 | POST `.../specialty-rules` | `app/api/tools.py:286` | RE | admin `:291` | ws (tool) | INSERT `compliance_profile`, `compliance_rule`, `approval_queue` (`specialty_rules.py:245-304`) | R | proposes a rule |
+| 87 | POST `.../owners` | `app/api/tools.py:304` | RE | admin `:314` | ws (tool) | INSERT or UPDATE `entity_owner` (`entity_owners.py:207`), `decision_audit` | R | ownership record |
+| 88 | POST `.../payments/propose` | `app/api/tools.py:325` | RE | bookkeeper `:330` | none | `NotImplementedError` (`payments.py:22`) | B | a stub; no write |
+| 89 | POST `.../consolidated/p-and-l` | `app/api/tools.py:346` | RW | admin, unscoped `:351-352` | none | none | B | a read served over POST |
+| 90 | POST `.../entities/{eid}/work-products` | `app/api/work_products.py:280` | RW | bookkeeper `:291` | ws `:300` | INSERT `work_product` (`work_product_service.py:95`) | R | tax draft |
+| 91 | POST `.../work-products/{wp_id}/attest` | `app/api/work_products.py:387` | RW | accountant `:397` | ws `:405` | UPDATE `work_product` `:442` | R | attestation |
+| 92 | POST `/a2a` | `app/a2a/server.py:17` | N | none | none | returns the agent card or a JSON-RPC error `:17-26` | B | no write, no workspace (section 13 notes it is unauthenticated) |
+| 93 | POST `/api/v1/provisioning/workspaces` | `app/api/provisioning.py:131` | PT | the control plane's signed token | pub, adm via `provision_workspace` `:120` | new `public.workspace`, `uc_org_id` `:108` | A | the control plane's own call (rule 7) |
+| 94 | PATCH `/api/v1/provisioning/workspaces/{wid}` | `app/api/provisioning.py:153` | PT | same | pub `:155` | UPDATE `control_plane_state` `:159` | A | the control plane's own call; this is the only writer of the state |
+| 95 | DELETE `/api/v1/provisioning/workspaces/{wid}/members/{subject}` | `app/api/provisioning.py:170` | PT | same | pub (`member_removal.py:38`) | revoke membership and tokens, audit, cancel invitations | A | the control plane's own call; section 8.2 |
+
+Three GET routes carry user writes and are gated like the rows above, because a verb is not what makes a write (section 3.6, rows G13 to G15): `GET /api/invitations/accept` (`app/api/members.py:737`) is row 50 under another verb; `GET /api/connectors/ebay/oauth/callback` (`app/api/ebay_oauth.py:343`) stores a bank credential (`:439`) for the workspace named in the signed state and is R; `GET /api/workspaces/{wid}/invoices/{invoice_id}` (`app/api/invoices.py:352`) lazily creates a Stripe Checkout session and writes `invoice.hosted_pay_url` (`:574-607`) and must skip that step, not fail the read, when the books state is not active.
+
+### 3.2 MCP tools
+
+79 tools are registered in `mcp_server.py:132-354` through the policy wrapper `_install_agent_tool_policy` (`:96-129`). Every tool authorizes with `authorize_workspace(workspace_id, entity_id, min_role=...)` (`app/mcp_auth.py:222`), except `list_my_workspaces`, `create_workspace`, the three tax-knowledge tools, `get_current_rule` and the `propose_payment` stub. The registry `_TOOL_METADATA` in `app/api/discovery.py:61-195` already carries a `read_only` flag per tool, and `tests/smoke/test_discovery_manifest.py:230-249` already fails when a registered tool has no row. That flag agrees with the sweep below for all 79 tools, and it is what the gate reads (section 4.2).
+
+46 tools are read-only and get verdict B. Three of them call out (SimpleFIN for `get_cash_position`, `list_recent_transactions`, `list_account_mappings`; the cpa-export sidecar for the three `get_form_*` tools; the embedding service for `get_current_rule` and `search_tax_knowledge`); none writes a row. The `propose_payment` tool raises `NotImplementedError` (`app/tools/payments.py:14`) and is B.
+
+The 33 writing tools:
+
+| Tool | Implementation | Min role | Session | Writes | Verdict |
+|---|---|---|---|---|---|
+| analyze_pending_approvals | `app/tools/analyze_pending_approvals.py:267` | bookkeeper `:311` | ws `:315` | upsert `approval_recommendation` `:413-451` | R |
+| ai_categorize_pending | `app/tools/ai_categorize.py:57` | bookkeeper `:100` | ws `:118` | UPDATE `approval_queue.payload`, LLM calls, `decision_audit` `:246` | R |
+| decide_approval | `app/tools/approvals.py:154` | admin `:197` | via `app/api/approvals.py:206` | as route 5 | R |
+| bulk_decide_approvals | `app/tools/approvals.py:219` | admin `:273` | per item | as route 5 | R |
+| categorize_transaction | `app/tools/categorization.py:33` | bookkeeper `:52` | ent `:54` | `post_correction` (`posting.py:1289`), `decision_audit` | R |
+| link_receipt_to_transaction | `app/tools/receipts.py:27` | bookkeeper `:43` | ent `:45` | INSERT `recon_link` `:109`, `decision_audit` | R |
+| add_specialty_rule | `app/tools/specialty_rules.py:186` | admin `:206` | ent `:224` | `compliance_profile`, `compliance_rule`, `approval_queue`, `decision_audit` | R |
+| create_coa_account | `app/tools/coa.py:85` | accountant `:116` | ws `:138` | INSERT `chart_of_account` `:155` | R |
+| update_coa_account | `app/tools/coa.py:185` | accountant `:215` | ws `:227` | UPDATE `chart_of_account` `:265` | R |
+| create_entity_with_coa | `app/tools/create_entity_with_coa.py:112` | accountant `:159` | ws `:190` | INSERT `entity` `:206`, `chart_of_account` `:272`, `decision_audit` `:305` | R |
+| create_workspace | `app/tools/setup_assistant.py:281` | admin on a candidate workspace `:273` | adm (`provision_workspace`), pub `:344` | new `public.workspace`, membership `:346` | A, no subject (as route 14) |
+| post_journal_entry | `app/tools/journal_tools.py:519` | bookkeeper `:584` | ws `:615` | `post_journal_entry` `:663`, `enqueue` `:693`, `decision_audit` `:705` | R |
+| propose_manual_journal_entry | `app/tools/journal_tools.py:777` | bookkeeper `:797` | ws `:809` | INSERT `approval_queue` (`manual_proposal.py:324`), `decision_audit` | R |
+| close_period | `app/tools/journal_tools.py:861` | admin `:892` | ws `:901` | INSERT `closed_period` `:929` | R |
+| upsert_ar_customer | `app/tools/ar_invoicing.py:68` | accountant `:94` | ws `:96` | `counterparty` (`invoicing.py:372`, `:389`) | R |
+| create_invoice_from_draft | `app/tools/ar_invoicing.py:114` | accountant `:176` | ws `:197` | as route 34 | R |
+| issue_invoice_draft | `app/tools/ar_invoicing.py:411` | accountant `:428` | ws | as route 37 | R |
+| void_invoice | `app/tools/ar_invoicing.py:275` | accountant `:296` | ws `:300` | as route 35 | R |
+| record_payment | `app/tools/ar_invoicing.py:326` | accountant `:355` | ws `:357` | as route 36 | R |
+| create_invoices_from_quote | `app/tools/quotes_seam.py:56` | bookkeeper `:110` | ws `:134` | as route 57 | R |
+| run_invoice_schedules | `app/tools/quotes_seam.py:148` | bookkeeper `:170` | ws `:177` | as route 58 | R |
+| upsert_account_mappings | `app/tools/connectors.py:348` | accountant `:372` | via route 1 | upsert `account_entity_mapping` | R |
+| create_category_override | `app/tools/connectors.py:428` | accountant `:454` | via route 8 | upsert `category_override` | R |
+| resolve_tax_review_item | `app/tools/tax_review_resolve.py:31` | accountant `:68` | ws `:70` | UPDATE `tax_review_queue` `:96` | R |
+| upsert_entity_owner | `app/tools/entity_owners.py:104` | admin `:157` | ws `:190` | `entity_owner` `:200-222`, `decision_audit` `:224` | R |
+| draft_memo | `app/tools/tax_draft_memo.py:30` | bookkeeper `:64` | ws `:86` | INSERT `tax_review_queue` `:88` | R |
+| flag_for_cpa_review | `app/tools/tax_flag_for_cpa_review.py:32` | bookkeeper `:81` | ws `:103` | INSERT `tax_review_queue` `:105` | R |
+| tax_fill_w4p | `app/tools/tax_w4p.py:29` | bookkeeper `:77` | ws `:82` | INSERT `work_product` (`work_product_service.py:95`) | R |
+| tax_prepare_filing | `app/tools/tax_prepare_filing.py:32` | bookkeeper `:62` | ws `:80` | INSERT `work_product` | R |
+| tax_compute_1040 | `app/tools/tax_1040.py:23` | bookkeeper `:65` | ws `:93` | INSERT `work_product` | R |
+| trigger_tax_narrative | `app/tools/tax_narrative.py:130` | accountant `:159` | subprocess `:232` | memo through `draft_memo` under the service token `:188` | R |
+| start_specialist_run | `app/tools/specialist_runs.py:217` | accountant `:249` | ws `:251` | INSERT `specialist_run` `:253` | R |
+| finish_specialist_run | `app/tools/specialist_runs.py:290` | accountant `:323` | ws `:325` | UPDATE `specialist_run` `:351` | R |
+
+The HTTP mirror of these tools in `app/api/tools.py` (routes 82 to 89) calls the same functions, so a gate inside `authorize_workspace` covers both surfaces.
+
+The A2A surface (`app/a2a/server.py`) exposes a card, a JSON-RPC stub and a one-event stream; it writes nothing and resolves no workspace.
+
+### 3.3 Agents and specialist runners
+
+| Runner | Launched by | Resolves the workspace | Role | Writes | Verdict |
+|---|---|---|---|---|---|
+| Tax specialist coordinator and specialists (`agents/tax_specialists/coordinator/run_coordinator.py`, `agents/tax_specialists/*/run_specialist.py`) | `execute_run` in `app/api/tax_run_launch.py:590`, a subprocess `:604` spawned from route 79; also by hand with `docker exec` (`scripts/run_tax_specialists.sh:61-62`) | the launching request's workspace, passed in the environment `:528-548`; by hand, a `--workspace-id` argument | the launcher writes the `specialist_run` row on the runtime role (`:424-478`); the runners open no database connection and use MCP under the service token (`run_coordinator.py:314-315`) | UPDATE `specialist_run` running and finished (launcher only; the runners' telemetry helper `agents/tax_specialists/_shared/run_telemetry.py` has no importers), drafts under `/drafts` (`:565-585`), memos and review items through `draft_memo` and `flag_for_cpa_review` | R (the launch is refused; a run in flight: section 6.1; a hand-started run is refused tool by tool at `authorize_workspace`) |
+| Books-lead batch scripts (`agents/cpa_team/books_lead/apply_high_confidence.py`, `promote_medium_to_high.py`, `cluster_low_confidence.py`, `reconcile_books.py`) | by hand, `docker exec ... python -m agents.cpa_team.books_lead.<script>` (`apply_high_confidence.py:31-32`) | one workspace and entity from `BOOKS_LEAD_WORKSPACE_ID` and `BOOKS_LEAD_ENTITY_ID` (`:57-58`); no status check | runtime role, direct `SessionLocal` and `workspace_session` (`:49`, `:321`, `:344`), deliberately not HTTP (`:10-14`) | `journal_entry` through `post_journal_entry` with `user_confirmed=True` (`:255-276`), UPDATE `approval_queue` `:198`, `decision_audit` `:149`, UPDATE `approval_recommendation` (`promote_medium_to_high.py:477`, `:501`; `cluster_low_confidence.py:145`) | R: the backstop refuses every statement; the scripts gain `workspace_session(writes=True)` for a clear message |
+| CPA tax resolver (`agents/cpa_team/tax_resolver/run_cpa_resolver.py`) | by hand (`:13-20`) | one workspace, over the HTTP API with a service token (`:174-175`, `:221-222`) | none directly | `tax-review-queue/{id}/resolve` (route 78) | R through the route |
+| Narrative generator (`agents/cpa_team/narrative_generator`) | route 77 and tool `trigger_tax_narrative` | the caller's workspace, passed in `app/api/tax_narrative.py:178-209` | service token `:274` | `tax_review_queue` memo through MCP `draft_memo` | R (the trigger is refused; a run in flight is refused at `draft_memo`) |
+| Categorizer, Tier 2 model (`app/categorization/engine.py`) | route 84 and tool `ai_categorize_pending` | the caller's workspace | runtime role | UPDATE `approval_queue.payload` | R |
+| Manual journal proposals (design #73, pull requests #74 and #75) | tool `propose_manual_journal_entry`; approval through route 5 | the caller's workspace | runtime role | `approval_queue`, `decision_audit`; on approval `journal_entry` (`app/journal/manual_proposal.py:368`) | R at enqueue and at approval |
+| Chat runner (`agents/chat/runner.py:196`) | route 11 | the caller's workspace | runtime role; LLM endpoint | `chat_message`, `agent_session`; tools under the user's bearer | D (question 1) |
+| Sentinel daemon (`agents/sentinel/run_sentinel.py`) | compose service `sentinel` (`docker-compose.yml:584-609`), `python -m agents.sentinel.run_sentinel`; also route 62 | iterates `public.workspace WHERE status = 'active'` (`run_sentinel.py:121-125`); skips `autonomy_level = 'off'` (`:363`) | `DATABASE_URL`, runtime role (`docker-compose.yml:594`) | `sentinel_check_run` (`:198`, `:231`), `sentinel_config.last_run_at` (`config.py:220`), `sentinel_check_state` (`config.py:292`), findings, memos, scheduled actions, `decision_audit` (`agents/sentinel/actions.py:301-808`) | R: skip workspaces whose books state is not active; executes pending scheduled actions again on the first cycle after `active` (section 6.4) |
+
+### 3.4 Workers and scheduled scripts
+
+| Worker | Entry point | Launched by | Database role | Picks workspaces | Writes | Verdict |
+|---|---|---|---|---|---|---|
+| Mail drainer | `scripts/drain_email_outbox.py` | compose `mail-drainer` `--loop` (`docker-compose.yml:427-463`) | `DATABASE_URL` runtime role (`:434`); the healthcheck may use the admin URL (`:457`) | none: `public.email_outbox WHERE status = 'pending'` (`:171-178`); the table has no `workspace_id` column (`migrations/public/versions/0008_rbac_expansion.py:174-200`) | UPDATE `email_outbox` sent or failed (`:190-196`), SMTP | D (question 4: the queue cannot be filtered by workspace today) |
+| eBay sync | `scripts/ebay_sync.py` | compose `ebay-sync` `--loop` (`docker-compose.yml:478-522`), hourly (`:496`); inert until `EBAY_SYNC_ENABLED=1` (`:495-511`) | discovery on the admin URL when set, because `tenant_credentials` is under RLS (`:78-105`); all workspace work on the runtime role through `workspace_session` (`:146`, `:314`, `:372`) | workspaces with an `ebay_finances` credential and `w.status = 'active'` (`:116-125`) | `journal_entry` and `approval_queue` through the mapper (`app/connectors/ebay/mapper.py:315`, `:659-688`), `posting_log`, `connector_state` cursor (`:215-251`), credential refresh re-encrypt (`app/connectors/ebay/client.py:193-228`) | R: skip the workspace before any provider call and before `_record_sync_outcome`, so the cursor does not move; section 6.3 |
+| Stripe sync | `scripts/stripe_sync.py` | compose `stripe-sync` `--loop` (`docker-compose.yml:537-576`), hourly (`:550`); inert until `STRIPE_SYNC_ENABLED` (`:453-469`) | same split: admin URL for discovery (`:93-106`), runtime role for the work (`:149`, `:317`, `:349`) | workspaces with a `stripe_api_key` credential and `w.status = 'active'` (`:117-126`) | `journal_entry`, `approval_queue` (`app/connectors/stripe/mapper.py:315`, `:720-749`, `:826-856`), `posting_log`, `connector_state` cursor (`:217-252`) | R: skip before any provider call and before `_record_sync_outcome`; section 6.3 |
+| Erasure purger | `scripts/purge_due_erasures.py` | compose `erasure-purger` `--loop`, profile and `AO_ERASURE_PURGE_ENABLED` (`docker-compose.yml:627-666`) | admin role for the purge (`erasure.py:444`), runtime role for the receipt (`:242`) | workspaces whose erasure receipt carries a due date, with no status filter (`:230-258`) | `revoke_access`, `purge_workspace_ledger`, receipt | A: runs in every state (section 8.1) |
+| Stale specialist run maintenance | `scripts/maintain_stale_specialist_runs.py` | by hand (`:3-6`); no compose service, no cron | the admin engine (`:196-199`), then `workspace_session` per workspace, so FORCE RLS still applies (`:13-16`) | every `public.workspace` with no filter (`:119`) | UPDATE `specialist_run SET status = 'failed'` (`:81-87`), only with `--apply` (`:104-110`) | R: skip workspaces whose books state is not active; catches up on `active` |
+| Operator scripts run by hand | `scripts/ingest_bofa_live.py` (runtime role `:450`; `journal_entry` `:717`, `approval_queue` `:506`, `decision_audit` `:568`), `scripts/backfill_tax_extractions.py` (`document_extraction` `:44`), `scripts/seed_default_coa.py` (admin; `chart_of_account` `:104`), `scripts/grant_workspace_admin.py` (admin; `user_account` `:369`, `workspace_membership` `:393`) | an operator | as listed; none reads either status column | one workspace from the command line | as listed | R by the backstop for the `books` writes; an operator who must write a stopped organization's books on purpose declares `maintenance` (section 4.2); the membership grant is a `public` write and stays the operator's call |
+| Receipt worker (sibling repository) | compose `receipt-worker` (`docker-compose.yml:324-374`) | profile `receipts` | runtime role, direct to PostgreSQL (`:347`) | one workspace from `RECEIPT_WORKER_WORKSPACE_ID` (`:336`) | `public.worker_runs`, `worker_extractions`, `worker_dedup_index` (grants in `scripts/grant_worker_runtime.sql:60-90`), object storage; its code is not in this repository | D (question 5): the backstop covers any `books` row it writes; its own loop must learn to skip |
+| Reconciler (sibling repository) | compose `receipt-reconciler` (`docker-compose.yml:379-412`) | profile `receipts` | runtime role, direct to PostgreSQL (`:393`), and the app API with a service token (`:391-392`) | one workspace from `RECONCILER_WORKSPACE_ID` (`:389`) | `public.worker_reconcile_runs`, `receipt_transaction_link` (`grant_worker_runtime.sql:95-112`); API writes through the gated routes | D (question 5); API writes are R by the route gate |
+| Export background task | `_run_export` in `app/api/data_rights.py:157` | route 23 | runtime role | the requesting workspace | job record in `setup_progress`, object put | A |
+| Document extraction background task | `_run_tax_extraction` in `app/api/documents.py:536`, queued at `:416` | route 25 | runtime role (`:562`) | the uploading request's workspace | upsert `document_extraction` `:566` | R (the upload is refused first; a task in flight: section 6.2) |
+
+### 3.5 Inbound machine rails
+
+| Rail | Route | Resolver | Verdict |
+|---|---|---|---|
+| Customer-Ops, quote accepted to draft invoices | route 57 | `resolve_workspace_for_quotes_seam` (`app/api/quotes_seam.py:76-139`), machine proof required `:85` | R, answered with the seam's error body (section 5.3) |
+| Tax-Planning-Ops and other trusted callers, reads (`GET .../entities`, P&L, `document_extraction`) | `app/api/workspaces.py:155`, `app/api/federation.py`, `app/api/reports.py` | `resolve_workspace_for_federation` (`app/tenancy.py:546-607`), viewer | B: reads keep working |
+| Brigade-issued tokens over MCP | all tools | `authorize_workspace` after `resolve_internal_workspace_id` (`app/mcp_auth.py:263-276`) | same verdict as the tool |
+| Stripe webhooks | routes 71 and 72 | signature | R (section 6.3) |
+| eBay OAuth callback | `app/api/ebay_oauth.py:343` | signed state | R |
+| Ops-Center provisioning | routes 93 to 95 | provisioning token | A |
+
+### 3.6 Writes on sign-in and on a GET
+
+These are the writes rule 6 protects. None of them is on a `books` table that the backstop covers, and none of them passes a writing HTTP method through `resolve_workspace`, so neither layer of the gate touches them. The table exists so the proof plan can assert that each keeps working in a suspended and in an archived workspace.
+
+| # | Write | Where | Trigger | Table | Needed for the read |
+|---|---|---|---|---|---|
+| G1 | `UPDATE public.user_account SET last_seen_at = now()` | `app/auth.py:1122-1129` | every Keycloak-authenticated request | `user_account` | no; bookkeeping |
+| G2 | email backfill on `user_account` | `app/auth.py:1113-1121` | Keycloak request with a blank stored email | `user_account` | no |
+| G3 | verified-email bind, re-keys `uc_uid` | `app/auth.py:1150-1176` | first Keycloak sign-in of a migrated account | `user_account` | yes |
+| G4 | `INSERT public.user_account` at sign-in | `app/auth.py:1183-1204`; also `app/tenancy.py:302-310` when `may_autoprovision` | first sight of a Keycloak or local user | `user_account` | yes |
+| G5 | PAT `last_used_at` bump | `app/security/pat.py:429-441`, fired from `app/auth.py:537` | every PAT request | `personal_access_token` | no |
+| G6 | JIT membership upsert at sign-in | `app/api/provisioning.py:419-429`, from `ensure_jit_membership` on `GET /api/me/workspaces` (`app/api/workspaces.py:61`) and on every MCP request (`app/mcp_auth.py:133`) | `PROVISIONING_ENABLED` and a fresh entitlement answer | `workspace_membership` | yes for a newcomer |
+| G7 | entitled provisioning membership upsert | `app/api/onboarding.py:146-191` | `AO_ENTITLED_PROVISIONING` | `workspace_membership` | yes for a newcomer |
+| G8 | first-sign-in workspace creation | `app/api/provisioning.py:77-128`, `app/api/onboarding.py:194-224` | no workspace yet for the organization | `workspace` (admin role) | yes |
+| G9 | credential decrypt log and `last_used_at` | `app/security/credentials.py:229-244`, `:316-349` | GET status, cash position, recent transactions, account mappings, BYOK, billing (`stripe_oauth.py:430`, `ebay_oauth.py:505`, `cash_position.py:76`, `transactions.py:95`, `account_mappings.py:97`, `inference_settings.py:140`, `billing.py:31`); the sync workers; the Stripe webhook before verification (`stripe_oauth.py:782`) | `tenant_credentials`, `credential_access_log` | the decrypt is needed; the log is the audit trail |
+| G10 | `decision_audit` rows | `app/tools/_audit.py:26-73` | only writing tools and routes, and the export (`data_rights.py:74`) | `books.decision_audit` | the audit trail of a write; the export's row must land in a suspended workspace |
+| G11 | `membership_audit` rows | `app/api/members.py:91-130`, `app/security/member_removal.py:134`, `:167` | member changes, removals, invitation cancels | `membership_audit` | the audit trail of allowed writes |
+| G12 | uc_ key metering, outbound | `app/mcp_auth.py:150-174` | every MCP request with a uc_ key | Ops-Center | no |
+| G13 | invitation acceptance over GET | `app/api/members.py:737` | a person clicks the link | `user_account`, `workspace_membership`, `workspace_invitation`, `membership_audit` | a user write riding a GET: gated as route 50 |
+| G14 | eBay OAuth callback stores a credential | `app/api/ebay_oauth.py:343`, `:439` | browser redirect | `tenant_credentials` | a user write riding a GET: R |
+| G15 | lazy Stripe pay link on `GET .../invoices/{id}` | `app/api/invoices.py:352`, `:574-607` | first read of an issued invoice | `books.invoice`, Stripe call | a user-domain write on a GET: skip the step when read-only, keep the read |
+| G16 | lazy default `engagement_policy` row | `app/engagement/policy.py:83-105` from `GET .../submission/channels` (`submission.py:56`), `GET .../engagement/policy` (`engagement.py:53`) | first read | `books.engagement_policy` | section 4.3: the read falls back to the default without inserting |
+| G17 | lazy default `sentinel_config` row | `agents/sentinel/config.py:139-166` from `GET .../sentinel/config` (`sentinel.py:85`) | first read | `books.sentinel_config` | same treatment |
+| G18 | orphan reconcile on the launch preview | `app/api/tax_run_launch.py:277-284` from the GET at `:736` | preview of a tax run | `books.specialist_run` | a maintenance write on a GET; refused by the backstop in a suspended workspace, so the preview must tolerate the refusal |
+| G19 | `audit_span_middleware`, rate limiter | `app/otel.py:55-96`, `app/rate_limit.py:476-562` | every request | telemetry, memory | no database write |
+| G20 | `workspace_membership.last_active_at` | read in `app/api/workspaces.py:89`, never written anywhere in `app/` | none | none | there is no view counter to protect |
+
+### 3.7 Counts by verdict
+
+| Surface | Total | R refused | B allowed, a read needs it or no write | A allowed always | D decide |
+|---|---|---|---|---|---|
+| HTTP routes with a writing method | 95 | 66 | 10 | 15 | 4 |
+| GET routes that carry a user write | 3 | 2 | 1 (G15, skip the step) | 0 | 0 |
+| MCP tools | 79 | 32 | 46 | 1 | 0 |
+| Agents and runners | 8 | 7 | 0 | 0 | 1 |
+| Workers and scripts | 10 | 5 | 0 | 2 | 3 |
+| Inbound machine rails | 6 | 3 | 2 | 1 | 0 |
+| Writes on sign-in and on a GET | 20 | 2 (G13, G14; counted above) | 18 | 0 | 0 |
+
+## 4. Where the gate goes
+
+### 4.1 Three places compared
+
+**(a) In `resolve_workspace` and `WorkspaceContext`.** Every workspace-scoped HTTP request already passes `_resolve_membership`, whose single query joins `public.workspace` (`app/tenancy.py:327-343`). Adding `w.control_plane_state` to that SELECT costs nothing: no extra query, no extra round trip. `WorkspaceContext` gains a `books_state` field, and `resolve_workspace` refuses a writing method when the state is not `active`, unless the route is in the registry of allowed writes. The MCP surface resolves membership through the same function (`app/mcp_auth.py:279-281`), so the same field reaches `authorize_workspace`. What (a) cannot cover: routes that never call `resolve_workspace` (the user-scoped routes 50, 54; the webhooks 71, 72; the OAuth callback; the provisioning router); the workers, which have no request at all; and writes hidden behind a GET (G13 to G18). Each of those needs its own line of code, and a forgotten one is an open hole with no alarm.
+
+**(b) At the database.** A trigger on the `books` tables that reads `public.workspace.control_plane_state` for `current_workspace_id()` and raises when it is not `active`. The runtime role cannot get around it: it is `NOSUPERUSER`, not the table owner, cannot `ALTER TABLE` or disable a trigger (`migrations/tenant/versions/0005_rls_and_runtime_grants.py:9-16`), and `session_replication_role` can only be set by a role that was granted it (the erasure docs note this, `docs/DATA-RIGHTS.md`, known gap 2). It covers workers, webhooks, callbacks, GET-side writes, sibling repositories that connect directly, and any route added next month without a verdict. What (b) cannot do: give a readable message (it raises a SQLSTATE), choose by role or by route (it sees a statement, not a caller), or distinguish a legitimate always-allowed write from a forgotten one without help. Erasure Tier 1 updates `books.entity` on the runtime role (`erasure.py:299-306`) and would be refused unless the trigger is told. It also binds the owner role: a data backfill migration or a restore that writes a suspended workspace's rows is refused unless it declares itself (section 4.4, costs).
+
+**(c) In the journal's posting function only.** One `if` at the top of `post_journal_entry` (`app/journal/posting.py:496`) and `_insert_journal_entry` (`:827`) stops money from posting. It covers routes 5, 34 to 37, 43, 72, 83 and the sync workers. It misses everything else in section 3: approvals, chart of accounts, documents, invitations, credentials, tax runs, sentinel actions, draft invoices from the quotes seam (which deliberately never posts, `app/api/quotes_seam.py:170`), and the `invoice` tables that `_post_balanced_row` writes beside the journal (`app/ar/invoicing.py:506`). It also cannot see the state without a query of its own, since the posting function receives a session and ids, not a `WorkspaceContext`.
+
+Per request cost: (a) zero extra queries on the hot path (one more column in an existing SELECT). (b) one primary-key lookup on `public.workspace` per writing statement, inside the same transaction; measured at the noise floor in section 4.4 (0.064 ms per single-row insert on a gated table against 0.062 ms on an ungated one, scratch PostgreSQL 16.2, 2000 rows). (c) one SELECT per post.
+
+Effect on sign-in and on the audit trail (rule 6): (a) touches only writing methods on workspace-scoped routes, so `/api/me/workspaces`, `/api/me`, the MCP middleware and every GET are unchanged; the sign-in writes in section 3.6 are on public tables under no trigger. (b) attaches to a named list of `books` tables, which excludes `decision_audit` and `activity_event`; the proof in 4.4 shows an audit row landing in a suspended workspace while a journal insert is refused in the same session. (c) has no effect on either.
+
+How a worker with no request finds the state: under (a) alone it does not. Under (b) it does not need to: the statement itself is refused. For a clear log line and to skip work (not fetch a provider's history only to be refused), the workers get `workspace_session(..., writes=True)`, which reads the state in the transaction it opens (section 4.2).
+
+### 4.2 The choice: two layers
+
+Layer 1 is (a), extended to MCP and to workers. Layer 2 is (b). (c) is not used: it is a subset of (b) with a worse message.
+
+**Layer 1, HTTP.** `_resolve_membership` returns `control_plane_state` alongside role and slug (`app/tenancy.py:331-349`). `WorkspaceContext` gains `books_state: str`. `resolve_workspace` (`:455-487`) checks, after membership and service scope: if `request.method` is `POST`, `PUT`, `PATCH` or `DELETE` and `books_state != 'active'`, look the route up in `app/security/books_state.py:ROUTE_VERDICTS`, keyed by `(method, request.scope["route"].path)`. Starlette sets `scope["route"]` before dependencies run; verified on FastAPI 0.163 and Starlette 1.10 in a scratch venv, and the project pins FastAPI at or above 0.115 (`pyproject.toml`). A route with verdict `A` or `B` passes. A route with verdict `R`, or with no row at all, is refused with 409 (section 5.1). The dependency raises before the body is validated, so a refused write never reaches a handler and never opens a tenant transaction (verified in the same venv: an invalid body to a suspended workspace answers 409, not 422). `resolve_workspace_for_quotes_seam` builds its own context (`app/api/quotes_seam.py:130-139`) and applies the same check with the seam's error body. `resolve_workspace_for_federation` is read-only by construction (`app/tenancy.py:553-556`) and is unchanged.
+
+The user-scoped and unauthenticated writes get one call each to the same helper, `assert_books_writable(session, workspace_id)`: invitation accept (route 50 and G13) after it loads the invitation's workspace; PAT mint (route 54) for each workspace in `workspace_scope`, if question 3 is decided that way; the two Stripe webhooks (71, 72) once they know the workspace; the eBay callback (G14) once it has verified the state.
+
+**Layer 1, MCP.** `_install_agent_tool_policy` (`mcp_server.py:96-129`) knows the tool's MCP name at registration; it sets a contextvar `current_tool_name` for the duration of the call. `authorize_workspace` (`app/mcp_auth.py:222`) reads it, looks the tool up in `_TOOL_METADATA` (`app/api/discovery.py:61`), and refuses when `read_only` is false and the state is not `active`. An unknown tool is treated as a write (the registry's own fallback already says `read_only: False`, `discovery.py:55-59`). The HTTP mirror routes in `app/api/tools.py` set the same contextvar through their router dependency `bind_http_caller` (`app/mcp_auth.py:60`) with a small path-to-tool map, so a read tool served over POST (routes 82, 89) stays allowed. `create_workspace` has no subject workspace and is exempt by name.
+
+**Layer 1, workers.** `workspace_session(sessionmaker, workspace_id, writes=False)` gains the keyword. With `writes=True`, after `set_workspace_search_path` it runs `SELECT control_plane_state, status FROM public.workspace WHERE id = :wid` in the same transaction and raises `WorkspaceReadOnly(state)` or `WorkspaceErased` or `WorkspaceStateUnknown` before yielding. The sync workers, the sentinel, the stale-run maintenance, the document extraction task and the launch worker open their writing sessions with `writes=True`. Their workspace enumeration also adds `AND control_plane_state = 'active'` next to the existing `status = 'active'` (`scripts/ebay_sync.py:123`, `scripts/stripe_sync.py:124`, `agents/sentinel/run_sentinel.py:110`, `:123`), so no provider is called for a stopped organization. The enumeration filter is an optimization; the session check is the guarantee; the trigger is the backstop.
+
+**Layer 2.** Tenant migration 0033 creates `public.refuse_books_write_unless_active()` and attaches `BEFORE INSERT OR UPDATE OR DELETE ... FOR EACH STATEMENT` to every `books` table in the list below. Statement-level, not row-level: one lookup per statement, and it fires even when zero rows match (proved in 4.4). The function:
+
+1. returns at once when `current_setting('app.books_gate_override', true)` is `erasure` (any role) or `maintenance` (only when `current_user` is not the runtime role);
+2. reads `control_plane_state, status` from `public.workspace` where `id = public.current_workspace_id()`;
+3. raises SQLSTATE `AO000` `workspace_state_unknown` when no row is found (GUC unset, or an id that names no workspace);
+4. raises `AO001` `workspace_suspended` or `AO002` `workspace_archived` on the books state;
+5. raises `AO003` `workspace_erased` when `status <> 'active'`;
+6. otherwise returns.
+
+The runtime role already has SELECT on `public.workspace` (`0003_rls_and_runtime_grants.py:89`), so the function needs no `SECURITY DEFINER`. Step 5 keeps the two names apart on the wire: an erased workspace is refused with a different code than a suspended one, and the message never says "suspended" for an erasure.
+
+Gated tables (every `books` table at tenant head 0032 except the two bookkeeping tables): `account_entity_mapping`, `agent_session`, `approval_queue`, `approval_recommendation`, `bill`, `category_override`, `chart_of_account`, `chat_message`, `closed_period`, `compliance_profile`, `compliance_rule`, `connector_state`, `counterparty`, `document_extraction`, `engagement_policy`, `entity`, `entity_owner`, `event_log`, `fixed_asset`, `fx_rate`, `invoice`, `invoice_line`, `invoice_payment`, `invoice_schedules`, `journal_entry`, `monthly_account_balance`, `posting_log`, `receipt`, `recon_link`, `sentinel_check_run`, `sentinel_check_state`, `sentinel_config`, `sentinel_finding`, `sentinel_scheduled_action`, `signature_request`, `specialist_run`, `tax_filing_submission`, `tax_review_queue`, `vendor`, `work_product` (sources: `op.create_table` calls across `migrations/tenant/versions/0001` to `0032`, the raw `CREATE TABLE` in `0016_monthly_account_balance.py:135`, and the name constants in `0019`, `0022`, `0023`, `0024`, `0027`, `0028`, `0029`, `0031`). The migration discovers the list the way `0026_force_rls_shared.py:334-351` does, every base table with a `workspace_id` column, minus the exemption set, so a table added later is gated by default. Ungated: `decision_audit` and `activity_event`. Both are already INSERT-only for the runtime role (`0005_rls_and_runtime_grants.py:64-70`), so leaving them open cannot change a figure. If question 1 decides that chat stays open while suspended, `agent_session` and `chat_message` move to the exemption set.
+
+Not gated, by design: every `public` table. The sign-in writes (G1 to G8), the credential access log (G9), the membership audit (G11), the control plane's own PATCH and DELETE (routes 94, 95), the export job record (`setup_progress`), the erasure receipt and the email outbox all live there. The application layer refuses the user writes among them (routes 19, 20, 32, 45, 47, 49, 50, 54, 64, 68, 69); the backstop does not need to.
+
+Statement types the backstop blocks: INSERT, UPDATE and DELETE on the gated tables. It does not block SELECT, and it does not fire on TRUNCATE (statement triggers for TRUNCATE are separate, and TRUNCATE is already forbidden on the ledger by `0005_rls_and_runtime_grants.py:198-218` and not granted anywhere). It does not fire under `session_replication_role = 'replica'`, which is exactly how the erasure ledger purge runs (`erasure.py:452`); the purge needs no override.
+
+### 4.3 Reads that lazily insert a default row
+
+Three reads write a default row on first use: `get_or_create_policy` (`app/engagement/policy.py:83-105`), `get_or_create_config` (`agents/sentinel/config.py:139-166`), and the orphan reconcile on the launch preview (`app/api/tax_run_launch.py:277-284`). Under the backstop these INSERTs and UPDATEs are refused in a suspended workspace, which would turn a read into a 500. The build lane changes the two get-or-create helpers to return the in-memory default without inserting when the books state is not `active` (they already know the defaults), and the preview to tolerate the refusal. The reads then keep working, and the first read after `active` inserts the row as before.
+
+### 4.4 Proof on a scratch PostgreSQL
+
+Run on 2026-11-16 against an embedded PostgreSQL 16.2 started in the sandbox's temporary directory (`pgserver` from PyPI, no network, no container, no shared host). The script created an owner role `accounting_ops` and a runtime role `accounting_ops_app` with the attributes of `0005_rls_and_runtime_grants.py:134-150`, `public.workspace` with both columns, three `books` tables with the FORCE RLS per-command policies of `0026_force_rls_shared.py:363-386`, the `current_workspace_id()` function of `0025_prep_shared_uniques.py:51-54`, the grants of `0005`, the trigger function above, and the trigger on `journal_entry` and `entity` but not on `decision_audit`. Then, connected as `accounting_ops_app`:
+
+| Case | Result |
+|---|---|
+| active: insert `journal_entry`, insert `entity`, insert `decision_audit` | all OK |
+| suspended: insert `journal_entry` | refused, SQLSTATE `AO001` `workspace_suspended` |
+| suspended: update `entity` | refused `AO001` |
+| suspended: update `entity` where zero rows match | refused `AO001` (statement-level fires with no rows) |
+| suspended: insert `decision_audit` | OK (the bookkeeping of a read) |
+| suspended: select `journal_entry` | OK |
+| suspended: update `entity` with `app.books_gate_override = 'erasure'` | OK (erasure Tier 1 path) |
+| suspended: insert `journal_entry` in another, active workspace | OK |
+| archived: insert `journal_entry` | refused `AO002` `workspace_archived` |
+| archived: insert `decision_audit` | OK |
+| erased (`status = 'suspended'`, books state active): insert `journal_entry` | refused `AO003` `workspace_erased` |
+| GUC unset: insert `journal_entry` | refused `AO000` `workspace_state_unknown` |
+| GUC names a workspace that does not exist | refused `AO000` |
+| PATCH to suspended commits while a transaction has already inserted one row; the transaction inserts again | second insert refused `AO001`; the whole transaction rolls back |
+| owner role, `session_replication_role = 'replica'`, suspended: delete `journal_entry` | OK, 1 row (the purge path) |
+| owner role, normal mode, suspended: insert `journal_entry` | refused `AO001` (the trigger binds the owner too) |
+| cost, 2000 single-row inserts | 0.064 ms per statement on the gated table, 0.062 ms on the ungated one |
+
+Costs this proof exposes, to be carried into the lanes: a data backfill migration or a `pg_restore` of `books` rows for a suspended workspace, run as the owner in normal mode, is refused unless it sets `app.books_gate_override = 'maintenance'` (the tenant `env.py` can set it for every migration) or runs with `session_replication_role = 'replica'` (which `pg_restore --disable-triggers` does). The runbook in `docs/OPERATIONS.md` gets one line for each.
+
+The override GUC is a declaration of intent for known code paths, not a security boundary against the runtime role, which can set any GUC. The backstop defends against forgotten paths and against the next route that ships without a verdict; code that runs as the runtime role and deliberately declares `erasure` could already write the books today.
+
+## 5. What a person sees
+
+### 5.1 A refused write over HTTP
+
+Status 409 Conflict. Not 403: this app's 403 already means "your role or token scope is short" (`app/tenancy.py:223-248`) or "no active membership" (`:344-348`), and a web tier that treats 403 as a sign-out or a permissions problem would send the person to the wrong fix. 409 says the resource is in a state that does not accept this request, which is the truth. The body keeps `detail` as a plain sentence and puts the named code beside it:
+
+```json
+{
+  "detail": "This organization is suspended. Its books are read-only until the organization is active again. You can still read, export and sign in.",
+  "code": "workspace_read_only",
+  "state": "suspended",
+  "workspace_id": "2b2f0f2e-5e8e-4c9a-9d0b-6b7c1f0a9e11",
+  "allowed": ["read", "export", "sign-in"]
+}
+```
+
+For an archived organization `state` is `"archived"`, `detail` is "This organization is archived. Its books are read-only. An owner can still read, export and erase them.", and `allowed` is `["read", "export", "erase"]`.
+
+`detail` stays a string on purpose. The web tier has no shared error class; about seventy call sites do `body.detail ?? "HTTP n"` and show the result as text (for example `web/app/coa/coa-editor.tsx:122-123`, `web/app/journal/new/manual-entry-form.tsx:163-164`, `web/components/approval-actions.tsx:50`). An object in `detail` would render there as "[object Object]"; a sentence renders as the sentence, on the day the gate ships, before the web lane lands. New client code reads `code`. The gate raises a `WorkspaceReadOnly` exception from the dependency, and a handler registered in `app/main.py` turns it into this body (FastAPI's `HTTPException` carries only `detail`, so the sibling fields need the handler).
+
+When the application layer did not catch a write and the backstop did, the same handler module maps the SQLSTATEs: `AO001` and `AO002` to the 409 above (state from the code), `AO003` to the existing 403 "No active membership for this workspace", `AO000` to 503 with code `workspace_state_unavailable` and a `Retry-After` header (section 9). The handler logs the route, so a backstop hit is visible as a missed verdict and gets a registry row.
+
+### 5.2 The web tier
+
+The web never reads the books state today: no file under `web/` mentions `control_plane_state`, `suspended` or `archived`, and the `Workspace` type (`web/lib/api.ts:22-31`) has no state field. The current workspace comes from `GET /api/me/workspaces` through `getActiveContext` (`web/lib/active-context.ts:61-77`, cookie `aops_workspace` at `:73`), and that list keeps a suspended workspace, because its filter is on `w.status` only (`app/api/workspaces.py:93-94`). So the change is one field: `GET /api/me/workspaces` and `GET /api/workspaces/{id}` (`:127-152`) gain `books_state`, and the `Workspace` type gains the same.
+
+One banner, a new `web/components/read-only-banner.tsx` in the style of `web/components/disclaimer-banner.tsx` (a slim, non-dismissible strip under the header), mounted in `web/components/app-shell.tsx` between the header and the disclaimer (`app-shell.tsx:49-50`), where `ctx.activeWorkspace` is already resolved (`:24`). It renders when `books_state` is not `active`: "This organization is suspended. Its books are read-only. Nothing you enter here will be saved until the organization is active again." Archived: "This organization is archived. Its books are read-only. You can read and export them." It appears on every page that uses the shell, which is 47 pages and 13 loading states; the eight pages without a shell (`/`, `/login`, `/start`, `/welcome`, `/chat/window`, `/legal`, `/terms`, `/privacy`) do not show it, and of those only the pop-out chat writes. The banner does not hide or disable buttons; the server is the gate. When a write comes back 409 with `code: "workspace_read_only"`, the component shows `detail` through `queueGlobalToast` (`web/components/global-toast.tsx:28-41`), which is already mounted once in the shell (`app-shell.tsx:86`); every existing inline error path shows the same sentence because `detail` is a string (section 5.1). Pages with write actions, all of which stay visible: 40 of the 56 pages, among them approvals, journal, coa, invoices, documents, open-items, contacts, connectors, setup, taxes, specialty-rules, settings and chat.
+
+### 5.3 Agents and MCP callers
+
+`authorize_workspace` raises `PermissionError("workspace_read_only: This organization is suspended; its books are read-only")` the way it raises every other denial (`app/mcp_auth.py:308-311`), so the MCP transport returns a tool error, `isError` true, and the model sees the code and the sentence. The quotes seam answers Customer-Ops with its own envelope, `{"code": "WORKSPACE_READ_ONLY", "reason": ..., "federated": {"accounting_ops": "failed", "partner": "skipped", "reason": ...}}` at 409, so the caller records the adapter status as it already does for other failures (`app/api/quotes_seam.py:151-158`). Webhooks get the plain 409 so the provider retries.
+
+### 5.4 Nothing silently dropped
+
+A refused write is an error to its caller in every case: 409 over HTTP, a tool error over MCP, a raised `WorkspaceReadOnly` inside a worker (logged at WARNING with the workspace id and the state, and counted in the pass summary the way `scripts/stripe_sync.py` already records `last_outcome`). No path returns 200 with a no-op. The one place where a read used to carry a write (G15) keeps returning 200 because the read itself succeeds; the pay link is simply absent, and the response says so with `hosted_pay_url: null`.
+
+## 6. In flight and in the background
+
+### 6.1 A tax run already running
+
+A specialist run is a subprocess driven from the uvicorn process (`app/api/tax_run_launch.py:590-686`). When the PATCH to `suspended` lands mid-run, the coordinator keeps talking to the LLM (the platform's spend, under the service token), and its MCP tool calls that write (`draft_memo`, `flag_for_cpa_review`, `finish_specialist_run`) are refused at `authorize_workspace`. `execute_run`'s own `db_finish` UPDATE (`:458`) is refused by the backstop. The row stays `running`. Drafts already written under `/drafts` stay on disk. Cancel (route 80) is refused too. On `active`, `scripts/maintain_stale_specialist_runs.py` marks the stale row `failed` on its next pass (`:81-85`), and a person relaunches. The lane adds one check: `execute_run` reads the books state before spawning and once more before publishing, so a run that starts seconds before a suspension stops early instead of spending an hour.
+
+### 6.2 An import or upload already running
+
+Document upload writes the object, then the `receipt` row, then queues the extraction task (`app/api/documents.py:237`, `:280`, `:416`). A suspension between the response and the task's upsert refuses the upsert (`:566`); the receipt exists without an extraction. On `active`, `scripts/backfill_tax_extractions.py` fills the gap, or the person uploads again. A counterparty import (route 18) is one transaction: the backstop refuses the statement that runs after the PATCH commits and the whole import rolls back with a 409.
+
+### 6.3 Bank and Stripe history during a suspension
+
+The sync workers skip a suspended workspace and do not move its cursor. Stripe sync fetches `balance_transactions` with `created[gte]` set to `connector_state.last_sync_at` minus one day (`scripts/stripe_sync.py:288-295`, `app/connectors/stripe/client.py:405-406`), or 30 days when there is no cursor (`stripe_sync.py:66`), with no upper bound and capped at 50 pages of 100 per pass (`:301-303`, `client.py:400`, `:410-434`). eBay sync fetches payouts from `last_sync_at` minus one day (`scripts/ebay_sync.py:287-293`), or 30 days (`:65`), up to 200 payouts per pass (`:300`) and 500 transactions per payout (`:318`, `:366`). So history that was not fetched during a suspension is fetched on the first pass after `active`, from the frozen cursor forward, as long as the provider still returns it and the per-pass caps are not hit; a long suspension may need several hourly passes to catch up.
+
+One detail decides whether the cursor really freezes. `_record_sync_outcome` sets `last_sync_at = now()` whenever a pass ran, including a pass that ended in a provider error (`stripe_sync.py:307`, `:363`; `ebay_sync.py:305`, `:408`). A "skip" that recorded an outcome would move the cursor past the suspension and lose the history. The skip must therefore happen before the per-workspace function records anything, so the row keeps its last successful time. The test in section 10 asserts exactly that.
+
+How far back Stripe and eBay serve history is not stated anywhere in the code, and this design does not claim a number; the lane records the provider's window in `docs/OPERATIONS.md` once an operator confirms it against the provider's documentation. Posting is idempotent on `(entity_id, source, source_external_id)` (`app/journal/posting.py:5-8`), so a catch-up never double-posts.
+
+Stripe webhooks are different. Route 71 only logs a delivery; the posting happens on the sync pass (`app/api/stripe_oauth.py:728-733`), so a lost delivery loses nothing. Route 72 records a Checkout payment on an invoice (`app/api/stripe_webhook.py:49-59`). A 409 makes Stripe retry; how long Stripe retries is not stated in the code. A payment whose retries expire during a long suspension is not re-fetched by anything in this repository: on `active`, a person records it with route 36 using the Checkout session id as `external_ref`, which is idempotent (`stripe_webhook.py:58`). This is listed in section 12 as a product question (question 6).
+
+### 6.4 Queued email and the sentinel
+
+`email_outbox` rows carry no `workspace_id` (section 3.4); their only link to a workspace is `related_invitation_id`, set when an invitation is sent (`app/mailer.py:139`, `:153`). The drainer can therefore hold an invitation email by joining `workspace_invitation` and reading the workspace's books state, without a migration; email with no invitation link passes as today. Invitation acceptance is refused anyway while the workspace is suspended (route 50), so a link that lands during a suspension does not widen access; it tells the recipient the organization is read-only. Question 4 asks which of the two to do.
+
+The sentinel skips suspended workspaces. Its scheduled actions that fell due during the suspension are still `pending`; on the first cycle after `active`, `process_due_scheduled_actions` executes them (`agents/sentinel/run_sentinel.py:137-175`). That is automatic and may be surprising: a reminder scheduled for a date inside the suspension fires late. The lane makes the sentinel mark actions due during a suspension `skipped_suspended` instead of executing them late; a person re-schedules what still matters.
+
+### 6.5 What resumes by itself, what needs a person
+
+Resumes on `active` without anyone doing anything: HTTP and MCP writes; Stripe and eBay sync, with cursor catch-up; the sentinel's next cycle; the mail drainer (it never stopped); invoice schedules the next time route 58 or its tool runs, which generate every schedule due on or before today (`app/ar/quotes_seam.py:1617`); JIT seating at sign-in.
+
+Needs a person: a specialist run that was in flight (relaunch); document extractions that were refused (backfill script or re-upload); Checkout payments whose webhook retries expired (record by hand); anything an agent proposed and had refused (the agent retries on its own only if it was told to); the e-sign request that a person wanted to cancel during the suspension (route 31).
+
+## 7. Archived
+
+The refusal set is the same as for suspended. Everything else differs in degree:
+
+| | suspended | archived |
+|---|---|---|
+| reads, sign-in, the switcher | work | work |
+| banner text and `state` in the 409 | "suspended ... until active again" | "archived ... read and export" |
+| export (route 23 and the GET download) | owner may | owner may |
+| erasure (route 24) | owner may | owner may |
+| retention setting (route 22) | question 2 | question 2 |
+| automatic purge | none | none: the purger acts only on an erasure receipt with a due date (`scripts/purge_due_erasures.py:230-258`), never on the books state |
+| new invitation, resend, role change, new credential, new BYOK key | refused | refused |
+| new PAT scoped to the workspace | question 3 | question 3 |
+| member removal, invitation cancel, token revoke, credential delete | allowed | allowed |
+| sync workers, sentinel | skip | skip |
+
+An owner of an archived organization may read, export and delete their data. Nothing in this app deletes an archived organization's data by itself; only the owner's erasure or the control plane's later instruction does, and the latter is not in the contract this design read.
+
+## 8. The two things that must keep working
+
+### 8.1 A legal erasure runs in every state
+
+Route 24 is verdict A at the application layer. Tier 1 runs on the runtime role (`app/data_rights/erasure.py:226-321`): the credential DELETE and the receipt SELECT are on `public` and `books.receipt` reads, untouched by the backstop; the `UPDATE books.entity SET tax_id_encrypted = NULL` (`:299-306`) is a gated statement, so the erasure route sets `app.books_gate_override = 'erasure'` in that transaction, and the proof in 4.4 shows the update passing. Tier 2 runs on the admin connection: `revoke_access` writes `public.workspace.status` and deletes `public.workspace_membership` (`:364-390`), both outside the backstop; `purge_workspace_ledger` sets `session_replication_role = 'replica'` (`:452`), under which the backstop does not fire, proved in 4.4. The deferred purger (`scripts/purge_due_erasures.py`) reads the receipt on the runtime role and purges on the admin connection, and it already ignores workspace status (`:238-240`).
+
+Tests (section 10): `test_erasure_tier1_runs_in_suspended_workspace` and `..._in_archived_workspace` (PostgreSQL, runtime role, the entity update lands); `test_ledger_purge_runs_in_suspended_workspace` (owner role, replica mode, rows gone); `test_erasure_route_is_allowed_in_every_books_state` (unit, the registry row and the dependency).
+
+### 8.2 The control plane's calls are accepted in every state
+
+Routes 93 to 95 use `require_provisioning_token` (`app/api/provisioning.py:28`), never `resolve_workspace`, so layer 1 does not see them. Their writes are all on `public` tables: `workspace.control_plane_state` (`:159`), and through `remove_person` (`app/security/member_removal.py:17-177`) `workspace_membership`, `personal_access_token`, `membership_audit`, `workspace_invitation`. None is under the backstop. A removal in a suspended workspace therefore still revokes the person's PATs (`member_removal.py:107-125`) and still writes the audit row (`:134`). This holds today and this design does not touch it. `tests/integration/test_provisioning_contract_pg.py` already proves removal and token revocation on PostgreSQL through the runtime role (`Harness.remove`, `Harness.revoked`, `:130-141`); the lane adds the same assertions with the workspace first PATCHed to `suspended` and to `archived`: `test_member_delete_revokes_pats_in_suspended_workspace`, `test_state_patch_accepted_in_every_state` (active to suspended to archived to active, each answered 200 and read back).
+
+## 9. Fail direction and caching
+
+If the state cannot be read, a write is refused. In layer 1 the state arrives with the membership row; if the membership query fails, the request fails with 500 as it does today, and no handler runs. In `workspace_session(writes=True)`, a failed read raises `WorkspaceStateUnknown`; the worker logs and skips the workspace this pass. In layer 2 a missing row is `AO000`, mapped to 503 `workspace_state_unavailable` with `Retry-After: 30`, so a client retries rather than concluding the write was taken.
+
+If Ops-Center is down nothing changes (rule 15): the state lives in this app's database and moves only when the PATCH arrives (`app/api/provisioning.py:155-164`). No code path in this design calls Ops-Center to ask about the state. The JIT entitlement answers that `ensure_jit_membership` remembers for 60 seconds (`app/api/provisioning.py:193-197`) concern who has a seat, not the books state, and are untouched.
+
+No cache of the state anywhere. Layer 1 reads it with the membership on every request; workers read it in each writing transaction; the backstop reads it per statement in the same transaction as the write, which is the stated preference. The only "stale" window is a transaction that executed its last books statement before the PATCH committed and commits after; its rows were in flight at the moment of suspension and the rule allows them. A worker's in-memory list of workspaces to visit is at most one pass old (one hour for the sync workers, `docker-compose.yml:496`, `:550`; six hours for the sentinel, `:597`), and the per-transaction read refuses the write even if the list is stale.
+
+## 10. Proof plan
+
+The acceptance tests of the build lanes. The stack-free tier runs in CI's `unit` job (`.forgejo/workflows/ci.yml`, `pytest -v`); the PostgreSQL tier runs in the `integration` job once `ACCTOPS_INTEGRATION_CI` is on, alongside `tests/integration/test_db_rls_roles.py` and `test_provisioning_contract_pg.py`, through the runtime DSN `ACCTOPS_TEST_APP_DSN` (`tests/conftest.py:97`). SQLite proves nothing about grants, triggers or row security and is not used for any of these.
+
+**Guard tests (stack-free).**
+
+- `test_every_writing_route_has_a_books_state_verdict`: build the app with `PROVISIONING_ENABLED`, a 32-byte `PROVISIONING_JWT_SECRET` and `AO_EDITION=enterprise` so every router mounts (`app/main.py:244-258`, `:409-412`); enumerate `(method, path)` from `app.openapi()` the way `tests/route_introspection.py` does; assert every `POST`, `PUT`, `PATCH`, `DELETE` pair has a row in `ROUTE_VERDICTS`, and every row names a live route (the stale-row check mirrors `tests/unit/test_membership_reader_status.py:76`). A new writing route without a verdict fails CI.
+- `test_every_mcp_tool_has_read_only_metadata`: already exists as `tests/smoke/test_discovery_manifest.py:230-249`; the lane adds the assertion that every tool with `read_only: False` is refused by `authorize_workspace` when the resolved state is `suspended`, using a stubbed `_resolve_membership`.
+- `test_get_routes_that_write_are_listed`: a static scan (AST, like `test_membership_reader_status.py`) of every `@router.get` handler body and its first-level helpers for `INSERT` or `UPDATE` literals; each hit must be in the G-table allow-list with a reason, so a new write hidden behind a GET fails CI.
+
+**Generated from the registry (stack-free).** For every row in `ROUTE_VERDICTS`, one parametrized test: with `_resolve_membership` stubbed to return `control_plane_state = 'suspended'`, a request with an empty body to the route answers 409 with `detail.code == "workspace_read_only"` for verdict R, and does not answer 409 for verdicts A and B (it may answer 422 or 400, which proves the gate let it through to validation). The same for `archived`. For `active`, no row answers 409. The parametrization reads the registry, so the table in this document, the registry and the tests cannot drift: a verdict changed in the registry changes the test's expectation in the same commit, and the guard test above keeps the registry equal to the route list.
+
+**PostgreSQL through the runtime role.** In `tests/integration/test_books_gate_pg.py`, with a disposable workspace PATCHed through route 94:
+
+- `test_backstop_refuses_insert_update_delete_when_suspended` and `..._when_archived`: one direct statement per gated table with the runtime DSN, each raising SQLSTATE `AO001` or `AO002`; generated from the migration's table list so a new table is covered automatically.
+- `test_backstop_leaves_decision_audit_and_activity_event_open`.
+- `test_backstop_refuses_without_workspace_guc` (`AO000`) and `test_backstop_distinguishes_erased` (`AO003`).
+- `test_backstop_reads_state_per_statement`: the mid-transaction PATCH case of 4.4.
+- `test_backstop_does_not_fire_under_replica_mode` (owner DSN).
+- For each REFUSED route that posts money (5, 34 to 37, 43, 72, 83), one end-to-end test: write refused with 409 when suspended, the same write succeeds when active again, and `journal_entry` count is unchanged by the refusal. Fixtures use fictional entities and `example.org` addresses.
+- One test per ALLOWED-always row: routes 21, 23, 24, 26, 33, 46, 48, 55, 56, 70, 93, 94, 95, and the tool `create_workspace`, each succeeding with the workspace suspended and again archived, plus the erasure and control-plane tests of section 8.
+- `test_sign_in_bookkeeping_survives_suspension`: with a suspended workspace, a Keycloak sign-in bumps `last_seen_at` (G1), a PAT request bumps `last_used_at` (G5), a credential read logs to `credential_access_log` (G9), the export writes its `decision_audit` row (G10), and `GET /api/me/workspaces` lists the workspace with `books_state = 'suspended'`.
+- Workers: `test_stripe_sync_skips_suspended_workspace_and_keeps_cursor`, `test_ebay_sync_skips_...`, `test_sentinel_skips_...`, `test_stale_run_maintenance_skips_...`, each with the provider client mocked and the assertion that `connector_state.last_sync_at` is unchanged.
+- `test_flag_off_changes_nothing`: with `AO_BOOKS_STATE_GATE` unset and the migration applied, every REFUSED route still succeeds in a suspended workspace, and the trigger's setting row is `off`.
+
+**Web (stack-free, `npm run test:journal-review` style).** `read-only-banner.smoke.tsx`: the banner renders for `books_state` `suspended` and `archived` with the exact texts of 5.2, does not render for `active`, and a 409 `workspace_read_only` payload produces the toast text, not the generic error.
+
+## 11. Build lanes
+
+Flag: `AO_BOOKS_STATE_GATE`, read into `Settings.books_state_gate: bool` (default `False`) in `app/config.py` next to `quotes_enabled` (`app/config.py:326`). Off: layer 1 does not refuse and the backstop's setting row stays `off`, so the release that carries the code changes nothing. On, per ring, is two steps by an operator: set the environment variable for the `app`, `sentinel`, `ebay-sync`, `stripe-sync` and `mail-drainer` services, and run `UPDATE public.books_gate_setting SET enabled = true` as the owner role (one row, created `false` by the migration; the trigger function reads it before anything else). Each ring has its own database, so "per ring" is natural. Turning it on for an organization that is already suspended at that moment: its next write is refused, its next page load shows the banner, the workers skip it on their next pass; nothing already written is undone, because the ledger is append-only; the lane ships a one-off read-only report query (journal entries, approvals and invitations created after `control_plane_state_changed_at`) so an operator can see what landed between the suspension and the switch.
+
+Order and fences:
+
+**Lane 1, DB.** Public migration `0021_books_state_gate_setting`: `control_plane_state_changed_at timestamptz` on `public.workspace` (stamped by route 94), `public.books_gate_setting` (one row, `enabled boolean default false`, SELECT to the runtime role, UPDATE to nobody but the owner). Tenant migration `0033_books_write_gate`: the function and the statement triggers of 4.2, discovered dynamically, exemption set `decision_audit`, `activity_event`. Files: `migrations/public/versions/0021_*.py`, `migrations/tenant/versions/0033_*.py`, `tests/integration/test_books_gate_pg.py` (the backstop cases only), one paragraph in `docs/OPERATIONS.md` for the maintenance override and restores. Must not touch `app/`, `agents/`, `scripts/`, `web/`. Inert until the setting row is flipped.
+
+**Lane 2, CORE.** `app/security/books_state.py` (new: `ROUTE_VERDICTS`, `WorkspaceReadOnly`, `assert_books_writable`, the 409 body, the SQLSTATE mapper), `app/tenancy.py` (`books_state` on `WorkspaceContext`, the check in `resolve_workspace`), `app/mcp_auth.py` (tool-name contextvar, the check in `authorize_workspace`), `mcp_server.py` (set the contextvar in the policy wrapper), `app/api/tools.py` (path-to-tool map on `bind_http_caller`), `app/workspace_session.py` (`writes=`), `app/config.py` (the flag), `app/main.py` (exception handler), `app/api/provisioning.py` (stamp `changed_at`), `app/api/quotes_seam.py` (seam body), `app/api/data_rights.py` and `app/data_rights/erasure.py` (set the erasure override), `app/api/members.py` (route 50 and G13 check), `app/api/ebay_oauth.py` (G14), `app/api/stripe_webhook.py`, `app/api/stripe_oauth.py` (routes 71, 72), `app/api/invoices.py` (G15 skip), `app/engagement/policy.py`, `agents/sentinel/config.py`, `app/api/tax_run_launch.py` (4.3), `app/api/workspaces.py` (`books_state` in both responses). Tests: `tests/unit/test_books_state_verdicts.py` (guard, generated), `tests/unit/test_books_state_get_writes.py`, the route and sign-in cases of `tests/integration/test_books_gate_pg.py`. Must not touch migrations or `web/`. Depends on lane 1 only for the PostgreSQL tests.
+
+**Lane 3, WORKERS.** `scripts/ebay_sync.py`, `scripts/stripe_sync.py` (skip before `_record_sync_outcome`), `scripts/maintain_stale_specialist_runs.py`, `scripts/drain_email_outbox.py` (hold through `related_invitation_id`, if question 4 is decided that way), `agents/sentinel/run_sentinel.py` (skip, `writes=True`, `skipped_suspended` actions), `agents/cpa_team/books_lead/*.py` (`writes=True`), `app/api/tax_run_launch.py` (pre-spawn and pre-publish check), `app/api/documents.py` (background task tolerates refusal). Tests: the worker tests of section 10. Must not touch `app/tenancy.py`, `app/mcp_auth.py`, migrations, `web/`. Depends on lane 2 for `writes=True`.
+
+**Lane 4, WEB.** `web/lib/api.ts` (type), `web/components/read-only-banner.tsx` (new), `web/components/app-shell.tsx` (mount), `web/lib/api-client.ts` (409 handling), `web/tests/read-only-banner.smoke.tsx`, `web/package.json` (add to `test:journal-review`). Must not touch anything outside `web/`. Depends on lane 2 for the field.
+
+**Lane 5, DOCS and turn-on.** `docs/OPERATIONS.md` (the two-step turn-on, the override, the report query), `docs/DATA-RIGHTS.md` (one sentence: erasure sets the override), `docs/roles.md` (one line: what "read-only organization" means for every role), `CHANGELOG.md`. Must not touch code.
+
+Each lane is a single run for a non-interactive agent: the fence is the file list; the acceptance tests are named above; the flag keeps every lane inert in production until the operator's two steps.
+
+## 12. Decisions needed
+
+For Persephone, and for Aaron where marked product:
+
+1. **Chat while suspended (product).** Routes 10, 11 and the chat runner. Chat is a read for the person but a spend for the platform and a write of `agent_session` and `chat_message`. Recommendation: refuse (R), with the banner saying so; keep the chat history readable. If allowed instead, `agent_session` and `chat_message` move to the backstop's exemption set and the LLM spend is the platform's.
+2. **Retention setting while suspended or archived (product).** Route 22. Recommendation: allow (A); it is part of the owner's data rights and only changes when their own data is destroyed.
+3. **New personal access token scoped to a suspended or archived workspace (review).** Route 54. Recommendation: refuse when `workspace_scope` names such a workspace, allow an unscoped token because every write it attempts is refused at use. The other apps refuse new tokens in both states; matching them exactly means refusing when any workspace the person belongs to is suspended, which this design thinks is too wide.
+4. **Queued email for a suspended organization (review).** `email_outbox` has no workspace column, only `related_invitation_id`. Recommendation: the drainer joins `workspace_invitation` through that column and holds rows whose workspace's books state is not active, leaving them `pending` for the drainer's next pass after `active`; no migration. The alternative is to accept that invitation emails sent during a suspension land and the acceptance is refused with the message.
+5. **The receipt worker and the reconciler (review).** They are sibling repositories that connect to PostgreSQL directly as the runtime role and are pinned to one workspace by environment (`docker-compose.yml:336`, `:389`). The backstop refuses any `books` row they write for a suspended workspace, and the API gate refuses their API writes. Their own loops will log errors each cycle until they learn to read the state. Recommendation: a one-line check in each sibling, tracked as separate tasks; not in these lanes.
+6. **Stripe Checkout payments received during a long suspension (product).** Route 72 answers 409, Stripe retries for its window, then stops. Recommendation: accept that a person records late payments by hand on resume, and write that into the runbook; or build a Checkout session backfill, which is new connector work.
+7. **Local member removal, invitation cancel, token revoke and credential delete stay allowed (review).** Rows 21, 26, 33, 46, 48, 55, 56, 70. The design treats narrowing access as not a "user write" under rule 6. Confirm, or move any of them to R.
+8. **Rule 18 (review).** Not readable from this sandbox; the reviewer should check section D of the Ops-Center contract for anything it adds.
+
+## 13. What was found that is not this
+
+Wrong or risky today, regardless of suspension. Listed, not fixed and not designed here.
+
+1. `workspace_status()` reports an erased workspace to the control plane as `"status": "suspended"`, the control plane's own word for a different state (`app/api/provisioning.py:58-62`).
+2. The A2A router mounts with no authentication dependency (`app/a2a/server.py:9`, `app/main.py:166`); it writes nothing today.
+3. `GET /api/connectors/ebay/oauth/callback` stores a bank credential with authorization inherited from the signed state only, and its replay set is in-process memory (`app/api/ebay_oauth.py:181-188`, `:383`, `:439`).
+4. `POST /api/connectors/stripe/webhook` decrypts every Stripe-connected workspace's credential and writes `credential_access_log` rows before any signature verifies (`app/api/stripe_oauth.py:780-800`).
+5. `POST /api/stripe/webhook` posts a payment to the workspace and invoice named in Stripe-supplied metadata, guarded by one shared secret (`app/api/stripe_webhook.py:42-59`).
+6. Writes with no entity-scope check for a scoped member: `POST .../coa/link` (`app/api/journal.py:122`), `POST .../journal-entries` (`:444`), `POST .../coa/seed` over every entity (`:89`), `PUT .../account-mappings` (`app/api/account_mappings.py:168`), `POST .../category-overrides` (`app/api/category_overrides.py:63`), open items (`app/api/open_items.py:621`, `:712`), sentinel action cancel (`app/api/sentinel.py:346`), the Stripe key's free-string `entity_id` (`app/api/stripe_oauth.py:84`, `:251`).
+7. Viewer-floor mutations: refresh-tracking changes submission status and calls USPS (`app/api/tax_filing_submissions.py:549`, `:595`); the AI-activity challenge files review items (`app/api/ai_activity.py:1358`); chat sessions and messages (`app/api/chat.py:254`, `:477`). Client-user floor on document upload (`app/api/documents.py:155`).
+8. `PATCH .../members/{user_id}` requires owner only when the new role is elevated, so an admin can demote another admin (`app/api/members.py:252-257`); invitation resend writes no `membership_audit` row (`:659-697`).
+9. `GET .../account-mappings` decrypts the SimpleFIN credential and calls the bank for any member with no role check (`app/api/account_mappings.py:97-107`).
+10. `GET .../invoices/{id}` creates a Stripe Checkout session and writes `hosted_pay_url` on a read (`app/api/invoices.py:352`, `:574-607`).
+11. `get_current_rule` authorizes no caller beyond the transport middleware (`app/tools/tax_get_current_rule.py:41-96`); `list_pending_approvals` and `list_credentials` enforce accountant in code while `_TOOL_METADATA` says viewer (`app/tools/approvals.py:94`, `app/tools/connectors.py:301`, `app/api/discovery.py:72`, `:139`); `_TOOL_METADATA` carries a stale `propose_payment` row (`discovery.py:194-195`).
+12. `scripts/maintain_stale_specialist_runs.py` iterates every workspace including erased ones (`:114-121`).
+13. Background agents run under the server's service token rather than the caller's identity: `app/api/tax_narrative.py:274`, `app/api/tax_run_launch.py:111-120`.
+14. `app/api/personal_access_tokens.py:105-130` auto-creates `user_account` rows without the `may_autoprovision` guard that `app/tenancy.py:259-311` enforces.
+15. The onboarding route and the clients route open the owner-role engine from a request path (`app/api/onboarding.py:334` and `app/api/clients.py:833` through `scripts/provision_workspace.py:56-57`).
+16. Docstring and code disagree on role floors: `app/api/approvals.py:10` vs `:231`; `app/api/chat.py:979` vs `:982`; `app/api/submission.py:22` vs `:140`; `app/api/approval_clusters.py:487` vs `app/tools/approvals.py:273`.
+17. Several writing tools write no `decision_audit` row: `create_coa_account`, `update_coa_account`, `close_period`, `upsert_account_mappings`, the AR invoicing tools, the quotes seam tools, `draft_memo`, `flag_for_cpa_review`, `resolve_tax_review_item`, `start_specialist_run`, `finish_specialist_run`; `create_entity_with_coa` swallows an audit failure (`app/tools/create_entity_with_coa.py:335-337`).
+18. `mark_intake_complete` claims an audit row in its docstring and writes nothing (`app/tools/setup_assistant.py:168-190`).
+19. The sync workers advance `connector_state.last_sync_at` to now even when the provider call failed (`scripts/stripe_sync.py:307`, `scripts/ebay_sync.py:305`), so after a failed pass only the one-day backstop covers the gap.
+20. The specialist runners' telemetry helper (`agents/tax_specialists/_shared/run_telemetry.py`) has no importers; hand-started runs leave no `specialist_run` row, so the stale-run maintenance and the launcher's orphan logic never see them.
+21. The pop-out chat (`web/app/chat/window/page.tsx`) renders without the app shell, so no shell-level notice reaches it; it writes through `web/components/chat/embedded-chat.tsx:177`.
+22. The web has no shared error class; about seventy components copy the `body.detail ?? "HTTP n"` pattern, and only `web/app/clients/inbox/inbox-view.tsx:171-179` gives 403 and 409 their own text.
