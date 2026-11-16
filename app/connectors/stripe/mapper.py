@@ -93,6 +93,7 @@ StripeTxnType = Literal[
 FIRST_RUN_REVIEW_LIMIT = 30
 
 STRIPE_SOURCE = "stripe_api"
+IDEMPOTENCY_CONSTRAINT = "uq_je_entity_source_external"
 
 
 @dataclass
@@ -112,6 +113,25 @@ class MapResult:
     fee_journal_entry_id: UUID | None = None  # if a stripe-fee child entry was also posted
     approval_id: UUID | None = None
     reason: str = ""
+
+
+def _is_idempotency_integrity_error(exc: IntegrityError) -> bool:
+    """Return true only for the journal idempotency constraint.
+
+    The parent insert also participates in the hash-chain uniqueness
+    constraint and may fail for other integrity reasons. Treating every
+    ``IntegrityError`` as a duplicate can advance the Stripe cursor over an
+    item that was never posted.
+    """
+    original = exc.orig
+    diagnostic = getattr(original, "diag", None)
+    constraint_name = (
+        getattr(diagnostic, "constraint_name", None)
+        or getattr(original, "constraint_name", None)
+    )
+    if constraint_name:
+        return constraint_name == IDEMPOTENCY_CONSTRAINT
+    return IDEMPOTENCY_CONSTRAINT in str(original)
 
 
 # ----------------------------------------------------------------------------
@@ -840,6 +860,8 @@ async def map_and_post_balance_transaction(
                 receipt_link_id=None,
             )
     except IntegrityError as exc:
+        if not _is_idempotency_integrity_error(exc):
+            raise
         await _log_post_attempt(
             session, workspace_id=workspace_id, entity_id=entity_id,
             source=STRIPE_SOURCE, source_external_id=bt_id,
