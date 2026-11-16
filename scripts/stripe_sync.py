@@ -65,6 +65,7 @@ logging.basicConfig(
 
 DEFAULT_BACKFILL_DAYS = 30
 DEFAULT_LOOP_INTERVAL_S = int(os.getenv("STRIPE_SYNC_INTERVAL_S", "3600"))
+STRIPE_WINDOW_OVERLAP_S = 24 * 60 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +205,8 @@ async def _load_last_sync(
 
 async def _load_sync_position(
     workspace_id: UUID, entity_id: UUID
-) -> tuple[datetime | None, str | None]:
-    """Load the time boundary and optional Stripe object continuation cursor."""
+) -> tuple[datetime | None, str | None, int | None, int | None]:
+    """Load the durable Stripe chain position and its fixed time window."""
     async with workspace_session(SessionLocal, workspace_id) as session:
         r = (
             await session.execute(
@@ -220,10 +221,33 @@ async def _load_sync_position(
             )
         ).first()
     if r is None:
-        return None, None
+        return None, None, None, None
     state = r.state if isinstance(r.state, dict) else {}
     cursor = state.get("_stripe_continuation_cursor")
-    return r.last_sync_at, cursor if isinstance(cursor, str) else None
+
+    def _epoch(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    window_gte = _epoch(state.get("window_gte"))
+    window_lt = _epoch(state.get("window_lt"))
+    # Cursors written by the first revision predate fixed windows. Re-read
+    # from the time overlap rather than carrying a cursor whose filter can no
+    # longer be reconstructed safely.
+    if window_gte is None or window_lt is None:
+        cursor = None
+        window_gte = None
+        window_lt = None
+    return (
+        r.last_sync_at,
+        cursor if isinstance(cursor, str) else None,
+        window_gte,
+        window_lt,
+    )
 
 
 async def _record_sync_outcome(
@@ -233,6 +257,8 @@ async def _record_sync_outcome(
     outcome_summary: dict[str, Any],
     last_sync_at: datetime | None,
     continuation_cursor: str | None,
+    window_gte: int | None,
+    window_lt: int | None,
     instance_name: str = "default",
 ) -> None:
     """Upsert connector_state with the latest run's summary."""
@@ -241,6 +267,12 @@ async def _record_sync_outcome(
         state.pop("_stripe_continuation_cursor", None)
     else:
         state["_stripe_continuation_cursor"] = continuation_cursor
+    if window_gte is None or window_lt is None:
+        state.pop("window_gte", None)
+        state.pop("window_lt", None)
+    else:
+        state["window_gte"] = window_gte
+        state["window_lt"] = window_lt
     async with workspace_session(SessionLocal, workspace_id) as session:
         result = await session.execute(
             text(
@@ -338,36 +370,86 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         summary["errors"].append("No active entity to attribute Stripe revenue to.")
         return summary
 
-    last_sync, continuation_cursor = await _load_sync_position(workspace_id, entity_id)
-    start_date = (
-        last_sync - timedelta(days=1)
-        if last_sync
-        else datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_BACKFILL_DAYS)
+    last_sync, continuation_cursor, window_gte, window_lt = (
+        await _load_sync_position(workspace_id, entity_id)
     )
-    # Stripe filter is unix epoch seconds.
-    created_gte = int(start_date.timestamp())
+    loaded_window_lt = window_lt
+    if window_gte is None:
+        start_date = (
+            last_sync - timedelta(seconds=STRIPE_WINDOW_OVERLAP_S)
+            if last_sync
+            else datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_BACKFILL_DAYS)
+        )
+        # Stripe filter is unix epoch seconds. The lower bound is pinned in
+        # state for every pass of this chain.
+        window_gte = int(start_date.timestamp())
+    else:
+        start_date = datetime.fromtimestamp(window_gte, tz=timezone.utc)
 
     client = StripeClient.from_credential(cred)
 
     # ---- 1. Pull balance_transactions ----
+    bts = None
     try:
         bts = await paginate_balance_transactions(
             client,
             starting_after=continuation_cursor,
-            created_gte=created_gte,
+            created_gte=window_gte,
+            created_lt=window_lt,
             max_pages=50,
         )
     except StripeApiError as exc:
-        summary["last_outcome"] = "api_error_balance_transactions"
-        summary["errors"].append(f"list_balance_transactions: {exc}")
+        # Stripe cursors are object IDs, not durable tokens. A deleted or
+        # expired object returns 400. Re-read the same pinned window from its
+        # newest end so the chain cannot wedge forever.
+        if continuation_cursor and exc.status_code == 400:
+            _log.warning(
+                "stripe_sync_invalid_continuation workspace=%s entity=%s "
+                "window_gte=%s window_lt=%s; restarting pinned window",
+                workspace_id,
+                entity_id,
+                window_gte,
+                window_lt,
+            )
+            continuation_cursor = None
+            try:
+                bts = await paginate_balance_transactions(
+                    client,
+                    created_gte=window_gte,
+                    created_lt=window_lt,
+                    max_pages=50,
+                )
+            except StripeApiError as retry_exc:
+                exc = retry_exc
+            else:
+                # Continue through the normal mapping path below.
+                pass
+        if bts is None:
+            summary["last_outcome"] = "api_error_balance_transactions"
+            summary["errors"].append(f"list_balance_transactions: {exc}")
+            await _record_sync_outcome(
+                workspace_id,
+                entity_id,
+                outcome_summary=summary,
+                last_sync_at=last_sync,
+                continuation_cursor=continuation_cursor,
+                window_gte=window_gte if window_lt is not None else None,
+                window_lt=window_lt,
+            )
+            return summary
+    window_lt = bts.window_lt or window_lt
+    if loaded_window_lt is None and window_lt is not None:
+        # Establish the chain window before mapping. If the worker dies while
+        # mapping, the retry still uses this exact Stripe-derived upper bound.
         await _record_sync_outcome(
             workspace_id,
             entity_id,
             outcome_summary=summary,
             last_sync_at=last_sync,
             continuation_cursor=continuation_cursor,
+            window_gte=window_gte,
+            window_lt=window_lt,
         )
-        return summary
     summary["balance_transactions_seen"] = len(bts)
     _log.info(
         "stripe_sync workspace=%s entity=%s pulled %d balance_transactions since %s",
@@ -413,7 +495,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     if processing_error:
         summary["last_outcome"] = "processing_error"
         summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
-        last_sync_at, next_cursor = _durable_position_after_item(
+        _, next_cursor = _durable_position_after_item(
             last_processed,
             fallback_last_sync=last_sync,
             fallback_cursor=continuation_cursor,
@@ -422,20 +504,23 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             workspace_id,
             entity_id,
             outcome_summary=summary,
-            last_sync_at=last_sync_at,
+            last_sync_at=last_sync,
             continuation_cursor=next_cursor,
+            window_gte=window_gte,
+            window_lt=window_lt,
         )
         return summary
 
-    if bts.exhausted:
-        next_sync_at = datetime.now(tz=timezone.utc)
+    if bts.exhausted and window_lt is not None:
+        next_sync_at = datetime.fromtimestamp(window_lt, tz=timezone.utc)
         next_cursor = None
+        next_window_gte = None
+        next_window_lt = None
     else:
-        next_sync_at, next_cursor = _durable_position_after_item(
-            last_processed,
-            fallback_last_sync=last_sync,
-            fallback_cursor=continuation_cursor,
-        )
+        next_sync_at = last_sync
+        next_cursor = bts.continuation_cursor
+        next_window_gte = window_gte
+        next_window_lt = window_lt
 
     # ---- 3. Reconcile Stripe payouts ↔ BoA deposits ----
     try:
@@ -459,6 +544,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         outcome_summary=summary,
         last_sync_at=next_sync_at,
         continuation_cursor=next_cursor,
+        window_gte=next_window_gte,
+        window_lt=next_window_lt,
     )
     return summary
 

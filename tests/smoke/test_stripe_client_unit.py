@@ -251,6 +251,19 @@ async def test_starting_after_pagination_passed_through():
 
 
 @pytest.mark.asyncio
+async def test_created_lt_filter_passed_through():
+    blob = _blob()
+    client = StripeClient.from_credential(blob)
+    fake = FakeAsyncClient([FakeResponse(200, {"data": [], "has_more": False})])
+    client._http_factory = lambda: fake
+
+    await client.list_balance_transactions(created_gte=100, created_lt=200)
+
+    assert fake.calls[0]["params"]["created[gte]"] == 100
+    assert fake.calls[0]["params"]["created[lt]"] == 200
+
+
+@pytest.mark.asyncio
 async def test_paginate_balance_transactions_stops_on_has_more_false():
     blob = _blob()
     client = StripeClient.from_credential(blob)
@@ -278,6 +291,7 @@ async def test_paginate_balance_transactions_stops_on_has_more_false():
     assert len(out) == 3
     assert out.exhausted is True
     assert out.continuation_cursor is None
+    assert out.window_lt is None
     assert [t["id"] for t in out] == ["txn_1", "txn_2", "txn_3"]
     # Second page request should have starting_after=txn_2
     assert fake.calls[1]["params"]["starting_after"] == "txn_2"

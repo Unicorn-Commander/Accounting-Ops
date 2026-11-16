@@ -1,15 +1,16 @@
-"""Offline tests for the Stripe sync worker's durable cursor behavior."""
+"""Offline tests for the Stripe sync worker's fixed-window cursor behavior."""
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
 
 from app.connectors.stripe.client import (
+    StripeApiError,
     StripeClient,
     StripeCredentialBlob,
 )
@@ -33,12 +34,12 @@ class _Response:
 
 
 class _StripeHttp:
-    """Fake HTTP layer that honors Stripe's created filter and cursor."""
+    """Newest-first fake that honors both created filters and object cursors."""
 
-    def __init__(self, transactions: list[dict[str, Any]], created: int):
+    def __init__(self, transactions: list[dict[str, Any]]):
         self.transactions = transactions
-        self.created = created
         self.calls: list[dict[str, Any]] = []
+        self.on_first_request: Any = None
 
     async def __aenter__(self) -> "_StripeHttp":
         return self
@@ -49,21 +50,41 @@ class _StripeHttp:
     async def request(self, method: str, url: str, **kwargs: Any) -> _Response:
         self.calls.append({"method": method, "url": url, **kwargs})
         params = kwargs.get("params", {})
-        if int(params.get("created[gte]", 0)) > self.created:
-            return _Response({"data": [], "has_more": False})
-
+        created_gte = int(params.get("created[gte]", 0))
+        created_lt = params.get("created[lt]")
+        filtered = [
+            txn
+            for txn in self.transactions
+            if txn["created"] >= created_gte
+            and (created_lt is None or txn["created"] < int(created_lt))
+        ]
         starting_after = params.get("starting_after")
-        start = int(starting_after.removeprefix("txn_")) + 1 if starting_after else 0
-        page = self.transactions[start : start + 100]
+        if starting_after:
+            ids = [txn["id"] for txn in filtered]
+            if starting_after not in ids:
+                raise StripeApiError(
+                    "fictional invalid starting_after", status_code=400
+                )
+            start = ids.index(starting_after) + 1
+        else:
+            start = 0
+        page = filtered[start : start + 100]
+        if len(self.calls) == 1 and self.on_first_request:
+            self.on_first_request()
         return _Response(
             {
                 "data": page,
-                "has_more": start + len(page) < len(self.transactions),
+                "has_more": start + len(page) < len(filtered),
             }
         )
 
 
-def _transactions(count: int, created: int) -> list[dict[str, Any]]:
+def _transactions(
+    count: int,
+    created: int,
+    *,
+    id_start: int = 0,
+) -> list[dict[str, Any]]:
     return [
         {
             "id": f"txn_{index:05d}",
@@ -77,20 +98,47 @@ def _transactions(count: int, created: int) -> list[dict[str, Any]]:
             "available_on": created,
             "reporting_category": "charge",
         }
-        for index in range(count)
+        for index in range(id_start, id_start + count)
     ]
+
+
+class _IdempotentSession(_StubSession):
+    """Mapper session double that behaves like journal_entry's unique key."""
+
+    def __init__(self) -> None:
+        super().__init__(accounts=_ACCOUNTS, existing_posts=31)
+        self.external_ids: set[str] = set()
+
+    async def execute(self, query: Any, params: dict[str, Any] | None = None):
+        sql = str(query)
+        params = params or {}
+        if "FROM journal_entry" in sql and "source_external_id = :ext" in sql:
+            ext = params.get("ext", "")
+            if ext in self.external_ids:
+                return SimpleNamespace(
+                    first=lambda: SimpleNamespace(
+                        id="00000000-0000-0000-0000-000000000001"
+                    )
+                )
+        result = await super().execute(query, params)
+        if "INSERT INTO journal_entry" in sql:
+            external_id = params.get("source_external_id")
+            if external_id:
+                self.external_ids.add(external_id)
+        return result
 
 
 def _install_worker(
     monkeypatch: pytest.MonkeyPatch,
     transactions: list[dict[str, Any]],
-    created: int,
     *,
     mapper: Any = None,
+    position: tuple[datetime | None, str | None, int | None, int | None]
+    | None = None,
 ):
     workspace_id = uuid4()
     entity_id = uuid4()
-    http = _StripeHttp(transactions, created)
+    http = _StripeHttp(transactions)
     client = StripeClient(
         blob=StripeCredentialBlob(
             workspace_id=workspace_id,
@@ -103,19 +151,23 @@ def _install_worker(
         ),
         _http_factory=lambda: http,
     )
-    session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
-    position: list[Any] = [None, None]
+    session = _IdempotentSession()
+    current: list[Any] = list(position or (None, None, None, None))
     records: list[dict[str, Any]] = []
 
     async def load_credential(*args: Any, **kwargs: Any) -> StripeCredentialBlob:
         return client.blob
 
-    async def load_position(*args: Any, **kwargs: Any) -> tuple[datetime | None, str | None]:
-        return position[0], position[1]
+    async def load_position(*args: Any, **kwargs: Any):
+        return tuple(current)
 
     async def record_cursor(*args: Any, **kwargs: Any) -> None:
-        position[0] = kwargs["last_sync_at"]
-        position[1] = kwargs["continuation_cursor"]
+        current[:] = [
+            kwargs["last_sync_at"],
+            kwargs["continuation_cursor"],
+            kwargs["window_gte"],
+            kwargs["window_lt"],
+        ]
         records.append(dict(kwargs["outcome_summary"]))
 
     @asynccontextmanager
@@ -137,33 +189,115 @@ def _install_worker(
     )
     if mapper is not None:
         monkeypatch.setattr(stripe_sync, "map_and_post_balance_transaction", mapper)
-    return workspace_id, http, session, position, records
+    return workspace_id, http, session, current, records
 
 
 @pytest.mark.asyncio
-async def test_sync_recovers_transactions_after_the_50_page_cap(monkeypatch):
-    """5,100 old rows must survive two capped passes without a cursor skip."""
-    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
-    transactions = _transactions(5100, created)
+async def test_sync_records_the_worst_case_old_rows_after_the_50_page_cap(monkeypatch):
+    """5,000 rows at two days plus 100 at ten days are all recorded."""
+    two_days_ago = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    ten_days_ago = two_days_ago - 8 * 24 * 60 * 60
+    transactions = _transactions(5000, two_days_ago) + _transactions(
+        100, ten_days_ago, id_start=5000
+    )
     workspace_id, http, session, position, _ = _install_worker(
-        monkeypatch, transactions, created
+        monkeypatch, transactions
     )
 
     await stripe_sync._sync_one_workspace(workspace_id)
     await stripe_sync._sync_one_workspace(workspace_id)
 
-    assert len(http.calls) == 51
     assert len(session.posted_entries) == 5100
-    assert {entry["source_external_id"] for entry in session.posted_entries} == {
-        f"txn_{index:05d}" for index in range(5100)
-    }
+    assert len({entry["source_external_id"] for entry in session.posted_entries}) == 5100
     assert position[1] is None
+    assert position[2] is None
+    assert position[3] is None
+    assert http.calls[0]["params"]["created[gte]"] < ten_days_ago
+    assert http.calls[50]["params"]["created[lt]"] == two_days_ago + 1
 
 
 @pytest.mark.asyncio
-async def test_sync_does_not_advance_cursor_past_mapping_failure(monkeypatch):
+async def test_rows_arriving_mid_chain_are_recorded_by_the_next_chain(monkeypatch):
     created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
-    transactions = _transactions(4, created)
+    new_created = created + 2 * 24 * 60 * 60
+    old = _transactions(2, created)
+    workspace_id, http, session, position, _ = _install_worker(monkeypatch, old)
+
+    def add_new_row() -> None:
+        http.transactions.append(_transactions(1, new_created, id_start=2)[0])
+
+    http.on_first_request = add_new_row
+    await stripe_sync._sync_one_workspace(workspace_id)
+    assert len(session.posted_entries) == 2
+    assert position[0] == datetime.fromtimestamp(created + 1, tz=timezone.utc)
+
+    await stripe_sync._sync_one_workspace(workspace_id)
+    assert len(session.posted_entries) == 3
+    assert {entry["source_external_id"] for entry in session.posted_entries} == {
+        "txn_00000",
+        "txn_00001",
+        "txn_00002",
+    }
+
+
+@pytest.mark.asyncio
+async def test_chain_window_does_not_use_worker_clock_after_spanning_time(monkeypatch):
+    first_created = int(
+        (datetime.now(tz=timezone.utc) - timedelta(days=3)).timestamp()
+    )
+    later_created = first_created + 2 * 24 * 60 * 60
+    transactions = _transactions(2, later_created) + _transactions(
+        2, first_created, id_start=2
+    )
+    workspace_id, _, _, position, _ = _install_worker(monkeypatch, transactions)
+
+    await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert position[0] == datetime.fromtimestamp(later_created + 1, tz=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_deleted_continuation_restarts_the_same_pinned_window(monkeypatch):
+    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    window_gte = created - 10
+    window_lt = created + 1
+    workspace_id, http, session, position, records = _install_worker(
+        monkeypatch,
+        _transactions(3, created),
+        position=(
+            datetime.fromtimestamp(window_gte, tz=timezone.utc),
+            "txn_deleted",
+            window_gte,
+            window_lt,
+        ),
+    )
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "ok"
+    assert len(session.posted_entries) == 3
+    assert http.calls[0]["params"]["starting_after"] == "txn_deleted"
+    assert "starting_after" not in http.calls[1]["params"]
+    assert position[1] is None
+    assert records[-1]["last_outcome"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_reread_from_the_overlap_does_not_double_post(monkeypatch):
+    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    workspace_id, _, session, _, _ = _install_worker(
+        monkeypatch, _transactions(3, created)
+    )
+
+    await stripe_sync._sync_one_workspace(workspace_id)
+    await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert len(session.posted_entries) == 3
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_advance_window_past_mapping_failure(monkeypatch):
+    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
     seen: list[str] = []
 
     async def failing_mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
@@ -173,31 +307,32 @@ async def test_sync_does_not_advance_cursor_past_mapping_failure(monkeypatch):
         return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
 
     workspace_id, _, _, position, records = _install_worker(
-        monkeypatch, transactions, created, mapper=failing_mapper
+        monkeypatch, _transactions(4, created), mapper=failing_mapper
     )
     summary = await stripe_sync._sync_one_workspace(workspace_id)
 
     assert seen == ["txn_00000", "txn_00001", "txn_00002"]
     assert summary["last_outcome"] == "processing_error"
     assert position[1] == "txn_00001"
-    assert position[0] == datetime.fromtimestamp(created, tz=timezone.utc)
+    assert position[0] is None
+    assert position[2] is not None
+    assert position[3] == created + 1
     assert records[-1]["errors"]
 
 
 @pytest.mark.asyncio
-async def test_sync_below_cap_advances_to_now_and_clears_continuation(monkeypatch):
+async def test_sync_below_cap_uses_stripe_window_end_and_clears_continuation(monkeypatch):
     created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
-    transactions = _transactions(3, created)
     workspace_id, http, session, position, _ = _install_worker(
-        monkeypatch, transactions, created
+        monkeypatch, _transactions(3, created)
     )
 
-    before = datetime.now(tz=timezone.utc)
     summary = await stripe_sync._sync_one_workspace(workspace_id)
-    after = datetime.now(tz=timezone.utc)
 
     assert summary["last_outcome"] == "ok"
     assert len(http.calls) == 1
     assert len(session.posted_entries) == 3
-    assert before <= position[0] <= after
+    assert position[0] == datetime.fromtimestamp(created + 1, tz=timezone.utc)
     assert position[1] is None
+    assert position[2] is None
+    assert position[3] is None
