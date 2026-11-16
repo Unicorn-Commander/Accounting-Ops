@@ -233,7 +233,7 @@ async def test_sync_stops_at_failed_mapping_and_keeps_last_good_position(monkeyp
     assert seen == ["PAY-000", "PAY-001"]
     assert summary["last_outcome"] == "processing_error"
     assert position["last_sync_at"] is None
-    assert position["continuation_cursor"]["payouts"]["offset"] == 0
+    assert position["continuation_cursor"]["payouts"]["offset"] == 1
 
 
 @pytest.mark.asyncio

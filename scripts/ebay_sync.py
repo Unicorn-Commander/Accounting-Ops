@@ -66,6 +66,11 @@ DEFAULT_BACKFILL_DAYS = 30
 DEFAULT_LOOP_INTERVAL_S = int(os.getenv("EBAY_SYNC_INTERVAL_S", "3600"))
 
 
+def _utcnow() -> datetime:
+    """Return the run clock; tests replace this for deterministic cursors."""
+    return datetime.now(tz=timezone.utc)
+
+
 # ---------------------------------------------------------------------------
 # Workspace + entity discovery
 # ---------------------------------------------------------------------------
@@ -182,13 +187,16 @@ async def _entity_for_credential(workspace_id: UUID, entity_id_hint: str | None)
 # ---------------------------------------------------------------------------
 
 
-async def _load_last_sync(workspace_id: UUID, entity_id: UUID) -> datetime | None:
+async def _load_sync_position(
+    workspace_id: UUID, entity_id: UUID
+) -> tuple[datetime | None, dict[str, Any] | None]:
+    """Load the time boundary and optional eBay offset continuation."""
     async with workspace_session(SessionLocal, workspace_id) as session:
         r = (
             await session.execute(
                 text(
                     """
-                    SELECT last_sync_at FROM connector_state
+                    SELECT last_sync_at, state FROM connector_state
                     WHERE entity_id = :eid AND connector_name = 'ebay_finances'
                     LIMIT 1
                     """
@@ -196,7 +204,13 @@ async def _load_last_sync(workspace_id: UUID, entity_id: UUID) -> datetime | Non
                 {"eid": str(entity_id)},
             )
         ).first()
-    return r.last_sync_at if r and r.last_sync_at else None
+    if r is None:
+        return None, None
+    state = r.state if isinstance(r.state, dict) else {}
+    continuation = state.get("_ebay_continuation_cursor")
+    if not isinstance(continuation, dict):
+        continuation = None
+    return r.last_sync_at if r.last_sync_at else None, continuation
 
 
 async def _record_sync_outcome(
@@ -204,16 +218,23 @@ async def _record_sync_outcome(
     entity_id: UUID,
     *,
     outcome_summary: dict[str, Any],
+    last_sync_at: datetime | None,
+    continuation_cursor: dict[str, Any] | None,
     instance_name: str = "default",
 ) -> None:
     """Upsert connector_state with the latest run's summary."""
+    state = dict(outcome_summary)
+    if continuation_cursor is None:
+        state.pop("_ebay_continuation_cursor", None)
+    else:
+        state["_ebay_continuation_cursor"] = continuation_cursor
     async with workspace_session(SessionLocal, workspace_id) as session:
         # Try update first.
         result = await session.execute(
             text(
                 """
                 UPDATE connector_state
-                SET last_sync_at = now(), state = CAST(:state AS jsonb)
+                SET last_sync_at = :last_sync_at, state = CAST(:state AS jsonb)
                 WHERE entity_id = :eid AND connector_name = 'ebay_finances'
                   AND connector_instance_name = :instance
                 """
@@ -221,7 +242,8 @@ async def _record_sync_outcome(
             {
                 "eid": str(entity_id),
                 "instance": instance_name,
-                "state": json.dumps(outcome_summary),
+                "state": json.dumps(state),
+                "last_sync_at": last_sync_at,
             },
         )
         if (result.rowcount or 0) > 0:
@@ -236,17 +258,18 @@ async def _record_sync_outcome(
                 )
                 VALUES (
                     gen_random_uuid(), :wid, :eid, 'ebay_finances',
-                    :instance, CAST(:state AS jsonb), now()
+                    :instance, CAST(:state AS jsonb), :last_sync_at
                 )
                 ON CONFLICT (entity_id, connector_name, connector_instance_name) DO UPDATE
-                SET last_sync_at = now(), state = EXCLUDED.state
+                SET last_sync_at = EXCLUDED.last_sync_at, state = EXCLUDED.state
                 """
             ),
             {
                 "wid": str(workspace_id),
                 "eid": str(entity_id),
                 "instance": instance_name,
-                "state": json.dumps(outcome_summary),
+                "state": json.dumps(state),
+                "last_sync_at": last_sync_at,
             },
         )
 
@@ -256,11 +279,58 @@ async def _record_sync_outcome(
 # ---------------------------------------------------------------------------
 
 
+def _iso_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _continuation_for_window(
+    existing: dict[str, Any] | None,
+    *,
+    start_date: datetime,
+    end_date: datetime,
+) -> dict[str, Any]:
+    """Keep a continuation only when it belongs to this exact date window."""
+    if (
+        isinstance(existing, dict)
+        and existing.get("start_date") == _iso_datetime(start_date)
+        and existing.get("end_date") == _iso_datetime(end_date)
+    ):
+        cursor = dict(existing)
+        cursor["payouts"] = dict(cursor.get("payouts") or {"offset": 0})
+        cursor["transactions"] = dict(cursor.get("transactions") or {})
+        return cursor
+    return {
+        "start_date": _iso_datetime(start_date),
+        "end_date": _iso_datetime(end_date),
+        "payouts": {"offset": 0},
+        "transactions": {},
+    }
+
+
+def _offset(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
 async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     """Pull + post for one workspace. Returns a structured summary."""
     summary: dict[str, Any] = {
         "workspace_id": str(workspace_id),
-        "started_at": datetime.now(tz=timezone.utc).isoformat(),
+        "started_at": _utcnow().isoformat(),
         "payouts_seen": 0,
         "transactions_seen": 0,
         "posted": 0,
@@ -284,25 +354,44 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         summary["errors"].append("No active entity to attribute eBay revenue to.")
         return summary
 
-    last_sync = await _load_last_sync(workspace_id, entity_id)
-    start_date = (
-        last_sync - timedelta(days=1)  # 1-day backstop in case of late-arriving txns
-        if last_sync
-        else datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_BACKFILL_DAYS)
+    last_sync, stored_cursor = await _load_sync_position(workspace_id, entity_id)
+    stored_start = _parse_datetime((stored_cursor or {}).get("start_date"))
+    stored_end = _parse_datetime((stored_cursor or {}).get("end_date"))
+    if stored_cursor and stored_start and stored_end:
+        start_date, end_date = stored_start, stored_end
+    else:
+        end_date = _utcnow()
+        start_date = (
+            last_sync - timedelta(days=1)  # 1-day backstop for late transactions
+            if last_sync
+            else end_date - timedelta(days=DEFAULT_BACKFILL_DAYS)
+        )
+    cursor = _continuation_for_window(
+        stored_cursor, start_date=start_date, end_date=end_date
     )
-    end_date = datetime.now(tz=timezone.utc)
+    payout_offset = _offset((cursor.get("payouts") or {}).get("offset"))
+    transaction_cursors = cursor.setdefault("transactions", {})
 
     client = EbayFinancesClient.from_credential(cred)
 
     # ---- 1. Pull payouts ----
     try:
         payouts = await client.list_payouts(
-            start_date=start_date, end_date=end_date, limit=200
+            start_date=start_date,
+            end_date=end_date,
+            limit=200,
+            offset=payout_offset,
         )
     except EbayApiError as exc:
         summary["last_outcome"] = "api_error_payouts"
         summary["errors"].append(f"list_payouts: {exc}")
-        await _record_sync_outcome(workspace_id, entity_id, outcome_summary=summary)
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync,
+            continuation_cursor=cursor,
+        )
         return summary
     summary["payouts_seen"] = len(payouts)
     _log.info(
@@ -311,75 +400,179 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     )
 
     # ---- 2. Per-payout: pull /transaction + post each + post the PAYOUT ----
+    # A payout page and a transaction continuation are independent positions.
+    # Finish older transaction continuations before consuming a new payout page.
+    pending_payouts = {
+        payout_id: state.get("payout")
+        for payout_id, state in transaction_cursors.items()
+        if payout_id != "__loose__"
+        and isinstance(state, dict)
+        and isinstance(state.get("payout"), dict)
+    }
+    payouts_to_process: list[dict[str, Any]] = list(pending_payouts.values())
+    seen_payout_ids = {payout.get("payoutId") for payout in payouts_to_process}
+    payouts_to_process.extend(
+        payout for payout in payouts if payout.get("payoutId") not in seen_payout_ids
+    )
+
+    processing_error = False
     async with workspace_session(SessionLocal, workspace_id) as session:
-        for payout in payouts:
+        for payout in payouts_to_process:
             payout_id = payout.get("payoutId") or ""
+            transaction_state = transaction_cursors.get(payout_id) or {}
+            transaction_offset = _offset(transaction_state.get("offset"))
+            payout_posted = bool(transaction_state.get("payout_posted"))
             try:
-                txns = await client.list_transactions(payout_id=payout_id, limit=500)
+                txns = await client.list_transactions(
+                    payout_id=payout_id, limit=500, offset=transaction_offset
+                )
             except EbayApiError as exc:
+                transaction_cursors[payout_id] = {
+                    "offset": transaction_offset,
+                    "payout": payout,
+                    "payout_posted": payout_posted,
+                }
                 summary["errors"].append(
                     f"list_transactions payout={payout_id[:8] if payout_id else '?'}: {exc}"
                 )
-                continue
+                summary["last_outcome"] = "api_error_transactions"
+                processing_error = True
+                break
             summary["transactions_seen"] += len(txns)
-            for txn in txns:
-                result = await map_and_post_transaction(
-                    session,
-                    workspace_id=str(workspace_id),
-                    entity_id=str(entity_id),
-                    txn=txn,
-                    actor_uc_uid="agent:ebay_sync",
-                    actor_agent_id="ebay_sync_worker",
-                )
+            for index, txn in enumerate(txns):
+                try:
+                    result = await map_and_post_transaction(
+                        session,
+                        workspace_id=str(workspace_id),
+                        entity_id=str(entity_id),
+                        txn=txn,
+                        actor_uc_uid="agent:ebay_sync",
+                        actor_agent_id="ebay_sync_worker",
+                    )
+                except Exception as exc:
+                    transaction_cursors[payout_id] = {
+                        "offset": transaction_offset + index,
+                        "payout": payout,
+                        "payout_posted": payout_posted,
+                    }
+                    summary["errors"].append(
+                        f"map_and_post {txn.get('transactionId', '?')}: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    )
+                    processing_error = True
+                    break
                 if result.outcome == "posted":
                     summary["posted"] += 1
                 elif result.outcome in ("queued_for_confirm", "queued_first_run"):
                     summary["queued"] += 1
-                elif result.outcome in ("blocked_idempotent",):
-                    pass  # Expected on re-runs.
-                else:
+                elif result.outcome not in ("blocked_idempotent",):
                     summary["skipped"] += 1
-
-            # Post the synthetic PAYOUT settlement entry (BoA cash deposit).
-            payout_txn = normalize_payout_as_txn(payout)
-            result = await map_and_post_transaction(
-                session,
-                workspace_id=str(workspace_id),
-                entity_id=str(entity_id),
-                txn=payout_txn,
-                actor_uc_uid="agent:ebay_sync",
-                actor_agent_id="ebay_sync_worker",
-            )
-            if result.outcome == "posted":
-                summary["posted"] += 1
-            elif result.outcome in ("queued_for_confirm", "queued_first_run"):
-                summary["queued"] += 1
-            elif result.outcome in ("blocked_idempotent",):
-                pass
+            if processing_error:
+                break
+            if txns.exhausted:
+                transaction_cursors.pop(payout_id, None)
             else:
-                summary["skipped"] += 1
+                transaction_cursors[payout_id] = {
+                    "offset": txns.continuation_offset,
+                    "payout": payout,
+                    "payout_posted": payout_posted,
+                }
+                continue
 
-    # ---- 3. Pull date-bounded /transaction in case there were txns NOT yet
-    # bound to a payout (eBay's "available balance" with no payout cycle yet).
-    try:
-        loose_txns = await client.list_transactions(
-            start_date=start_date, end_date=end_date, limit=500
-        )
-    except EbayApiError as exc:
-        summary["errors"].append(f"list_transactions(loose): {exc}")
-        loose_txns = []
-    if loose_txns:
-        async with workspace_session(SessionLocal, workspace_id) as session:
-            for txn in loose_txns:
-                # Idempotency in the mapper handles dupes from the payout-bound path.
+            # Post the synthetic PAYOUT settlement entry only after all its
+            # transaction pages mapped successfully.
+            if payout_posted:
+                continue
+            try:
                 result = await map_and_post_transaction(
                     session,
                     workspace_id=str(workspace_id),
                     entity_id=str(entity_id),
-                    txn=txn,
+                    txn=normalize_payout_as_txn(payout),
                     actor_uc_uid="agent:ebay_sync",
                     actor_agent_id="ebay_sync_worker",
                 )
+            except Exception as exc:
+                summary["errors"].append(
+                    f"map_and_post {payout_id}: {exc.__class__.__name__}: {exc}"
+                )
+                processing_error = True
+                # Re-read this payout, including its synthetic entry, next pass.
+                current_index = next(
+                    (
+                        index
+                        for index, current in enumerate(payouts)
+                        if current.get("payoutId") == payout_id
+                    ),
+                    None,
+                )
+                if current_index is not None:
+                    cursor["payouts"]["offset"] = payout_offset + current_index
+                break
+            if result.outcome == "posted":
+                summary["posted"] += 1
+            elif result.outcome in ("queued_for_confirm", "queued_first_run"):
+                summary["queued"] += 1
+            elif result.outcome not in ("blocked_idempotent",):
+                summary["skipped"] += 1
+
+    if processing_error:
+        summary["finished_at"] = _utcnow().isoformat()
+        summary.setdefault("last_outcome", "processing_error")
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync,
+            continuation_cursor=cursor,
+        )
+        return summary
+
+    if payouts.exhausted:
+        cursor["payouts"].pop("offset", None)
+    else:
+        cursor["payouts"]["offset"] = payouts.continuation_offset
+
+    # ---- 3. Pull date-bounded /transaction in case there were txns NOT yet
+    # bound to a payout (eBay's "available balance" with no payout cycle yet).
+    loose_state = transaction_cursors.get("__loose__") or {}
+    loose_offset = _offset(loose_state.get("offset"))
+    try:
+        loose_txns = await client.list_transactions(
+            start_date=start_date,
+            end_date=end_date,
+            limit=500,
+            offset=loose_offset,
+        )
+    except EbayApiError as exc:
+        summary["errors"].append(f"list_transactions(loose): {exc}")
+        summary["last_outcome"] = "api_error_transactions"
+        transaction_cursors["__loose__"] = {"offset": loose_offset}
+        processing_error = True
+        loose_txns = None
+    if loose_txns:
+        async with workspace_session(SessionLocal, workspace_id) as session:
+            for index, txn in enumerate(loose_txns):
+                # Idempotency in the mapper handles dupes from the payout-bound path.
+                try:
+                    result = await map_and_post_transaction(
+                        session,
+                        workspace_id=str(workspace_id),
+                        entity_id=str(entity_id),
+                        txn=txn,
+                        actor_uc_uid="agent:ebay_sync",
+                        actor_agent_id="ebay_sync_worker",
+                    )
+                except Exception as exc:
+                    transaction_cursors["__loose__"] = {
+                        "offset": loose_offset + index,
+                    }
+                    summary["errors"].append(
+                        f"map_and_post {txn.get('transactionId', '?')}: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    )
+                    processing_error = True
+                    break
                 if result.outcome == "posted":
                     summary["posted"] += 1
                 elif result.outcome in ("queued_for_confirm", "queued_first_run"):
@@ -388,6 +581,25 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                     pass
                 else:
                     summary["skipped"] += 1
+            if not processing_error:
+                if loose_txns.exhausted:
+                    transaction_cursors.pop("__loose__", None)
+                else:
+                    transaction_cursors["__loose__"] = {
+                        "offset": loose_txns.continuation_offset,
+                    }
+
+    if processing_error:
+        summary["finished_at"] = _utcnow().isoformat()
+        summary.setdefault("last_outcome", "processing_error")
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync,
+            continuation_cursor=cursor,
+        )
+        return summary
 
     # ---- 4. Reconcile eBay payouts ↔ BoA deposits ----
     try:
@@ -403,9 +615,22 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     except Exception as exc:
         summary["errors"].append(f"reconcile: {exc.__class__.__name__}: {exc}")
 
-    summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+    if not cursor["payouts"] and not transaction_cursors:
+        next_sync_at: datetime | None = end_date
+        next_cursor: dict[str, Any] | None = None
+    else:
+        next_sync_at = last_sync
+        next_cursor = cursor
+
+    summary["finished_at"] = _utcnow().isoformat()
     summary["last_outcome"] = "ok"
-    await _record_sync_outcome(workspace_id, entity_id, outcome_summary=summary)
+    await _record_sync_outcome(
+        workspace_id,
+        entity_id,
+        outcome_summary=summary,
+        last_sync_at=next_sync_at,
+        continuation_cursor=next_cursor,
+    )
     return summary
 
 
