@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 from app.connectors.stripe.client import (
     StripeApiError,
@@ -16,6 +17,8 @@ from app.connectors.stripe.client import (
 )
 from scripts import stripe_sync
 from tests.smoke.test_stripe_mapper_unit import _ACCOUNTS, _StubSession
+
+FIXED_NOW = datetime(2026, 11, 10, tzinfo=timezone.utc)
 
 
 class _Response:
@@ -205,7 +208,7 @@ def _install_worker(
 @pytest.mark.asyncio
 async def test_sync_recovers_transactions_after_the_50_page_cap(monkeypatch):
     """5,000 rows at two days plus 100 at ten days are all recorded."""
-    two_days_ago = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    two_days_ago = int((FIXED_NOW - timedelta(days=2)).timestamp())
     ten_days_ago = two_days_ago - 8 * 24 * 60 * 60
     transactions = _transactions(5000, two_days_ago) + _transactions(
         100, ten_days_ago, id_start=5000
@@ -228,7 +231,7 @@ async def test_sync_recovers_transactions_after_the_50_page_cap(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_rows_arriving_mid_chain_are_recorded_by_the_next_chain(monkeypatch):
-    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
     new_created = created + 2 * 24 * 60 * 60
     old = _transactions(2, created)
     workspace_id, http, session, position, _ = _install_worker(monkeypatch, old)
@@ -253,7 +256,7 @@ async def test_rows_arriving_mid_chain_are_recorded_by_the_next_chain(monkeypatc
 @pytest.mark.asyncio
 async def test_chain_window_does_not_use_worker_clock_after_spanning_time(monkeypatch):
     first_created = int(
-        (datetime.now(tz=timezone.utc) - timedelta(days=3)).timestamp()
+        (FIXED_NOW - timedelta(days=3)).timestamp()
     )
     later_created = first_created + 2 * 24 * 60 * 60
     transactions = _transactions(2, later_created) + _transactions(
@@ -268,7 +271,7 @@ async def test_chain_window_does_not_use_worker_clock_after_spanning_time(monkey
 
 @pytest.mark.asyncio
 async def test_deleted_continuation_restarts_the_same_pinned_window(monkeypatch):
-    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
     window_gte = created - 10
     window_lt = created + 1
     workspace_id, http, session, position, records = _install_worker(
@@ -294,7 +297,7 @@ async def test_deleted_continuation_restarts_the_same_pinned_window(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_reread_from_the_overlap_does_not_double_post(monkeypatch):
-    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
     workspace_id, _, session, _, _ = _install_worker(
         monkeypatch, _transactions(3, created)
     )
@@ -307,7 +310,7 @@ async def test_reread_from_the_overlap_does_not_double_post(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sync_does_not_advance_window_past_mapping_failure(monkeypatch):
-    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
     seen: list[str] = []
 
     async def failing_mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
@@ -331,8 +334,37 @@ async def test_sync_does_not_advance_window_past_mapping_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_db_error_rolls_back_only_current_item_savepoint(monkeypatch):
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
+    seen: list[str] = []
+    real_mapper = stripe_sync.map_and_post_balance_transaction
+
+    async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        seen.append(txn["id"])
+        if txn["id"] == "txn_00002":
+            raise DBAPIError("SELECT fictional", {}, RuntimeError("db failure"))
+        return await real_mapper(session, txn=txn, **kwargs)
+
+    workspace_id, _, session, position, records = _install_worker(
+        monkeypatch, _transactions(4, created), mapper=mapper
+    )
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert seen == ["txn_00000", "txn_00001", "txn_00002"]
+    assert [entry["source_external_id"] for entry in session.posted_entries] == [
+        "txn_00000",
+        "txn_00001",
+    ]
+    assert summary["last_outcome"] == "processing_error"
+    assert position[1] == "txn_00001"
+    assert position[4] == {"txn_00002": 1}
+    assert records[-1]["errors"]
+
+
+@pytest.mark.asyncio
 async def test_sync_below_cap_uses_stripe_window_end_and_clears_continuation(monkeypatch):
-    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
     workspace_id, http, session, position, _ = _install_worker(
         monkeypatch, _transactions(3, created)
     )
@@ -350,7 +382,7 @@ async def test_sync_below_cap_uses_stripe_window_end_and_clears_continuation(mon
 
 @pytest.mark.asyncio
 async def test_poison_item_quarantines_on_third_pass_and_keeps_other_rows(monkeypatch):
-    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
     seen: list[str] = []
 
     async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
@@ -389,7 +421,7 @@ async def test_poison_item_quarantines_on_third_pass_and_keeps_other_rows(monkey
 
 @pytest.mark.asyncio
 async def test_non_missing_400_does_not_restart_continuation(monkeypatch):
-    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
     window_gte = created - 10
     window_lt = created + 1
     workspace_id, _, _, position, records = _install_worker(
@@ -425,7 +457,7 @@ async def test_non_missing_400_does_not_restart_continuation(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_capped_progress_is_saved_before_reconcile_failure(monkeypatch):
-    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
 
     async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
         return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
