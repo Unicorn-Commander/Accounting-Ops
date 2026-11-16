@@ -203,7 +203,7 @@ def _install_worker(
 
 
 @pytest.mark.asyncio
-async def test_sync_records_the_worst_case_old_rows_after_the_50_page_cap(monkeypatch):
+async def test_sync_recovers_transactions_after_the_50_page_cap(monkeypatch):
     """5,000 rows at two days plus 100 at ten days are all recorded."""
     two_days_ago = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
     ten_days_ago = two_days_ago - 8 * 24 * 60 * 60
