@@ -377,6 +377,15 @@ async def decide_approval(
                     note=body.note,
                     category_override=body.category_override,
                 )
+            elif subject_type == "stripe_post_balance_transaction":
+                applied = await _approve_stripe_balance_transaction(
+                    session,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    payload=payload,
+                    approving_human=workspace.user_uc_uid,
+                    note=body.note,
+                )
             else:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -549,7 +558,12 @@ def _project_approval_decision(
                 source_external_id=f"{subject_id}:{index}",
                 payee=None,
             )
-    elif subject_type in ("bank_transaction_import", "journal_entry_post"):
+    elif subject_type in (
+        "bank_transaction_import",
+        "journal_entry_post",
+        "stripe_post_balance_transaction",
+    ):
+        is_stripe = subject_type == "stripe_post_balance_transaction"
         if subject_type == "journal_entry_post":
             payload = payload["request"]
         from app.journal.materiality import MaterialityVerdict
@@ -570,10 +584,14 @@ def _project_approval_decision(
                 workspace_id=workspace_id,
                 entity_id=entity_id,
                 outcome=outcome,
-                category=str(payload.get("category") or ""),
+                category=(
+                    str(payload.get("category") or "")
+                    if not is_stripe
+                    else f"Stripe · {payload.get('stripe_type') or 'review'}"
+                ),
                 amount_cents=int(amt),
                 effective_date=payload.get("effective_date"),
-                source="bofa-statement",
+                source="stripe_api" if is_stripe else "bofa-statement",
                 source_external_id=applied.get("source_external_id")
                 or payload.get("source_external_id"),
                 payee=payload.get("payee"),
@@ -843,6 +861,95 @@ async def _approve_bank_transaction_import(
         "journal_entry_id": str(result.journal_entry_id),
         "materiality_tier": result.materiality.tier,
         "source_external_id": source_external_id,
+    }
+
+
+async def _approve_stripe_balance_transaction(
+    session,
+    *,
+    workspace_id: UUID,
+    entity_id: UUID,
+    payload: dict,
+    approving_human: str,
+    note: str | None,
+) -> dict:
+    """Reattempt a queued Stripe balance transaction after human review.
+
+    First-run and quarantined Stripe rows use the same mapper entry point as
+    the worker. Human approval bypasses the automatic review gates, while the
+    account pair stored in the approval is honored when it is an explicit
+    operator choice. The mapper's existing source/external-id lookup makes a
+    repeated approval idempotent.
+    """
+    required = ("stripe_balance_txn_id", "stripe_type", "amount_cents", "effective_date")
+    missing = [key for key in required if key not in payload]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Stripe approval payload missing fields: {missing}",
+        )
+
+    stripe_id = str(payload["stripe_balance_txn_id"])
+    stripe_type = str(payload["stripe_type"]).strip().lower()
+    amount_cents = int(payload["amount_cents"])
+    effective_date = dt.date.fromisoformat(str(payload["effective_date"]))
+    stored_txn = payload.get("stripe_txn")
+    txn = dict(stored_txn) if isinstance(stored_txn, dict) else {}
+    txn.update({
+        "id": stripe_id,
+        "type": stripe_type,
+        "amount": amount_cents,
+        "fee": int(txn.get("fee") or 0),
+        "available_on": txn.get("available_on") or txn.get("created"),
+    })
+    if not isinstance(txn.get("created"), int):
+        txn["created"] = int(
+            dt.datetime.combine(
+                effective_date, dt.time.min, tzinfo=dt.timezone.utc
+            ).timestamp()
+        )
+    if txn.get("available_on") is None:
+        txn["available_on"] = txn["created"]
+    if not txn.get("reporting_category"):
+        txn["reporting_category"] = stripe_type
+
+    debit_account = payload.get("debit_account")
+    credit_account = payload.get("credit_account")
+    account_override = None
+    if (
+        isinstance(debit_account, str)
+        and isinstance(credit_account, str)
+        and debit_account.strip()
+        and credit_account.strip()
+        and not debit_account.startswith("(")
+        and not credit_account.startswith("(")
+    ):
+        account_override = (debit_account, credit_account)
+
+    from app.connectors.stripe.mapper import map_and_post_balance_transaction
+
+    result = await map_and_post_balance_transaction(
+        session,
+        workspace_id=str(workspace_id),
+        entity_id=str(entity_id),
+        txn=txn,
+        actor_uc_uid=approving_human,
+        actor_agent_id=None,
+        account_override=account_override,
+        human_approved=True,
+    )
+    if result.outcome not in ("posted", "blocked_idempotent"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Could not apply Stripe balance transaction: {result.reason}",
+        )
+    return {
+        "journal_entry_id": (
+            str(result.journal_entry_id) if result.journal_entry_id else None
+        ),
+        "source_external_id": stripe_id,
+        "stripe_type": stripe_type,
+        "reviewer_note": note,
     }
 
 

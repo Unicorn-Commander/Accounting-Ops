@@ -596,7 +596,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                             entity_id,
                             bt_id,
                         )
-            except Exception as exc:
+            except Exception:
                 processing_error = True
                 break
             if result is None:
