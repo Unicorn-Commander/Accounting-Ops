@@ -25,7 +25,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 from uuid import UUID
 
 import httpx
@@ -378,34 +378,48 @@ class EbayFinancesClient:
         end_date: datetime | None = None,
         limit: int = 200,
         max_pages: int = 50,
-    ) -> list[dict[str, Any]]:
+        offset: int = 0,
+    ) -> "EbayPaginationResult":
         """Page through GET /payout.
 
         eBay supports a `filter` query param: `payoutDate:[2026-01-01T00:00:00.000Z..]`.
         Returns the flat list of payout dicts in eBay's shape.
         """
-        params: dict[str, Any] = {"limit": min(limit, 200), "offset": 0}
+        output_limit = max(1, limit)
+        params: dict[str, Any] = {
+            "limit": min(output_limit, 200),
+            "offset": max(0, offset),
+        }
         if start_date or end_date:
             params["filter"] = _build_date_filter("payoutDate", start_date, end_date)
         out: list[dict[str, Any]] = []
         pages = 0
-        while True:
+        while pages < max_pages:
             data = await self._request("GET", "/payout", params=params)
             page = data.get("payouts") or []
             if not page:
-                break
-            out.extend(page)
+                return EbayPaginationResult(items=out, exhausted=True, continuation_offset=None)
+            remaining = output_limit - len(out)
+            out.extend(page[:remaining])
             pages += 1
             total = int(data.get("total") or 0)
             params["offset"] += len(page)
-            if pages >= max_pages:
-                break
             if total and params["offset"] >= total:
-                break
-            if len(out) >= limit:
-                out = out[:limit]
-                break
-        return out
+                return EbayPaginationResult(items=out, exhausted=True, continuation_offset=None)
+            if len(out) >= output_limit:
+                return EbayPaginationResult(
+                    items=out,
+                    exhausted=False,
+                    continuation_offset=int(params["offset"]),
+                )
+            if len(page) < int(params["limit"]):
+                return EbayPaginationResult(items=out, exhausted=True, continuation_offset=None)
+            params["limit"] = min(output_limit - len(out), 200)
+        return EbayPaginationResult(
+            items=out,
+            exhausted=False,
+            continuation_offset=int(params["offset"]),
+        )
 
     async def list_transactions(
         self,
@@ -415,9 +429,14 @@ class EbayFinancesClient:
         end_date: datetime | None = None,
         limit: int = 200,
         max_pages: int = 50,
-    ) -> list[dict[str, Any]]:
+        offset: int = 0,
+    ) -> "EbayPaginationResult":
         """Page through GET /transaction. Either by payout_id OR by date range."""
-        params: dict[str, Any] = {"limit": min(limit, 200), "offset": 0}
+        output_limit = max(1, limit)
+        params: dict[str, Any] = {
+            "limit": min(output_limit, 200),
+            "offset": max(0, offset),
+        }
         filters: list[str] = []
         if payout_id:
             filters.append(f"payoutId:{{{payout_id}}}")
@@ -427,23 +446,61 @@ class EbayFinancesClient:
             params["filter"] = ",".join(filters)
         out: list[dict[str, Any]] = []
         pages = 0
-        while True:
+        while pages < max_pages:
             data = await self._request("GET", "/transaction", params=params)
             page = data.get("transactions") or []
             if not page:
-                break
-            out.extend(page)
+                return EbayPaginationResult(items=out, exhausted=True, continuation_offset=None)
+            remaining = output_limit - len(out)
+            out.extend(page[:remaining])
             pages += 1
             total = int(data.get("total") or 0)
             params["offset"] += len(page)
-            if pages >= max_pages:
-                break
             if total and params["offset"] >= total:
-                break
-            if len(out) >= limit:
-                out = out[:limit]
-                break
-        return out
+                return EbayPaginationResult(items=out, exhausted=True, continuation_offset=None)
+            if len(out) >= output_limit:
+                return EbayPaginationResult(
+                    items=out,
+                    exhausted=False,
+                    continuation_offset=int(params["offset"]),
+                )
+            if len(page) < int(params["limit"]):
+                return EbayPaginationResult(items=out, exhausted=True, continuation_offset=None)
+            params["limit"] = min(output_limit - len(out), 200)
+        return EbayPaginationResult(
+            items=out,
+            exhausted=False,
+            continuation_offset=int(params["offset"]),
+        )
+
+
+@dataclass(frozen=True)
+class EbayPaginationResult:
+    """Rows returned by a bounded pull and its durable offset continuation."""
+
+    items: list[dict[str, Any]]
+    exhausted: bool
+    continuation_offset: int | None
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        return iter(self.items)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return self.items[index]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, EbayPaginationResult):
+            return (
+                self.items == other.items
+                and self.exhausted == other.exhausted
+                and self.continuation_offset == other.continuation_offset
+            )
+        if isinstance(other, list):
+            return self.items == other
+        return NotImplemented
 
     async def get_payout_summary(
         self,
@@ -486,5 +543,6 @@ __all__ = (
     "EbayApiError",
     "EbayCredentialBlob",
     "EbayFinancesClient",
+    "EbayPaginationResult",
     "load_ebay_credential",
 )
