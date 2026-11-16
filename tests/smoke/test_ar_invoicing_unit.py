@@ -649,3 +649,63 @@ async def test_void_refuses_when_payments_exist():
         )
     # No reversing entries posted.
     assert s.journal_entries == []
+
+
+class _SqlRecordingSession(_StubSession):
+    """_StubSession that also records every statement, in order."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.sql_log: list[str] = []
+
+    async def execute(self, query, params=None):
+        self.sql_log.append(" ".join(str(query).split()))
+        return await super().execute(query, params)
+
+
+def _first_invoice_touch(log: list[str]) -> str:
+    return next(sql for sql in log if "invoice" in sql)
+
+
+@pytest.mark.asyncio
+async def test_record_payment_locks_invoice_row_first():
+    """Task 320c07af: the invoice row is read FOR UPDATE before anything else.
+
+    Offline guard for the real-PostgreSQL race test in
+    tests/integration/test_ar_payment_concurrency_pg.py (which skips without a
+    stack): the lock must be the FIRST statement touching invoice data, ahead
+    of the balance check, the idempotency probe and the payment insert.
+    """
+    s = _SqlRecordingSession()
+    s.invoices.append({
+        "id": "inv-lock", "entity_id": "eid", "invoice_number": "INV-2026-0009",
+        "status": "sent", "total": Decimal("100.00"),
+        "balance_due": Decimal("100.00"), "currency": "USD",
+    })
+    await ar.record_payment(
+        s, workspace_id="wid", invoice_id="inv-lock", actor_uc_uid="tester",
+        amount="40.00", external_ref="evt-lock",
+    )
+    first = _first_invoice_touch(s.sql_log)
+    assert "FROM invoice WHERE id = :id" in first
+    assert first.endswith("FOR UPDATE")
+    assert sum("FOR UPDATE" in sql for sql in s.sql_log) == 1
+
+
+@pytest.mark.asyncio
+async def test_void_invoice_locks_invoice_row_first():
+    """void_invoice takes the same invoice row lock, first, before its guard."""
+    s = _SqlRecordingSession()
+    s.invoices.append({
+        "id": "inv-lock-v", "entity_id": "eid", "invoice_number": "INV-2026-0010",
+        "status": "sent", "total": Decimal("100.00"),
+    })
+    s.payments.append({"amt": Decimal("5.00")})
+    with pytest.raises(ar.InvoiceError, match="payments"):
+        await ar.void_invoice(
+            s, workspace_id="wid", invoice_id="inv-lock-v", actor_uc_uid="tester",
+            reason="oops",
+        )
+    first = _first_invoice_touch(s.sql_log)
+    assert "FROM invoice WHERE id = :id" in first
+    assert first.endswith("FOR UPDATE")

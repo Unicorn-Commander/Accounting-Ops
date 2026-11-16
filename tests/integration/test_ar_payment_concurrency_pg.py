@@ -14,6 +14,11 @@ The interleaving is forced, not left to timing:
      (it is blocked behind A on the invoice row), so B has provably started.
   4. A commits; B is released and finishes.
 
+On main (no lock) B blocks only at its final UPDATE, after it has already
+passed the balance check, so both payments land (120.00 recorded on a 100.00
+invoice, balance_due -20.00). With the invoice row lock B blocks at its first
+read and then sees A's committed balance.
+
 Runs as the least-privilege runtime role through the real
 ``workspace_session`` (RLS, search_path) on a migrated database with at least
 one provisioned workspace (``make integration`` or any PostgreSQL brought to
@@ -26,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from decimal import Decimal
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 import pytest
 import pytest_asyncio
@@ -38,7 +43,12 @@ except ImportError:  # pragma: no cover
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.ar.invoicing import create_invoice_from_draft, record_payment
+from app.ar.invoicing import (
+    InvoiceError,
+    create_invoice_from_draft,
+    record_payment,
+    void_invoice,
+)
 from app.workspace_session import workspace_session
 from tests.conftest import StackConfig
 
@@ -205,12 +215,11 @@ async def _race(
     *,
     amount_a: str,
     ref_a: str,
-    amount_b: str,
-    ref_b: str,
+    second: Callable[[], Awaitable[dict[str, Any]]],
 ) -> BaseException | dict[str, Any]:
-    """Run A (held open) and B (forced to start while A is open).
+    """Run payment A (held open) and ``second`` (forced to start while A is open).
 
-    Returns B's result, or the exception B raised.
+    Returns the second operation's result, or the exception it raised.
     """
     async with workspace_session(sm, ws["workspace_id"]) as session_a:
         await record_payment(
@@ -221,7 +230,7 @@ async def _race(
             amount=amount_a,
             external_ref=ref_a,
         )
-        task_b = asyncio.create_task(_pay(sm, ws, invoice_id, amount_b, ref_b))
+        task_b = asyncio.create_task(second())
         await _wait_for_lock_waiter(owner, task_b)
         # Leaving this block commits A and releases B.
     try:
@@ -230,25 +239,101 @@ async def _race(
         return exc
 
 
-async def test_concurrent_distinct_payments_overpay_today(
+async def test_concurrent_distinct_payments_exactly_one_accepted(
     sessionmaker, owner_sessionmaker, owner, workspace
 ):
-    """TODAY'S BEHAVIOUR (task 320c07af step 1): both payments are accepted.
+    """100.00 invoice, two distinct 60.00 payments in overlapping transactions.
 
-    100.00 invoice, two distinct 60.00 payments in overlapping transactions.
-    Without a row lock both pass the balance check, so 120.00 is recorded
-    against a 100.00 invoice. This assertion is expected to FAIL once
-    record_payment locks the invoice row.
+    Exactly one is accepted; the other gets the existing over-balance error and
+    leaves nothing behind. Failed on main: both were accepted (120.00 recorded,
+    balance_due -20.00).
     """
     invoice_id = await _new_invoice(owner_sessionmaker, workspace, "100.00")
     tag = uuid.uuid4().hex[:8]
     result_b = await _race(
         sessionmaker, owner, workspace, invoice_id,
         amount_a="60.00", ref_a=f"race-{tag}-a",
-        amount_b="60.00", ref_b=f"race-{tag}-b",
+        second=lambda: _pay(sessionmaker, workspace, invoice_id, "60.00", f"race-{tag}-b"),
     )
+    assert isinstance(result_b, InvoiceError), result_b
+    assert "exceeds the remaining balance 40.00" in str(result_b)
     state = await _invoice_state(owner, invoice_id)
+    assert state["n_payments"] == 1
+    assert Decimal(state["paid"]) == Decimal("60.00")
+    assert Decimal(state["balance_due"]) == Decimal("40.00")
+    assert state["status"] == "partial"
+
+
+async def test_concurrent_same_event_duplicate_is_idempotent(
+    sessionmaker, owner_sessionmaker, owner, workspace
+):
+    """The same external_ref delivered twice at once (a Stripe webhook retry).
+
+    The second delivery waits for the first, then finds its payment and returns
+    the invoice view: one payment row, no error. On main the second delivery
+    raised a unique-violation from invoice_payment instead.
+    """
+    invoice_id = await _new_invoice(owner_sessionmaker, workspace, "100.00")
+    ref = f"evt-{uuid.uuid4().hex[:12]}"
+    result_b = await _race(
+        sessionmaker, owner, workspace, invoice_id,
+        amount_a="40.00", ref_a=ref,
+        second=lambda: _pay(sessionmaker, workspace, invoice_id, "40.00", ref),
+    )
     assert not isinstance(result_b, BaseException), result_b
+    assert Decimal(str(result_b["balance_due"])) == Decimal("60.00")
+    state = await _invoice_state(owner, invoice_id)
+    assert state["n_payments"] == 1
+    assert Decimal(state["balance_due"]) == Decimal("60.00")
+    assert state["status"] == "partial"
+
+
+async def test_void_waits_for_concurrent_payment_and_refuses(
+    sessionmaker, owner_sessionmaker, owner, workspace
+):
+    """void_invoice takes the same lock, so its no-payments guard sees a
+    payment that commits while the void is in flight. On main the void read
+    paid=0, then set status='void', balance_due=0 over a recorded payment.
+    """
+    invoice_id = await _new_invoice(owner_sessionmaker, workspace, "100.00")
+
+    async def _void() -> dict[str, Any]:
+        async with workspace_session(sessionmaker, workspace["workspace_id"]) as session:
+            return await void_invoice(
+                session,
+                workspace_id=workspace["workspace_id"],
+                invoice_id=invoice_id,
+                actor_uc_uid=_ACTOR,
+                reason="fictional race void",
+            )
+
+    result_b = await _race(
+        sessionmaker, owner, workspace, invoice_id,
+        amount_a="25.00", ref_a=f"pre-void-{uuid.uuid4().hex[:8]}",
+        second=_void,
+    )
+    assert isinstance(result_b, InvoiceError), result_b
+    assert "payments recorded" in str(result_b)
+    state = await _invoice_state(owner, invoice_id)
+    assert state["status"] == "partial"
+    assert Decimal(state["balance_due"]) == Decimal("75.00")
+    assert state["n_payments"] == 1
+
+
+async def test_sequential_payments_unchanged(
+    sessionmaker, owner_sessionmaker, owner, workspace
+):
+    """No concurrency: partial, then a payment that settles it, then a refusal."""
+    invoice_id = await _new_invoice(owner_sessionmaker, workspace, "100.00")
+    tag = uuid.uuid4().hex[:8]
+    first = await _pay(sessionmaker, workspace, invoice_id, "30.00", f"seq-{tag}-1")
+    assert Decimal(str(first["balance_due"])) == Decimal("70.00")
+    assert first["status"] == "partial"
+    second = await _pay(sessionmaker, workspace, invoice_id, "70.00", f"seq-{tag}-2")
+    assert Decimal(str(second["balance_due"])) == Decimal("0.00")
+    assert second["status"] == "paid"
+    with pytest.raises(InvoiceError, match="already fully paid"):
+        await _pay(sessionmaker, workspace, invoice_id, "1.00", f"seq-{tag}-3")
+    state = await _invoice_state(owner, invoice_id)
     assert state["n_payments"] == 2
-    assert Decimal(state["paid"]) == Decimal("120.00")
-    assert Decimal(state["paid"]) > Decimal(state["total"])
+    assert Decimal(state["paid"]) == Decimal("100.00")
