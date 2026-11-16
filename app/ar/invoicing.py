@@ -906,6 +906,13 @@ async def create_invoice_from_draft(
     public_token = None
     for _ in range(_PUBLIC_TOKEN_ATTEMPTS):
         candidate = secrets.token_urlsafe(_PUBLIC_TOKEN_BYTES)
+        # RETURNING reads the new row back, which needs the SELECT policy
+        # (token = app.pay_token). Scope that GUC, transaction-locally, to the one
+        # token we are inserting: the runtime role still cannot see any other row.
+        await session.execute(
+            text("SELECT set_config('app.pay_token', :tok, true)"),
+            {"tok": candidate},
+        )
         inserted = (
             await session.execute(
                 text(
@@ -925,6 +932,7 @@ async def create_invoice_from_draft(
         break
     if public_token is None:
         raise InvoiceError("could not allocate a unique public invoice token")
+    await session.execute(text("SELECT set_config('app.pay_token', '', true)"))
     await session.execute(
         text(
             """
