@@ -202,20 +202,51 @@ async def _load_last_sync(
     return r.last_sync_at if r and r.last_sync_at else None
 
 
+async def _load_sync_position(
+    workspace_id: UUID, entity_id: UUID
+) -> tuple[datetime | None, str | None]:
+    """Load the time boundary and optional Stripe object continuation cursor."""
+    async with workspace_session(SessionLocal, workspace_id) as session:
+        r = (
+            await session.execute(
+                text(
+                    """
+                    SELECT last_sync_at, state FROM connector_state
+                    WHERE entity_id = :eid AND connector_name = 'stripe_api'
+                    LIMIT 1
+                    """
+                ),
+                {"eid": str(entity_id)},
+            )
+        ).first()
+    if r is None:
+        return None, None
+    state = r.state if isinstance(r.state, dict) else {}
+    cursor = state.get("_stripe_continuation_cursor")
+    return r.last_sync_at, cursor if isinstance(cursor, str) else None
+
+
 async def _record_sync_outcome(
     workspace_id: UUID,
     entity_id: UUID,
     *,
     outcome_summary: dict[str, Any],
+    last_sync_at: datetime | None,
+    continuation_cursor: str | None,
     instance_name: str = "default",
 ) -> None:
     """Upsert connector_state with the latest run's summary."""
+    state = dict(outcome_summary)
+    if continuation_cursor is None:
+        state.pop("_stripe_continuation_cursor", None)
+    else:
+        state["_stripe_continuation_cursor"] = continuation_cursor
     async with workspace_session(SessionLocal, workspace_id) as session:
         result = await session.execute(
             text(
                 """
                 UPDATE connector_state
-                SET last_sync_at = now(), state = CAST(:state AS jsonb)
+                SET last_sync_at = :last_sync_at, state = CAST(:state AS jsonb)
                 WHERE entity_id = :eid AND connector_name = 'stripe_api'
                   AND connector_instance_name = :instance
                 """
@@ -223,7 +254,8 @@ async def _record_sync_outcome(
             {
                 "eid": str(entity_id),
                 "instance": instance_name,
-                "state": json.dumps(outcome_summary),
+                "state": json.dumps(state),
+                "last_sync_at": last_sync_at,
             },
         )
         if (result.rowcount or 0) > 0:
@@ -237,19 +269,40 @@ async def _record_sync_outcome(
                 )
                 VALUES (
                     gen_random_uuid(), :wid, :eid, 'stripe_api',
-                    :instance, CAST(:state AS jsonb), now()
+                    :instance, CAST(:state AS jsonb), :last_sync_at
                 )
                 ON CONFLICT (entity_id, connector_name, connector_instance_name) DO UPDATE
-                SET last_sync_at = now(), state = EXCLUDED.state
+                SET last_sync_at = EXCLUDED.last_sync_at, state = EXCLUDED.state
                 """
             ),
             {
                 "wid": str(workspace_id),
                 "eid": str(entity_id),
                 "instance": instance_name,
-                "state": json.dumps(outcome_summary),
+                "state": json.dumps(state),
+                "last_sync_at": last_sync_at,
             },
         )
+
+
+def _durable_position_after_item(
+    item: dict[str, Any] | None,
+    *,
+    fallback_last_sync: datetime | None,
+    fallback_cursor: str | None,
+) -> tuple[datetime | None, str | None]:
+    """Return a position no later than the last successfully mapped item."""
+    if item is None:
+        return fallback_last_sync, fallback_cursor
+    item_id = item.get("id")
+    created = item.get("created")
+    if not isinstance(item_id, str) or not item_id or created is None:
+        return fallback_last_sync, fallback_cursor
+    try:
+        item_sync = datetime.fromtimestamp(int(created), tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return fallback_last_sync, fallback_cursor
+    return item_sync, item_id
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +338,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         summary["errors"].append("No active entity to attribute Stripe revenue to.")
         return summary
 
-    last_sync = await _load_last_sync(workspace_id, entity_id)
+    last_sync, continuation_cursor = await _load_sync_position(workspace_id, entity_id)
     start_date = (
         last_sync - timedelta(days=1)
         if last_sync
@@ -299,12 +352,21 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     # ---- 1. Pull balance_transactions ----
     try:
         bts = await paginate_balance_transactions(
-            client, created_gte=created_gte, max_pages=50
+            client,
+            starting_after=continuation_cursor,
+            created_gte=created_gte,
+            max_pages=50,
         )
     except StripeApiError as exc:
         summary["last_outcome"] = "api_error_balance_transactions"
         summary["errors"].append(f"list_balance_transactions: {exc}")
-        await _record_sync_outcome(workspace_id, entity_id, outcome_summary=summary)
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync,
+            continuation_cursor=continuation_cursor,
+        )
         return summary
     summary["balance_transactions_seen"] = len(bts)
     _log.info(
@@ -314,6 +376,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
 
     # ---- 2. Map + post each ----
     revenue_account = cred.default_revenue_account or DEFAULT_REVENUE_ACCOUNT
+    last_processed: dict[str, Any] | None = None
+    processing_error = False
     async with workspace_session(SessionLocal, workspace_id) as session:
         for bt in bts:
             try:
@@ -330,7 +394,9 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 summary["errors"].append(
                     f"map_and_post {bt.get('id', '?')}: {exc.__class__.__name__}: {exc}"
                 )
-                continue
+                processing_error = True
+                break
+            last_processed = bt
             if result.outcome == "posted":
                 summary["posted"] += 1
                 if result.fee_journal_entry_id:
@@ -343,6 +409,33 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 pass
             else:
                 summary["skipped"] += 1
+
+    if processing_error:
+        summary["last_outcome"] = "processing_error"
+        summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+        last_sync_at, next_cursor = _durable_position_after_item(
+            last_processed,
+            fallback_last_sync=last_sync,
+            fallback_cursor=continuation_cursor,
+        )
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync_at,
+            continuation_cursor=next_cursor,
+        )
+        return summary
+
+    if bts.exhausted:
+        next_sync_at = datetime.now(tz=timezone.utc)
+        next_cursor = None
+    else:
+        next_sync_at, next_cursor = _durable_position_after_item(
+            last_processed,
+            fallback_last_sync=last_sync,
+            fallback_cursor=continuation_cursor,
+        )
 
     # ---- 3. Reconcile Stripe payouts ↔ BoA deposits ----
     try:
@@ -360,7 +453,13 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
 
     summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
     summary["last_outcome"] = "ok"
-    await _record_sync_outcome(workspace_id, entity_id, outcome_summary=summary)
+    await _record_sync_outcome(
+        workspace_id,
+        entity_id,
+        outcome_summary=summary,
+        last_sync_at=next_sync_at,
+        continuation_cursor=next_cursor,
+    )
     return summary
 
 

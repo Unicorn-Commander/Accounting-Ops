@@ -276,6 +276,8 @@ async def test_paginate_balance_transactions_stops_on_has_more_false():
 
     out = await paginate_balance_transactions(client, max_pages=10)
     assert len(out) == 3
+    assert out.exhausted is True
+    assert out.continuation_cursor is None
     assert [t["id"] for t in out] == ["txn_1", "txn_2", "txn_3"]
     # Second page request should have starting_after=txn_2
     assert fake.calls[1]["params"]["starting_after"] == "txn_2"
@@ -299,6 +301,8 @@ async def test_paginate_respects_max_pages():
     out = await paginate_balance_transactions(client, max_pages=3)
     assert len(out) == 3
     assert len(fake.calls) == 3
+    assert out.exhausted is False
+    assert out.continuation_cursor == "txn_2"
 
 
 # ---- helpers ----------------------------------------------------------

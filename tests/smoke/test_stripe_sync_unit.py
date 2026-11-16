@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -62,13 +63,8 @@ class _StripeHttp:
         )
 
 
-@pytest.mark.asyncio
-async def test_sync_recovers_transactions_after_the_50_page_cap():
-    """5,100 old rows must survive two capped passes without a cursor skip."""
-    workspace_id = uuid4()
-    entity_id = uuid4()
-    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
-    transactions = [
+def _transactions(count: int, created: int) -> list[dict[str, Any]]:
+    return [
         {
             "id": f"txn_{index:05d}",
             "object": "balance_transaction",
@@ -81,8 +77,19 @@ async def test_sync_recovers_transactions_after_the_50_page_cap():
             "available_on": created,
             "reporting_category": "charge",
         }
-        for index in range(5100)
+        for index in range(count)
     ]
+
+
+def _install_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    transactions: list[dict[str, Any]],
+    created: int,
+    *,
+    mapper: Any = None,
+):
+    workspace_id = uuid4()
+    entity_id = uuid4()
     http = _StripeHttp(transactions, created)
     client = StripeClient(
         blob=StripeCredentialBlob(
@@ -97,17 +104,19 @@ async def test_sync_recovers_transactions_after_the_50_page_cap():
         _http_factory=lambda: http,
     )
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
-    last_sync: datetime | None = None
+    position: list[Any] = [None, None]
+    records: list[dict[str, Any]] = []
 
     async def load_credential(*args: Any, **kwargs: Any) -> StripeCredentialBlob:
         return client.blob
 
-    async def load_cursor(*args: Any, **kwargs: Any) -> datetime | None:
-        return last_sync
+    async def load_position(*args: Any, **kwargs: Any) -> tuple[datetime | None, str | None]:
+        return position[0], position[1]
 
     async def record_cursor(*args: Any, **kwargs: Any) -> None:
-        nonlocal last_sync
-        last_sync = datetime.now(tz=timezone.utc)
+        position[0] = kwargs["last_sync_at"]
+        position[1] = kwargs["continuation_cursor"]
+        records.append(dict(kwargs["outcome_summary"]))
 
     @asynccontextmanager
     async def fake_workspace_session(*args: Any, **kwargs: Any):
@@ -116,9 +125,8 @@ async def test_sync_recovers_transactions_after_the_50_page_cap():
     async def fake_reconcile(*args: Any, **kwargs: Any) -> dict[str, int]:
         return {"checked_payouts": 0, "matched": 0, "unmatched": 0}
 
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(stripe_sync, "load_stripe_credential", load_credential)
-    monkeypatch.setattr(stripe_sync, "_load_last_sync", load_cursor)
+    monkeypatch.setattr(stripe_sync, "_load_sync_position", load_position)
     monkeypatch.setattr(stripe_sync, "_record_sync_outcome", record_cursor)
     monkeypatch.setattr(stripe_sync, "workspace_session", fake_workspace_session)
     monkeypatch.setattr(stripe_sync, "reconcile_one_entity", fake_reconcile)
@@ -127,14 +135,69 @@ async def test_sync_recovers_transactions_after_the_50_page_cap():
         "from_credential",
         classmethod(lambda cls, blob: client),
     )
-    try:
-        await stripe_sync._sync_one_workspace(workspace_id)
-        await stripe_sync._sync_one_workspace(workspace_id)
-    finally:
-        monkeypatch.undo()
+    if mapper is not None:
+        monkeypatch.setattr(stripe_sync, "map_and_post_balance_transaction", mapper)
+    return workspace_id, http, session, position, records
+
+
+@pytest.mark.asyncio
+async def test_sync_recovers_transactions_after_the_50_page_cap(monkeypatch):
+    """5,100 old rows must survive two capped passes without a cursor skip."""
+    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    transactions = _transactions(5100, created)
+    workspace_id, http, session, position, _ = _install_worker(
+        monkeypatch, transactions, created
+    )
+
+    await stripe_sync._sync_one_workspace(workspace_id)
+    await stripe_sync._sync_one_workspace(workspace_id)
 
     assert len(http.calls) == 51
     assert len(session.posted_entries) == 5100
     assert {entry["source_external_id"] for entry in session.posted_entries} == {
         f"txn_{index:05d}" for index in range(5100)
     }
+    assert position[1] is None
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_advance_cursor_past_mapping_failure(monkeypatch):
+    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    transactions = _transactions(4, created)
+    seen: list[str] = []
+
+    async def failing_mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        seen.append(txn["id"])
+        if txn["id"] == "txn_00002":
+            raise RuntimeError("fictional mapper failure")
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    workspace_id, _, _, position, records = _install_worker(
+        monkeypatch, transactions, created, mapper=failing_mapper
+    )
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert seen == ["txn_00000", "txn_00001", "txn_00002"]
+    assert summary["last_outcome"] == "processing_error"
+    assert position[1] == "txn_00001"
+    assert position[0] == datetime.fromtimestamp(created, tz=timezone.utc)
+    assert records[-1]["errors"]
+
+
+@pytest.mark.asyncio
+async def test_sync_below_cap_advances_to_now_and_clears_continuation(monkeypatch):
+    created = int((datetime.now(tz=timezone.utc) - timedelta(days=2)).timestamp())
+    transactions = _transactions(3, created)
+    workspace_id, http, session, position, _ = _install_worker(
+        monkeypatch, transactions, created
+    )
+
+    before = datetime.now(tz=timezone.utc)
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+    after = datetime.now(tz=timezone.utc)
+
+    assert summary["last_outcome"] == "ok"
+    assert len(http.calls) == 1
+    assert len(session.posted_entries) == 3
+    assert before <= position[0] <= after
+    assert position[1] is None
