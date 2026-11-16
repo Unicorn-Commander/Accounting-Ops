@@ -18,7 +18,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.asyncio
 async def test_db_error_rolls_back_only_failed_stripe_item(
-    db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+    db: Any, app_db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A real statement error rolls back item k, not items before it."""
     del seeded_workspace
@@ -55,6 +55,43 @@ async def test_db_error_rolls_back_only_failed_stripe_item(
     async with db.acquire() as conn:
         async with conn.transaction():
             await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            await conn.executemany(
+                """
+                INSERT INTO chart_of_account (
+                    workspace_id, entity_id, account_number, account_name,
+                    canonical_form, account_type, normal_balance,
+                    is_active, is_system, notes
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, true, false, $8)
+                ON CONFLICT (entity_id, account_number)
+                DO UPDATE SET is_active = true
+                """,
+                [
+                    (
+                        str(TEST_WORKSPACE_ID),
+                        str(TEST_ENTITY_ID),
+                        "1210",
+                        "Stripe Receivable",
+                        "1210·Stripe Receivable",
+                        "asset",
+                        "debit",
+                        "Stripe savepoint integration test",
+                    ),
+                    (
+                        str(TEST_WORKSPACE_ID),
+                        str(TEST_ENTITY_ID),
+                        "4200",
+                        "AI Infrastructure Revenue (UC-Cloud)",
+                        "4200·AI Infrastructure Revenue (UC-Cloud)",
+                        "revenue",
+                        "credit",
+                        "Stripe savepoint integration test",
+                    ),
+                ],
+            )
             await conn.execute(
                 """
                 INSERT INTO connector_state (
@@ -117,9 +154,13 @@ async def test_db_error_rolls_back_only_failed_stripe_item(
     summary = await stripe_sync._sync_one_workspace(TEST_WORKSPACE_ID)
     assert summary["last_outcome"] == "processing_error"
 
-    async with db.acquire() as conn:
+    async with app_db.acquire() as conn:
         async with conn.transaction():
             await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
             first = await conn.fetchval(
                 """
                 SELECT count(*) FROM journal_entry
@@ -148,7 +189,25 @@ async def test_db_error_rolls_back_only_failed_stripe_item(
                 str(TEST_ENTITY_ID),
             )
 
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            owner_first = await conn.fetchval(
+                """
+                SELECT count(*) FROM journal_entry
+                WHERE entity_id = $1 AND source = 'stripe_api'
+                  AND source_external_id = $2
+                """,
+                str(TEST_ENTITY_ID),
+                first_id,
+            )
+
     assert first == 1
+    assert owner_first == 1
     assert failed == 0
     assert state["last_sync_at"] is None
     assert state["cursor"] == first_id
