@@ -1270,11 +1270,17 @@ async def record_payment(
     if pay_amount <= 0:
         raise InvoiceError("payment amount must be positive")
 
+    # Row-lock the invoice BEFORE reading its balance, held to commit. A second
+    # payment (or a void) on the same invoice waits here and then sees the
+    # committed balance, so two distinct payments cannot both pass the check
+    # below and overpay. Every invoice balance/payment writer takes this lock
+    # first, before any other row, so they cannot deadlock against each other.
     inv = (
         await session.execute(
             text(
                 "SELECT id::text, entity_id::text AS entity_id, invoice_number, "
-                "status, total, balance_due, currency FROM invoice WHERE id = :id"
+                "status, total, balance_due, currency FROM invoice WHERE id = :id "
+                "FOR UPDATE"
             ),
             {"id": invoice_id},
         )
@@ -1408,11 +1414,13 @@ async def void_invoice(
     if not reason:
         raise InvoiceError("a void reason is required")
 
+    # Same invoice row lock as record_payment, taken first: the "no payments
+    # recorded" guard below must not race a payment committing in between.
     inv = (
         await session.execute(
             text(
                 "SELECT id::text, entity_id::text AS entity_id, invoice_number, "
-                "status, total FROM invoice WHERE id = :id"
+                "status, total FROM invoice WHERE id = :id FOR UPDATE"
             ),
             {"id": invoice_id},
         )
