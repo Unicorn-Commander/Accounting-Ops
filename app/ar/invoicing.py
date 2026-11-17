@@ -94,6 +94,28 @@ class InvoiceError(Exception):
     """A clean, caller-surfaceable AR error (bad input, missing entity, etc.)."""
 
 
+def normalize_invoice_line_items(
+    line_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Materialize the invoice line-item defaults shared by all callers.
+
+    ``tax_amount`` is optional at the API boundary, but the database snapshot
+    and totals logic use a concrete money value. Copy each line so callers do
+    not receive an unexpected mutation, while preserving every supplied value.
+    """
+    return [
+        {
+            **line_item,
+            "tax_amount": (
+                line_item["tax_amount"]
+                if line_item.get("tax_amount") is not None
+                else Decimal("0")
+            ),
+        }
+        for line_item in line_items
+    ]
+
+
 def _q(amount: Decimal) -> Decimal:
     """Quantize to cents, half-up — money never carries sub-cent dust."""
     return amount.quantize(_CENTS, rounding=ROUND_HALF_UP)
@@ -779,7 +801,10 @@ async def create_invoice_from_draft(
 
     # ---- Lines + totals ----
     norm_lines = await _normalize_lines(
-        session, workspace_id=workspace_id, entity_id=entity_id, line_items=line_items
+        session,
+        workspace_id=workspace_id,
+        entity_id=entity_id,
+        line_items=normalize_invoice_line_items(line_items),
     )
     totals = _compute_totals(norm_lines, _to_decimal(discount or 0, "discount"))
 
