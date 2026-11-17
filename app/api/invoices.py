@@ -40,7 +40,7 @@ from app.connectors.stripe.checkout import create_checkout_session
 # cross-app entitlement gate (no-op for standalone). Deferred into the create
 # path behind an edition check so community boot never hard-imports it.
 from app.config import get_settings
-from app.ar.invoicing import InvoiceError
+from app.ar.invoicing import InvoiceError, normalize_invoice_line_items
 from app.authz import assert_entity_in_scope
 from app.core.business_time import business_today
 from app.db import SessionLocal
@@ -68,7 +68,7 @@ class LineItemBody(BaseModel):
     unit_price: Decimal = Decimal("0")
     amount: Decimal | None = None
     tax_code: str | None = None
-    tax_amount: Decimal | None = None
+    tax_amount: Decimal = Field(default=Decimal("0"), ge=0)
     revenue_account_id: UUID | None = None
     source_ref: str | None = None
 
@@ -290,7 +290,9 @@ async def create_invoice(
                 status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
             ) from exc
 
-    line_items = [li.model_dump(exclude_none=False) for li in body.line_items]
+    line_items = normalize_invoice_line_items(
+        [li.model_dump(exclude_none=False) for li in body.line_items]
+    )
     # Normalize revenue_account_id UUID → str for the service layer.
     for li in line_items:
         if li.get("revenue_account_id") is not None:
