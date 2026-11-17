@@ -768,6 +768,10 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                         limit=500,
                         offset=0,
                     )
+                set_window(txns)
+                if start_date is not None and end_date is not None:
+                    cursor["start_date"] = _iso_datetime(start_date)
+                    cursor["end_date"] = _iso_datetime(end_date)
             except EbayApiError as exc:
                 transaction_cursors[payout_id] = {
                     "offset": transaction_offset,
