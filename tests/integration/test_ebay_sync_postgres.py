@@ -148,7 +148,10 @@ async def test_db_error_rolls_back_only_failed_ebay_item(
         classmethod(lambda cls, blob: FakeClient()),
     )
     monkeypatch.setattr(ebay_sync, "map_and_post_transaction", mapper_with_real_db_error)
-    monkeypatch.setattr(ebay_mapper, "_count_existing_ebay_posts", lambda *a, **k: 31)
+    async def existing_ebay_posts(*args: Any, **kwargs: Any) -> int:
+        return 31
+
+    monkeypatch.setattr(ebay_mapper, "_count_existing_ebay_posts", existing_ebay_posts)
     monkeypatch.setattr(ebay_sync, "reconcile_one_entity", no_reconciliation)
 
     summary = await ebay_sync._sync_one_workspace(TEST_WORKSPACE_ID)
