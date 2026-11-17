@@ -54,7 +54,7 @@ from app.connectors.stripe.blocked_resolution import (
     RESOLVED_STATE_KEY,
     SUPERSEDED_BY_REOPEN_KEY,
     block_revision,
-    load_resolved_blocked_ids,
+    lock_block_state,
     lock_stripe_state_row,
     merge_params,
     resolved_ids,
@@ -834,15 +834,36 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
 
     last_processed: dict[str, Any] | None = None
     processing_error = False
+    superseded_before_mapping = False
     async with workspace_session(SessionLocal, workspace_id) as session:
-        # Take the shared Stripe state lock FIRST and only then read the ids a
-        # human resolved elsewhere (manual journal entry or "not
-        # books-relevant"). The lock is held until this transaction commits,
-        # so no resolution can land between this read and a post below; a
-        # resolve call waits for this pass (blocked_resolution.LOCK_TIMEOUT_MS)
-        # and then refuses because the item is posted. Posting a resolved item
-        # would double-book it, so a re-read moves past it without the mapper.
-        resolved_elsewhere = await load_resolved_blocked_ids(session, entity_id)
+        # Take the shared Stripe state lock FIRST and only then read what a
+        # human decided: the ids resolved elsewhere, the block revision and
+        # blocked id, and (below) any rejection. The lock is held until this
+        # transaction commits, so a resolve, reopen or rejection either
+        # committed before this read and is seen here, or waits for this pass
+        # (decide_approval and the resolve/reopen calls take the same lock
+        # first). Nothing loaded before the lock decides what is posted.
+        locked = await lock_block_state(session, entity_id)
+        resolved_elsewhere = locked.resolved
+        if locked.exists and (
+            (loaded_revision is not None and locked.revision != loaded_revision)
+            or locked.blocked_id != loaded_blocked_id
+        ):
+            # A resolve, reopen or another pass changed the block after this
+            # pass loaded its position. Map nothing and write nothing; the
+            # next pass starts from the human's state.
+            _log.warning(
+                "stripe_sync_superseded_before_mapping workspace=%s entity=%s "
+                "carried=%s now_blocked=%s carried_revision=%s now_revision=%s",
+                workspace_id,
+                entity_id,
+                loaded_blocked_id,
+                locked.blocked_id,
+                loaded_revision,
+                locked.revision,
+            )
+            superseded_before_mapping = True
+            items_to_process = []
         for bt in items_to_process:
             bt_id = bt.get("id")
             if isinstance(bt_id, str) and bt_id in resolved_elsewhere:
@@ -1021,8 +1042,18 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 )
                 break
 
+            if retrying_blocked and result_outcome == "human_rejected":
+                # Fail closed: a rejection is never success for a persisted
+                # block. It neither clears the block nor moves the cursor;
+                # only fix-and-retry or an evidence-backed resolution does.
+                summary["blocked_item"] = blocked_item
+                summary["errors"].append(
+                    f"persisted blocked Stripe item {bt_id} was rejected; "
+                    "evidence-backed resolution is required"
+                )
+                break
             if retrying_blocked and result_outcome not in {
-                "posted", "blocked_idempotent", "human_rejected"
+                "posted", "blocked_idempotent"
             }:
                 error_text = (
                     f"persisted blocked item returned non-posting outcome: "
@@ -1055,6 +1086,11 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 pass
             else:
                 summary["skipped"] += 1
+
+    if superseded_before_mapping:
+        summary["last_outcome"] = "superseded_by_resolution"
+        summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+        return summary
 
     if awaiting_review:
         summary["last_outcome"] = "awaiting_review"

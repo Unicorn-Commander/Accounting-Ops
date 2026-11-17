@@ -58,6 +58,7 @@ carries the resolution without any change there.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import UUID
@@ -209,6 +210,41 @@ async def load_resolved_blocked_ids(
     between this read and a post of the same item.
     """
     return resolved_ids(await lock_stripe_state(session, entity_id, instance))
+
+
+@dataclass(frozen=True)
+class LockedBlockState:
+    """What the worker may act on, read under the shared Stripe state lock."""
+
+    exists: bool
+    resolved: frozenset[str]
+    revision: int
+    blocked_id: str | None
+
+
+async def lock_block_state(
+    session: AsyncSession, entity_id: UUID, instance: str = "default"
+) -> LockedBlockState:
+    """Lock the Stripe state row, then read resolutions, revision and block.
+
+    The sync worker calls this FIRST in its mapping transaction and makes every
+    decision about the items it maps (resolved elsewhere, block still the one
+    it loaded, rejected by a human) only after it. The lock is held until that
+    transaction commits, so a resolve, reopen or rejection either committed
+    before this read (and is seen) or waits for the pass to finish.
+    """
+    locked = await lock_stripe_state_row(session, entity_id, instance)
+    if locked is None:
+        return LockedBlockState(False, frozenset(), 0, None)
+    state = locked[1]
+    block = state.get("blocked_item")
+    block_id = block.get("id") if isinstance(block, dict) else None
+    return LockedBlockState(
+        True,
+        resolved_ids(state),
+        block_revision(state),
+        block_id if isinstance(block_id, str) and block_id else None,
+    )
 
 
 MERGE_STATE_SQL = """

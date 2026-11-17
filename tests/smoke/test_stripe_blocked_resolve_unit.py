@@ -501,13 +501,13 @@ async def test_sync_skips_resolved_item_and_advances(monkeypatch: pytest.MonkeyP
         seen.append(txn["id"])
         return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
 
-    async def resolved(session: Any, entity_id: Any) -> frozenset[str]:
-        return frozenset({"txn_00001"})
+    async def resolved(session: Any, entity_id: Any) -> br.LockedBlockState:
+        return br.LockedBlockState(True, frozenset({"txn_00001"}), 0, None)
 
     workspace_id, _, _, position, _ = _install_worker(
         monkeypatch, _transactions(3, created), mapper=mapper
     )
-    monkeypatch.setattr(stripe_sync, "load_resolved_blocked_ids", resolved)
+    monkeypatch.setattr(stripe_sync, "lock_block_state", resolved)
 
     summary = await stripe_sync._sync_one_workspace(workspace_id)
 
@@ -516,3 +516,88 @@ async def test_sync_skips_resolved_item_and_advances(monkeypatch: pytest.MonkeyP
     assert summary["skipped"] == 1
     assert position[1] is None  # chain exhausted and advanced
     assert position[5] is None
+
+
+def _blocked_position(created: int) -> tuple[Any, ...]:
+    return (
+        None,
+        "txn_00000",
+        created - 10,
+        created + 1,
+        {"txn_00001": 3},
+        {"id": "txn_00001", "amount": 1000, "currency": "usd", "error": "fictional"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_rejected_blocked_item_is_never_success_on_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed (review 79c78f14 #2): human_rejected never clears a block.
+
+    Even when only the awaiting-review rejection check fires (so the result
+    reaches the post-mapper outcome handling as human_rejected), a retried
+    blocked item keeps the block, its failure count and the cursor.
+    """
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
+    seen: list[str] = []
+
+    async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        seen.append(txn["id"])
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    async def rejected(session: Any, *, awaiting_review_only: bool = False, **kw: Any) -> bool:
+        return awaiting_review_only
+
+    workspace_id, _, session, position, records = _install_worker(
+        monkeypatch,
+        _transactions(3, created),
+        mapper=mapper,
+        position=_blocked_position(created),
+    )
+    monkeypatch.setattr(stripe_sync, "_stripe_item_was_rejected", rejected)
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "blocked_item"
+    assert seen == []
+    assert not session.posted_entries
+    assert position[1] == "txn_00000"
+    assert position[4] == {"txn_00001": 3}
+    assert position[5]["id"] == "txn_00001"
+    assert "rejected" in " ".join(records[-1]["errors"])
+
+
+@pytest.mark.asyncio
+async def test_block_changed_after_load_maps_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review 79c78f14 #1: decisions come from the state read under the lock."""
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
+    seen: list[str] = []
+
+    async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        seen.append(txn["id"])
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    async def locked(session: Any, entity_id: Any) -> br.LockedBlockState:
+        # A resolve then a reopen landed between the load and the lock.
+        return br.LockedBlockState(True, frozenset(), 2, "txn_00001")
+
+    workspace_id, _, session, position, records = _install_worker(
+        monkeypatch,
+        _transactions(3, created),
+        mapper=mapper,
+        position=_blocked_position(created),
+    )
+    monkeypatch.setattr(stripe_sync, "lock_block_state", locked)
+    writes_before = len(records)
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "superseded_by_resolution"
+    assert seen == []
+    assert not session.posted_entries
+    assert len(records) == writes_before
+    assert position[1] == "txn_00000"
+    assert position[5]["id"] == "txn_00001"
