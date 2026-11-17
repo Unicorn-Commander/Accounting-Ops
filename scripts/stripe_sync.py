@@ -47,7 +47,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.connectors.stripe import StripeApiError, StripeClient, load_stripe_credential
-from app.connectors.stripe.blocked_resolution import load_resolved_blocked_ids
+from app.connectors.stripe.blocked_resolution import (
+    MERGE_STATE_SQL,
+    REOPENED_STATE_KEY,
+    RESOLVED_STATE_KEY,
+    load_resolved_blocked_ids,
+    merge_params,
+    resolved_ids,
+)
 from app.connectors.stripe.client import paginate_balance_transactions
 from app.connectors.stripe.mapper import (
     DEFAULT_REVENUE_ACCOUNT,
@@ -305,74 +312,126 @@ async def _record_sync_outcome(
     failure_counts: dict[str, int] | None = None,
     blocked_item: dict[str, Any] | None = None,
     clear_blocked_item: bool = False,
+    carried_blocked_id: str | None = None,
     instance_name: str = "default",
 ) -> None:
-    """Upsert connector_state, preserving durable safety state between runs."""
+    """Merge this pass's keys into connector_state under the shared lock.
+
+    Takes the same row lock as the manual resolve/reopen
+    (app/connectors/stripe/blocked_resolution.py) and writes a jsonb merge of
+    only the worker's own keys, so a resolution committed while this pass ran
+    is never erased. ``carried_blocked_id`` is the blocked item this pass
+    loaded at its start. If a human changed the block since (resolved the
+    carried item, or reopened an item into the blocked slot), this pass is
+    stale: its block, cursor, window and last_sync_at are not written, so a
+    resolved item neither comes back nor rewinds the chain and a reopened item
+    keeps the window it was re-armed in.
+    """
     async with workspace_session(SessionLocal, workspace_id) as session:
         existing = (
             await session.execute(
                 text(
                     """
-                    SELECT state FROM connector_state
+                    SELECT id::text AS id, state FROM connector_state
                     WHERE entity_id = :eid AND connector_name = 'stripe_api'
                       AND connector_instance_name = :instance
-                    LIMIT 1
+                    FOR UPDATE
                     """
                 ),
                 {"eid": str(entity_id), "instance": instance_name},
             )
         ).first()
-        prior_state = existing.state if existing and isinstance(existing.state, dict) else {}
-        state = dict(prior_state)
-        state.update(
-            {
-                key: value
-                for key, value in outcome_summary.items()
-                if key != "blocked_item"
-            }
+        locked_state = (
+            existing.state if existing and isinstance(existing.state, dict) else {}
         )
+        resolved = resolved_ids(locked_state)
+        owned_by_human = {RESOLVED_STATE_KEY, REOPENED_STATE_KEY, "blocked_item"}
+        patch: dict[str, Any] = {
+            key: value
+            for key, value in outcome_summary.items()
+            if key not in owned_by_human
+        }
+        drop: set[str] = set()
         if blocked_item is not None:
-            state["blocked_item"] = blocked_item
+            patch["blocked_item"] = blocked_item
         elif clear_blocked_item:
-            state.pop("blocked_item", None)
+            drop.add("blocked_item")
         last_outcome = outcome_summary.get("last_outcome")
         if last_outcome == "awaiting_review":
-            state["awaiting_review_item"] = outcome_summary.get(
+            patch["awaiting_review_item"] = outcome_summary.get(
                 "awaiting_review_item"
             )
         elif last_outcome in {"ok", "processing_error", "blocked_item"}:
-            state.pop("awaiting_review_item", None)
+            patch.pop("awaiting_review_item", None)
+            drop.add("awaiting_review_item")
         if continuation_cursor is None:
-            state.pop("_stripe_continuation_cursor", None)
+            drop.add("_stripe_continuation_cursor")
         else:
-            state["_stripe_continuation_cursor"] = continuation_cursor
+            patch["_stripe_continuation_cursor"] = continuation_cursor
         if window_gte is None or window_lt is None:
-            state.pop("window_gte", None)
-            state.pop("window_lt", None)
+            drop.update({"window_gte", "window_lt"})
         else:
-            state["window_gte"] = window_gte
-            state["window_lt"] = window_lt
-        if failure_counts:
-            state["_stripe_failure_counts"] = failure_counts
+            patch["window_gte"] = window_gte
+            patch["window_lt"] = window_lt
+        counts = {
+            key: value
+            for key, value in (failure_counts or {}).items()
+            if key not in resolved
+        }
+        if counts:
+            patch["_stripe_failure_counts"] = counts
         else:
-            state.pop("_stripe_failure_counts", None)
-        result = await session.execute(
-            text(
-                """
-                UPDATE connector_state
-                SET last_sync_at = :last_sync_at, state = CAST(:state AS jsonb)
-                WHERE entity_id = :eid AND connector_name = 'stripe_api'
-                  AND connector_instance_name = :instance
-                """
-            ),
-            {
-                "eid": str(entity_id),
-                "instance": instance_name,
-                "state": json.dumps(state),
-                "last_sync_at": last_sync_at,
-            },
+            drop.add("_stripe_failure_counts")
+        write_last_sync = True
+        locked_block = locked_state.get("blocked_item")
+        locked_block_id = (
+            locked_block.get("id") if isinstance(locked_block, dict) else None
         )
-        if (result.rowcount or 0) > 0:
+        writing_block_id = (
+            blocked_item.get("id") if isinstance(blocked_item, dict) else None
+        )
+        if (
+            (carried_blocked_id is not None and carried_blocked_id in resolved)
+            or (writing_block_id is not None and writing_block_id in resolved)
+            or (locked_block_id is not None and locked_block_id != carried_blocked_id)
+        ):
+            # A human resolved or reopened a blocked item while this pass ran.
+            # Keep the human's position; re-blocking or rewinding here would
+            # undo that decision.
+            _log.warning(
+                "stripe_sync_stale_outcome workspace=%s entity=%s carried=%s "
+                "now_blocked=%s; human change during this pass, position kept",
+                workspace_id,
+                entity_id,
+                carried_blocked_id,
+                locked_block_id,
+            )
+            for key in (
+                "blocked_item",
+                "_stripe_continuation_cursor",
+                "window_gte",
+                "window_lt",
+                "awaiting_review_item",
+            ):
+                patch.pop(key, None)
+                drop.discard(key)
+            patch["last_outcome"] = "superseded_by_resolution"
+            write_last_sync = False
+        if existing is not None:
+            await session.execute(
+                text(
+                    MERGE_STATE_SQL.replace(
+                        "WHERE id = :id",
+                        ", last_sync_at = :last_sync_at WHERE id = :id",
+                    )
+                    if write_last_sync
+                    else MERGE_STATE_SQL
+                ),
+                {
+                    **merge_params(existing.id, patch, drop),
+                    **({"last_sync_at": last_sync_at} if write_last_sync else {}),
+                },
+            )
             return
         await session.execute(
             text(
@@ -386,14 +445,17 @@ async def _record_sync_outcome(
                     :instance, CAST(:state AS jsonb), :last_sync_at
                 )
                 ON CONFLICT (entity_id, connector_name, connector_instance_name) DO UPDATE
-                SET last_sync_at = EXCLUDED.last_sync_at, state = EXCLUDED.state
+                SET last_sync_at = EXCLUDED.last_sync_at,
+                    state = (COALESCE(connector_state.state, '{}'::jsonb)
+                             - CAST(:drop_keys AS text[])) || EXCLUDED.state
                 """
             ),
             {
                 "wid": str(workspace_id),
                 "eid": str(entity_id),
                 "instance": instance_name,
-                "state": json.dumps(state),
+                "state": json.dumps(patch),
+                "drop_keys": sorted(drop - set(patch)),
                 "last_sync_at": last_sync_at,
             },
         )
@@ -497,6 +559,9 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         blocked_item,
     ) = await _load_sync_position(workspace_id, entity_id)
     loaded_continuation_cursor = continuation_cursor
+    # The block this pass started from. Outcome writes pass it so a human
+    # resolve/reopen that lands mid-pass is never overwritten.
+    loaded_blocked_id = blocked_item["id"] if blocked_item is not None else None
     loaded_window_lt = window_lt
     if window_gte is None:
         start_date = (
@@ -562,6 +627,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 window_gte=window_gte if window_lt is not None else None,
                 window_lt=window_lt,
                 failure_counts=failure_counts,
+                carried_blocked_id=loaded_blocked_id,
                 blocked_item=blocked_item,
             )
             return summary
@@ -578,6 +644,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            carried_blocked_id=loaded_blocked_id,
             blocked_item=blocked_item,
         )
     summary["balance_transactions_seen"] = len(bts)
@@ -618,6 +685,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 window_gte=window_gte,
                 window_lt=window_lt,
                 failure_counts=failure_counts,
+                carried_blocked_id=loaded_blocked_id,
                 blocked_item=blocked_item,
             )
             return summary
@@ -628,9 +696,13 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     last_processed: dict[str, Any] | None = None
     processing_error = False
     async with workspace_session(SessionLocal, workspace_id) as session:
-        # A human resolved these elsewhere (manual journal entry or "not
-        # books-relevant"). Posting one now would double-book it, so a re-read
-        # from the window overlap moves past it without calling the mapper.
+        # Take the shared Stripe state lock FIRST and only then read the ids a
+        # human resolved elsewhere (manual journal entry or "not
+        # books-relevant"). The lock is held until this transaction commits,
+        # so no resolution can land between this read and a post below; a
+        # resolve call waits for this pass (blocked_resolution.LOCK_TIMEOUT_MS)
+        # and then refuses because the item is posted. Posting a resolved item
+        # would double-book it, so a re-read moves past it without the mapper.
         resolved_elsewhere = await load_resolved_blocked_ids(session, entity_id)
         for bt in items_to_process:
             bt_id = bt.get("id")
@@ -857,6 +929,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            carried_blocked_id=loaded_blocked_id,
             blocked_item=blocked_item,
         )
         return summary
@@ -878,6 +951,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            carried_blocked_id=loaded_blocked_id,
             blocked_item=blocked_item,
         )
         return summary
@@ -899,6 +973,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            carried_blocked_id=loaded_blocked_id,
             blocked_item=summary.get("blocked_item") or blocked_item,
         )
         return summary
@@ -923,6 +998,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            carried_blocked_id=loaded_blocked_id,
             clear_blocked_item=True,
         )
         return summary
@@ -952,6 +1028,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         window_gte=next_window_gte,
         window_lt=next_window_lt,
         failure_counts=failure_counts,
+        carried_blocked_id=loaded_blocked_id,
         clear_blocked_item=False,
     )
 
@@ -978,6 +1055,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         window_gte=next_window_gte,
         window_lt=next_window_lt,
         failure_counts=failure_counts,
+        carried_blocked_id=loaded_blocked_id,
         clear_blocked_item=False,
     )
     return summary

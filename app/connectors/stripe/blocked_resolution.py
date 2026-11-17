@@ -21,6 +21,20 @@ never runs on its own. In ONE transaction it:
   * remembers the id under ``resolved_blocked_items`` so a later re-read of the
     24h window overlap skips it instead of posting it a second time.
 
+Concurrency: ONE lock serializes every writer of the Stripe
+``connector_state`` row: ``SELECT ... FOR UPDATE`` on that row (see
+``lock_stripe_state``). The sync worker takes it at the start of its mapping
+transaction and re-reads the resolved ids under it; the worker's outcome
+write takes it and merges only its own keys; resolve and reopen take it and
+decide only from state read after it. All of them write with a jsonb merge
+(MERGE_STATE_SQL), never a whole-state replacement, and none of the worker's
+writes can drop ``resolved_blocked_items`` or put a resolved id back as the
+blocked item.
+
+A resolution can be undone only by ``reopen_resolved_item``: an owner/admin
+human, a required reason, an audit row. It re-arms the item as the blocked
+item so the worker maps it normally. Nothing expires on its own.
+
 The approval row, the audit row and connector_state are all workspace tables,
 so the customer export (app/data_rights/export.py, dynamic table discovery)
 carries the resolution without any change there.
@@ -41,8 +55,13 @@ from app.tools._audit import write_decision_audit
 RESOLVED_STATE_KEY = "resolved_blocked_items"
 AUDIT_TOOL_NAME = "stripe_blocked_item_resolve"
 AUDIT_OUTCOME = "resolved_elsewhere"
+REOPEN_AUDIT_TOOL_NAME = "stripe_blocked_item_reopen"
+REOPEN_OUTCOME = "resolution_reopened"
+REOPENED_STATE_KEY = "reopened_blocked_items"
 MIN_REASON_CHARS = 10
 MAX_REASON_CHARS = 2000
+# How long a human call waits for a running sync pass to release the lock.
+LOCK_TIMEOUT_MS = 5000
 
 
 class BlockedResolutionError(Exception):
@@ -54,21 +73,39 @@ class BlockedResolutionError(Exception):
         self.detail = detail
 
 
-async def load_resolved_blocked_ids(session: AsyncSession, entity_id: UUID) -> frozenset[str]:
-    """Stripe ids a human resolved elsewhere; the sync worker must skip them."""
+async def lock_stripe_state(
+    session: AsyncSession, entity_id: UUID, instance: str = "default"
+) -> dict[str, Any] | None:
+    """Take THE Stripe sync lock for one entity and return its fresh state.
+
+    Every writer of ``connector_state.state`` for the Stripe connector takes
+    this row lock first: the sync worker's mapping transaction, the worker's
+    outcome write, the manual resolve and the manual reopen. Whatever a caller
+    decides from the returned state stays true until its transaction ends.
+    Returns None when the row does not exist yet (nothing can be blocked or
+    resolved then).
+    """
     row = (
         await session.execute(
             text(
                 """
-                SELECT state -> 'resolved_blocked_items' AS resolved
-                FROM connector_state
+                SELECT state FROM connector_state
                 WHERE entity_id = :eid AND connector_name = 'stripe_api'
+                  AND connector_instance_name = :instance
+                FOR UPDATE
                 """
             ),
-            {"eid": str(entity_id)},
+            {"eid": str(entity_id), "instance": instance},
         )
     ).first()
-    resolved = getattr(row, "resolved", None) if row is not None else None
+    if row is None:
+        return None
+    return _state_dict(getattr(row, "state", None))
+
+
+def resolved_ids(state: dict[str, Any] | None) -> frozenset[str]:
+    """Stripe ids under ``resolved_blocked_items`` in a state dict."""
+    resolved = (state or {}).get(RESOLVED_STATE_KEY)
     if isinstance(resolved, str):
         try:
             resolved = json.loads(resolved)
@@ -77,6 +114,37 @@ async def load_resolved_blocked_ids(session: AsyncSession, entity_id: UUID) -> f
     if not isinstance(resolved, dict):
         return frozenset()
     return frozenset(key for key in resolved if isinstance(key, str) and key)
+
+
+async def load_resolved_blocked_ids(
+    session: AsyncSession, entity_id: UUID, instance: str = "default"
+) -> frozenset[str]:
+    """Lock the Stripe state row, then return the ids resolved elsewhere.
+
+    The sync worker calls this at the start of its mapping transaction. The
+    lock is held until that transaction commits, so a resolution cannot land
+    between this read and a post of the same item.
+    """
+    return resolved_ids(await lock_stripe_state(session, entity_id, instance))
+
+
+MERGE_STATE_SQL = """
+    UPDATE connector_state
+    SET state = (COALESCE(state, '{}'::jsonb) - CAST(:drop_keys AS text[]))
+                || CAST(:patch AS jsonb)
+    WHERE id = :id
+"""
+
+
+def merge_params(row_id: str, patch: dict[str, Any], drop_keys: set[str]) -> dict[str, Any]:
+    """Bind values for MERGE_STATE_SQL. The resolutions key is never dropped."""
+    if RESOLVED_STATE_KEY in drop_keys:
+        raise ValueError("resolved_blocked_items is never dropped by a merge")
+    return {
+        "id": row_id,
+        "patch": json.dumps(patch),
+        "drop_keys": sorted(drop_keys - set(patch)),
+    }
 
 
 def _state_dict(value: Any) -> dict[str, Any]:
@@ -88,30 +156,157 @@ def _state_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def resolved_state(state: dict[str, Any], bt_id: str, resolution: dict[str, Any]) -> dict[str, Any]:
-    """Return connector_state.state after a manual resolution of ``bt_id``.
+def _epoch(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _clean_reason(value: str | None, field: str) -> str | None:
+    reason = (value or "").strip() or None
+    if reason is not None and not MIN_REASON_CHARS <= len(reason) <= MAX_REASON_CHARS:
+        raise BlockedResolutionError(
+            422, f"{field} must be {MIN_REASON_CHARS} to {MAX_REASON_CHARS} characters"
+        )
+    return reason
+
+
+def _is_lock_timeout(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        code = getattr(current, "sqlstate", None) or getattr(current, "pgcode", None)
+        if code == "55P03" or type(current).__name__ == "LockNotAvailableError":
+            return True
+        current = getattr(current, "orig", None) or current.__cause__
+    return False
+
+
+async def _lock_workspace_stripe_rows(
+    session: AsyncSession, workspace_id: UUID, entity_id: UUID | None
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Take the shared Stripe state lock (see lock_stripe_state) for a human call.
+
+    A sync pass holds the lock for its whole mapping transaction. A human
+    call waits at most LOCK_TIMEOUT_MS for it and is then told to retry,
+    rather than hanging the request.
+    """
+    params: dict[str, Any] = {"wid": str(workspace_id)}
+    entity_filter = ""
+    if entity_id is not None:
+        entity_filter = "AND entity_id = :eid"
+        params["eid"] = str(entity_id)
+    await session.execute(text(f"SET LOCAL lock_timeout = '{int(LOCK_TIMEOUT_MS)}ms'"))
+    try:
+        rows = (
+            await session.execute(
+                text(
+                    f"""
+                    SELECT id::text AS id, entity_id::text AS entity_id, state
+                    FROM connector_state
+                    WHERE workspace_id = :wid AND connector_name = 'stripe_api'
+                      {entity_filter}
+                    ORDER BY id
+                    FOR UPDATE
+                    """  # noqa: S608 - entity_filter is a fixed literal
+                ),
+                params,
+            )
+        ).mappings().all()
+    except Exception as exc:
+        if _is_lock_timeout(exc):
+            raise BlockedResolutionError(
+                409, "A Stripe sync pass is running for this workspace; retry shortly"
+            ) from exc
+        raise
+    await session.execute(text("SET LOCAL lock_timeout = 0"))
+    return [(dict(row), _state_dict(row["state"])) for row in rows]
+
+
+async def _stripe_post_exists(session: AsyncSession, entity_id: UUID, bt_id: str) -> bool:
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT 1 FROM journal_entry
+                WHERE entity_id = :eid AND source = 'stripe_api'
+                  AND source_external_id = :ext
+                LIMIT 1
+                """
+            ),
+            {"eid": str(entity_id), "ext": bt_id},
+        )
+    ).first()
+    return row is not None
+
+
+def resolution_patch(
+    state: dict[str, Any], bt_id: str, resolution: dict[str, Any]
+) -> tuple[dict[str, Any], set[str]]:
+    """The keys a manual resolution of ``bt_id`` writes, and the keys it drops.
 
     Mirrors ``_record_sync_outcome(clear_blocked_item=True)``: drop the block
     and that id's failure count. The pinned window and last_sync_at stay, and
     the cursor moves onto the resolved item, which is where the chain stood
-    once everything before it had been handled.
+    once everything before it had been handled. ``state`` must have been read
+    under the shared lock.
     """
-    new_state = dict(state)
-    new_state.pop("blocked_item", None)
-    counts = new_state.get("_stripe_failure_counts")
-    if isinstance(counts, dict):
-        counts = {key: value for key, value in counts.items() if key != bt_id}
-        if counts:
-            new_state["_stripe_failure_counts"] = counts
-        else:
-            new_state.pop("_stripe_failure_counts", None)
-    new_state["_stripe_continuation_cursor"] = bt_id
-    resolved = new_state.get(RESOLVED_STATE_KEY)
+    patch: dict[str, Any] = {"_stripe_continuation_cursor": bt_id, "last_outcome": AUDIT_OUTCOME}
+    drop = {"blocked_item"}
+    counts = state.get("_stripe_failure_counts")
+    counts = (
+        {key: value for key, value in counts.items() if key != bt_id}
+        if isinstance(counts, dict)
+        else {}
+    )
+    if counts:
+        patch["_stripe_failure_counts"] = counts
+    else:
+        drop.add("_stripe_failure_counts")
+    resolved = state.get(RESOLVED_STATE_KEY)
     resolved = dict(resolved) if isinstance(resolved, dict) else {}
     resolved[bt_id] = resolution
-    new_state[RESOLVED_STATE_KEY] = resolved
-    new_state["last_outcome"] = AUDIT_OUTCOME
-    return new_state
+    patch[RESOLVED_STATE_KEY] = resolved
+    return patch, drop
+
+
+def reopen_patch(
+    state: dict[str, Any], bt_id: str, blocked_item: dict[str, Any], window: tuple[int, int]
+) -> tuple[dict[str, Any], set[str]]:
+    """The keys a reopen writes, and the keys it drops.
+
+    The item goes back to the head of the chain as the blocked item, with a
+    fresh failure count, inside the window it was blocked in, read again from
+    that window's newest end. The worker's normal blocked-item retry then maps
+    it through the mapper (normal materiality). Once it advances, the chain
+    finishes that window and last_sync_at moves back to its end, so everything
+    after it is read again; the mapper's journal idempotency keeps that safe.
+    """
+    resolved = state.get(RESOLVED_STATE_KEY)
+    resolved = {key: value for key, value in (resolved or {}).items() if key != bt_id}
+    patch: dict[str, Any] = {
+        "blocked_item": blocked_item,
+        "window_gte": window[0],
+        "window_lt": window[1],
+        RESOLVED_STATE_KEY: resolved,
+        "last_outcome": REOPEN_OUTCOME,
+    }
+    drop = {"_stripe_continuation_cursor", "awaiting_review_item"}
+    counts = state.get("_stripe_failure_counts")
+    counts = (
+        {key: value for key, value in counts.items() if key != bt_id}
+        if isinstance(counts, dict)
+        else {}
+    )
+    if counts:
+        patch["_stripe_failure_counts"] = counts
+    else:
+        drop.add("_stripe_failure_counts")
+    return patch, drop
 
 
 async def resolve_blocked_item(
@@ -130,39 +325,17 @@ async def resolve_blocked_item(
         raise BlockedResolutionError(
             422, "Provide exactly one of journal_entry_id or not_books_relevant_reason"
         )
-    if reason is not None and not MIN_REASON_CHARS <= len(reason) <= MAX_REASON_CHARS:
-        raise BlockedResolutionError(
-            422,
-            f"not_books_relevant_reason must be {MIN_REASON_CHARS} to "
-            f"{MAX_REASON_CHARS} characters",
-        )
+    reason = _clean_reason(reason, "not_books_relevant_reason")
     workspace_id = ctx.workspace_id
 
-    params: dict[str, Any] = {"wid": str(workspace_id)}
-    entity_filter = ""
-    if entity_id is not None:
-        entity_filter = "AND entity_id = :eid"
-        params["eid"] = str(entity_id)
-    rows = (
-        await session.execute(
-            text(
-                f"""
-                SELECT id::text AS id, entity_id::text AS entity_id, state
-                FROM connector_state
-                WHERE workspace_id = :wid AND connector_name = 'stripe_api'
-                  {entity_filter}
-                FOR UPDATE
-                """  # noqa: S608 - entity_filter is a fixed literal
-            ),
-            params,
-        )
-    ).mappings().all()
-    blocked: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for row in rows:
-        state = _state_dict(row["state"])
-        item = state.get("blocked_item")
-        if isinstance(item, dict) and isinstance(item.get("id"), str):
-            blocked.append((dict(row), state))
+    # Everything below is decided on state read AFTER taking the shared lock.
+    rows = await _lock_workspace_stripe_rows(session, workspace_id, entity_id)
+    blocked = [
+        (row, state)
+        for row, state in rows
+        if isinstance(state.get("blocked_item"), dict)
+        and isinstance(state["blocked_item"].get("id"), str)
+    ]
     matches = [(row, state) for row, state in blocked if state["blocked_item"]["id"] == bt_id]
     if not matches:
         if not blocked:
@@ -174,6 +347,12 @@ async def resolve_blocked_item(
     row_entity = UUID(row["entity_id"])
     scope_check(ctx, row_entity)
     blocked_item = dict(state["blocked_item"])
+    if await _stripe_post_exists(session, row_entity, bt_id):
+        # A sync retry posted it before we got the lock. Resolving it now
+        # would book it twice; the worker's own outcome write clears the block.
+        raise BlockedResolutionError(
+            409, "The sync already posted this Stripe item; nothing to resolve"
+        )
 
     journal_ref: dict[str, Any] | None = None
     if journal_entry_id is not None:
@@ -224,6 +403,12 @@ async def resolve_blocked_item(
         "not_books_relevant_reason": reason,
         "blocked_item": blocked_item,
         "approval_id": approval_id,
+        # The window the item was blocked in, so a reopen can re-arm it.
+        "position": {
+            "window_gte": _epoch(state.get("window_gte")),
+            "window_lt": _epoch(state.get("window_lt")),
+            "continuation_cursor": state.get("_stripe_continuation_cursor"),
+        },
     }
     note = (
         f"Resolved elsewhere by {resolved_by}: manual journal entry "
@@ -278,15 +463,133 @@ async def resolve_blocked_item(
             },
         )
 
-    await session.execute(
-        text(
-            """
-            UPDATE connector_state
-            SET state = CAST(:state AS jsonb)
-            WHERE id = :id
-            """
-        ),
-        {"id": row["id"], "state": json.dumps(resolved_state(state, bt_id, resolution))},
-    )
+    patch, drop = resolution_patch(state, bt_id, resolution)
+    await session.execute(text(MERGE_STATE_SQL), merge_params(row["id"], patch, drop))
     response["audit_id"] = str(audit_id)
+    return response
+
+
+async def reopen_resolved_item(
+    session: AsyncSession,
+    *,
+    ctx: WorkspaceContext,
+    bt_id: str,
+    entity_id: UUID | None,
+    reason: str | None,
+    scope_check: Callable[[WorkspaceContext, UUID], Any],
+) -> dict[str, Any]:
+    """Undo a manual resolution: audited, human, and it posts nothing itself.
+
+    ``bt_id`` leaves ``resolved_blocked_items`` and becomes the blocked item
+    again (see reopen_patch), so the next sync pass retries it through the
+    mapper with normal materiality. Nothing expires on its own. Caller owns
+    the transaction and the authz floor.
+    """
+    reason = _clean_reason(reason, "reason")
+    if reason is None:
+        raise BlockedResolutionError(422, "A reason is required to reopen a resolution")
+    workspace_id = ctx.workspace_id
+
+    rows = await _lock_workspace_stripe_rows(session, workspace_id, entity_id)
+    matches = [(row, state) for row, state in rows if bt_id in resolved_ids(state)]
+    if not matches:
+        raise BlockedResolutionError(409, "bt_id has no manual resolution to reopen")
+    if len(matches) > 1:
+        raise BlockedResolutionError(409, "bt_id is resolved on more than one entity; pass entity_id")
+    row, state = matches[0]
+    row_entity = UUID(row["entity_id"])
+    scope_check(ctx, row_entity)
+    current_block = state.get("blocked_item")
+    if isinstance(current_block, dict) and current_block.get("id"):
+        raise BlockedResolutionError(
+            409,
+            "Another Stripe item is blocked; fix or resolve it before reopening this one",
+        )
+    resolution = state[RESOLVED_STATE_KEY][bt_id]
+    resolution = dict(resolution) if isinstance(resolution, dict) else {}
+    position = resolution.get("position") if isinstance(resolution.get("position"), dict) else {}
+    window_gte = _epoch(position.get("window_gte"))
+    window_lt = _epoch(position.get("window_lt"))
+    if window_gte is None or window_lt is None:
+        raise BlockedResolutionError(
+            409, "This resolution has no recorded sync window, so it cannot be re-armed safely"
+        )
+    original = resolution.get("blocked_item")
+    original = dict(original) if isinstance(original, dict) else {}
+    original["id"] = bt_id
+
+    reopened_by = ctx.user_uc_uid
+    reopen: dict[str, Any] = {
+        "reopened_by_uc_uid": reopened_by,
+        "reopened_at": datetime.now(tz=timezone.utc).isoformat(),
+        "reason": reason,
+        "resolution": resolution,
+    }
+    manual_je = resolution.get("journal_entry_id")
+    note = f"Resolution reopened by {reopened_by}: {reason}"
+    response: dict[str, Any] = {
+        "ok": True,
+        "bt_id": bt_id,
+        "entity_id": str(row_entity),
+        "posted": False,
+        "reopen": reopen,
+    }
+    if manual_je:
+        # Kit decides whether to require a reversal first; until then, say it.
+        response["warning"] = (
+            f"Manual journal entry {manual_je} cited by the resolution still exists. "
+            "If the sync now posts this item, reverse that entry or it is booked twice."
+        )
+    audit_id = await write_decision_audit(
+        session,
+        workspace_id=workspace_id,
+        entity_id=row_entity,
+        ctx=ctx,
+        tool_name=REOPEN_AUDIT_TOOL_NAME,
+        request_payload={
+            "bt_id": bt_id,
+            "entity_id": str(entity_id) if entity_id else None,
+            "reason": reason,
+        },
+        response_payload=response,
+        reasoning=note,
+        outcome=REOPEN_OUTCOME,
+    )
+    reopen["audit_id"] = str(audit_id)
+
+    approval_id = resolution.get("approval_id")
+    if approval_id:
+        # The old "(blocked)" row stays decided as history. If the item fails
+        # again the worker raises a fresh pending "(blocked)" row as usual.
+        await session.execute(
+            text(
+                """
+                UPDATE approval_queue
+                SET reasoning = reasoning || ' | ' || :note,
+                    payload = payload || CAST(:payload AS jsonb)
+                WHERE id = :id AND entity_id = :eid
+                """
+            ),
+            {
+                "id": str(approval_id),
+                "eid": str(row_entity),
+                "note": note,
+                "payload": json.dumps({"blocked_reopen": reopen}),
+            },
+        )
+
+    blocked_item = dict(original)
+    blocked_item["reopened"] = {
+        "reopened_by_uc_uid": reopened_by,
+        "reopened_at": reopen["reopened_at"],
+        "audit_id": reopen["audit_id"],
+    }
+    patch, drop = reopen_patch(state, bt_id, blocked_item, (window_gte, window_lt))
+    history = state.get(REOPENED_STATE_KEY)
+    history = dict(history) if isinstance(history, dict) else {}
+    entries = history.get(bt_id)
+    history[bt_id] = [*(entries if isinstance(entries, list) else []), reopen]
+    patch[REOPENED_STATE_KEY] = history
+    await session.execute(text(MERGE_STATE_SQL), merge_params(row["id"], patch, drop))
+    response["audit_id"] = reopen["audit_id"]
     return response
