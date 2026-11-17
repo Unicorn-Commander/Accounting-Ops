@@ -154,7 +154,7 @@ async def test_review_approval_is_deduped_across_three_mapper_passes(
     db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     del seeded_workspace
-    transaction_prefix = "ebay-pg-review-dedupe"
+    transaction_id = "ebay-pg-review-dedupe"
     async with db.acquire() as conn:
         async with conn.transaction():
             await conn.execute("SET LOCAL search_path = books, public")
@@ -162,20 +162,33 @@ async def test_review_approval_is_deduped_across_three_mapper_passes(
                 "SELECT set_config('app.current_workspace', $1, true)",
                 str(TEST_WORKSPACE_ID),
             )
-            prior_runs = await conn.fetchval(
+            # The eBay mapper resolves SALEs against the eBay-specific accounts.
+            # Seed them with the same owner pool used by CI's integration setup
+            # so the test reaches the review queue instead of the expected
+            # production block for a fresh entity with no eBay COA.
+            await conn.executemany(
                 """
-                SELECT count(*)
-                FROM journal_entry
-                WHERE entity_id = $1
-                  AND source = 'ebay_finances'
-                  AND source_external_id LIKE $2
+                INSERT INTO chart_of_account (
+                    workspace_id, entity_id, account_number, account_name,
+                    canonical_form, account_type, normal_balance,
+                    is_active, is_system, notes
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, true, false, $8)
+                ON CONFLICT (entity_id, account_number)
+                DO UPDATE SET is_active = true
                 """,
-                str(TEST_ENTITY_ID), f"{transaction_prefix}%",
+                [
+                    (
+                        str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID), "1220",
+                        "eBay Payouts Receivable", "1220·eBay Payouts Receivable",
+                        "asset", "debit", "eBay review dedupe integration test",
+                    ),
+                    (
+                        str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID), "4150",
+                        "eBay Resale Revenue", "4150·eBay Resale Revenue",
+                        "revenue", "credit", "eBay review dedupe integration test",
+                    ),
+                ],
             )
-            # journal_entry is append-only, so a rerun cannot delete the
-            # prior test row. Keep the ID deterministic while avoiding a
-            # stale idempotency hit from an earlier run on the same stack.
-            transaction_id = f"{transaction_prefix}-{prior_runs}"
             await conn.execute(
                 """
                 DELETE FROM approval_queue
