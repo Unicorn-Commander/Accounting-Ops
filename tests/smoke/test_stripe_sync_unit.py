@@ -315,12 +315,12 @@ async def test_fixed_blocked_item_beyond_cap_reached_after_missing_cursor(monkey
         "currency": "usd",
         "error": "RuntimeError: fictional failure",
     }
-    workspace_id, _, session, position, _ = _install_worker(
+    workspace_id, http, session, position, _ = _install_worker(
         monkeypatch,
         _transactions(5002, created),
         position=(
             datetime.fromtimestamp(window_gte, tz=timezone.utc),
-            "txn_00000",
+            "txn_deleted",
             window_gte,
             window_lt,
             {blocked_id: 3},
@@ -332,9 +332,11 @@ async def test_fixed_blocked_item_beyond_cap_reached_after_missing_cursor(monkey
 
     assert first["last_outcome"] == "blocked_item"
     assert not session.posted_entries
-    assert position[1] == "txn_05000"
+    assert position[1] == "txn_04999"
     assert position[2] == window_gte
     assert position[3] == window_lt
+    assert http.calls[0]["params"]["starting_after"] == "txn_deleted"
+    assert "starting_after" not in http.calls[1]["params"]
 
     second = await stripe_sync._sync_one_workspace(workspace_id)
 
