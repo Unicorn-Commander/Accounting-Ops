@@ -332,7 +332,7 @@ async def test_load_resolved_ids_locks_the_state_row_first() -> None:
         async def execute(self, query: Any, params: Any = None) -> Any:
             queries.append(str(query))
             return SimpleNamespace(
-                first=lambda: SimpleNamespace(state=json.dumps({br.RESOLVED_STATE_KEY: {BT: {}, "": {}}}))
+                first=lambda: SimpleNamespace(id="row-1", state=json.dumps({br.RESOLVED_STATE_KEY: {BT: {}, "": {}}}))
             )
 
     assert await br.load_resolved_blocked_ids(_One(), EID) == frozenset({BT})
