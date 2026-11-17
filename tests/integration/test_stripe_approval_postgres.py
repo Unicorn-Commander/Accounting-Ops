@@ -237,10 +237,10 @@ async def test_materiality_blocked_approval_returns_409_and_holds_chain(
     assert status == "pending"
 
     held = await _run_sync(monkeypatch, txn, seeded_workspace)
-    assert held["last_outcome"] == "processing_error"
+    assert held["last_outcome"] == "awaiting_review"
     _, _, _, state = await _counts(db, txn["id"])
     assert state.get("_stripe_continuation_cursor") is None
-    assert state.get("last_outcome") == "processing_error"
+    assert state.get("last_outcome") == "awaiting_review"
 
 
 @pytest.mark.asyncio
