@@ -50,6 +50,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.connectors.ebay import EbayApiError, EbayFinancesClient, load_ebay_credential
+from app.connectors.ebay.decision_state import item_decision
 from app.connectors.ebay.mapper import (
     map_and_post_transaction,
     normalize_payout_as_txn,
@@ -69,7 +70,7 @@ DEFAULT_LOOP_INTERVAL_S = int(os.getenv("EBAY_SYNC_INTERVAL_S", "3600"))
 EBAY_WINDOW_OVERLAP = timedelta(days=1)
 
 _ADVANCE_MAPPER_OUTCOMES = frozenset({
-    "posted", "blocked_idempotent", "skipped_zero_amount",
+    "posted", "blocked_idempotent", "skipped_zero_amount", "human_rejected",
 })
 _REVIEW_MAPPER_OUTCOMES = frozenset({
     "queued_for_confirm", "queued_first_run", "blocked_materiality",
@@ -497,6 +498,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         "posted": 0,
         "queued": 0,
         "skipped": 0,
+        "rejected": 0,
+        "rejected_items": [],
         "errors": [],
     }
 
@@ -611,11 +614,29 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     blocked_now: dict[str, Any] | None = None
     blocked_resolved = False
 
-    async def process_item(session: Any, txn: dict[str, Any]) -> str:
+    async def process_item(
+        session: Any,
+        txn: dict[str, Any],
+        *,
+        decision: str | None = None,
+    ) -> str:
         """Return advance, await, fail, or block for one mapper outcome."""
         nonlocal blocked_now
         nonlocal blocked_resolved
         external_id = _txn_id(txn)
+        if decision == "rejected":
+            # A human rejection is an explicit, durable decision. It advances
+            # this one item without posting and without creating another
+            # pending approval on the next overlap read.
+            failure_counts.pop(external_id, None)
+            summary["rejected"] += 1
+            summary["rejected_items"].append({
+                "id": external_id,
+                "decision": "rejected",
+            })
+            if blocked_item is not None and external_id == blocked_item.get("id"):
+                blocked_resolved = True
+            return "advance"
         try:
             async with session.begin_nested():
                 result = await map_and_post_transaction(
@@ -625,6 +646,11 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                     txn=txn,
                     actor_uc_uid="agent:ebay_sync",
                     actor_agent_id="ebay_sync_worker",
+                    # This flag is derived from the locked connector state,
+                    # never from approval payload fields. The mapper still
+                    # derives accounts, dates, descriptions, and amounts from
+                    # the raw eBay item returned by the API.
+                    first_run_confirmed=decision == "approved",
                 )
         except Exception as exc:
             error_text = f"{exc.__class__.__name__}: {exc}"
@@ -736,18 +762,24 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         journal rows already committed for earlier items.
         """
         async with workspace_session(SessionLocal, workspace_id) as item_session:
-            await item_session.execute(
-                text(
-                    """
-                    SELECT id FROM connector_state
-                    WHERE entity_id = :eid AND connector_name = 'ebay_finances'
-                      AND connector_instance_name = 'default'
-                    FOR UPDATE
-                    """
-                ),
-                {"eid": str(entity_id)},
+            row = (
+                await item_session.execute(
+                    text(
+                        """
+                        SELECT id, state FROM connector_state
+                        WHERE entity_id = :eid AND connector_name = 'ebay_finances'
+                          AND connector_instance_name = 'default'
+                        FOR UPDATE
+                        """
+                    ),
+                    {"eid": str(entity_id)},
+                )
+            ).first()
+            state = getattr(row, "state", None) if row is not None else None
+            decision = item_decision(
+                state if isinstance(state, dict) else {}, _txn_id(txn)
             )
-            return await process_item(item_session, txn)
+            return await process_item(item_session, txn, decision=decision)
 
     payout_page_offset = payout_offset
     for index, payout in enumerate(payouts_to_process):

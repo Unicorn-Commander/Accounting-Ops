@@ -296,6 +296,12 @@ async def decide_approval(
                 session, approval_id=approval_id, new_status="rejected",
                 decided_by=workspace.user_uc_uid,
             )
+            if subject_type == "ebay_post_transaction":
+                await _record_ebay_decision(
+                    session, entity_id=entity_id, approval_id=approval_id,
+                    payload=payload, decision="reject",
+                    decided_by=workspace.user_uc_uid,
+                )
             response = {
                 "ok": True,
                 "approval_id": str(approval_id),
@@ -377,6 +383,11 @@ async def decide_approval(
                     note=body.note,
                     category_override=body.category_override,
                 )
+            elif subject_type == "ebay_post_transaction":
+                # The next eBay worker pass replays the raw item through the
+                # normal mapper after this durable human decision. The
+                # approval payload is never used as accounting input.
+                applied = {"queued_for_sync": True}
             else:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -389,12 +400,18 @@ async def decide_approval(
                 session, approval_id=approval_id, new_status="approved",
                 decided_by=workspace.user_uc_uid,
             )
+            if subject_type == "ebay_post_transaction":
+                await _record_ebay_decision(
+                    session, entity_id=entity_id, approval_id=approval_id,
+                    payload=payload, decision="approve",
+                    decided_by=workspace.user_uc_uid,
+                )
             response = {
                 "ok": True,
                 "approval_id": str(approval_id),
                 "decision": "approved",
                 "subject_type": subject_type,
-                "applied": True,
+                "applied": subject_type != "ebay_post_transaction",
                 **applied,
             }
             audit_id = await write_decision_audit(
@@ -596,6 +613,31 @@ async def _mark_decided(
         ),
         {"status": new_status, "uid": decided_by, "id": str(approval_id)},
     )
+
+
+async def _record_ebay_decision(
+    session,
+    *,
+    entity_id: UUID,
+    approval_id: UUID,
+    payload: dict,
+    decision: str,
+    decided_by: str | None,
+) -> None:
+    """Record an eBay decision in connector_state in this same transaction."""
+    from app.connectors.ebay.decision_state import record_ebay_decision
+
+    try:
+        await record_ebay_decision(
+            session,
+            entity_id=entity_id,
+            transaction_id=str(payload.get("ebay_transaction_id") or "").strip(),
+            approval_id=str(approval_id),
+            decision=decision,
+            decided_by=decided_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 async def _approve_recategorization(

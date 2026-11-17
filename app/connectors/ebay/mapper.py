@@ -369,6 +369,7 @@ async def map_and_post_transaction(
     txn: dict[str, Any],
     actor_uc_uid: str,
     actor_agent_id: str | None = None,
+    first_run_confirmed: bool = False,
 ) -> MapResult:
     """Map ONE eBay transaction to a journal entry and post it.
 
@@ -573,7 +574,7 @@ async def map_and_post_transaction(
     # of materiality. The operator eyeballs them and approves; after that we trust
     # the mapper.
     existing_ebay_count = await _count_existing_ebay_posts(session, entity_id=entity_id)
-    if existing_ebay_count < FIRST_RUN_REVIEW_LIMIT:
+    if existing_ebay_count < FIRST_RUN_REVIEW_LIMIT and not first_run_confirmed:
         approval_id = await _enqueue_for_review(
             session,
             workspace_id=workspace_id,

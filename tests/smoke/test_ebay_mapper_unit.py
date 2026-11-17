@@ -365,6 +365,22 @@ async def test_first_run_exactly_at_threshold_posts():
 
 
 @pytest.mark.asyncio
+async def test_approved_first_run_item_bypasses_only_the_review_guard():
+    """A worker-approved raw item posts even while the entity has zero posts."""
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
+    result = await ebay_mapper.map_and_post_transaction(
+        session,
+        workspace_id="wid",
+        entity_id="eid",
+        txn=_txn("TXN-APPROVED-FIRST-RUN", "SALE", "9.99"),
+        actor_uc_uid="agent:ebay_sync",
+        first_run_confirmed=True,
+    )
+    assert result.outcome == "posted"
+    assert not session.approvals
+
+
+@pytest.mark.asyncio
 async def test_pii_not_in_payee_or_description():
     """Buyer info must never land in the journal entry's payee/description."""
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
