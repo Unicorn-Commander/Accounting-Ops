@@ -109,10 +109,8 @@ async def _fetch(app_db: Any, workspace_id: UUID, sql: str, *args: Any) -> Any:
             return await conn.fetch(sql, *args)
 
 
-def _caller(role: str) -> tuple[WorkspaceContext, AuthContext]:
-    ctx = WorkspaceContext(
-        TEST_WORKSPACE_ID, "integration", role, HUMAN, None, None, False
-    )
+def _caller(role: str, workspace_id: UUID) -> tuple[WorkspaceContext, AuthContext]:
+    ctx = WorkspaceContext(workspace_id, "integration", role, HUMAN, None, None, False)
     auth = AuthContext(
         HUMAN,
         None,
@@ -128,10 +126,12 @@ def _caller(role: str) -> tuple[WorkspaceContext, AuthContext]:
     return ctx, auth
 
 
-async def _call(role: str, **body: Any) -> dict[str, Any]:
-    ctx, auth = _caller(role)
+async def _call(
+    role: str, workspace_id: UUID = TEST_WORKSPACE_ID, **body: Any
+) -> dict[str, Any]:
+    ctx, auth = _caller(role, workspace_id)
     return await resolve_stripe_blocked_item(
-        workspace_id=TEST_WORKSPACE_ID,
+        workspace_id=workspace_id,
         body=ResolveBlockedItemRequest(**body),
         workspace=ctx,
         auth=auth,
@@ -147,27 +147,16 @@ async def test_manual_resolution_unblocks_without_posting(
     newest = f"stripe-pg-resolve-{run}-newest"
     blocked = f"stripe-pg-resolve-{run}-blocked"
     oldest = f"stripe-pg-resolve-{run}-oldest"
-    other_ws = f"stripe-pg-resolve-{run}-other-ws"
-    feeds = {
-        TEST_WORKSPACE_ID: [
-            _txn(newest, CREATED + 2),
-            _txn(blocked, CREATED + 1),
-            _txn(oldest, CREATED),
-        ],
-        TEST_WORKSPACE_B_ID: [_txn(other_ws, CREATED)],
-    }
-    entities = {
-        TEST_WORKSPACE_ID: TEST_ENTITY_ID,
-        TEST_WORKSPACE_B_ID: TEST_WORKSPACE_B_ENTITY_ID,
-    }
+    other_ws_blocked = f"stripe-pg-resolve-{run}-other-ws"
+    feed = [
+        _txn(newest, CREATED + 2),
+        _txn(blocked, CREATED + 1),
+        _txn(oldest, CREATED),
+    ]
     await _seed(db, TEST_WORKSPACE_ID, TEST_ENTITY_ID)
-    await _seed(db, TEST_WORKSPACE_B_ID, TEST_WORKSPACE_B_ENTITY_ID)
-
-    current_ws: list[UUID] = []
     seen: list[str] = []
 
     async def load_credential(workspace_id: UUID, **kwargs: Any) -> StripeCredentialBlob:
-        current_ws[:] = [workspace_id]
         return StripeCredentialBlob(
             workspace_id=workspace_id,
             credential_id=workspace_id,
@@ -175,14 +164,14 @@ async def test_manual_resolution_unblocks_without_posting(
             api_key="rk_test_000000000000000000000000",
             account_id="acct_test_fictional",
             environment="test",
-            entity_id=str(entities[workspace_id]),
+            entity_id=str(TEST_ENTITY_ID),
         )
 
     async def entity_for_credential(workspace_id: UUID, *args: Any) -> UUID:
-        return entities[workspace_id]
+        return TEST_ENTITY_ID
 
     async def paginator(*args: Any, starting_after: str | None = None, **kwargs: Any):
-        items = feeds[current_ws[0]]
+        items = feed
         if starting_after:
             ids = [item["id"] for item in items]
             items = items[ids.index(starting_after) + 1 :]
@@ -208,17 +197,6 @@ async def test_manual_resolution_unblocks_without_posting(
     monkeypatch.setattr(stripe_sync, "map_and_post_balance_transaction", mapper)
     monkeypatch.setattr(stripe_mapper, "_count_existing_stripe_posts", existing_posts)
     monkeypatch.setattr(stripe_sync, "reconcile_one_entity", reconcile)
-
-    # Workspace B posts one real journal entry: the foreign id used below.
-    assert (await stripe_sync._sync_one_workspace(TEST_WORKSPACE_B_ID))["last_outcome"] == "ok"
-    foreign_je = (
-        await _fetch(
-            app_db,
-            TEST_WORKSPACE_B_ID,
-            "SELECT id FROM journal_entry WHERE source_external_id = $1",
-            other_ws,
-        )
-    )[0]["id"]
 
     # Three failing passes block the item in workspace A.
     outcomes = [
@@ -254,9 +232,34 @@ async def test_manual_resolution_unblocks_without_posting(
         await _call("admin", bt_id=newest, journal_entry_id=local_je)
     assert wrong.value.status_code == 409
 
+    # Workspace B has its own blocked item. Workspace A's journal entry is not
+    # in B's books, so B cannot cite it. B's books stay empty: the RLS suite
+    # relies on that.
+    await _seed(db, TEST_WORKSPACE_B_ID, TEST_WORKSPACE_B_ENTITY_ID)
+    b_state = {"blocked_item": {"id": other_ws_blocked, "amount": 1000, "currency": "usd"}}
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await _scoped(conn, TEST_WORKSPACE_B_ID)
+            await conn.execute(
+                """
+                UPDATE connector_state SET state = $2::jsonb
+                WHERE entity_id = $1 AND connector_name = 'stripe_api'
+                """,
+                str(TEST_WORKSPACE_B_ENTITY_ID),
+                json.dumps(b_state),
+            )
     with pytest.raises(HTTPException) as foreign:
-        await _call("admin", bt_id=blocked, journal_entry_id=foreign_je)
+        await _call(
+            "admin", TEST_WORKSPACE_B_ID, bt_id=other_ws_blocked, journal_entry_id=local_je
+        )
     assert foreign.value.status_code == 422
+    b_after = await _fetch(
+        app_db,
+        TEST_WORKSPACE_B_ID,
+        "SELECT state FROM connector_state WHERE entity_id = $1 AND connector_name = 'stripe_api'",
+        str(TEST_WORKSPACE_B_ENTITY_ID),
+    )
+    assert _json(b_after[0]["state"]) == b_state
 
     response = await _call("owner", bt_id=blocked, journal_entry_id=local_je)
     assert response["posted"] is False
@@ -281,14 +284,15 @@ async def test_manual_resolution_unblocks_without_posting(
         app_db,
         TEST_WORKSPACE_ID,
         """
-        SELECT reasoning, outcome, request_payload FROM decision_audit
+        SELECT reasoning_trace, outcome, request_payload FROM decision_audit
         WHERE tool_name = 'stripe_blocked_item_resolve' AND id = $1
         """,
         response["audit_id"],
     )
     assert len(audits) == 1
     assert audits[0]["outcome"] == "resolved_elsewhere"
-    assert HUMAN in audits[0]["reasoning"] and str(local_je) in audits[0]["reasoning"]
+    assert HUMAN in audits[0]["reasoning_trace"]
+    assert str(local_je) in audits[0]["reasoning_trace"]
 
     approval = (
         await _fetch(
