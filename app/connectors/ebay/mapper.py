@@ -295,6 +295,25 @@ async def _enqueue_for_review(
     post the entry without re-mapping. subject_id is a fresh UUID because the
     eBay txn isn't yet in the journal.
     """
+    existing = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text FROM approval_queue
+                WHERE entity_id = :eid
+                  AND subject_type = 'ebay_post_transaction'
+                  AND status = 'pending'
+                  AND payload ->> 'ebay_transaction_id' = :ebay_id
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "ebay_id": ebay_transaction_id},
+        )
+    ).first()
+    if existing:
+        return UUID(str(existing.id))
+
     approval_id = uuid4()
     subject_id = uuid4()
     payload = {

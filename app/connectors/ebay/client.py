@@ -488,14 +488,18 @@ class EbayFinancesClient:
         filters: list[str] = []
         if payout_id:
             filters.append(f"payoutId:{{{payout_id}}}")
+        date_bounded = payout_id is None
         out: list[dict[str, Any]] = []
-        window_start = start_date
-        window_end = end_date
+        window_start = start_date if date_bounded else None
+        window_end = end_date if date_bounded else None
         pages = 0
         while pages < max_pages:
-            params["filter"] = ",".join(
-                filters + [_build_date_filter("transactionDate", window_start, window_end)]
-            ) if (filters or (window_start or window_end)) else None
+            date_filter = (
+                [_build_date_filter("transactionDate", window_start, window_end)]
+                if date_bounded and (window_start or window_end)
+                else []
+            )
+            params["filter"] = ",".join(filters + date_filter) or None
             if params.get("filter") is None:
                 params.pop("filter", None)
             data = await self._request("GET", "/transaction", params=params)
@@ -509,19 +513,21 @@ class EbayFinancesClient:
                     window_end=window_end,
                     continuation_invalid=bool(offset),
                 )
-            page_timestamps = _item_timestamps(page, "transactionDate")
-            if window_end is None and page_timestamps:
-                window_end = max(page_timestamps) + timedelta(seconds=1)
-            if window_start is None and page_timestamps:
-                window_start = max(page_timestamps) - timedelta(
-                    days=DEFAULT_EBAY_WINDOW_DAYS
-                )
+            if date_bounded:
+                page_timestamps = _item_timestamps(page, "transactionDate")
+                if window_end is None and page_timestamps:
+                    window_end = max(page_timestamps) + timedelta(seconds=1)
+                if window_start is None and page_timestamps:
+                    window_start = max(page_timestamps) - timedelta(
+                        days=DEFAULT_EBAY_WINDOW_DAYS
+                    )
             remaining = output_limit - len(out)
             accepted = page[:remaining]
             out.extend(
                 item
                 for item in accepted
-                if window_start is None
+                if not date_bounded
+                or window_start is None
                 or _item_timestamp(item, "transactionDate") is None
                 or _item_timestamp(item, "transactionDate") >= window_start
             )

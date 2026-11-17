@@ -749,157 +749,148 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             )
             return await process_item(item_session, txn)
 
-    async with workspace_session(SessionLocal, workspace_id) as _session:
-        payout_page_offset = payout_offset
-        for index, payout in enumerate(payouts_to_process):
-            payout_id = payout.get("payoutId") or ""
-            state = transaction_cursors.get(payout_id) or {}
-            transaction_offset = _offset(state.get("offset"))
-            payout_page_offset_for_state = _offset(
-                state.get("payout_page_offset"), payout_page_offset
+    payout_page_offset = payout_offset
+    for index, payout in enumerate(payouts_to_process):
+        payout_id = payout.get("payoutId") or ""
+        state = transaction_cursors.get(payout_id) or {}
+        transaction_offset = _offset(state.get("offset"))
+        payout_page_offset_for_state = _offset(
+            state.get("payout_page_offset"), payout_page_offset
+        )
+        payout_index = _offset(state.get("payout_index"), index)
+        payout_posted = bool(state.get("payout_posted"))
+        try:
+            txns = await client.list_transactions(
+                payout_id=payout_id,
+                limit=500,
+                offset=transaction_offset,
             )
-            payout_index = _offset(state.get("payout_index"), index)
-            payout_posted = bool(state.get("payout_posted"))
-            try:
+            if txns.continuation_invalid:
+                transaction_offset = 0
                 txns = await client.list_transactions(
                     payout_id=payout_id,
-                    start_date=start_date,
-                    end_date=end_date,
                     limit=500,
-                    offset=transaction_offset,
+                    offset=0,
                 )
-                if txns.continuation_invalid:
-                    transaction_offset = 0
-                    txns = await client.list_transactions(
-                        payout_id=payout_id,
-                        start_date=start_date,
-                        end_date=end_date,
-                        limit=500,
-                        offset=0,
-                    )
-                set_window(txns)
-                if start_date is not None and end_date is not None:
-                    cursor["start_date"] = _iso_datetime(start_date)
-                    cursor["end_date"] = _iso_datetime(end_date)
-            except EbayApiError as exc:
-                transaction_cursors[payout_id] = {
-                    "offset": transaction_offset,
-                    "payout": payout,
-                    "payout_page_offset": payout_page_offset_for_state,
-                    "payout_index": payout_index,
-                    "payout_posted": payout_posted,
-                }
-                summary["errors"].append(
-                    f"list_transactions payout={payout_id[:8] or '?'}: {exc}"
-                )
-                processing_error = True
-                break
-            summary["transactions_seen"] += len(txns)
-            for txn_index, txn in enumerate(txns):
-                transaction_cursors[payout_id] = {
-                    "offset": transaction_offset + txn_index,
-                    "payout": payout,
-                    "payout_page_offset": payout_page_offset_for_state,
-                    "payout_index": payout_index,
-                    "payout_posted": payout_posted,
-                }
-                status = await process_item_in_transaction(txn)
-                if status != "advance":
-                    processing_error = status == "fail" or status == "block"
-                    awaiting_review = status == "await"
-                    break
-            if processing_error or awaiting_review:
-                break
-            if txns.exhausted:
-                transaction_cursors.pop(payout_id, None)
-            else:
-                transaction_cursors[payout_id] = {
-                    "offset": txns.continuation_offset,
-                    "payout": payout,
-                    "payout_page_offset": payout_page_offset_for_state,
-                    "payout_index": payout_index,
-                    "payout_posted": payout_posted,
-                }
-                continue
-            if payout_posted:
-                cursor["payouts"]["offset"] = max(
-                    _offset(cursor["payouts"].get("offset")),
-                    payout_page_offset_for_state + payout_index + 1,
-                )
-                continue
-            payout_txn = normalize_payout_as_txn(payout)
+        except EbayApiError as exc:
             transaction_cursors[payout_id] = {
-                "offset": 0,
+                "offset": transaction_offset,
                 "payout": payout,
                 "payout_page_offset": payout_page_offset_for_state,
                 "payout_index": payout_index,
-                "payout_posted": False,
+                "payout_posted": payout_posted,
             }
-            status = await process_item_in_transaction(payout_txn)
+            summary["errors"].append(
+                f"list_transactions payout={payout_id[:8] or '?'}: {exc}"
+            )
+            processing_error = True
+            break
+        summary["transactions_seen"] += len(txns)
+        for txn_index, txn in enumerate(txns):
+            transaction_cursors[payout_id] = {
+                "offset": transaction_offset + txn_index,
+                "payout": payout,
+                "payout_page_offset": payout_page_offset_for_state,
+                "payout_index": payout_index,
+                "payout_posted": payout_posted,
+            }
+            status = await process_item_in_transaction(txn)
             if status != "advance":
-                processing_error = status in {"fail", "block"}
+                processing_error = status == "fail" or status == "block"
                 awaiting_review = status == "await"
                 break
+        if processing_error or awaiting_review:
+            break
+        if txns.exhausted:
             transaction_cursors.pop(payout_id, None)
+        else:
+            transaction_cursors[payout_id] = {
+                "offset": txns.continuation_offset,
+                "payout": payout,
+                "payout_page_offset": payout_page_offset_for_state,
+                "payout_index": payout_index,
+                "payout_posted": payout_posted,
+            }
+            continue
+        if payout_posted:
             cursor["payouts"]["offset"] = max(
                 _offset(cursor["payouts"].get("offset")),
                 payout_page_offset_for_state + payout_index + 1,
             )
+            continue
+        payout_txn = normalize_payout_as_txn(payout)
+        transaction_cursors[payout_id] = {
+            "offset": 0,
+            "payout": payout,
+            "payout_page_offset": payout_page_offset_for_state,
+            "payout_index": payout_index,
+            "payout_posted": False,
+        }
+        status = await process_item_in_transaction(payout_txn)
+        if status != "advance":
+            processing_error = status in {"fail", "block"}
+            awaiting_review = status == "await"
+            break
+        transaction_cursors.pop(payout_id, None)
+        cursor["payouts"]["offset"] = max(
+            _offset(cursor["payouts"].get("offset")),
+            payout_page_offset_for_state + payout_index + 1,
+        )
 
-        if not processing_error and not awaiting_review:
-            if payouts.exhausted:
-                cursor["payouts"].pop("offset", None)
-            else:
-                cursor["payouts"]["offset"] = max(
-                    _offset(cursor["payouts"].get("offset")),
-                    _offset(payouts.continuation_offset),
-                )
+    if not processing_error and not awaiting_review:
+        if payouts.exhausted:
+            cursor["payouts"].pop("offset", None)
+        else:
+            cursor["payouts"]["offset"] = max(
+                _offset(cursor["payouts"].get("offset")),
+                _offset(payouts.continuation_offset),
+            )
 
-        if not processing_error and not awaiting_review:
-            loose_state = transaction_cursors.get("__loose__") or {}
-            loose_offset = _offset(loose_state.get("offset"))
-            try:
+    if not processing_error and not awaiting_review:
+        loose_state = transaction_cursors.get("__loose__") or {}
+        loose_offset = _offset(loose_state.get("offset"))
+        try:
+            loose_txns = await client.list_transactions(
+                start_date=start_date,
+                end_date=end_date,
+                limit=500,
+                offset=loose_offset,
+            )
+            if loose_txns.continuation_invalid:
+                loose_offset = 0
                 loose_txns = await client.list_transactions(
                     start_date=start_date,
                     end_date=end_date,
                     limit=500,
-                    offset=loose_offset,
+                    offset=0,
                 )
-                if loose_txns.continuation_invalid:
-                    loose_offset = 0
-                    loose_txns = await client.list_transactions(
-                        start_date=start_date,
-                        end_date=end_date,
-                        limit=500,
-                        offset=0,
-                    )
-            except EbayApiError as exc:
-                summary["errors"].append(f"list_transactions(loose): {exc}")
-                transaction_cursors["__loose__"] = {"offset": loose_offset}
-                processing_error = True
-                loose_txns = None
-            if loose_txns is not None:
-                set_window(loose_txns)
-                if start_date is not None and end_date is not None:
-                    cursor["start_date"] = _iso_datetime(start_date)
-                    cursor["end_date"] = _iso_datetime(end_date)
-                summary["transactions_seen"] += len(loose_txns)
-                for txn_index, txn in enumerate(loose_txns):
+        except EbayApiError as exc:
+            summary["errors"].append(f"list_transactions(loose): {exc}")
+            transaction_cursors["__loose__"] = {"offset": loose_offset}
+            processing_error = True
+            loose_txns = None
+        if loose_txns is not None:
+            set_window(loose_txns)
+            if start_date is not None and end_date is not None:
+                cursor["start_date"] = _iso_datetime(start_date)
+                cursor["end_date"] = _iso_datetime(end_date)
+            summary["transactions_seen"] += len(loose_txns)
+            for txn_index, txn in enumerate(loose_txns):
+                transaction_cursors["__loose__"] = {
+                    "offset": loose_offset + txn_index
+                }
+                status = await process_item_in_transaction(txn)
+                if status != "advance":
+                    processing_error = status in {"fail", "block"}
+                    awaiting_review = status == "await"
+                    break
+            if not processing_error and not awaiting_review:
+                if loose_txns.exhausted:
+                    transaction_cursors.pop("__loose__", None)
+                else:
                     transaction_cursors["__loose__"] = {
-                        "offset": loose_offset + txn_index
+                        "offset": loose_txns.continuation_offset
                     }
-                    status = await process_item_in_transaction(txn)
-                    if status != "advance":
-                        processing_error = status in {"fail", "block"}
-                        awaiting_review = status == "await"
-                        break
-                if not processing_error and not awaiting_review:
-                    if loose_txns.exhausted:
-                        transaction_cursors.pop("__loose__", None)
-                    else:
-                        transaction_cursors["__loose__"] = {
-                            "offset": loose_txns.continuation_offset
-                        }
 
     if blocked_now is not None:
         blocked_item = blocked_now
