@@ -7,6 +7,7 @@ import time
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from starlette.requests import Request
 
 from app.api.invoices import _public_token_ok
@@ -107,7 +108,15 @@ def test_invoice_money_models_materialize_decimal_values():
     payment = RecordPaymentBody(amount="10.01")
     assert isinstance(line.unit_price, Decimal)
     assert isinstance(line.amount, Decimal)
+    assert line.tax_amount == Decimal("0")
+    explicit_zero = LineItemBody(description="Work", tax_amount="0.00")
+    assert str(explicit_zero.tax_amount) == "0.00"
     assert isinstance(payment.amount, Decimal)
+
+
+def test_invoice_line_tax_amount_rejects_negative_values():
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        LineItemBody(description="Work", tax_amount="-0.01")
 
 
 @pytest.mark.asyncio

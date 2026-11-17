@@ -23,7 +23,9 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -406,6 +408,72 @@ async def test_create_invoice_untaxed_single_row():
     assert je["debit"] == _COA["1100"]
     assert je["credit"] == _COA["4030"]
     assert Decimal(str(je["amount"])) == Decimal("250.00")
+    assert s.invoice_lines[-1]["tamt"] == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_create_invoice_preserves_explicit_zero_tax_amount():
+    s = _StubSession()
+    await ar.create_invoice_from_draft(
+        s, workspace_id="wid", entity_id="eid", actor_uc_uid="tester",
+        external_source="manual", external_ref=None,
+        customer={"name": "Explicit Zero Customer"},
+        line_items=[{
+            "description": "Setup", "quantity": 1, "unit_price": "250.00",
+            "tax_amount": "0.00",
+        }],
+    )
+    assert str(s.invoice_lines[-1]["tamt"]) == "0.00"
+
+
+@pytest.mark.asyncio
+async def test_create_invoice_rejects_negative_tax_amount():
+    s = _StubSession()
+    with pytest.raises(ar.InvoiceError, match="line 1: tax_amount cannot be negative"):
+        await ar.create_invoice_from_draft(
+            s, workspace_id="wid", entity_id="eid", actor_uc_uid="tester",
+            external_source="manual", external_ref=None,
+            customer={"name": "Negative Tax Customer"},
+            line_items=[{
+                "description": "Setup", "quantity": 1, "unit_price": "250.00",
+                "tax_amount": "-0.01",
+            }],
+        )
+
+
+@pytest.mark.asyncio
+async def test_mcp_create_invoice_defaults_missing_tax_and_rejects_negative(monkeypatch):
+    import contextlib
+
+    import app.tools.ar_invoicing as invoice_tools
+
+    workspace_id, entity_id = uuid4(), uuid4()
+    session = _StubSession()
+
+    async def fake_authorize(*args, **kwargs):
+        return SimpleNamespace(workspace_id=workspace_id, user_uc_uid="tester")
+
+    @contextlib.asynccontextmanager
+    async def fake_workspace_session(*args, **kwargs):
+        yield session
+
+    monkeypatch.setattr(invoice_tools, "authorize_workspace", fake_authorize)
+    monkeypatch.setattr(invoice_tools, "workspace_session", fake_workspace_session)
+
+    await invoice_tools.create_invoice_from_draft(
+        workspace_id, entity_id, "manual", None, {"name": "MCP Customer"},
+        [{"description": "Work", "quantity": 1, "unit_price": "25.00"}],
+    )
+    assert session.invoice_lines[-1]["tamt"] == Decimal("0")
+
+    with pytest.raises(ValueError, match="line 1: tax_amount cannot be negative"):
+        await invoice_tools.create_invoice_from_draft(
+            workspace_id, entity_id, "manual", None, {"name": "MCP Customer"},
+            [{
+                "description": "Work", "quantity": 1, "unit_price": "25.00",
+                "tax_amount": "-0.01",
+            }],
+        )
 
 
 @pytest.mark.asyncio
