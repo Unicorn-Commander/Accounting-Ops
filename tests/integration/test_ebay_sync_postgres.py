@@ -193,7 +193,9 @@ async def test_review_approval_is_deduped_across_three_mapper_passes(
             )
             outcomes.append(result)
 
-    assert all(result.outcome == "queued_first_run" for result in outcomes)
+    assert all(
+        result.outcome == "queued_first_run" for result in outcomes
+    ), [result.outcome for result in outcomes]
     assert outcomes[0].approval_id == outcomes[1].approval_id == outcomes[2].approval_id
     async with db.acquire() as conn:
         count = await conn.fetchval(
