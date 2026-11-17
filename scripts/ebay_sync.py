@@ -638,6 +638,11 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 blocked_resolved = True
             return "advance"
         try:
+            mapper_options = (
+                {"first_run_confirmed": True}
+                if decision == "approved"
+                else {}
+            )
             async with session.begin_nested():
                 result = await map_and_post_transaction(
                     session,
@@ -646,11 +651,11 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                     txn=txn,
                     actor_uc_uid="agent:ebay_sync",
                     actor_agent_id="ebay_sync_worker",
-                    # This flag is derived from the locked connector state,
+                    # This option is derived from the locked connector state,
                     # never from approval payload fields. The mapper still
                     # derives accounts, dates, descriptions, and amounts from
                     # the raw eBay item returned by the API.
-                    first_run_confirmed=decision == "approved",
+                    **mapper_options,
                 )
         except Exception as exc:
             error_text = f"{exc.__class__.__name__}: {exc}"

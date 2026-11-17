@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import text
 
 from app.db import SessionLocal
+from app.connectors.ebay.decision_state import record_ebay_decision
 from app.connectors.ebay import mapper as ebay_mapper
 from app.connectors.ebay.client import (
     EbayCredentialBlob,
@@ -416,3 +417,353 @@ async def test_db_error_rolls_back_only_failed_ebay_item(
         state_json = json.loads(state_json)
     assert state_json["_ebay_failure_counts"] == {failed_id: 1}
     assert state_json["_ebay_continuation_cursor"]["payouts"]["offset"] == 1
+
+
+@pytest.mark.asyncio
+async def test_rejected_ebay_item_is_durable_and_advances_without_reasking(
+    db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del seeded_workspace
+    transaction_id = "ebay-pg-human-reject"
+    window_start = datetime(2026, 11, 9, tzinfo=timezone.utc)
+    window_end = datetime(2026, 11, 10, 0, 0, 1, tzinfo=timezone.utc)
+    txn = {
+        "transactionId": transaction_id,
+        "transactionType": "SALE",
+        "amount": {"value": "9.00", "currency": "USD"},
+        "transactionDate": "2026-11-05T00:00:00+00:00",
+    }
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            await conn.executemany(
+                """
+                INSERT INTO chart_of_account (
+                    workspace_id, entity_id, account_number, account_name,
+                    canonical_form, account_type, normal_balance,
+                    is_active, is_system, notes
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, true, false, $8)
+                ON CONFLICT (entity_id, account_number)
+                DO UPDATE SET is_active = true
+                """,
+                [
+                    (str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID), "1220", "eBay receivable", "1220·eBay receivable", "asset", "debit", "eBay decision test"),
+                    (str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID), "4150", "eBay revenue", "4150·eBay revenue", "revenue", "credit", "eBay decision test"),
+                ],
+            )
+            await conn.execute(
+                """
+                DELETE FROM approval_queue
+                WHERE entity_id = $1 AND payload ->> 'ebay_transaction_id' = $2
+                """,
+                str(TEST_ENTITY_ID), transaction_id,
+            )
+            await conn.execute(
+                "DELETE FROM journal_entry WHERE entity_id = $1 AND source_external_id = $2",
+                str(TEST_ENTITY_ID), transaction_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO connector_state (
+                    id, workspace_id, entity_id, connector_name,
+                    connector_instance_name, state, last_sync_at
+                ) VALUES (gen_random_uuid(), $1, $2, 'ebay_finances', 'default', '{}'::jsonb, NULL)
+                ON CONFLICT (entity_id, connector_name, connector_instance_name)
+                DO UPDATE SET state = '{}'::jsonb, last_sync_at = NULL
+                """,
+                str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID),
+            )
+
+    async def no_existing_posts(*args: Any, **kwargs: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(ebay_mapper, "_count_existing_ebay_posts", no_existing_posts)
+
+    async with workspace_session(SessionLocal, TEST_WORKSPACE_ID) as session:
+        queued = await ebay_mapper.map_and_post_transaction(
+            session,
+            workspace_id=str(TEST_WORKSPACE_ID),
+            entity_id=str(TEST_ENTITY_ID),
+            txn=txn,
+            actor_uc_uid="agent:ebay_sync",
+        )
+    assert queued.outcome == "queued_first_run"
+    assert queued.approval_id is not None
+
+    async with workspace_session(SessionLocal, TEST_WORKSPACE_ID) as session:
+        await session.execute(
+            text(
+                """
+                UPDATE approval_queue
+                SET status = CAST('rejected' AS approval_status),
+                    decided_by_uc_uid = 'fictional-reviewer', decided_at = now()
+                WHERE id = :id
+                """
+            ),
+            {"id": str(queued.approval_id)},
+        )
+        await record_ebay_decision(
+            session,
+            entity_id=TEST_ENTITY_ID,
+            transaction_id=transaction_id,
+            approval_id=str(queued.approval_id),
+            decision="reject",
+            decided_by="fictional-reviewer",
+        )
+
+    async def load_credential(*args: Any, **kwargs: Any) -> EbayCredentialBlob:
+        return EbayCredentialBlob(
+            workspace_id=TEST_WORKSPACE_ID,
+            credential_id=TEST_WORKSPACE_ID,
+            label="postgres human reject test",
+            client_id="fictional-app",
+            client_secret="fictional-secret",
+            refresh_token="fictional-refresh",
+            environment="sandbox",
+            entity_id=str(TEST_ENTITY_ID),
+        )
+
+    class FakeClient:
+        async def list_payouts(self, **kwargs: Any) -> EbayPaginationResult:
+            return EbayPaginationResult(
+                items=[], exhausted=True, continuation_offset=None,
+                window_start=window_start, window_end=window_end,
+            )
+
+        async def list_transactions(self, **kwargs: Any) -> EbayPaginationResult:
+            return EbayPaginationResult(items=[txn], exhausted=True, continuation_offset=None)
+
+    async def entity_for_credential(*args: Any, **kwargs: Any) -> Any:
+        return TEST_ENTITY_ID
+
+    async def no_reconciliation(*args: Any, **kwargs: Any) -> dict[str, int]:
+        return {"checked_payouts": 0, "matched": 0, "unmatched": 0}
+
+    monkeypatch.setattr(ebay_sync, "load_ebay_credential", load_credential)
+    monkeypatch.setattr(ebay_sync, "_entity_for_credential", entity_for_credential)
+    monkeypatch.setattr(
+        ebay_sync.EbayFinancesClient,
+        "from_credential",
+        classmethod(lambda cls, blob: FakeClient()),
+    )
+    monkeypatch.setattr(ebay_sync, "reconcile_one_entity", no_reconciliation)
+
+    summaries = [
+        await ebay_sync._sync_one_workspace(TEST_WORKSPACE_ID)
+        for _ in range(3)
+    ]
+    assert all(summary["rejected"] == 1 for summary in summaries)
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            approval_counts = await conn.fetchrow(
+                """
+                SELECT count(*) AS total,
+                       count(*) FILTER (WHERE status = 'pending') AS pending
+                FROM approval_queue
+                WHERE entity_id = $1 AND payload ->> 'ebay_transaction_id' = $2
+                """,
+                str(TEST_ENTITY_ID), transaction_id,
+            )
+            journal_count = await conn.fetchval(
+                """
+                SELECT count(*) FROM journal_entry
+                WHERE entity_id = $1 AND source = 'ebay_finances'
+                  AND source_external_id = $2
+                """,
+                str(TEST_ENTITY_ID), transaction_id,
+            )
+            state = await conn.fetchrow(
+                """
+                SELECT last_sync_at, state FROM connector_state
+                WHERE entity_id = $1 AND connector_name = 'ebay_finances'
+                """,
+                str(TEST_ENTITY_ID),
+            )
+    assert approval_counts["total"] == 1
+    assert approval_counts["pending"] == 0
+    assert journal_count == 0
+    assert state["last_sync_at"].replace(tzinfo=timezone.utc) == window_end
+    state_json = state["state"]
+    if isinstance(state_json, str):
+        state_json = json.loads(state_json)
+    assert state_json["rejected_ebay_items"][transaction_id]
+
+
+@pytest.mark.asyncio
+async def test_approved_first_run_batch_posts_once_and_replays_idempotently(
+    db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del seeded_workspace
+    prefix = "ebay-pg-human-approve"
+    transactions = [
+        {
+            "transactionId": f"{prefix}-{index:02d}",
+            "transactionType": "SALE",
+            "amount": {"value": "9.00", "currency": "USD"},
+            "transactionDate": "2026-11-05T00:00:00+00:00",
+        }
+        for index in range(30)
+    ]
+    window_start = datetime(2026, 11, 9, tzinfo=timezone.utc)
+    window_end = datetime(2026, 11, 10, 0, 0, 1, tzinfo=timezone.utc)
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            await conn.executemany(
+                """
+                INSERT INTO chart_of_account (
+                    workspace_id, entity_id, account_number, account_name,
+                    canonical_form, account_type, normal_balance,
+                    is_active, is_system, notes
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, true, false, $8)
+                ON CONFLICT (entity_id, account_number)
+                DO UPDATE SET is_active = true
+                """,
+                [
+                    (str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID), "1220", "eBay receivable", "1220·eBay receivable", "asset", "debit", "eBay decision batch test"),
+                    (str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID), "4150", "eBay revenue", "4150·eBay revenue", "revenue", "credit", "eBay decision batch test"),
+                ],
+            )
+            ids = [txn["transactionId"] for txn in transactions]
+            await conn.execute(
+                "DELETE FROM approval_queue WHERE entity_id = $1 AND payload ->> 'ebay_transaction_id' = ANY($2::text[])",
+                str(TEST_ENTITY_ID), ids,
+            )
+            await conn.execute(
+                "DELETE FROM journal_entry WHERE entity_id = $1 AND source = 'ebay_finances' AND source_external_id = ANY($2::text[])",
+                str(TEST_ENTITY_ID), ids,
+            )
+            await conn.execute(
+                """
+                INSERT INTO connector_state (
+                    id, workspace_id, entity_id, connector_name,
+                    connector_instance_name, state, last_sync_at
+                ) VALUES (gen_random_uuid(), $1, $2, 'ebay_finances', 'default', '{}'::jsonb, NULL)
+                ON CONFLICT (entity_id, connector_name, connector_instance_name)
+                DO UPDATE SET state = '{}'::jsonb, last_sync_at = NULL
+                """,
+                str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID),
+            )
+
+    async def no_existing_posts(*args: Any, **kwargs: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(ebay_mapper, "_count_existing_ebay_posts", no_existing_posts)
+    queued_ids: list[tuple[str, Any]] = []
+    for txn in transactions:
+        async with workspace_session(SessionLocal, TEST_WORKSPACE_ID) as session:
+            result = await ebay_mapper.map_and_post_transaction(
+                session,
+                workspace_id=str(TEST_WORKSPACE_ID),
+                entity_id=str(TEST_ENTITY_ID),
+                txn=txn,
+                actor_uc_uid="agent:ebay_sync",
+            )
+            assert result.outcome == "queued_first_run"
+            queued_ids.append((txn["transactionId"], result.approval_id))
+
+    async with workspace_session(SessionLocal, TEST_WORKSPACE_ID) as session:
+        for transaction_id, approval_id in queued_ids:
+            await session.execute(
+                text(
+                    """
+                    UPDATE approval_queue
+                    SET status = CAST('approved' AS approval_status),
+                        decided_by_uc_uid = 'fictional-reviewer', decided_at = now()
+                    WHERE id = :id
+                    """
+                ),
+                {"id": str(approval_id)},
+            )
+            await record_ebay_decision(
+                session,
+                entity_id=TEST_ENTITY_ID,
+                transaction_id=transaction_id,
+                approval_id=str(approval_id),
+                decision="approve",
+                decided_by="fictional-reviewer",
+            )
+
+    async def load_credential(*args: Any, **kwargs: Any) -> EbayCredentialBlob:
+        return EbayCredentialBlob(
+            workspace_id=TEST_WORKSPACE_ID,
+            credential_id=TEST_WORKSPACE_ID,
+            label="postgres human approve test",
+            client_id="fictional-app",
+            client_secret="fictional-secret",
+            refresh_token="fictional-refresh",
+            environment="sandbox",
+            entity_id=str(TEST_ENTITY_ID),
+        )
+
+    class FakeClient:
+        async def list_payouts(self, **kwargs: Any) -> EbayPaginationResult:
+            return EbayPaginationResult(
+                items=[], exhausted=True, continuation_offset=None,
+                window_start=window_start, window_end=window_end,
+            )
+
+        async def list_transactions(self, **kwargs: Any) -> EbayPaginationResult:
+            return EbayPaginationResult(items=transactions, exhausted=True, continuation_offset=None)
+
+    async def entity_for_credential(*args: Any, **kwargs: Any) -> Any:
+        return TEST_ENTITY_ID
+
+    async def no_reconciliation(*args: Any, **kwargs: Any) -> dict[str, int]:
+        return {"checked_payouts": 0, "matched": 0, "unmatched": 0}
+
+    monkeypatch.setattr(ebay_sync, "load_ebay_credential", load_credential)
+    monkeypatch.setattr(ebay_sync, "_entity_for_credential", entity_for_credential)
+    monkeypatch.setattr(
+        ebay_sync.EbayFinancesClient,
+        "from_credential",
+        classmethod(lambda cls, blob: FakeClient()),
+    )
+    monkeypatch.setattr(ebay_sync, "reconcile_one_entity", no_reconciliation)
+
+    first = await ebay_sync._sync_one_workspace(TEST_WORKSPACE_ID)
+    second = await ebay_sync._sync_one_workspace(TEST_WORKSPACE_ID)
+    assert first["last_outcome"] == "ok"
+    assert second["last_outcome"] == "ok"
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            journal_count = await conn.fetchval(
+                """
+                SELECT count(*) FROM journal_entry
+                WHERE entity_id = $1 AND source = 'ebay_finances'
+                  AND source_external_id LIKE $2
+                """,
+                str(TEST_ENTITY_ID), f"{prefix}-%",
+            )
+            approval_counts = await conn.fetchrow(
+                """
+                SELECT count(*) AS total,
+                       count(*) FILTER (WHERE status = 'pending') AS pending
+                FROM approval_queue
+                WHERE entity_id = $1 AND payload ->> 'ebay_transaction_id' LIKE $2
+                """,
+                str(TEST_ENTITY_ID), f"{prefix}-%",
+            )
+    assert journal_count == len(transactions)
+    assert approval_counts["total"] == len(transactions)
+    assert approval_counts["pending"] == 0
