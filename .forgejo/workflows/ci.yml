@@ -89,6 +89,8 @@ jobs:
   #   test:smoke           tests/cpa-export.smoke.ts
   #   test:journal-review  tests/journal-proposal.smoke.tsx
   #                        tests/scoped-activity.smoke.tsx
+  #   test:stripe          tests/stripe-approvals.smoke.tsx
+  #                        tests/stripe-blocked-item.smoke.tsx
   # A non-zero exit from either script fails this job. Nothing is swallowed
   # with `|| true`.
   #
@@ -123,6 +125,9 @@ jobs:
           echo "Running npm run test:journal-review (tests/journal-proposal.smoke.tsx, tests/scoped-activity.smoke.tsx)"
           npm run test:journal-review
           echo "test:journal-review passed"
+          echo "Running npm run test:stripe (tests/stripe-approvals.smoke.tsx, tests/stripe-blocked-item.smoke.tsx)"
+          npm run test:stripe
+          echo "test:stripe passed"
 
   # ---------------------------------------------------------------------------
   # Integration tier — builds the images and runs the real pipeline against a
