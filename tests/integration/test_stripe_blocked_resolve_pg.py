@@ -519,16 +519,16 @@ async def test_resolution_committed_before_the_worker_locks_is_never_posted(
     worker = _Worker(monkeypatch, feed)
     await _block(worker, blocked)
 
-    real_lock = stripe_sync.load_resolved_blocked_ids
+    real_lock = stripe_sync.lock_block_state
     at_lock = asyncio.Event()
     go = asyncio.Event()
 
-    async def paused_lock(session: Any, entity_id: UUID, *args: Any) -> frozenset[str]:
+    async def paused_lock(session: Any, entity_id: UUID, *args: Any) -> Any:
         at_lock.set()
         await go.wait()
         return await real_lock(session, entity_id, *args)
 
-    monkeypatch.setattr(stripe_sync, "load_resolved_blocked_ids", paused_lock)
+    monkeypatch.setattr(stripe_sync, "lock_block_state", paused_lock)
     worker.failing = set()
     worker.seen.clear()
     sync = asyncio.create_task(worker.run())  # loaded state still shows the block
@@ -768,16 +768,16 @@ async def test_reopen_survives_worker_that_loaded_the_same_block_id(
     window = blocked_state["window_gte"], blocked_state["window_lt"]
     revision_at_block = blocked_state["block_revision"]
 
-    real_lock = stripe_sync.load_resolved_blocked_ids
+    real_lock = stripe_sync.lock_block_state
     at_lock = asyncio.Event()
     go = asyncio.Event()
 
-    async def paused_lock(session: Any, entity_id: UUID, *args: Any) -> frozenset[str]:
+    async def paused_lock(session: Any, entity_id: UUID, *args: Any) -> Any:
         at_lock.set()
         await go.wait()
         return await real_lock(session, entity_id, *args)
 
-    monkeypatch.setattr(stripe_sync, "load_resolved_blocked_ids", paused_lock)
+    monkeypatch.setattr(stripe_sync, "lock_block_state", paused_lock)
     worker.failing = set()  # config fixed: this pass will post X and clear
     worker.seen.clear()
     sync = asyncio.create_task(worker.run())  # loads block X, revision r
@@ -791,24 +791,23 @@ async def test_reopen_survives_worker_that_loaded_the_same_block_id(
     assert reopened_state["block_revision"] == revision_at_block + 2
     go.set()
     await asyncio.wait_for(sync, timeout=10)
-    monkeypatch.setattr(stripe_sync, "load_resolved_blocked_ids", real_lock)
+    monkeypatch.setattr(stripe_sync, "lock_block_state", real_lock)
 
-    # The stale pass mapped X (a reopen asks for normal processing), but its
-    # outcome write was rejected: the reopen's block, window and fresh failure
-    # count are all still there.
-    assert worker.seen == [blocked]
+    # The stale pass re-read the block revision under the lock, saw the
+    # resolve and reopen, and mapped and wrote nothing: the reopen's block,
+    # window and fresh failure count are all still there.
+    assert worker.seen == []
     state = await _state(app_db)
     assert state["blocked_item"]["id"] == blocked, "stale pass erased the reopen"
     assert state["blocked_item"]["reopened"]["audit_id"] == reopen["audit_id"]
     assert (state["window_gte"], state["window_lt"]) == window
     assert "_stripe_continuation_cursor" not in state
     assert blocked not in state.get("_stripe_failure_counts", {})
-    assert state["last_outcome"] == "superseded_by_resolution"
     assert state["block_revision"] == revision_at_block + 2
-    assert await _posts_for(app_db, blocked) == 1
+    assert await _posts_for(app_db, blocked) == 0
 
-    # A fresh pass carries the new revision: it confirms the existing post
-    # (mapper idempotency), clears the block itself and moves on. One post.
+    # A fresh pass carries the new revision: it posts the reopened item,
+    # clears the block itself and moves on. One post.
     worker.seen.clear()
     assert (await worker.run())["last_outcome"] == "ok"
     assert worker.seen == [blocked]
@@ -866,6 +865,60 @@ async def test_reopen_supersedes_the_rejection_but_ordinary_rejection_still_hold
     assert await _posts_for(app_db, blocked) == 0
     rows = await _approval_rows(app_db, blocked)
     assert "superseded_by_reopen" not in _json(rows[1]["payload"])
+
+
+@pytest.mark.asyncio
+async def test_rejection_committed_after_the_load_is_honoured_under_the_lock(
+    db: Any, app_db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review 79c78f14 #1: worker past its load, REJECT commits, worker resumes.
+
+    The rejection is read only after the worker holds the shared lock, inside
+    the transaction that would map and post. With the config fixed the mapper
+    would succeed, so only that locked read keeps the refused item out.
+    """
+    del seeded_workspace
+    feed, _, blocked, _ = _feed(uuid4().hex[:10])
+    await _seed(db, TEST_WORKSPACE_ID, TEST_ENTITY_ID)
+    worker = _Worker(monkeypatch, feed)
+    await _block(worker, blocked)
+    before = await _state(app_db)
+    pending = [row for row in await _approval_rows(app_db, blocked) if row["status"] == "pending"]
+    assert len(pending) == 1
+
+    real_lock = stripe_sync.lock_block_state
+    at_lock = asyncio.Event()
+    go = asyncio.Event()
+
+    async def paused_lock(session: Any, entity_id: UUID, *args: Any) -> Any:
+        at_lock.set()
+        await go.wait()
+        return await real_lock(session, entity_id, *args)
+
+    monkeypatch.setattr(stripe_sync, "lock_block_state", paused_lock)
+    worker.failing = set()  # config fixed: the mapper WOULD post it
+    worker.seen.clear()
+    sync = asyncio.create_task(worker.run())  # loaded the block, no rejection yet
+    await asyncio.wait_for(at_lock.wait(), timeout=10)
+    decided = await _decide_in_process(
+        "admin", pending[0]["id"], "reject", note="Fictional rejection mid-pass"
+    )
+    assert decided["decision"] == "rejected"
+    go.set()
+    summary = await asyncio.wait_for(sync, timeout=10)
+    monkeypatch.setattr(stripe_sync, "lock_block_state", real_lock)
+
+    assert summary["last_outcome"] == "blocked_item"
+    assert worker.seen == []
+    assert await _posts_for(app_db, blocked) == 0
+    state = await _state(app_db)
+    assert state["blocked_item"]["id"] == blocked
+    assert state.get("_stripe_continuation_cursor") == before.get("_stripe_continuation_cursor")
+    assert (state["window_gte"], state["window_lt"]) == (before["window_gte"], before["window_lt"])
+    assert state["_stripe_failure_counts"].get(blocked) == 3
+    # And it stays held on every later pass.
+    assert (await worker.run())["last_outcome"] == "blocked_item"
+    assert worker.seen == [] and await _posts_for(app_db, blocked) == 0
 
 
 @pytest.mark.asyncio
