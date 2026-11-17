@@ -301,6 +301,7 @@ async def _enqueue_for_review(
     raw_txn: dict[str, Any],
     actor_uc_uid: str,
     reason: str,
+    revenue_account: str = DEFAULT_REVENUE_ACCOUNT,
 ) -> UUID:
     """Insert a row in approval_queue for human review.
 
@@ -336,6 +337,23 @@ async def _enqueue_for_review(
         k for k in raw_txn.keys()
         if k not in ("source", "customer", "metadata", "billing_details", "shipping")
     ])
+    replay_txn = {
+        key: raw_txn[key]
+        for key in safe_keys
+        if key in {
+            "id", "object", "type", "amount", "currency", "fee", "net",
+            "status", "created", "available_on", "reporting_category",
+        }
+    }
+    source = raw_txn.get("source")
+    if isinstance(source, dict):
+        safe_source = {
+            key: source[key]
+            for key in ("id", "object", "destination", "bank_account")
+            if key in source
+        }
+        if safe_source:
+            replay_txn["source"] = safe_source
     payload = {
         "action": "stripe_post_balance_transaction",
         "stripe_balance_txn_id": stripe_balance_txn_id,
@@ -347,6 +365,8 @@ async def _enqueue_for_review(
         "payee": payee,
         "description": description,
         "raw_txn_keys": safe_keys,
+        "stripe_txn": replay_txn,
+        "revenue_account": revenue_account,
     }
     await session.execute(
         text(
@@ -384,6 +404,7 @@ async def enqueue_blocked_balance_transaction(
     txn: dict[str, Any],
     actor_uc_uid: str,
     error: str,
+    revenue_account: str = DEFAULT_REVENUE_ACCOUNT,
 ) -> UUID:
     """Put a repeatedly failing transaction on the normal human review path."""
     stripe_balance_txn_id = str(txn.get("id") or "?")
@@ -446,6 +467,7 @@ async def enqueue_blocked_balance_transaction(
         raw_txn=txn,
         actor_uc_uid=actor_uc_uid,
         reason=reason,
+        revenue_account=revenue_account,
     )
 
 
@@ -463,6 +485,8 @@ async def map_and_post_balance_transaction(
     actor_uc_uid: str,
     actor_agent_id: str | None = None,
     revenue_account: str = DEFAULT_REVENUE_ACCOUNT,
+    first_run_confirmed: bool = False,
+    approving_human_uc_uid: str | None = None,
 ) -> MapResult:
     """Map ONE Stripe balance_transaction to a journal entry and post it.
 
@@ -733,7 +757,7 @@ async def map_and_post_balance_transaction(
     existing_stripe_count = await _count_existing_stripe_posts(
         session, entity_id=entity_id
     )
-    if existing_stripe_count < FIRST_RUN_REVIEW_LIMIT:
+    if existing_stripe_count < FIRST_RUN_REVIEW_LIMIT and not first_run_confirmed:
         approval_id = await _enqueue_for_review(
             session,
             workspace_id=workspace_id,
@@ -753,6 +777,7 @@ async def map_and_post_balance_transaction(
                 f"#{existing_stripe_count + 1} for this entity needs human eyes "
                 "before auto-posting trust is established."
             ),
+            revenue_account=revenue_account,
         )
         await _log_post_attempt(
             session, workspace_id=workspace_id, entity_id=entity_id,
@@ -790,6 +815,7 @@ async def map_and_post_balance_transaction(
             effective_date=eff_date, payee=payee, description=description,
             raw_txn=txn, actor_uc_uid=actor_uc_uid,
             reason=f"Materiality tier {verdict.tier}: {verdict.reason}",
+            revenue_account=revenue_account,
         )
         outcome_map = {
             "queue_for_confirm": "queued_for_confirm",
@@ -856,7 +882,7 @@ async def map_and_post_balance_transaction(
                 ),
                 model_version="stripe_mapper:v1",
                 identity=actor_uc_uid,
-                approving_uid=None,
+                approving_uid=approving_human_uc_uid,
                 receipt_link_id=None,
             )
     except IntegrityError as exc:
@@ -961,7 +987,7 @@ async def map_and_post_balance_transaction(
                         ),
                         model_version="stripe_mapper:v1",
                         identity=actor_uc_uid,
-                        approving_uid=None,
+                        approving_uid=approving_human_uc_uid,
                         receipt_link_id=None,
                     )
                 await _log_post_attempt(

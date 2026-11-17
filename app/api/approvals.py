@@ -178,14 +178,9 @@ class SkipRequest(BaseModel):
     note: str | None = None
 
 
-def _require_manual_proposal_human(auth: AuthContext, workspace: WorkspaceContext) -> None:
-    """Require a verified owner/admin interactive human for manual journals."""
-    if workspace.role not in {"owner", "admin"}:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Manual journal proposals require an owner or admin human reviewer",
-        )
-    if (
+def _is_interactive_human(auth: AuthContext, workspace: WorkspaceContext) -> bool:
+    """True only for a verified interactive browser session of this workspace's human."""
+    return not (
         not isinstance(auth, AuthContext)
         or not auth.may_autoprovision
         or auth.agent_id is not None
@@ -198,8 +193,31 @@ def _require_manual_proposal_human(auth: AuthContext, workspace: WorkspaceContex
         or auth.claims.get("auth_time", 0) <= 0
         or not (auth.claims.get("sid") or auth.claims.get("session_state"))
         or str(auth.claims.get("preferred_username", "")).startswith("service-account-")
-    ):
+    )
+
+
+def _require_manual_proposal_human(auth: AuthContext, workspace: WorkspaceContext) -> None:
+    """Require a verified owner/admin interactive human for manual journals."""
+    if workspace.role not in {"owner", "admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Manual journal proposals require an owner or admin human reviewer",
+        )
+    if not _is_interactive_human(auth, workspace):
         raise HTTPException(status_code=403, detail="Manual journal proposal requires a human session")
+
+
+def _require_stripe_decision_human(auth: AuthContext, workspace: WorkspaceContext) -> None:
+    """Require a verified interactive human for Stripe approval decisions."""
+    if (
+        workspace.agent_id is not None
+        or workspace.pat_scopes is not None
+        or not _is_interactive_human(auth, workspace)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Stripe approval decisions require a human session",
+        )
 
 
 @router.post("/api/workspaces/{workspace_id}/approvals/{approval_id}/decide")
@@ -237,6 +255,36 @@ async def decide_approval(
         )
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        # Stripe rows: take the shared Stripe state lock BEFORE the approval
+        # row lock. The sync worker, manual resolve and reopen take the state
+        # lock first too, so racing decisions share one lock order.
+        stripe_resolved: frozenset[str] = frozenset()
+        head = (
+            await session.execute(
+                text(
+                    """
+                    SELECT entity_id::text AS entity_id, subject_type
+                    FROM approval_queue WHERE id = :id
+                    """
+                ),
+                {"id": str(approval_id)},
+            )
+        ).mappings().first()
+        if head is not None and head["subject_type"] == "stripe_post_balance_transaction":
+            from app.connectors.stripe.blocked_resolution import (
+                BlockedResolutionError,
+                lock_stripe_state_for_approval,
+            )
+
+            assert_entity_in_scope(workspace, UUID(head["entity_id"]))
+            _require_stripe_decision_human(auth, workspace)
+            try:
+                stripe_resolved = await lock_stripe_state_for_approval(
+                    session, workspace.workspace_id, UUID(head["entity_id"])
+                )
+            except BlockedResolutionError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
         # Lock the row so two concurrent deciders can't both apply it. FOR UPDATE
         # within this transaction; the second decider sees status != 'pending'
         # after the first commits and gets a clean 409.
@@ -262,15 +310,45 @@ async def decide_approval(
         # entities. Out-of-scope -> 403 (same guard as the list endpoint).
         assert_entity_in_scope(workspace, entity_id)
 
+        subject_type = row["subject_type"]
+        subject_id = UUID(row["subject_id"])
+        payload = row["payload"] or {}
         if row["status"] != "pending":
+            # Stripe approval application is idempotent on the external balance
+            # transaction id. A retried approval after commit is a no-op.
+            if (
+                subject_type == "stripe_post_balance_transaction"
+                and decision == "approve"
+                and row["status"] == "approved"
+            ):
+                response = {
+                    "ok": True,
+                    "approval_id": str(approval_id),
+                    "decision": "approved",
+                    "subject_type": subject_type,
+                    "applied": False,
+                    "idempotent": True,
+                }
+                audit_id = await write_decision_audit(
+                    session,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    ctx=workspace,
+                    tool_name="approval_decision",
+                    request_payload={
+                        "approval_id": str(approval_id),
+                        "decision": "approve",
+                        "note": body.note,
+                    },
+                    response_payload=response,
+                    reasoning=body.note or "Repeated approval was already applied.",
+                    outcome="approved",
+                )
+                return response
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Approval already {row['status']}",
             )
-
-        subject_type = row["subject_type"]
-        subject_id = UUID(row["subject_id"])
-        payload = row["payload"] or {}
         # Collected inside the transaction; the graph projection runs AFTER the
         # workspace_session below commits (best-effort, never blocks the request).
         applied: dict = {}
@@ -278,17 +356,31 @@ async def decide_approval(
         if subject_type == "manual_journal_entry_proposal":
             _require_manual_proposal_human(auth, workspace)
 
-        if subject_type in ("journal_entry_post", "ebay_post_transaction"):
-            if (not isinstance(auth, AuthContext) or not auth.may_autoprovision
-                    or auth.agent_id is not None or auth.is_trusted_m2m
-                    or auth.uc_uid != workspace.user_uc_uid
-                    or auth.claims.get("azp") != get_settings().keycloak_client_id
-                    or "clientId" in auth.claims or "client_id" in auth.claims
-                    or type(auth.claims.get("auth_time")) is not int
-                    or auth.claims.get("auth_time", 0) <= 0
-                    or not (auth.claims.get("sid") or auth.claims.get("session_state"))
-                    or str(auth.claims.get("preferred_username", "")).startswith("service-account-")):
+        if subject_type in (
+            "journal_entry_post",
+            "stripe_post_balance_transaction",
+            "ebay_post_transaction",
+        ):
+            if not _is_interactive_human(auth, workspace):
                 raise HTTPException(status_code=403, detail="Journal proposal requires a human session")
+
+        if subject_type == "stripe_post_balance_transaction" and body.category_override is not None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Stripe approval payload does not accept an account override",
+            )
+        if (
+            subject_type == "stripe_post_balance_transaction"
+            and decision == "approve"
+            and str(payload.get("stripe_balance_txn_id") or "") in stripe_resolved
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This Stripe item was resolved elsewhere; reopen the "
+                    "resolution before approving it"
+                ),
+            )
 
         # ---------------- REJECT ----------------
         if decision == "reject":
@@ -296,6 +388,12 @@ async def decide_approval(
                 session, approval_id=approval_id, new_status="rejected",
                 decided_by=workspace.user_uc_uid,
             )
+            if subject_type == "stripe_post_balance_transaction":
+                await _record_stripe_decision(
+                    session, entity_id=entity_id, approval_id=approval_id,
+                    payload=payload, decision="reject",
+                    decided_by=workspace.user_uc_uid,
+                )
             if subject_type == "ebay_post_transaction":
                 await _record_ebay_decision(
                     session, entity_id=entity_id, approval_id=approval_id,
@@ -383,6 +481,14 @@ async def decide_approval(
                     note=body.note,
                     category_override=body.category_override,
                 )
+            elif subject_type == "stripe_post_balance_transaction":
+                applied = await _approve_stripe_balance_transaction(
+                    session,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    payload=payload,
+                    approving_human=workspace.user_uc_uid,
+                )
             elif subject_type == "ebay_post_transaction":
                 # The next eBay worker pass replays the raw item through the
                 # normal mapper after this durable human decision. The
@@ -400,6 +506,12 @@ async def decide_approval(
                 session, approval_id=approval_id, new_status="approved",
                 decided_by=workspace.user_uc_uid,
             )
+            if subject_type == "stripe_post_balance_transaction":
+                await _record_stripe_decision(
+                    session, entity_id=entity_id, approval_id=approval_id,
+                    payload=payload, decision="approve",
+                    decided_by=workspace.user_uc_uid,
+                )
             if subject_type == "ebay_post_transaction":
                 await _record_ebay_decision(
                     session, entity_id=entity_id, approval_id=approval_id,
@@ -639,6 +751,89 @@ async def _record_ebay_decision(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+async def _record_stripe_decision(
+    session,
+    *,
+    entity_id: UUID,
+    approval_id: UUID,
+    payload: dict,
+    decision: str,
+    decided_by: str | None,
+) -> None:
+    """Record a Stripe decision under the already-held Stripe state lock."""
+    from app.connectors.stripe.blocked_resolution import (
+        BlockedResolutionError,
+        record_stripe_decision,
+    )
+
+    try:
+        await record_stripe_decision(
+            session,
+            entity_id=entity_id,
+            bt_id=str(payload.get("stripe_balance_txn_id") or "").strip(),
+            approval_id=str(approval_id),
+            decision=decision,
+            decided_by=decided_by,
+            payload=payload,
+        )
+    except BlockedResolutionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+async def _approve_stripe_balance_transaction(
+    session,
+    *,
+    workspace_id: UUID,
+    entity_id: UUID,
+    payload: dict,
+    approving_human: str,
+) -> dict:
+    """Replay the Stripe mapper with human confirmation of first-run review."""
+    stripe_txn = payload.get("stripe_txn")
+    if not isinstance(stripe_txn, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Stripe approval payload is missing the replay transaction",
+        )
+    stripe_id = str(stripe_txn.get("id") or "").strip()
+    expected_id = str(payload.get("stripe_balance_txn_id") or "").strip()
+    if not stripe_id or stripe_id != expected_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Stripe approval payload has an invalid balance transaction id",
+        )
+
+    from app.connectors.stripe.mapper import map_and_post_balance_transaction
+
+    result = await map_and_post_balance_transaction(
+        session,
+        workspace_id=str(workspace_id),
+        entity_id=str(entity_id),
+        txn=stripe_txn,
+        actor_uc_uid=approving_human,
+        revenue_account=str(payload.get("revenue_account") or "4200"),
+        first_run_confirmed=True,
+        approving_human_uc_uid=approving_human,
+    )
+    if result.outcome == "blocked_idempotent":
+        return {
+            "applied": False,
+            "journal_entry_id": str(result.journal_entry_id) if result.journal_entry_id else None,
+            "idempotent": True,
+        }
+    if result.outcome != "posted":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=result.reason or f"Stripe mapper refused with {result.outcome}",
+        )
+    return {
+        "journal_entry_id": str(result.journal_entry_id) if result.journal_entry_id else None,
+        "fee_journal_entry_id": (
+            str(result.fee_journal_entry_id) if result.fee_journal_entry_id else None
+        ),
+    }
 
 
 async def _approve_recategorization(
