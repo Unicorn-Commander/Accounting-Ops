@@ -192,6 +192,32 @@ async def test_ebay_paginators_report_offset_continuation_without_skipping_rows(
 
 
 @pytest.mark.asyncio
+async def test_payout_transaction_pull_ignores_payout_date_window():
+    """A late-settling sale linked to a payout must survive the date window."""
+    workspace_id = uuid4()
+    entity_id = uuid4()
+    late_txn = _txn(0, "PAY-000")
+    late_txn["transactionDate"] = "2026-11-05T00:00:00.000Z"
+    http = _EbayHttp([_payout(0)], {"PAY-000": [late_txn]})
+    client = EbayFinancesClient(
+        blob=_blob(workspace_id, entity_id), _http_factory=lambda: http
+    )
+
+    page = await client.list_transactions(
+        payout_id="PAY-000",
+        start_date=datetime(2026, 11, 9, tzinfo=timezone.utc),
+        end_date=datetime(2026, 11, 13, tzinfo=timezone.utc),
+        limit=500,
+    )
+
+    assert [row["transactionId"] for row in page] == [late_txn["transactionId"]]
+    transaction_call = next(
+        call for call in http.calls if call["url"].endswith("/transaction")
+    )
+    assert transaction_call["params"]["filter"] == "payoutId:{PAY-000}"
+
+
+@pytest.mark.asyncio
 async def test_sync_recovers_above_cap_payouts_and_transactions(monkeypatch):
     """Two capped passes post every row once and finish both continuations."""
     workspace_id = uuid4()

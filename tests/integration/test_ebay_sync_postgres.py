@@ -3,21 +3,209 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from sqlalchemy import text
 
+from app.db import SessionLocal
 from app.connectors.ebay import mapper as ebay_mapper
 from app.connectors.ebay.client import (
     EbayCredentialBlob,
     EbayPaginationResult,
 )
+from app.workspace_session import workspace_session
 from scripts import ebay_sync
 from tests.conftest import TEST_ENTITY_ID, TEST_WORKSPACE_ID
 
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+async def test_payout_linked_late_sale_is_not_lost_from_date_window(
+    db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A payout's immutable link controls its pull, even for an old sale."""
+    del seeded_workspace
+    payout_id = "ebay-pg-late-payout"
+    transaction_id = "ebay-pg-late-sale"
+    last_sync = datetime(2026, 11, 10, tzinfo=timezone.utc)
+    payout_date = datetime(2026, 11, 12, tzinfo=timezone.utc)
+    window_end = datetime(2026, 11, 12, 0, 0, 1, tzinfo=timezone.utc)
+    seen: list[str] = []
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            await conn.execute(
+                """
+                DELETE FROM connector_state
+                WHERE entity_id = $1 AND connector_name = 'ebay_finances'
+                """,
+                str(TEST_ENTITY_ID),
+            )
+            await conn.execute(
+                """
+                INSERT INTO connector_state (
+                    id, workspace_id, entity_id, connector_name,
+                    connector_instance_name, state, last_sync_at
+                ) VALUES (
+                    gen_random_uuid(), $1, $2, 'ebay_finances', 'default',
+                    '{}'::jsonb, $3
+                )
+                """,
+                str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID), last_sync,
+            )
+
+    async def load_credential(*args: Any, **kwargs: Any) -> EbayCredentialBlob:
+        return EbayCredentialBlob(
+            workspace_id=TEST_WORKSPACE_ID,
+            credential_id=TEST_WORKSPACE_ID,
+            label="postgres late-settlement test",
+            client_id="fictional-app",
+            client_secret="fictional-secret",
+            refresh_token="fictional-refresh",
+            environment="sandbox",
+            entity_id=str(TEST_ENTITY_ID),
+        )
+
+    class FakeClient:
+        async def list_payouts(self, **kwargs: Any) -> EbayPaginationResult:
+            assert kwargs["start_date"] == datetime(2026, 11, 9, tzinfo=timezone.utc)
+            return EbayPaginationResult(
+                items=[
+                    {
+                        "payoutId": payout_id,
+                        "amount": {"value": "10.00", "currency": "USD"},
+                        "payoutDate": payout_date.isoformat(),
+                        "payoutStatus": "SUCCEEDED",
+                    }
+                ],
+                exhausted=True,
+                continuation_offset=None,
+                window_start=kwargs["start_date"],
+                window_end=window_end,
+            )
+
+        async def list_transactions(self, **kwargs: Any) -> EbayPaginationResult:
+            if kwargs.get("payout_id") == payout_id:
+                assert "start_date" not in kwargs
+                assert "end_date" not in kwargs
+                return EbayPaginationResult(
+                    items=[
+                        {
+                            "transactionId": transaction_id,
+                            "transactionType": "SALE",
+                            "amount": {"value": "9.00", "currency": "USD"},
+                            "transactionDate": "2026-11-05T00:00:00+00:00",
+                        }
+                    ],
+                    exhausted=True,
+                    continuation_offset=None,
+                )
+            return EbayPaginationResult(
+                items=[], exhausted=True, continuation_offset=None
+            )
+
+    async def entity_for_credential(*args: Any, **kwargs: Any) -> Any:
+        return TEST_ENTITY_ID
+
+    async def mapper(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["txn"].get("transactionId") or kwargs["txn"].get("payoutId"))
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    async def no_reconciliation(*args: Any, **kwargs: Any) -> dict[str, int]:
+        return {"checked_payouts": 0, "matched": 0, "unmatched": 0}
+
+    monkeypatch.setattr(ebay_sync, "load_ebay_credential", load_credential)
+    monkeypatch.setattr(ebay_sync, "_entity_for_credential", entity_for_credential)
+    monkeypatch.setattr(
+        ebay_sync.EbayFinancesClient,
+        "from_credential",
+        classmethod(lambda cls, blob: FakeClient()),
+    )
+    monkeypatch.setattr(ebay_sync, "map_and_post_transaction", mapper)
+    monkeypatch.setattr(ebay_sync, "reconcile_one_entity", no_reconciliation)
+
+    summary = await ebay_sync._sync_one_workspace(TEST_WORKSPACE_ID)
+
+    assert summary["last_outcome"] == "ok"
+    assert transaction_id in seen
+    assert payout_id in seen
+    async with db.acquire() as conn:
+        state = await conn.fetchrow(
+            """
+            SELECT last_sync_at FROM books.connector_state
+            WHERE entity_id = $1 AND connector_name = 'ebay_finances'
+            """,
+            str(TEST_ENTITY_ID),
+        )
+    assert state["last_sync_at"].replace(tzinfo=timezone.utc) == window_end
+
+
+@pytest.mark.asyncio
+async def test_review_approval_is_deduped_across_three_mapper_passes(
+    db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del seeded_workspace
+    transaction_id = "ebay-pg-review-dedupe"
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            await conn.execute(
+                """
+                DELETE FROM approval_queue
+                WHERE entity_id = $1 AND subject_type = 'ebay_post_transaction'
+                  AND payload ->> 'ebay_transaction_id' = $2
+                """,
+                str(TEST_ENTITY_ID), transaction_id,
+            )
+
+    async def no_existing_posts(*args: Any, **kwargs: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(ebay_mapper, "_count_existing_ebay_posts", no_existing_posts)
+    txn = {
+        "transactionId": transaction_id,
+        "transactionType": "SALE",
+        "amount": {"value": "9.00", "currency": "USD"},
+        "transactionDate": "2026-11-05T00:00:00+00:00",
+    }
+    outcomes = []
+    for _ in range(3):
+        async with workspace_session(SessionLocal, TEST_WORKSPACE_ID) as session:
+            result = await ebay_mapper.map_and_post_transaction(
+                session,
+                workspace_id=str(TEST_WORKSPACE_ID),
+                entity_id=str(TEST_ENTITY_ID),
+                txn=txn,
+                actor_uc_uid="agent:ebay_sync",
+            )
+            outcomes.append(result)
+
+    assert all(result.outcome == "queued_first_run" for result in outcomes)
+    assert outcomes[0].approval_id == outcomes[1].approval_id == outcomes[2].approval_id
+    async with db.acquire() as conn:
+        count = await conn.fetchval(
+            """
+            SELECT count(*) FROM books.approval_queue
+            WHERE entity_id = $1 AND subject_type = 'ebay_post_transaction'
+              AND status = 'pending'
+              AND payload ->> 'ebay_transaction_id' = $2
+            """,
+            str(TEST_ENTITY_ID), transaction_id,
+        )
+    assert count == 1
 
 
 @pytest.mark.asyncio
