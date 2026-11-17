@@ -967,3 +967,141 @@ async def test_approval_of_an_item_resolved_elsewhere_is_refused(
     assert resolved_elsewhere.value.status_code == 409
     assert "resolved elsewhere" in resolved_elsewhere.value.detail
     assert await _posts_for(app_db, blocked) == 0
+
+
+# ---------------------------------------------------------------------------
+# Review 4bba864c round 4: the side writers of the Stripe state row
+# (payout reconciliation, webhook delivery log) take the shared lock and merge
+# only their own keys. Each regression pauses the writer right after its read
+# while a resolve, then a reopen, try to commit. Before the fix the writer
+# replaced the whole JSON and rolled block_revision back.
+# ---------------------------------------------------------------------------
+
+
+async def _race_side_writer(
+    monkeypatch: pytest.MonkeyPatch,
+    module: Any,
+    write: Any,
+    human: Any,
+) -> dict[str, Any]:
+    """Run ``write`` paused after its locked read; run ``human`` meanwhile."""
+    real_lock = module.lock_stripe_state_row
+    read = asyncio.Event()
+    go = asyncio.Event()
+
+    async def paused_lock(*args: Any, **kwargs: Any) -> Any:
+        locked = await real_lock(*args, **kwargs)
+        read.set()
+        await go.wait()
+        return locked
+
+    monkeypatch.setattr(module, "lock_stripe_state_row", paused_lock)
+    try:
+        writer = asyncio.create_task(write())
+        await asyncio.wait_for(read.wait(), 10)
+        human_task = asyncio.create_task(human())
+        await asyncio.sleep(0.5)
+        assert not human_task.done()  # the human call waits on the row lock
+        go.set()
+        await writer
+        return await human_task
+    finally:
+        go.set()
+        monkeypatch.setattr(module, "lock_stripe_state_row", real_lock)
+
+
+async def _side_writer_keeps_resolve_and_reopen(
+    app_db: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    module: Any,
+    write: Any,
+    side_key: str,
+) -> None:
+    feed, _, blocked, _ = _feed(uuid4().hex[:10])
+    worker = _Worker(monkeypatch, feed)
+    await _block(worker, blocked)
+    before = await _state(app_db)
+    revision = before["block_revision"]
+
+    await _race_side_writer(
+        monkeypatch,
+        module,
+        write,
+        lambda: _call("admin", bt_id=blocked, not_books_relevant_reason=REASON),
+    )
+    state = await _state(app_db)
+    assert "blocked_item" not in state
+    assert blocked in state["resolved_blocked_items"]
+    assert state["block_revision"] == revision + 1
+    assert side_key in state
+
+    await _race_side_writer(
+        monkeypatch,
+        module,
+        write,
+        lambda: _reopen_call(
+            "owner", bt_id=blocked, reason="Fictional: reopen during a side write"
+        ),
+    )
+    state = await _state(app_db)
+    assert state["blocked_item"]["id"] == blocked
+    assert blocked not in state["resolved_blocked_items"]
+    assert state["block_revision"] == revision + 2
+    assert (state["window_gte"], state["window_lt"]) == (
+        before["window_gte"],
+        before["window_lt"],
+    )
+    assert side_key in state
+    assert await _posts_for(app_db, blocked) == 0
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_never_erases_a_resolve_or_reopen(
+    db: Any, app_db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del seeded_workspace
+    from app.connectors.stripe import reconcile as reconcile_module
+
+    await _seed(db, TEST_WORKSPACE_ID, TEST_ENTITY_ID)
+
+    async def write() -> None:
+        async with workspace_session(SessionLocal, TEST_WORKSPACE_ID) as session:
+            await reconcile_module.reconcile_one_entity(
+                session, workspace_id=TEST_WORKSPACE_ID, entity_id=TEST_ENTITY_ID
+            )
+
+    await _side_writer_keeps_resolve_and_reopen(
+        app_db, monkeypatch, reconcile_module, write, "reconciliation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_webhook_log_never_erases_a_resolve_or_reopen(
+    db: Any, app_db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del seeded_workspace
+    from datetime import datetime, timezone
+
+    from app.api import stripe_oauth
+
+    await _seed(db, TEST_WORKSPACE_ID, TEST_ENTITY_ID)
+    events: list[str] = []
+
+    async def write() -> None:
+        event_id = f"evt_fictional_{uuid4().hex[:12]}"
+        events.append(event_id)
+        await stripe_oauth._record_webhook_delivery(
+            TEST_WORKSPACE_ID,
+            event_id=event_id,
+            event_type="balance.available",
+            livemode=False,
+            api_version="2026-01-01",
+            received_at=datetime.now(timezone.utc),
+            outcome="handled",
+        )
+
+    await _side_writer_keeps_resolve_and_reopen(
+        app_db, monkeypatch, stripe_oauth, write, "webhook_log"
+    )
+    logged = [entry["event_id"] for entry in (await _state(app_db))["webhook_log"]]
+    assert logged[-2:] == events
