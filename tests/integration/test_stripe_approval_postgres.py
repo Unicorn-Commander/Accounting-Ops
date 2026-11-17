@@ -171,6 +171,35 @@ async def _counts(db: Any, txn_id: str) -> tuple[int, int, str | None, dict[str,
     return row["journal_count"], row["audit_count"], row["approval_status"], state
 
 
+async def _persist_block(db: Any, txn: dict[str, Any], cursor: str) -> None:
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                """
+                UPDATE connector_state
+                SET state = jsonb_build_object(
+                    'blocked_item', jsonb_build_object(
+                        'id', $2, 'amount', $3, 'currency', $4,
+                        'error', 'fictional persisted mapper failure'
+                    ),
+                    '_stripe_continuation_cursor', $5,
+                    'window_gte', $6,
+                    'window_lt', $7
+                )
+                WHERE entity_id = $1 AND connector_name = 'stripe_api'
+                  AND connector_instance_name = 'default'
+                """,
+                str(TEST_ENTITY_ID),
+                txn["id"],
+                txn["amount"],
+                txn["currency"],
+                cursor,
+                CREATED,
+                CREATED + 1,
+            )
+
+
 @pytest.mark.asyncio
 async def test_first_run_approve_posts_and_next_sync_advances(
     db: Any, seeded_workspace: StackConfig, monkeypatch: pytest.MonkeyPatch
@@ -270,3 +299,35 @@ async def test_reject_records_reason_and_next_sync_advances_without_posting(
     assert audit_count >= 1
     assert status == "rejected"
     assert state.get("last_outcome") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_reject_blocked_approval_keeps_block_and_cursor(
+    db: Any, seeded_workspace: StackConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    txn = _txn(f"stripe-pg-approval-blocked-reject-{uuid4().hex}", 1000)
+    await _prepare(db, txn)
+
+    first = await _run_sync(monkeypatch, txn, seeded_workspace)
+    assert first["last_outcome"] == "awaiting_review"
+    approval_id = await _pending_id(db, txn["id"])
+    cursor = f"stripe-pg-blocked-cursor-{uuid4().hex}"
+    await _persist_block(db, txn, cursor)
+
+    response = await _decide(
+        seeded_workspace.base_url,
+        seeded_workspace.token,
+        approval_id,
+        "reject",
+        {"note": "fictional blocked rejection"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["applied"] is False
+
+    second = await _run_sync(monkeypatch, txn, seeded_workspace)
+    assert second["last_outcome"] == "blocked_item"
+    journal_count, _, status, state = await _counts(db, txn["id"])
+    assert journal_count == 0
+    assert status == "rejected"
+    assert state["blocked_item"]["id"] == txn["id"]
+    assert state["_stripe_continuation_cursor"] == cursor

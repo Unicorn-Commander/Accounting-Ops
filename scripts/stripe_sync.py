@@ -456,9 +456,20 @@ async def _journal_entry_exists(
 
 
 async def _stripe_item_was_rejected(
-    session: Any, *, entity_id: UUID, stripe_balance_txn_id: str
+    session: Any,
+    *,
+    entity_id: UUID,
+    stripe_balance_txn_id: str,
+    awaiting_review_only: bool = False,
 ) -> bool:
-    """Return whether a human explicitly rejected this Stripe item."""
+    """Return whether a human explicitly rejected this Stripe item.
+
+    Normal cursor advancement is limited to the worker's persisted
+    ``awaiting_review_item`` marker, which is only written for review outcomes
+    that may be passed by an explicit human decision. The blocked-item path
+    deliberately uses the broader row check so a rejected blocked approval can
+    be held without invoking the mapper.
+    """
     row = (
         await session.execute(
             text(
@@ -468,11 +479,25 @@ async def _stripe_item_was_rejected(
                   AND subject_type = 'stripe_post_balance_transaction'
                   AND status = 'rejected'
                   AND payload ->> 'stripe_balance_txn_id' = :stripe_id
+                  AND (
+                      :awaiting_review_only = false
+                      OR EXISTS (
+                          SELECT 1 FROM connector_state
+                          WHERE entity_id = :eid
+                            AND connector_name = 'stripe_api'
+                            AND connector_instance_name = 'default'
+                            AND state -> 'awaiting_review_item' ->> 'id' = :stripe_id
+                      )
+                  )
                 ORDER BY decided_at DESC NULLS LAST, created_at DESC
                 LIMIT 1
                 """
             ),
-            {"eid": str(entity_id), "stripe_id": stripe_balance_txn_id},
+            {
+                "eid": str(entity_id),
+                "stripe_id": stripe_balance_txn_id,
+                "awaiting_review_only": awaiting_review_only,
+            },
         )
     ).first()
     return row is not None
@@ -654,6 +679,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             session,
             entity_id=entity_id,
             stripe_balance_txn_id=str(bt_id or ""),
+            awaiting_review_only=True,
         ):
             # A rejected review is the one explicit human decision that
             # permits the cursor to pass without a journal row.
@@ -682,6 +708,21 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         for bt in items_to_process:
             bt_id = bt.get("id")
             try:
+                if retrying_blocked and await _stripe_item_was_rejected(
+                    session,
+                    entity_id=entity_id,
+                    stripe_balance_txn_id=str(bt_id or ""),
+                ):
+                    # An ordinary rejection can release an awaiting-review
+                    # item, but it is not evidence-backed resolution of a
+                    # persisted block. Keep the exact item at the head of the
+                    # chain and do not run the mapper after this decision.
+                    summary["blocked_item"] = blocked_item
+                    summary["errors"].append(
+                        f"persisted blocked Stripe item {bt_id} was rejected; "
+                        "evidence-backed resolution is required"
+                    )
+                    break
                 result = await _map_or_skip_rejected(session, bt)
             except Exception as exc:
                 error_text = f"{exc.__class__.__name__}: {exc}"
