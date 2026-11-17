@@ -180,12 +180,12 @@ async def _persist_block(db: Any, txn: dict[str, Any], cursor: str) -> None:
                 UPDATE connector_state
                 SET state = jsonb_build_object(
                     'blocked_item', jsonb_build_object(
-                        'id', $2, 'amount', $3, 'currency', $4,
+                        'id', $2::text, 'amount', $3::bigint, 'currency', $4::text,
                         'error', 'fictional persisted mapper failure'
                     ),
-                    '_stripe_continuation_cursor', $5,
-                    'window_gte', $6,
-                    'window_lt', $7
+                    '_stripe_continuation_cursor', $5::text,
+                    'window_gte', $6::bigint,
+                    'window_lt', $7::bigint
                 )
                 WHERE entity_id = $1 AND connector_name = 'stripe_api'
                   AND connector_instance_name = 'default'
