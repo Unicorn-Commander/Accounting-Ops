@@ -2,17 +2,62 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
+from fastapi import HTTPException
 
+from app.api.approvals import DecideRequest, decide_approval
+from app.auth import AuthContext
+from app.config import get_settings
 from app.connectors.stripe.client import StripeCredentialBlob, StripePaginationResult
+from app.tenancy import WorkspaceContext
 from scripts import stripe_sync
 from tests.conftest import TEST_ENTITY_ID, TEST_WORKSPACE_ID, StackConfig
 from tests.integration.test_approvals import _decide
 
 pytestmark = pytest.mark.integration
+
+HUMAN = "fixture-stripe-reviewer"
+
+
+async def _human_decide(
+    approval_id: str, decision: str, extra: dict | None = None
+) -> SimpleNamespace:
+    """Decide in process as a verified interactive human accountant.
+
+    The stack token is a service token, which may not decide Stripe rows, so
+    the human path runs the real handler against the real database directly.
+    """
+    ctx = WorkspaceContext(TEST_WORKSPACE_ID, "integration", "accountant", HUMAN, None, None, False)
+    auth = AuthContext(
+        HUMAN,
+        None,
+        (),
+        {
+            "azp": get_settings().keycloak_client_id,
+            "auth_time": 1,
+            "sid": "fixture-session",
+            "preferred_username": HUMAN,
+        },
+        may_autoprovision=True,
+    )
+    try:
+        body = await decide_approval(
+            workspace_id=TEST_WORKSPACE_ID,
+            approval_id=UUID(approval_id),
+            body=DecideRequest(decision=decision, **(extra or {})),
+            workspace=ctx,
+            auth=auth,
+        )
+    except HTTPException as exc:
+        detail = {"detail": exc.detail}
+        return SimpleNamespace(
+            status_code=exc.status_code, text=str(exc.detail), json=lambda: detail
+        )
+    return SimpleNamespace(status_code=200, text=json.dumps(body), json=lambda: body)
 
 
 CREATED = 1_794_268_800  # 2026-11-10, inside the default backfill window
@@ -212,9 +257,17 @@ async def test_first_run_approve_posts_and_next_sync_advances(
     approval_id = await _pending_id(db, txn["id"])
     assert approval_id
 
-    decided = await _decide(
-        seeded_workspace.base_url,
-        seeded_workspace.token,
+    # The stack's service token may neither approve nor reject a Stripe row.
+    for decision in ("approve", "reject"):
+        denied = await _decide(
+            seeded_workspace.base_url, seeded_workspace.token, approval_id, decision
+        )
+        assert denied.status_code == 403, denied.text
+    journal_count, _, status, _ = await _counts(db, txn["id"])
+    assert journal_count == 0
+    assert status == "pending"
+
+    decided = await _human_decide(
         approval_id,
         "approve",
     )
@@ -225,9 +278,7 @@ async def test_first_run_approve_posts_and_next_sync_advances(
     assert status == "approved"
 
     # A retried approval is a no-op, and the external ref remains unique.
-    repeated = await _decide(
-        seeded_workspace.base_url,
-        seeded_workspace.token,
+    repeated = await _human_decide(
         approval_id,
         "approve",
     )
@@ -253,9 +304,7 @@ async def test_materiality_blocked_approval_returns_409_and_holds_chain(
     first = await _run_sync(monkeypatch, txn, seeded_workspace)
     assert first["last_outcome"] == "awaiting_review"
     approval_id = await _pending_id(db, txn["id"])
-    response = await _decide(
-        seeded_workspace.base_url,
-        seeded_workspace.token,
+    response = await _human_decide(
         approval_id,
         "approve",
     )
@@ -282,9 +331,7 @@ async def test_reject_records_reason_and_next_sync_advances_without_posting(
     first = await _run_sync(monkeypatch, txn, seeded_workspace)
     assert first["last_outcome"] == "awaiting_review"
     approval_id = await _pending_id(db, txn["id"])
-    response = await _decide(
-        seeded_workspace.base_url,
-        seeded_workspace.token,
+    response = await _human_decide(
         approval_id,
         "reject",
         {"note": "fictional reviewer reason"},
@@ -314,9 +361,7 @@ async def test_reject_blocked_approval_keeps_block_and_cursor(
     cursor = f"stripe-pg-blocked-cursor-{uuid4().hex}"
     await _persist_block(db, txn, cursor)
 
-    response = await _decide(
-        seeded_workspace.base_url,
-        seeded_workspace.token,
+    response = await _human_decide(
         approval_id,
         "reject",
         {"note": "fictional blocked rejection"},
