@@ -304,6 +304,87 @@ async def test_deleted_continuation_restarts_the_same_pinned_window(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_fixed_blocked_item_beyond_cap_reached_after_missing_cursor(monkeypatch):
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
+    window_gte = created - 10
+    window_lt = created + 1
+    blocked_id = "txn_05001"
+    blocked = {
+        "id": blocked_id,
+        "amount": 1000,
+        "currency": "usd",
+        "error": "RuntimeError: fictional failure",
+    }
+    workspace_id, _, session, position, _ = _install_worker(
+        monkeypatch,
+        _transactions(5002, created),
+        position=(
+            datetime.fromtimestamp(window_gte, tz=timezone.utc),
+            "txn_00000",
+            window_gte,
+            window_lt,
+            {blocked_id: 3},
+            blocked,
+        ),
+    )
+
+    first = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert first["last_outcome"] == "blocked_item"
+    assert not session.posted_entries
+    assert position[1] == "txn_05000"
+    assert position[2] == window_gte
+    assert position[3] == window_lt
+
+    second = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert second["last_outcome"] == "ok"
+    assert [entry["source_external_id"] for entry in session.posted_entries] == [
+        blocked_id
+    ]
+    assert position[1] == blocked_id
+    assert position[2] == window_gte
+    assert position[3] == window_lt
+    assert position[5] is None
+
+
+@pytest.mark.asyncio
+async def test_unposted_review_item_holds_cursor_until_journal_exists(monkeypatch):
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
+    seen: list[str] = []
+
+    async def review_mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        seen.append(txn["id"])
+        return SimpleNamespace(
+            outcome="queued_first_run",
+            fee_journal_entry_id=None,
+            reason="fictional human review",
+        )
+
+    workspace_id, _, session, position, records = _install_worker(
+        monkeypatch,
+        _transactions(3, created),
+        mapper=review_mapper,
+    )
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "awaiting_review"
+    assert summary["awaiting_review_item"] == {
+        "id": "txn_00000",
+        "amount": 1000,
+        "currency": "usd",
+    }
+    assert seen == ["txn_00000"]
+    assert not session.posted_entries
+    assert position[0] is None
+    assert position[1] is None
+    assert position[2] is not None
+    assert position[3] == created + 1
+    assert records[-1]["last_outcome"] == "awaiting_review"
+
+
+@pytest.mark.asyncio
 async def test_persisted_block_survives_deleted_cursor_and_missing_item(monkeypatch):
     created = int((FIXED_NOW - timedelta(days=2)).timestamp())
     blocked = {
@@ -330,7 +411,7 @@ async def test_persisted_block_survives_deleted_cursor_and_missing_item(monkeypa
     assert summary["last_outcome"] == "blocked_item"
     assert not session.posted_entries
     assert position[0] is None
-    assert position[1] == "txn_deleted_cursor"
+    assert position[1] is None
     assert position[2] == created - 10
     assert position[3] == created + 1
     assert position[4] == {"txn_missing": 3}

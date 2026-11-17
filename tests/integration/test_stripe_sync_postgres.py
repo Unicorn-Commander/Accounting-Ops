@@ -306,5 +306,173 @@ async def test_db_error_rolls_back_only_failed_stripe_item(
     assert collision_state_json["_stripe_failure_counts"] == {collision_id: 1}
 
 
+async def test_unposted_review_item_must_not_advance_sync(
+    db: Any, app_db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pending approval cannot move the durable Stripe position."""
+    del seeded_workspace
+    created = 1_794_268_800  # 2026-11-10, inside the default backfill window
+    review_id = "stripe-pg-awaiting-review"
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            await conn.execute(
+                """
+                INSERT INTO chart_of_account (
+                    workspace_id, entity_id, account_number, account_name,
+                    canonical_form, account_type, normal_balance,
+                    is_active, is_system, notes
+                ) VALUES
+                    ($1, $2, '1210', 'Stripe Receivable',
+                     '1210·Stripe Receivable', 'asset', 'debit', true, false,
+                     'Stripe review integration test'),
+                    ($1, $2, '4200', 'AI Infrastructure Revenue (UC-Cloud)',
+                     '4200·AI Infrastructure Revenue (UC-Cloud)', 'revenue',
+                     'credit', true, false, 'Stripe review integration test')
+                ON CONFLICT (entity_id, account_number)
+                DO UPDATE SET is_active = true
+                """,
+                str(TEST_WORKSPACE_ID),
+                str(TEST_ENTITY_ID),
+            )
+            await conn.execute(
+                """
+                DELETE FROM approval_queue
+                WHERE entity_id = $1
+                  AND payload ->> 'stripe_balance_txn_id' = $2
+                """,
+                str(TEST_ENTITY_ID),
+                review_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO connector_state (
+                    id, workspace_id, entity_id, connector_name,
+                    connector_instance_name, state, last_sync_at
+                ) VALUES (
+                    gen_random_uuid(), $1, $2, 'stripe_api', 'default',
+                    '{}'::jsonb, NULL
+                )
+                ON CONFLICT (entity_id, connector_name, connector_instance_name)
+                DO UPDATE SET state = '{}'::jsonb, last_sync_at = NULL
+                """,
+                str(TEST_WORKSPACE_ID),
+                str(TEST_ENTITY_ID),
+            )
+
+    transaction = {
+        "id": review_id,
+        "object": "balance_transaction",
+        "type": "charge",
+        "amount": 1000,
+        "currency": "usd",
+        "fee": 0,
+        "net": 1000,
+        "created": created,
+        "available_on": created,
+        "reporting_category": "charge",
+    }
+
+    async def load_credential(*args: Any, **kwargs: Any) -> StripeCredentialBlob:
+        return StripeCredentialBlob(
+            workspace_id=TEST_WORKSPACE_ID,
+            credential_id=TEST_WORKSPACE_ID,
+            label="postgres review test",
+            api_key="rk_test_000000000000000000000000",
+            account_id="acct_test_fictional",
+            environment="test",
+            entity_id=str(TEST_ENTITY_ID),
+        )
+
+    async def fake_paginator(*args: Any, **kwargs: Any) -> StripePaginationResult:
+        return StripePaginationResult(
+            items=[transaction],
+            exhausted=True,
+            continuation_cursor=None,
+            window_lt=created + 1,
+        )
+
+    async def entity_for_credential(*args: Any, **kwargs: Any):
+        return TEST_ENTITY_ID
+
+    async def existing_posts(*args: Any, **kwargs: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(stripe_sync, "load_stripe_credential", load_credential)
+    monkeypatch.setattr(stripe_sync, "_entity_for_credential", entity_for_credential)
+    monkeypatch.setattr(stripe_sync, "paginate_balance_transactions", fake_paginator)
+    monkeypatch.setattr(stripe_mapper, "_count_existing_stripe_posts", existing_posts)
+    monkeypatch.setattr(
+        stripe_sync,
+        "reconcile_one_entity",
+        lambda *args, **kwargs: _reconciliation(),
+    )
+
+    first = await stripe_sync._sync_one_workspace(TEST_WORKSPACE_ID)
+    second = await stripe_sync._sync_one_workspace(TEST_WORKSPACE_ID)
+
+    assert first["last_outcome"] == "awaiting_review"
+    assert second["last_outcome"] == "awaiting_review"
+    assert first["awaiting_review_item"] == {
+        "id": review_id,
+        "amount": 1000,
+        "currency": "usd",
+    }
+
+    async with app_db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            state = await conn.fetchrow(
+                """
+                SELECT last_sync_at, state, state->>'_stripe_continuation_cursor' AS cursor
+                FROM connector_state
+                WHERE entity_id = $1 AND connector_name = 'stripe_api'
+                  AND connector_instance_name = 'default'
+                """,
+                str(TEST_ENTITY_ID),
+            )
+            approvals = await conn.fetchval(
+                """
+                SELECT count(*) FROM approval_queue
+                WHERE entity_id = $1 AND status = 'pending'
+                  AND payload ->> 'stripe_balance_txn_id' = $2
+                """,
+                str(TEST_ENTITY_ID),
+                review_id,
+            )
+            journal = await conn.fetchval(
+                """
+                SELECT count(*) FROM journal_entry
+                WHERE entity_id = $1 AND source = 'stripe_api'
+                  AND source_external_id = $2
+                """,
+                str(TEST_ENTITY_ID),
+                review_id,
+            )
+
+    assert state["last_sync_at"] is None
+    assert state["cursor"] is None
+    state_json = state["state"]
+    if isinstance(state_json, str):
+        state_json = json.loads(state_json)
+    assert state_json["last_outcome"] == "awaiting_review"
+    assert state_json["awaiting_review_item"] == {
+        "id": review_id,
+        "amount": 1000,
+        "currency": "usd",
+    }
+    assert approvals == 1
+    assert journal == 0
+
+
 async def _reconciliation() -> dict[str, int]:
     return {"checked_payouts": 0, "matched": 0, "unmatched": 0}

@@ -70,15 +70,18 @@ STRIPE_WINDOW_OVERLAP_S = 24 * 60 * 60
 
 # A mapper refusal is not proof that the item was handled. Only these
 # outcomes mean that the external_ref is safe to move past: a journal entry
-# was written, a duplicate was confirmed, or main intentionally queued the
-# item for a human review path.
+# was written, a duplicate was confirmed, or the item is an intentional zero
+# amount skip. Review outcomes remain at the head of the chain until their
+# approval path has actually written the journal entry.
 _ADVANCE_MAPPER_OUTCOMES = frozenset({
     "posted",
     "blocked_idempotent",
+    "skipped_zero_amount",
+})
+_REVIEW_MAPPER_OUTCOMES = frozenset({
     "queued_for_confirm",
     "queued_first_run",
     "flagged_for_cpa",
-    "skipped_zero_amount",
 })
 
 
@@ -331,6 +334,13 @@ async def _record_sync_outcome(
             state["blocked_item"] = blocked_item
         elif clear_blocked_item:
             state.pop("blocked_item", None)
+        last_outcome = outcome_summary.get("last_outcome")
+        if last_outcome == "awaiting_review":
+            state["awaiting_review_item"] = outcome_summary.get(
+                "awaiting_review_item"
+            )
+        elif last_outcome in {"ok", "processing_error", "blocked_item"}:
+            state.pop("awaiting_review_item", None)
         if continuation_cursor is None:
             state.pop("_stripe_continuation_cursor", None)
         else:
@@ -547,11 +557,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 entity_id,
                 outcome_summary=summary,
                 last_sync_at=last_sync,
-                continuation_cursor=(
-                    loaded_continuation_cursor
-                    if blocked_item is not None
-                    else continuation_cursor
-                ),
+                continuation_cursor=continuation_cursor,
                 window_gte=window_gte if window_lt is not None else None,
                 window_lt=window_lt,
                 failure_counts=failure_counts,
@@ -580,6 +586,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     )
 
     retrying_blocked = blocked_item is not None
+    awaiting_review = False
     items_to_process = bts
     if retrying_blocked:
         blocked_id = blocked_item["id"]
@@ -594,12 +601,19 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             summary["errors"].append(
                 f"persisted blocked Stripe item {blocked_id} was not returned"
             )
+            # A capped pull is only a partial search. Persist its continuation
+            # inside the pinned window so a later pass can reach the exact
+            # blocked row. An exhausted pull proved that the row is absent;
+            # either way the financial position stays where it was.
+            search_cursor = (
+                bts.continuation_cursor if not bts.exhausted else None
+            )
             await _record_sync_outcome(
                 workspace_id,
                 entity_id,
                 outcome_summary=summary,
                 last_sync_at=last_sync,
-                continuation_cursor=loaded_continuation_cursor,
+                continuation_cursor=search_cursor,
                 window_gte=window_gte,
                 window_lt=window_lt,
                 failure_counts=failure_counts,
@@ -684,12 +698,40 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 break
             result_outcome = result.outcome
             result_reason = getattr(result, "reason", None) or "no reason supplied"
+            idempotency_confirmed = False
+            if result_outcome in _REVIEW_MAPPER_OUTCOMES:
+                # The approval row is deliberately not enough to advance the
+                # chain. The approval-posting path must create the journal row;
+                # confirm it on this same database transaction before moving
+                # past the Stripe item.
+                if isinstance(bt_id, str) and bt_id:
+                    try:
+                        idempotency_confirmed = await _journal_entry_exists(
+                            session,
+                            entity_id=entity_id,
+                            source_external_id=bt_id,
+                        )
+                    except Exception as exc:
+                        result_reason = (
+                            "could not confirm review journal entry: "
+                            f"{exc.__class__.__name__}: {exc}"
+                        )
+                if not idempotency_confirmed:
+                    summary["awaiting_review_item"] = {
+                        "id": bt_id,
+                        "amount": bt.get("amount"),
+                        "currency": bt.get("currency"),
+                    }
+                    summary["errors"].append(
+                        f"awaiting review {bt.get('id', '?')}: {result_reason}"
+                    )
+                    awaiting_review = True
+                    break
+                result_outcome = "blocked_idempotent"
             if result.outcome == "blocked_idempotent":
                 try:
-                    confirmed = await _journal_entry_exists(
-                        session,
-                        entity_id=entity_id,
-                        source_external_id=bt_id,
+                    confirmed = idempotency_confirmed or await _journal_entry_exists(
+                        session, entity_id=entity_id, source_external_id=bt_id
                     )
                 except Exception as exc:
                     confirmed = False
@@ -787,6 +829,27 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 pass
             else:
                 summary["skipped"] += 1
+
+    if awaiting_review:
+        summary["last_outcome"] = "awaiting_review"
+        summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+        _, next_cursor = _durable_position_after_item(
+            last_processed,
+            fallback_last_sync=last_sync,
+            fallback_cursor=continuation_cursor,
+        )
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync,
+            continuation_cursor=next_cursor,
+            window_gte=window_gte,
+            window_lt=window_lt,
+            failure_counts=failure_counts,
+            blocked_item=blocked_item,
+        )
+        return summary
 
     if processing_error:
         summary["last_outcome"] = "processing_error"
