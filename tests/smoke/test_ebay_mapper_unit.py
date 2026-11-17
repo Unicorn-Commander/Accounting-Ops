@@ -15,6 +15,7 @@ What we cover:
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -378,6 +379,42 @@ async def test_approved_first_run_item_bypasses_only_the_review_guard():
     )
     assert result.outcome == "posted"
     assert not session.approvals
+
+
+@pytest.mark.parametrize("amount", ["80.00", "1500.00"])
+@pytest.mark.asyncio
+async def test_verified_approval_attestation_posts_m_and_h_items(amount):
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
+    result = await ebay_mapper.map_and_post_transaction(
+        session,
+        workspace_id="wid",
+        entity_id="eid",
+        txn=_txn(f"TXN-ATTEST-{amount}", "SALE", amount),
+        actor_uc_uid="agent:ebay_sync",
+        human_attested=True,
+    )
+    assert result.outcome == "posted", result.reason
+    assert not session.approvals
+
+
+@pytest.mark.asyncio
+async def test_changed_approved_item_is_forced_back_to_review():
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
+    result = await ebay_mapper.map_and_post_transaction(
+        session,
+        workspace_id="wid",
+        entity_id="eid",
+        txn=_txn("TXN-CHANGED", "SALE", "60.00"),
+        actor_uc_uid="agent:ebay_sync",
+        force_review=True,
+    )
+    assert result.outcome == "queued_for_confirm"
+    assert session.approvals
+    assert not session.posted_entries
+    payload = json.loads(session.approvals[0]["payload"])
+    assert payload["amount_cents"] == 6000
+    assert payload["transactionType"] == "SALE"
+    assert payload["transactionDate"] == "2026-05-01T12:00:00.000Z"
 
 
 @pytest.mark.asyncio

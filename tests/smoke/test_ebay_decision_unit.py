@@ -71,4 +71,6 @@ async def test_worker_rejects_without_mapper_and_approves_raw_item(
     decisions[payout["payoutId"]] = "approved"
     approved_summary = await ebay_sync._sync_one_workspace(workspace_id)
     assert approved_summary["last_outcome"] == "ok"
-    assert calls and calls[0]["first_run_confirmed"] is True
+    # This fixture has no locked connector-state arm, so the worker must not
+    # treat the bare decision string as a verified attestation.
+    assert calls and calls[0]["force_review"] is True

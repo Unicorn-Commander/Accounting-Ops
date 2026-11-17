@@ -128,6 +128,59 @@ def test_registered_decision_authority(kind, expected):
     asyncio.run(run())
 
 
+def test_ebay_decision_rejects_agent_session_before_applying():
+    async def run():
+        wid, eid, aid = uuid4(), uuid4(), uuid4()
+        ctx = WorkspaceContext(wid, "isolated", "accountant", "human", None, None, False)
+        auth = AuthContext(
+            "human",
+            "ebay-agent",
+            (),
+            {
+                "sid": "verified-session",
+                "azp": get_settings().keycloak_client_id,
+                "auth_time": 1789520000,
+            },
+            may_autoprovision=True,
+        )
+        row = {
+            "id": str(aid),
+            "entity_id": str(eid),
+            "subject_type": "ebay_post_transaction",
+            "subject_id": str(aid),
+            "status": "pending",
+            "payload": {"ebay_transaction_id": "TXN-AGENT"},
+            "reasoning": "fixture",
+        }
+        session = SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(
+                    mappings=lambda: SimpleNamespace(first=lambda: row)
+                )
+            )
+        )
+
+        @asynccontextmanager
+        async def ws(*args):
+            yield session
+
+        app = FastAPI()
+        app.include_router(approvals.router)
+        app.dependency_overrides[resolve_workspace] = lambda: ctx
+        app.dependency_overrides[validate_bearer_token] = lambda: auth
+        with patch.object(approvals, "workspace_session", ws):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                result = await client.post(
+                    f"/api/workspaces/{wid}/approvals/{aid}/decide",
+                    json={"decision": "approve"},
+                )
+        assert result.status_code == 403
+
+    asyncio.run(run())
+
+
 def test_legacy_direct_tool_delegate_keeps_working_without_new_auth_parameter():
     async def run():
         wid, eid, aid = uuid4(), uuid4(), uuid4()
