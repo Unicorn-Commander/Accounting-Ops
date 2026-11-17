@@ -1,6 +1,7 @@
 """Real PostgreSQL proof for eBay item savepoint and cursor isolation."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -193,5 +194,8 @@ async def test_db_error_rolls_back_only_failed_ebay_item(
     assert first == 1
     assert failed == 0
     assert state["last_sync_at"] is None
-    assert state["state"]["_ebay_failure_counts"] == {failed_id: 1}
-    assert state["state"]["_ebay_continuation_cursor"]["payouts"]["offset"] == 1
+    state_json = state["state"]
+    if isinstance(state_json, str):
+        state_json = json.loads(state_json)
+    assert state_json["_ebay_failure_counts"] == {failed_id: 1}
+    assert state_json["_ebay_continuation_cursor"]["payouts"]["offset"] == 1
