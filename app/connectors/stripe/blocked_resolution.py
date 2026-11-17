@@ -31,9 +31,21 @@ decide only from state read after it. All of them write with a jsonb merge
 writes can drop ``resolved_blocked_items`` or put a resolved id back as the
 blocked item.
 
+Every resolve, reopen and worker block transition bumps
+``connector_state.state.block_revision`` under that lock. A sync pass carries
+the revision it loaded, and an outcome write from an older revision may not
+touch the block, cursor, window, failure counts or last_sync_at. That is what
+stops a stale pass from erasing a reopen of the SAME id it had loaded.
+
+The approval-posting path (app/api/approvals.py decide_approval, Stripe rows)
+takes the same state lock BEFORE it locks the approval row. Resolve does the
+same. One lock order everywhere: Stripe state row, then approval row.
+
 A resolution can be undone only by ``reopen_resolved_item``: an owner/admin
 human, a required reason, an audit row. It re-arms the item as the blocked
-item so the worker maps it normally. Nothing expires on its own.
+item so the worker maps it normally, and marks every existing rejection of
+that item ``superseded_by_reopen`` so the worker's rejected-approval hold no
+longer applies to it. Nothing expires on its own.
 
 The approval row, the audit row and connector_state are all workspace tables,
 so the customer export (app/data_rights/export.py, dynamic table discovery)
@@ -58,6 +70,17 @@ AUDIT_OUTCOME = "resolved_elsewhere"
 REOPEN_AUDIT_TOOL_NAME = "stripe_blocked_item_reopen"
 REOPEN_OUTCOME = "resolution_reopened"
 REOPENED_STATE_KEY = "reopened_blocked_items"
+# Monotonic counter bumped under the shared lock by every resolve, every reopen
+# and every worker block transition (a new blocked item, or the block cleared).
+# A sync pass carries the value it loaded; an outcome write from an older
+# revision is stale and may not touch the chain position (see
+# scripts/stripe_sync.py _record_sync_outcome). Id equality alone cannot tell
+# "the same block the pass loaded" from "that id resolved and reopened since".
+BLOCK_REVISION_KEY = "block_revision"
+# Set on a rejected approval row by an audited reopen. The worker's
+# rejected-approval checks (scripts/stripe_sync.py _stripe_item_was_rejected)
+# skip superseded rows; an ordinary rejection never carries this key.
+SUPERSEDED_BY_REOPEN_KEY = "superseded_by_reopen"
 MIN_REASON_CHARS = 10
 MAX_REASON_CHARS = 2000
 # How long a human call waits for a running sync pass to release the lock.
@@ -147,6 +170,17 @@ def merge_params(row_id: str, patch: dict[str, Any], drop_keys: set[str]) -> dic
     }
 
 
+def block_revision(state: dict[str, Any] | None) -> int:
+    """The state's block revision; 0 for rows written before it existed."""
+    value = (state or {}).get(BLOCK_REVISION_KEY)
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(int(value), 0) if value is not None else 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _state_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
         try:
@@ -227,6 +261,25 @@ async def _lock_workspace_stripe_rows(
     return [(dict(row), _state_dict(row["state"])) for row in rows]
 
 
+async def lock_stripe_state_for_approval(
+    session: AsyncSession, workspace_id: UUID, entity_id: UUID
+) -> frozenset[str]:
+    """Take the shared Stripe state lock for a Stripe approval decision.
+
+    app/api/approvals.py decide_approval calls this BEFORE it locks the
+    approval row, so approval posting, the sync worker, resolve and reopen all
+    take locks in one order: Stripe state row, then approval row. Waits at
+    most LOCK_TIMEOUT_MS (then BlockedResolutionError 409). Returns the ids
+    resolved elsewhere, read under the lock: approving one of those would
+    book it a second time.
+    """
+    rows = await _lock_workspace_stripe_rows(session, workspace_id, entity_id)
+    resolved: set[str] = set()
+    for _row, state in rows:
+        resolved.update(resolved_ids(state))
+    return frozenset(resolved)
+
+
 async def _stripe_post_exists(session: AsyncSession, entity_id: UUID, bt_id: str) -> bool:
     row = (
         await session.execute(
@@ -255,7 +308,11 @@ def resolution_patch(
     once everything before it had been handled. ``state`` must have been read
     under the shared lock.
     """
-    patch: dict[str, Any] = {"_stripe_continuation_cursor": bt_id, "last_outcome": AUDIT_OUTCOME}
+    patch: dict[str, Any] = {
+        "_stripe_continuation_cursor": bt_id,
+        "last_outcome": AUDIT_OUTCOME,
+        BLOCK_REVISION_KEY: block_revision(state) + 1,
+    }
     drop = {"blocked_item"}
     counts = state.get("_stripe_failure_counts")
     counts = (
@@ -294,6 +351,7 @@ def reopen_patch(
         "window_lt": window[1],
         RESOLVED_STATE_KEY: resolved,
         "last_outcome": REOPEN_OUTCOME,
+        BLOCK_REVISION_KEY: block_revision(state) + 1,
     }
     drop = {"_stripe_continuation_cursor", "awaiting_review_item"}
     counts = state.get("_stripe_failure_counts")
@@ -577,6 +635,42 @@ async def reopen_resolved_item(
                 "payload": json.dumps({"blocked_reopen": reopen}),
             },
         )
+    # A rejected approval for this item holds a blocked retry without running
+    # the mapper (scripts/stripe_sync.py). The reopen is the audited decision
+    # to run the mapper again, so every rejection of this item that exists now
+    # is marked superseded by it. A rejection made AFTER this reopen carries no
+    # marker and holds the item again, exactly like any ordinary rejection.
+    # Approval rows are locked after the state row: the one lock order.
+    superseded = (
+        await session.execute(
+            text(
+                """
+                UPDATE approval_queue
+                SET payload = payload || CAST(:payload AS jsonb)
+                WHERE entity_id = :eid
+                  AND subject_type = 'stripe_post_balance_transaction'
+                  AND status = 'rejected'
+                  AND payload ->> 'stripe_balance_txn_id' = :stripe_id
+                  AND payload -> :marker IS NULL
+                RETURNING id::text AS id
+                """
+            ),
+            {
+                "eid": str(row_entity),
+                "stripe_id": bt_id,
+                "marker": SUPERSEDED_BY_REOPEN_KEY,
+                "payload": json.dumps({
+                    SUPERSEDED_BY_REOPEN_KEY: {
+                        "audit_id": reopen["audit_id"],
+                        "reopened_by_uc_uid": reopened_by,
+                        "reopened_at": reopen["reopened_at"],
+                    }
+                }),
+            },
+        )
+    ).mappings().all()
+    reopen["superseded_rejection_ids"] = sorted(row_["id"] for row_ in superseded)
+    response["superseded_rejection_ids"] = reopen["superseded_rejection_ids"]
 
     blocked_item = dict(original)
     blocked_item["reopened"] = {

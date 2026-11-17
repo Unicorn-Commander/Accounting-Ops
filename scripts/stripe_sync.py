@@ -48,9 +48,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.connectors.stripe import StripeApiError, StripeClient, load_stripe_credential
 from app.connectors.stripe.blocked_resolution import (
+    BLOCK_REVISION_KEY,
     MERGE_STATE_SQL,
     REOPENED_STATE_KEY,
     RESOLVED_STATE_KEY,
+    SUPERSEDED_BY_REOPEN_KEY,
+    block_revision,
     load_resolved_blocked_ids,
     merge_params,
     resolved_ids,
@@ -229,6 +232,33 @@ async def _load_last_sync(
     return r.last_sync_at if r and r.last_sync_at else None
 
 
+async def _load_block_revision(workspace_id: UUID, entity_id: UUID) -> int:
+    """Read the block revision a pass carries (see BLOCK_REVISION_KEY).
+
+    Called BEFORE ``_load_sync_position``. Any resolve, reopen or block
+    transition after this read raises the stored revision above the carried
+    one, so the pass's outcome write is treated as stale. A change that lands
+    between the two reads makes the pass look stale while its position is in
+    fact fresh; that only costs one pass that does not move the position.
+    """
+    async with workspace_session(SessionLocal, workspace_id) as session:
+        r = (
+            await session.execute(
+                text(
+                    """
+                    SELECT state FROM connector_state
+                    WHERE entity_id = :eid AND connector_name = 'stripe_api'
+                      AND connector_instance_name = 'default'
+                    LIMIT 1
+                    """
+                ),
+                {"eid": str(entity_id)},
+            )
+        ).first()
+    state = r.state if r is not None and isinstance(r.state, dict) else {}
+    return block_revision(state)
+
+
 async def _load_sync_position(
     workspace_id: UUID, entity_id: UUID
 ) -> tuple[
@@ -314,8 +344,9 @@ async def _record_sync_outcome(
     blocked_item: dict[str, Any] | None = None,
     clear_blocked_item: bool = False,
     carried_blocked_id: str | None = None,
+    carried_revision: int | None = None,
     instance_name: str = "default",
-) -> None:
+) -> int:
     """Merge this pass's keys into connector_state under the shared lock.
 
     Takes the same row lock as the manual resolve/reopen
@@ -327,6 +358,15 @@ async def _record_sync_outcome(
     stale: its block, cursor, window and last_sync_at are not written, so a
     resolved item neither comes back nor rewinds the chain and a reopened item
     keeps the window it was re-armed in.
+
+    ``carried_revision`` is the block revision the pass loaded before its
+    position. A stored revision above it means a resolve, reopen or another
+    block transition happened since, even when the blocked id is the same one
+    the pass loaded (resolve then reopen of that id). Such a write is stale.
+    A non-stale write that sets a new blocked item or clears one bumps the
+    revision. Returns the revision the pass should carry into its next write:
+    the stored one after a fresh write, the old carried one after a stale
+    write (so every later write of that pass stays stale).
     """
     async with workspace_session(SessionLocal, workspace_id) as session:
         existing = (
@@ -391,21 +431,28 @@ async def _record_sync_outcome(
         writing_block_id = (
             blocked_item.get("id") if isinstance(blocked_item, dict) else None
         )
-        if (
-            (carried_blocked_id is not None and carried_blocked_id in resolved)
+        locked_revision = block_revision(locked_state)
+        new_revision = locked_revision
+        stale = (
+            (carried_revision is not None and carried_revision < locked_revision)
+            or (carried_blocked_id is not None and carried_blocked_id in resolved)
             or (writing_block_id is not None and writing_block_id in resolved)
             or (locked_block_id is not None and locked_block_id != carried_blocked_id)
-        ):
+        )
+        if stale:
             # A human resolved or reopened a blocked item while this pass ran.
             # Keep the human's position; re-blocking or rewinding here would
             # undo that decision.
             _log.warning(
                 "stripe_sync_stale_outcome workspace=%s entity=%s carried=%s "
-                "now_blocked=%s; human change during this pass, position kept",
+                "now_blocked=%s carried_revision=%s now_revision=%s; "
+                "human change during this pass, position kept",
                 workspace_id,
                 entity_id,
                 carried_blocked_id,
                 locked_block_id,
+                carried_revision,
+                locked_revision,
             )
             for key in (
                 "blocked_item",
@@ -413,11 +460,25 @@ async def _record_sync_outcome(
                 "window_gte",
                 "window_lt",
                 "awaiting_review_item",
+                "_stripe_failure_counts",
             ):
                 patch.pop(key, None)
                 drop.discard(key)
             patch["last_outcome"] = "superseded_by_resolution"
             write_last_sync = False
+        elif ("blocked_item" in patch and writing_block_id != locked_block_id) or (
+            "blocked_item" in drop and locked_block_id is not None
+        ):
+            # This pass moves the block itself: a new item blocked, or the
+            # carried block cleared after it posted.
+            new_revision = locked_revision + 1
+        patch.pop(BLOCK_REVISION_KEY, None)
+        drop.discard(BLOCK_REVISION_KEY)
+        if new_revision != locked_revision:
+            patch[BLOCK_REVISION_KEY] = new_revision
+        result_revision = (
+            carried_revision if stale and carried_revision is not None else new_revision
+        )
         if existing is not None:
             await session.execute(
                 text(
@@ -433,7 +494,7 @@ async def _record_sync_outcome(
                     **({"last_sync_at": last_sync_at} if write_last_sync else {}),
                 },
             )
-            return
+            return result_revision
         await session.execute(
             text(
                 """
@@ -460,6 +521,7 @@ async def _record_sync_outcome(
                 "last_sync_at": last_sync_at,
             },
         )
+        return result_revision
 
 
 def _durable_position_after_item(
@@ -532,6 +594,11 @@ async def _stripe_item_was_rejected(
     that may be passed by an explicit human decision. The blocked-item path
     deliberately uses the broader row check so a rejected blocked approval can
     be held without invoking the mapper.
+
+    A rejection marked ``superseded_by_reopen`` is ignored: an audited reopen
+    (app/connectors/stripe/blocked_resolution.py reopen_resolved_item) is the
+    later human decision to run the mapper again. An ordinary rejection never
+    carries that marker, so it still never clears a block.
     """
     row = (
         await session.execute(
@@ -542,6 +609,7 @@ async def _stripe_item_was_rejected(
                   AND subject_type = 'stripe_post_balance_transaction'
                   AND status = 'rejected'
                   AND payload ->> 'stripe_balance_txn_id' = :stripe_id
+                  AND payload -> :superseded_key IS NULL
                   AND (
                       :awaiting_review_only = false
                       OR EXISTS (
@@ -560,6 +628,7 @@ async def _stripe_item_was_rejected(
                 "eid": str(entity_id),
                 "stripe_id": stripe_balance_txn_id,
                 "awaiting_review_only": awaiting_review_only,
+                "superseded_key": SUPERSEDED_BY_REOPEN_KEY,
             },
         )
     ).first()
@@ -599,6 +668,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         summary["errors"].append("No active entity to attribute Stripe revenue to.")
         return summary
 
+    # Revision first, then position: see _load_block_revision.
+    loaded_revision: int | None = await _load_block_revision(workspace_id, entity_id)
     (
         last_sync,
         continuation_cursor,
@@ -677,6 +748,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 window_lt=window_lt,
                 failure_counts=failure_counts,
                 carried_blocked_id=loaded_blocked_id,
+                carried_revision=loaded_revision,
                 blocked_item=blocked_item,
             )
             return summary
@@ -684,7 +756,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     if loaded_window_lt is None and window_lt is not None:
         # Establish the chain window before mapping. If the worker dies while
         # mapping, the retry still uses this exact Stripe-derived upper bound.
-        await _record_sync_outcome(
+        loaded_revision = await _record_sync_outcome(
             workspace_id,
             entity_id,
             outcome_summary=summary,
@@ -694,6 +766,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_lt=window_lt,
             failure_counts=failure_counts,
             carried_blocked_id=loaded_blocked_id,
+            carried_revision=loaded_revision,
             blocked_item=blocked_item,
         )
     summary["balance_transactions_seen"] = len(bts)
@@ -735,6 +808,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 window_lt=window_lt,
                 failure_counts=failure_counts,
                 carried_blocked_id=loaded_blocked_id,
+                carried_revision=loaded_revision,
                 blocked_item=blocked_item,
             )
             return summary
@@ -1013,6 +1087,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_lt=window_lt,
             failure_counts=failure_counts,
             carried_blocked_id=loaded_blocked_id,
+            carried_revision=loaded_revision,
             blocked_item=blocked_item,
         )
         return summary
@@ -1035,6 +1110,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_lt=window_lt,
             failure_counts=failure_counts,
             carried_blocked_id=loaded_blocked_id,
+            carried_revision=loaded_revision,
             blocked_item=blocked_item,
         )
         return summary
@@ -1057,6 +1133,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_lt=window_lt,
             failure_counts=failure_counts,
             carried_blocked_id=loaded_blocked_id,
+            carried_revision=loaded_revision,
             blocked_item=summary.get("blocked_item") or blocked_item,
         )
         return summary
@@ -1082,6 +1159,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_lt=window_lt,
             failure_counts=failure_counts,
             carried_blocked_id=loaded_blocked_id,
+            carried_revision=loaded_revision,
             clear_blocked_item=True,
         )
         return summary
@@ -1102,7 +1180,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
 
     # Persist the cursor before reconciliation. Reconciliation is best effort,
     # and must not erase progress from a capped pass when it raises.
-    await _record_sync_outcome(
+    loaded_revision = await _record_sync_outcome(
         workspace_id,
         entity_id,
         outcome_summary=summary,
@@ -1112,6 +1190,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         window_lt=next_window_lt,
         failure_counts=failure_counts,
         carried_blocked_id=loaded_blocked_id,
+        carried_revision=loaded_revision,
         clear_blocked_item=False,
     )
 
@@ -1139,6 +1218,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         window_lt=next_window_lt,
         failure_counts=failure_counts,
         carried_blocked_id=loaded_blocked_id,
+        carried_revision=loaded_revision,
         clear_blocked_item=False,
     )
     return summary

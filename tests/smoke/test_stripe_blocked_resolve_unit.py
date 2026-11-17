@@ -114,6 +114,16 @@ class _Session:
         if "INSERT INTO decision_audit" in sql:
             self.audits.append(dict(params))
             return _Result([])
+        if "UPDATE approval_queue" in sql and "RETURNING" in sql:
+            # reopen: mark every not-yet-superseded rejection of the item
+            assert params["stripe_id"] == BT
+            if (
+                self.approval["status"] == "rejected"
+                and params["marker"] not in self.approval["payload"]
+            ):
+                self.approval["payload"].update(json.loads(params["payload"]))
+                return _Result([{"id": self.approval["id"]}])
+            return _Result([])
         if "UPDATE approval_queue" in sql:
             if "decided_by_uc_uid" in sql:
                 self.approval["status"] = "rejected"
@@ -449,6 +459,12 @@ async def test_reopen_rearms_the_item_with_an_audit_trail() -> None:
     assert session.approval["status"] == "rejected"
     assert session.approval["payload"]["blocked_reopen"]["audit_id"] == audit["id"]
     assert "blocked_resolution" in session.approval["payload"]
+    # the resolution's rejection no longer holds the item for the worker
+    marker = session.approval["payload"][br.SUPERSEDED_BY_REOPEN_KEY]
+    assert marker["audit_id"] == audit["id"]
+    assert response["superseded_rejection_ids"] == [session.approval["id"]]
+    # resolve bumped the revision once, reopen once more
+    assert state[br.BLOCK_REVISION_KEY] == 2
 
     # reopened means blocked again: it can be resolved again, and not reopened twice
     with pytest.raises(br.BlockedResolutionError) as exc:

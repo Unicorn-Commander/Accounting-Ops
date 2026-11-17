@@ -237,6 +237,38 @@ async def decide_approval(
         )
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        # Stripe rows: take the shared Stripe state lock BEFORE the approval
+        # row lock. The sync worker, the manual resolve and the reopen take the
+        # state lock first too (app/connectors/stripe/blocked_resolution.py),
+        # so there is one lock order and a resolve racing this approval waits
+        # for it and then sees the posted journal entry. subject_type and
+        # entity_id never change on a row, so reading them unlocked is safe.
+        stripe_resolved: frozenset[str] = frozenset()
+        head = (
+            await session.execute(
+                text(
+                    """
+                    SELECT entity_id::text AS entity_id, subject_type
+                    FROM approval_queue WHERE id = :id
+                    """
+                ),
+                {"id": str(approval_id)},
+            )
+        ).mappings().first()
+        if head is not None and head["subject_type"] == "stripe_post_balance_transaction":
+            from app.connectors.stripe.blocked_resolution import (
+                BlockedResolutionError,
+                lock_stripe_state_for_approval,
+            )
+
+            assert_entity_in_scope(workspace, UUID(head["entity_id"]))
+            try:
+                stripe_resolved = await lock_stripe_state_for_approval(
+                    session, workspace.workspace_id, UUID(head["entity_id"])
+                )
+            except BlockedResolutionError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
         # Lock the row so two concurrent deciders can't both apply it. FOR UPDATE
         # within this transaction; the second decider sees status != 'pending'
         # after the first commits and gets a clean 409.
@@ -313,6 +345,21 @@ async def decide_approval(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Stripe approval payload does not accept an account override",
+            )
+        if (
+            subject_type == "stripe_post_balance_transaction"
+            and decision == "approve"
+            and str(payload.get("stripe_balance_txn_id") or "") in stripe_resolved
+        ):
+            # Re-checked under the state lock: an owner/admin already resolved
+            # this item elsewhere (manual journal entry or not books-relevant).
+            # Posting it now would book it twice. Reopen the resolution first.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This Stripe item was resolved elsewhere; reopen the "
+                    "resolution before approving it"
+                ),
             )
 
         if subject_type == "journal_entry_post":
