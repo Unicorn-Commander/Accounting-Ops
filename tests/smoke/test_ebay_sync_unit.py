@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 from app.connectors.ebay.client import EbayCredentialBlob, EbayFinancesClient
 from scripts import ebay_sync
@@ -102,6 +103,65 @@ def _txn(index: int, payout_id: str) -> dict[str, Any]:
     }
 
 
+def _install_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    client: EbayFinancesClient,
+    session: Any,
+    position: dict[str, Any],
+    mapper: Any,
+):
+    workspace_id = client.blob.workspace_id
+    entity_id = uuid4()
+    client.blob.entity_id = str(entity_id)
+    records: list[dict[str, Any]] = []
+
+    async def load_credential(*args: Any, **kwargs: Any):
+        return client.blob
+
+    async def load_position(*args: Any, **kwargs: Any):
+        return position["last_sync_at"], {
+            "cursor": position["continuation_cursor"],
+            "failure_counts": position.get("failure_counts", {}),
+            "blocked_item": position.get("blocked_item"),
+        }
+
+    async def entity_for_credential(*args: Any, **kwargs: Any):
+        return entity_id
+
+    async def record_outcome(*args: Any, **kwargs: Any):
+        position["last_sync_at"] = kwargs["last_sync_at"]
+        position["continuation_cursor"] = kwargs["continuation_cursor"]
+        position["failure_counts"] = dict(kwargs.get("failure_counts") or {})
+        if kwargs.get("blocked_item") is not None:
+            position["blocked_item"] = kwargs["blocked_item"]
+        elif kwargs.get("clear_blocked_item"):
+            position["blocked_item"] = None
+        records.append(dict(kwargs["outcome_summary"]))
+
+    @asynccontextmanager
+    async def fake_workspace_session(*args: Any, **kwargs: Any):
+        yield session
+
+    async def fake_reconcile(*args: Any, **kwargs: Any) -> dict[str, int]:
+        return {"checked_payouts": 0, "matched": 0, "unmatched": 0}
+
+    monkeypatch.setattr(ebay_sync, "load_ebay_credential", load_credential)
+    monkeypatch.setattr(ebay_sync, "_entity_for_credential", entity_for_credential)
+    monkeypatch.setattr(ebay_sync, "_load_sync_position", load_position)
+    monkeypatch.setattr(ebay_sync, "_record_sync_outcome", record_outcome)
+    monkeypatch.setattr(ebay_sync, "workspace_session", fake_workspace_session)
+    monkeypatch.setattr(ebay_sync, "reconcile_one_entity", fake_reconcile)
+    monkeypatch.setattr(ebay_sync, "map_and_post_transaction", mapper)
+    monkeypatch.setattr(
+        ebay_sync.EbayFinancesClient,
+        "from_credential",
+        classmethod(lambda cls, blob: client),
+    )
+    monkeypatch.setattr(ebay_sync, "_utcnow", lambda: RUN_END)
+    return workspace_id, entity_id, records
+
+
 @pytest.mark.asyncio
 async def test_ebay_paginators_report_offset_continuation_without_skipping_rows():
     workspace_id = uuid4()
@@ -176,7 +236,9 @@ async def test_sync_recovers_above_cap_payouts_and_transactions(monkeypatch):
     assert set(external_ids) == expected
     assert len(external_ids) == len(expected)
     assert position["continuation_cursor"] is None
-    assert position["last_sync_at"] == RUN_END
+    assert position["last_sync_at"] == datetime(
+        2026, 10, 20, 0, 0, 1, tzinfo=timezone.utc
+    )
     assert records[-1]["last_outcome"] == "ok"
 
 
@@ -278,5 +340,164 @@ async def test_sync_below_cap_advances_time_cursor_and_clears_continuation(monke
     summary = await ebay_sync._sync_one_workspace(workspace_id)
 
     assert summary["last_outcome"] == "ok"
-    assert position["last_sync_at"] == RUN_END
+    assert position["last_sync_at"] == datetime(
+        2026, 10, 20, 0, 0, 1, tzinfo=timezone.utc
+    )
     assert position["continuation_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_stale_offset_restarts_the_same_pinned_window(monkeypatch):
+    workspace_id = uuid4()
+    entity_id = uuid4()
+    payouts = [_payout(0), _payout(1)]
+    http = _EbayHttp(payouts, {})
+    client = EbayFinancesClient(blob=_blob(workspace_id, entity_id), _http_factory=lambda: http)
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
+    start = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    end = datetime(2026, 10, 21, tzinfo=timezone.utc)
+    position = {
+        "last_sync_at": start,
+        "continuation_cursor": {
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "payouts": {"offset": 99},
+            "transactions": {},
+        },
+    }
+
+    async def mapper(*args: Any, **kwargs: Any):
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    _install_sync(
+        monkeypatch,
+        client=client,
+        session=session,
+        position=position,
+        mapper=mapper,
+    )
+    summary = await ebay_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "ok"
+    payout_calls = [call for call in http.calls if call["url"].endswith("/payout")]
+    assert payout_calls[0]["params"]["offset"] == 99
+    assert payout_calls[1]["params"]["offset"] == 0
+    assert position["continuation_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_rows_arriving_mid_chain_wait_for_the_next_chain(monkeypatch):
+    workspace_id = uuid4()
+    entity_id = uuid4()
+    initial = [_payout(0), _payout(1)]
+
+    class _LatePayoutHttp(_EbayHttp):
+        def __init__(self):
+            super().__init__(initial, {})
+            self.first = True
+
+        async def request(self, method: str, url: str, **kwargs: Any) -> _Response:
+            response = await super().request(method, url, **kwargs)
+            if self.first and url.endswith("/payout") and kwargs.get("params", {}).get("offset", 0) == 0:
+                self.first = False
+                self.payouts.append(_payout(99))
+            return response
+
+    http = _LatePayoutHttp()
+    client = EbayFinancesClient(blob=_blob(workspace_id, entity_id), _http_factory=lambda: http)
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
+    seen: set[str] = set()
+
+    async def mapper(*args: Any, **kwargs: Any):
+        txn = kwargs["txn"]
+        external_id = txn.get("transactionId") or txn.get("payoutId")
+        if external_id in seen:
+            session.idempotent_hit = True
+            return SimpleNamespace(outcome="blocked_idempotent", reason="duplicate")
+        seen.add(external_id)
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    position = {"last_sync_at": None, "continuation_cursor": None}
+    _install_sync(
+        monkeypatch,
+        client=client,
+        session=session,
+        position=position,
+        mapper=mapper,
+    )
+    await ebay_sync._sync_one_workspace(workspace_id)
+    assert "PAY-099" not in seen
+    await ebay_sync._sync_one_workspace(workspace_id)
+    assert "PAY-099" in seen
+
+
+@pytest.mark.asyncio
+async def test_refusal_blocks_on_third_attempt_and_keeps_cursor_before_item(monkeypatch):
+    workspace_id = uuid4()
+    entity_id = uuid4()
+    payouts = [_payout(0), _payout(1), _payout(2)]
+    http = _EbayHttp(payouts, {})
+    client = EbayFinancesClient(blob=_blob(workspace_id, entity_id), _http_factory=lambda: http)
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
+    position = {"last_sync_at": None, "continuation_cursor": None}
+    seen: list[str] = []
+
+    async def mapper(*args: Any, **kwargs: Any):
+        external_id = kwargs["txn"].get("transactionId")
+        seen.append(external_id)
+        if external_id == "PAY-001":
+            return SimpleNamespace(
+                outcome="blocked_unknown_account",
+                reason="fictional missing account",
+                fee_journal_entry_id=None,
+            )
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    _install_sync(
+        monkeypatch,
+        client=client,
+        session=session,
+        position=position,
+        mapper=mapper,
+    )
+    first = await ebay_sync._sync_one_workspace(workspace_id)
+    second = await ebay_sync._sync_one_workspace(workspace_id)
+    third = await ebay_sync._sync_one_workspace(workspace_id)
+
+    assert first["last_outcome"] == "processing_error"
+    assert second["last_outcome"] == "processing_error"
+    assert third["last_outcome"] == "blocked_item"
+    assert position["continuation_cursor"]["payouts"]["offset"] == 1
+    assert position["failure_counts"] == {"PAY-001": 3}
+    assert len(session.approvals) == 1
+    assert "PAY-002" not in seen
+
+
+@pytest.mark.asyncio
+async def test_db_error_savepoint_preserves_prior_payout(monkeypatch):
+    workspace_id = uuid4()
+    entity_id = uuid4()
+    http = _EbayHttp([_payout(0), _payout(1)], {})
+    client = EbayFinancesClient(blob=_blob(workspace_id, entity_id), _http_factory=lambda: http)
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
+    position = {"last_sync_at": None, "continuation_cursor": None}
+    real_mapper = ebay_sync.map_and_post_transaction
+
+    async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        if txn.get("transactionId") == "PAY-001":
+            raise DBAPIError("SELECT fictional", {}, RuntimeError("db failure"))
+        return await real_mapper(session, txn=txn, **kwargs)
+
+    _install_sync(
+        monkeypatch,
+        client=client,
+        session=session,
+        position=position,
+        mapper=mapper,
+    )
+    summary = await ebay_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "processing_error"
+    assert [entry["source_external_id"] for entry in session.posted_entries] == ["PAY-000"]
+    assert position["continuation_cursor"]["payouts"]["offset"] == 1
+    assert position["failure_counts"] == {"PAY-001": 1}
