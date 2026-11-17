@@ -50,6 +50,7 @@ from app.connectors.stripe import StripeApiError, StripeClient, load_stripe_cred
 from app.connectors.stripe.client import paginate_balance_transactions
 from app.connectors.stripe.mapper import (
     DEFAULT_REVENUE_ACCOUNT,
+    enqueue_blocked_balance_transaction,
     map_and_post_balance_transaction,
 )
 from app.connectors.stripe.reconcile import reconcile_one_entity
@@ -65,6 +66,23 @@ logging.basicConfig(
 
 DEFAULT_BACKFILL_DAYS = 30
 DEFAULT_LOOP_INTERVAL_S = int(os.getenv("STRIPE_SYNC_INTERVAL_S", "3600"))
+STRIPE_WINDOW_OVERLAP_S = 24 * 60 * 60
+
+# A mapper refusal is not proof that the item was handled. Only these
+# outcomes mean that the external_ref is safe to move past: a journal entry
+# was written, a duplicate was confirmed, or the item is an intentional zero
+# amount skip. Review outcomes remain at the head of the chain until their
+# approval path has actually written the journal entry.
+_ADVANCE_MAPPER_OUTCOMES = frozenset({
+    "posted",
+    "blocked_idempotent",
+    "skipped_zero_amount",
+})
+_REVIEW_MAPPER_OUTCOMES = frozenset({
+    "queued_for_confirm",
+    "queued_first_run",
+    "flagged_for_cpa",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -202,20 +220,146 @@ async def _load_last_sync(
     return r.last_sync_at if r and r.last_sync_at else None
 
 
+async def _load_sync_position(
+    workspace_id: UUID, entity_id: UUID
+) -> tuple[
+    datetime | None,
+    str | None,
+    int | None,
+    int | None,
+    dict[str, int],
+    dict[str, Any] | None,
+]:
+    """Load the durable Stripe chain position and its fixed time window."""
+    async with workspace_session(SessionLocal, workspace_id) as session:
+        r = (
+            await session.execute(
+                text(
+                    """
+                    SELECT last_sync_at, state FROM connector_state
+                    WHERE entity_id = :eid AND connector_name = 'stripe_api'
+                    LIMIT 1
+                    """
+                ),
+                {"eid": str(entity_id)},
+            )
+        ).first()
+    if r is None:
+        return None, None, None, None, {}, None
+    state = r.state if isinstance(r.state, dict) else {}
+    cursor = state.get("_stripe_continuation_cursor")
+    blocked_item = state.get("blocked_item")
+    if not isinstance(blocked_item, dict) or not isinstance(blocked_item.get("id"), str):
+        blocked_item = None
+
+    def _epoch(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    window_gte = _epoch(state.get("window_gte"))
+    window_lt = _epoch(state.get("window_lt"))
+    # Cursors written by the first revision predate fixed windows. Re-read
+    # from the time overlap rather than carrying a cursor whose filter can no
+    # longer be reconstructed safely.
+    if (window_gte is None or window_lt is None) and blocked_item is None:
+        cursor = None
+        window_gte = None
+        window_lt = None
+
+    failure_counts = state.get("_stripe_failure_counts")
+    if not isinstance(failure_counts, dict):
+        failure_counts = {}
+    failure_counts = {
+        str(key): int(value)
+        for key, value in failure_counts.items()
+        if isinstance(key, str)
+        and not isinstance(value, bool)
+        and isinstance(value, (int, str))
+        and str(value).isdigit()
+        and int(value) > 0
+    }
+    return (
+        r.last_sync_at,
+        cursor if isinstance(cursor, str) else None,
+        window_gte,
+        window_lt,
+        failure_counts,
+        blocked_item,
+    )
+
+
 async def _record_sync_outcome(
     workspace_id: UUID,
     entity_id: UUID,
     *,
     outcome_summary: dict[str, Any],
+    last_sync_at: datetime | None,
+    continuation_cursor: str | None,
+    window_gte: int | None,
+    window_lt: int | None,
+    failure_counts: dict[str, int] | None = None,
+    blocked_item: dict[str, Any] | None = None,
+    clear_blocked_item: bool = False,
     instance_name: str = "default",
 ) -> None:
-    """Upsert connector_state with the latest run's summary."""
+    """Upsert connector_state, preserving durable safety state between runs."""
     async with workspace_session(SessionLocal, workspace_id) as session:
+        existing = (
+            await session.execute(
+                text(
+                    """
+                    SELECT state FROM connector_state
+                    WHERE entity_id = :eid AND connector_name = 'stripe_api'
+                      AND connector_instance_name = :instance
+                    LIMIT 1
+                    """
+                ),
+                {"eid": str(entity_id), "instance": instance_name},
+            )
+        ).first()
+        prior_state = existing.state if existing and isinstance(existing.state, dict) else {}
+        state = dict(prior_state)
+        state.update(
+            {
+                key: value
+                for key, value in outcome_summary.items()
+                if key != "blocked_item"
+            }
+        )
+        if blocked_item is not None:
+            state["blocked_item"] = blocked_item
+        elif clear_blocked_item:
+            state.pop("blocked_item", None)
+        last_outcome = outcome_summary.get("last_outcome")
+        if last_outcome == "awaiting_review":
+            state["awaiting_review_item"] = outcome_summary.get(
+                "awaiting_review_item"
+            )
+        elif last_outcome in {"ok", "processing_error", "blocked_item"}:
+            state.pop("awaiting_review_item", None)
+        if continuation_cursor is None:
+            state.pop("_stripe_continuation_cursor", None)
+        else:
+            state["_stripe_continuation_cursor"] = continuation_cursor
+        if window_gte is None or window_lt is None:
+            state.pop("window_gte", None)
+            state.pop("window_lt", None)
+        else:
+            state["window_gte"] = window_gte
+            state["window_lt"] = window_lt
+        if failure_counts:
+            state["_stripe_failure_counts"] = failure_counts
+        else:
+            state.pop("_stripe_failure_counts", None)
         result = await session.execute(
             text(
                 """
                 UPDATE connector_state
-                SET last_sync_at = now(), state = CAST(:state AS jsonb)
+                SET last_sync_at = :last_sync_at, state = CAST(:state AS jsonb)
                 WHERE entity_id = :eid AND connector_name = 'stripe_api'
                   AND connector_instance_name = :instance
                 """
@@ -223,7 +367,8 @@ async def _record_sync_outcome(
             {
                 "eid": str(entity_id),
                 "instance": instance_name,
-                "state": json.dumps(outcome_summary),
+                "state": json.dumps(state),
+                "last_sync_at": last_sync_at,
             },
         )
         if (result.rowcount or 0) > 0:
@@ -237,19 +382,76 @@ async def _record_sync_outcome(
                 )
                 VALUES (
                     gen_random_uuid(), :wid, :eid, 'stripe_api',
-                    :instance, CAST(:state AS jsonb), now()
+                    :instance, CAST(:state AS jsonb), :last_sync_at
                 )
                 ON CONFLICT (entity_id, connector_name, connector_instance_name) DO UPDATE
-                SET last_sync_at = now(), state = EXCLUDED.state
+                SET last_sync_at = EXCLUDED.last_sync_at, state = EXCLUDED.state
                 """
             ),
             {
                 "wid": str(workspace_id),
                 "eid": str(entity_id),
                 "instance": instance_name,
-                "state": json.dumps(outcome_summary),
+                "state": json.dumps(state),
+                "last_sync_at": last_sync_at,
             },
         )
+
+
+def _durable_position_after_item(
+    item: dict[str, Any] | None,
+    *,
+    fallback_last_sync: datetime | None,
+    fallback_cursor: str | None,
+) -> tuple[datetime | None, str | None]:
+    """Return a position no later than the last successfully mapped item."""
+    if item is None:
+        return fallback_last_sync, fallback_cursor
+    item_id = item.get("id")
+    created = item.get("created")
+    if not isinstance(item_id, str) or not item_id or created is None:
+        return fallback_last_sync, fallback_cursor
+    try:
+        item_sync = datetime.fromtimestamp(int(created), tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return fallback_last_sync, fallback_cursor
+    return item_sync, item_id
+
+
+def _is_missing_starting_after_error(exc: StripeApiError) -> bool:
+    """Only Stripe's deleted-cursor response may restart a pinned window."""
+    if exc.status_code != 400:
+        return False
+    try:
+        body = json.loads(exc.body)
+    except (TypeError, ValueError):
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    return (
+        isinstance(error, dict)
+        and error.get("code") == "resource_missing"
+        and error.get("param") == "starting_after"
+    )
+
+
+async def _journal_entry_exists(
+    session: Any, *, entity_id: UUID, source_external_id: str
+) -> bool:
+    """Confirm an idempotent mapper result has a durable journal row."""
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT 1 FROM journal_entry
+                WHERE entity_id = :eid AND source = 'stripe_api'
+                  AND source_external_id = :ext
+                LIMIT 1
+                """
+            ),
+            {"eid": str(entity_id), "ext": source_external_id},
+        )
+    ).first()
+    return row is not None
 
 
 # ---------------------------------------------------------------------------
@@ -285,64 +487,463 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         summary["errors"].append("No active entity to attribute Stripe revenue to.")
         return summary
 
-    last_sync = await _load_last_sync(workspace_id, entity_id)
-    start_date = (
-        last_sync - timedelta(days=1)
-        if last_sync
-        else datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_BACKFILL_DAYS)
-    )
-    # Stripe filter is unix epoch seconds.
-    created_gte = int(start_date.timestamp())
+    (
+        last_sync,
+        continuation_cursor,
+        window_gte,
+        window_lt,
+        failure_counts,
+        blocked_item,
+    ) = await _load_sync_position(workspace_id, entity_id)
+    loaded_continuation_cursor = continuation_cursor
+    loaded_window_lt = window_lt
+    if window_gte is None:
+        start_date = (
+            last_sync - timedelta(seconds=STRIPE_WINDOW_OVERLAP_S)
+            if last_sync
+            else datetime.now(tz=timezone.utc) - timedelta(days=DEFAULT_BACKFILL_DAYS)
+        )
+        # Stripe filter is unix epoch seconds. The lower bound is pinned in
+        # state for every pass of this chain.
+        window_gte = int(start_date.timestamp())
+    else:
+        start_date = datetime.fromtimestamp(window_gte, tz=timezone.utc)
 
     client = StripeClient.from_credential(cred)
 
     # ---- 1. Pull balance_transactions ----
+    bts = None
     try:
         bts = await paginate_balance_transactions(
-            client, created_gte=created_gte, max_pages=50
+            client,
+            starting_after=continuation_cursor,
+            created_gte=window_gte,
+            created_lt=window_lt,
+            max_pages=50,
         )
     except StripeApiError as exc:
-        summary["last_outcome"] = "api_error_balance_transactions"
-        summary["errors"].append(f"list_balance_transactions: {exc}")
-        await _record_sync_outcome(workspace_id, entity_id, outcome_summary=summary)
-        return summary
+        # Stripe cursors are object IDs, not durable tokens. A deleted or
+        # expired object returns 400. Re-read the same pinned window from its
+        # newest end so the chain cannot wedge forever.
+        if continuation_cursor and _is_missing_starting_after_error(exc):
+            _log.warning(
+                "stripe_sync_invalid_continuation workspace=%s entity=%s "
+                "window_gte=%s window_lt=%s; restarting pinned window",
+                workspace_id,
+                entity_id,
+                window_gte,
+                window_lt,
+            )
+            continuation_cursor = None
+            try:
+                bts = await paginate_balance_transactions(
+                    client,
+                    created_gte=window_gte,
+                    created_lt=window_lt,
+                    max_pages=50,
+                )
+            except StripeApiError as retry_exc:
+                exc = retry_exc
+            else:
+                # Continue through the normal mapping path below.
+                pass
+        if bts is None:
+            summary["last_outcome"] = "api_error_balance_transactions"
+            summary["errors"].append(f"list_balance_transactions: {exc}")
+            if blocked_item is not None:
+                summary["blocked_item"] = blocked_item
+            await _record_sync_outcome(
+                workspace_id,
+                entity_id,
+                outcome_summary=summary,
+                last_sync_at=last_sync,
+                continuation_cursor=continuation_cursor,
+                window_gte=window_gte if window_lt is not None else None,
+                window_lt=window_lt,
+                failure_counts=failure_counts,
+                blocked_item=blocked_item,
+            )
+            return summary
+    window_lt = bts.window_lt or window_lt
+    if loaded_window_lt is None and window_lt is not None:
+        # Establish the chain window before mapping. If the worker dies while
+        # mapping, the retry still uses this exact Stripe-derived upper bound.
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync,
+            continuation_cursor=continuation_cursor,
+            window_gte=window_gte,
+            window_lt=window_lt,
+            failure_counts=failure_counts,
+            blocked_item=blocked_item,
+        )
     summary["balance_transactions_seen"] = len(bts)
     _log.info(
         "stripe_sync workspace=%s entity=%s pulled %d balance_transactions since %s",
         workspace_id, entity_id, len(bts), start_date.isoformat(),
     )
 
+    retrying_blocked = blocked_item is not None
+    awaiting_review = False
+    items_to_process = bts
+    if retrying_blocked:
+        blocked_id = blocked_item["id"]
+        exact_item = next(
+            (item for item in bts if item.get("id") == blocked_id),
+            None,
+        )
+        if exact_item is None:
+            summary["blocked_item"] = blocked_item
+            summary["last_outcome"] = "blocked_item"
+            summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+            summary["errors"].append(
+                f"persisted blocked Stripe item {blocked_id} was not returned"
+            )
+            # A capped pull is only a partial search. Persist its continuation
+            # inside the pinned window so a later pass can reach the exact
+            # blocked row. An exhausted pull proved that the row is absent;
+            # either way the financial position stays where it was.
+            search_cursor = (
+                bts.continuation_cursor if not bts.exhausted else None
+            )
+            await _record_sync_outcome(
+                workspace_id,
+                entity_id,
+                outcome_summary=summary,
+                last_sync_at=last_sync,
+                continuation_cursor=search_cursor,
+                window_gte=window_gte,
+                window_lt=window_lt,
+                failure_counts=failure_counts,
+                blocked_item=blocked_item,
+            )
+            return summary
+        items_to_process = [exact_item]
+
     # ---- 2. Map + post each ----
     revenue_account = cred.default_revenue_account or DEFAULT_REVENUE_ACCOUNT
+    last_processed: dict[str, Any] | None = None
+    processing_error = False
     async with workspace_session(SessionLocal, workspace_id) as session:
-        for bt in bts:
+        for bt in items_to_process:
+            bt_id = bt.get("id")
             try:
-                result = await map_and_post_balance_transaction(
-                    session,
-                    workspace_id=str(workspace_id),
-                    entity_id=str(entity_id),
-                    txn=bt,
-                    actor_uc_uid="agent:stripe_sync",
-                    actor_agent_id="stripe_sync_worker",
-                    revenue_account=revenue_account,
-                )
+                # Keep every statement for one balance transaction inside its
+                # own savepoint. A DBAPI error aborts the current PostgreSQL
+                # transaction until that savepoint is rolled back; without
+                # this boundary, earlier posts are lost when the outer
+                # workspace transaction exits.
+                async with session.begin_nested():
+                    result = await map_and_post_balance_transaction(
+                        session,
+                        workspace_id=str(workspace_id),
+                        entity_id=str(entity_id),
+                        txn=bt,
+                        actor_uc_uid="agent:stripe_sync",
+                        actor_agent_id="stripe_sync_worker",
+                        revenue_account=revenue_account,
+                    )
             except Exception as exc:
+                error_text = f"{exc.__class__.__name__}: {exc}"
+                if isinstance(bt_id, str) and bt_id:
+                    failure_counts[bt_id] = min(
+                        failure_counts.get(bt_id, 0) + 1, 3
+                    )
                 summary["errors"].append(
-                    f"map_and_post {bt.get('id', '?')}: {exc.__class__.__name__}: {exc}"
+                    f"map_and_post {bt.get('id', '?')}: {error_text}"
                 )
-                continue
-            if result.outcome == "posted":
+                if (
+                    not isinstance(bt_id, str)
+                    or not bt_id
+                    or failure_counts.get(bt_id, 0) < 3
+                ):
+                    processing_error = True
+                    break
+                # The mapper savepoint has now rolled back. Keep the failed
+                # item at the head of the chain and raise a visible alert.
+                try:
+                    async with session.begin_nested():
+                        await enqueue_blocked_balance_transaction(
+                            session,
+                            workspace_id=str(workspace_id),
+                            entity_id=str(entity_id),
+                            txn=bt,
+                            actor_uc_uid="agent:stripe_sync",
+                            error=error_text,
+                        )
+                except Exception as alert_exc:
+                    summary["errors"].append(
+                        "blocked alert "
+                        f"{bt_id}: {alert_exc.__class__.__name__}: {alert_exc}"
+                    )
+                blocked_item = {
+                    "id": bt_id,
+                    "amount": bt.get("amount"),
+                    "currency": bt.get("currency"),
+                    "error": error_text,
+                }
+                summary["blocked_item"] = blocked_item
+                _log.error(
+                    "stripe_sync_blocked_item workspace=%s entity=%s id=%s "
+                    "amount=%s currency=%s error=%s",
+                    workspace_id,
+                    entity_id,
+                    bt_id,
+                    bt.get("amount"),
+                    bt.get("currency"),
+                    error_text,
+                )
+                break
+            result_outcome = result.outcome
+            result_reason = getattr(result, "reason", None) or "no reason supplied"
+            idempotency_confirmed = False
+            if result_outcome in _REVIEW_MAPPER_OUTCOMES:
+                # The approval row is deliberately not enough to advance the
+                # chain. The approval-posting path must create the journal row;
+                # confirm it on this same database transaction before moving
+                # past the Stripe item.
+                if isinstance(bt_id, str) and bt_id:
+                    try:
+                        idempotency_confirmed = await _journal_entry_exists(
+                            session,
+                            entity_id=entity_id,
+                            source_external_id=bt_id,
+                        )
+                    except Exception as exc:
+                        result_reason = (
+                            "could not confirm review journal entry: "
+                            f"{exc.__class__.__name__}: {exc}"
+                        )
+                if not idempotency_confirmed:
+                    summary["awaiting_review_item"] = {
+                        "id": bt_id,
+                        "amount": bt.get("amount"),
+                        "currency": bt.get("currency"),
+                    }
+                    summary["errors"].append(
+                        f"awaiting review {bt.get('id', '?')}: {result_reason}"
+                    )
+                    awaiting_review = True
+                    break
+                result_outcome = "blocked_idempotent"
+            if result.outcome == "blocked_idempotent":
+                try:
+                    confirmed = idempotency_confirmed or await _journal_entry_exists(
+                        session, entity_id=entity_id, source_external_id=bt_id
+                    )
+                except Exception as exc:
+                    confirmed = False
+                    result_reason = (
+                        "could not confirm idempotency journal entry: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    )
+                if not confirmed:
+                    result_outcome = "unconfirmed_idempotent"
+                    if result_reason == "no reason supplied":
+                        result_reason = (
+                            "mapper returned blocked_idempotent without a "
+                            "journal_entry for this Stripe transaction"
+                        )
+            if result_outcome not in _ADVANCE_MAPPER_OUTCOMES:
+                error_text = (
+                    f"mapper refusal {result_outcome}: {result_reason}"
+                )
+                if isinstance(bt_id, str) and bt_id:
+                    failure_counts[bt_id] = min(
+                        failure_counts.get(bt_id, 0) + 1, 3
+                    )
+                summary["errors"].append(
+                    f"map_and_post {bt.get('id', '?')}: {error_text}"
+                )
+                if (
+                    not isinstance(bt_id, str)
+                    or not bt_id
+                    or failure_counts.get(bt_id, 0) < 3
+                ):
+                    processing_error = True
+                    break
+                try:
+                    async with session.begin_nested():
+                        await enqueue_blocked_balance_transaction(
+                            session,
+                            workspace_id=str(workspace_id),
+                            entity_id=str(entity_id),
+                            txn=bt,
+                            actor_uc_uid="agent:stripe_sync",
+                            error=error_text,
+                        )
+                except Exception as alert_exc:
+                    summary["errors"].append(
+                        "blocked alert "
+                        f"{bt_id}: {alert_exc.__class__.__name__}: {alert_exc}"
+                    )
+                summary["blocked_item"] = {
+                    "id": bt_id,
+                    "amount": bt.get("amount"),
+                    "currency": bt.get("currency"),
+                    "error": error_text,
+                }
+                _log.error(
+                    "stripe_sync_blocked_item workspace=%s entity=%s id=%s "
+                    "amount=%s currency=%s error=%s",
+                    workspace_id,
+                    entity_id,
+                    bt_id,
+                    bt.get("amount"),
+                    bt.get("currency"),
+                    error_text,
+                )
+                break
+
+            if retrying_blocked and result_outcome not in {"posted", "blocked_idempotent"}:
+                error_text = (
+                    f"persisted blocked item returned non-posting outcome: "
+                    f"{result_outcome}"
+                )
+                if isinstance(bt_id, str) and bt_id:
+                    failure_counts[bt_id] = min(
+                        failure_counts.get(bt_id, 0) + 1, 3
+                    )
+                summary["errors"].append(
+                    f"map_and_post {bt.get('id', '?')}: {error_text}"
+                )
+                processing_error = True
+                break
+
+            last_processed = bt
+            if isinstance(bt_id, str):
+                # A failure counter is cleared only after this same item
+                # reaches an advancing outcome.
+                failure_counts.pop(bt_id, None)
+            if result_outcome == "posted":
                 summary["posted"] += 1
                 if result.fee_journal_entry_id:
                     summary["posted"] += 1  # sidecar fee entry counts too
-            elif result.outcome in ("queued_for_confirm", "queued_first_run"):
+            elif result_outcome in ("queued_for_confirm", "queued_first_run"):
                 summary["queued"] += 1
-            elif result.outcome == "flagged_for_cpa":
+            elif result_outcome == "flagged_for_cpa":
                 summary["flagged_for_cpa"] += 1
-            elif result.outcome == "blocked_idempotent":
+            elif result_outcome == "blocked_idempotent":
                 pass
             else:
                 summary["skipped"] += 1
+
+    if awaiting_review:
+        summary["last_outcome"] = "awaiting_review"
+        summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+        _, next_cursor = _durable_position_after_item(
+            last_processed,
+            fallback_last_sync=last_sync,
+            fallback_cursor=continuation_cursor,
+        )
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync,
+            continuation_cursor=next_cursor,
+            window_gte=window_gte,
+            window_lt=window_lt,
+            failure_counts=failure_counts,
+            blocked_item=blocked_item,
+        )
+        return summary
+
+    if processing_error:
+        summary["last_outcome"] = "processing_error"
+        summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+        _, next_cursor = _durable_position_after_item(
+            last_processed,
+            fallback_last_sync=last_sync,
+            fallback_cursor=continuation_cursor,
+        )
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync,
+            continuation_cursor=next_cursor,
+            window_gte=window_gte,
+            window_lt=window_lt,
+            failure_counts=failure_counts,
+            blocked_item=blocked_item,
+        )
+        return summary
+
+    if "blocked_item" in summary:
+        summary["last_outcome"] = "blocked_item"
+        summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+        _, next_cursor = _durable_position_after_item(
+            last_processed,
+            fallback_last_sync=last_sync,
+            fallback_cursor=continuation_cursor,
+        )
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync,
+            continuation_cursor=next_cursor,
+            window_gte=window_gte,
+            window_lt=window_lt,
+            failure_counts=failure_counts,
+            blocked_item=summary.get("blocked_item") or blocked_item,
+        )
+        return summary
+
+    if retrying_blocked:
+        # A persisted block owns the pass. Even after the exact item succeeds,
+        # leave the fixed window and last_sync_at in place so the next pass
+        # continues from this item and nothing after it is skipped.
+        summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+        summary["last_outcome"] = "ok"
+        _, next_cursor = _durable_position_after_item(
+            last_processed,
+            fallback_last_sync=last_sync,
+            fallback_cursor=loaded_continuation_cursor,
+        )
+        await _record_sync_outcome(
+            workspace_id,
+            entity_id,
+            outcome_summary=summary,
+            last_sync_at=last_sync,
+            continuation_cursor=next_cursor,
+            window_gte=window_gte,
+            window_lt=window_lt,
+            failure_counts=failure_counts,
+            clear_blocked_item=True,
+        )
+        return summary
+
+    if bts.exhausted and window_lt is not None:
+        next_sync_at = datetime.fromtimestamp(window_lt, tz=timezone.utc)
+        next_cursor = None
+        next_window_gte = None
+        next_window_lt = None
+    else:
+        next_sync_at = last_sync
+        next_cursor = bts.continuation_cursor
+        next_window_gte = window_gte
+        next_window_lt = window_lt
+
+    summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+    summary["last_outcome"] = "ok"
+
+    # Persist the cursor before reconciliation. Reconciliation is best effort,
+    # and must not erase progress from a capped pass when it raises.
+    await _record_sync_outcome(
+        workspace_id,
+        entity_id,
+        outcome_summary=summary,
+        last_sync_at=next_sync_at,
+        continuation_cursor=next_cursor,
+        window_gte=next_window_gte,
+        window_lt=next_window_lt,
+        failure_counts=failure_counts,
+        clear_blocked_item=False,
+    )
 
     # ---- 3. Reconcile Stripe payouts ↔ BoA deposits ----
     try:
@@ -358,9 +959,17 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     except Exception as exc:
         summary["errors"].append(f"reconcile: {exc.__class__.__name__}: {exc}")
 
-    summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
-    summary["last_outcome"] = "ok"
-    await _record_sync_outcome(workspace_id, entity_id, outcome_summary=summary)
+    await _record_sync_outcome(
+        workspace_id,
+        entity_id,
+        outcome_summary=summary,
+        last_sync_at=next_sync_at,
+        continuation_cursor=next_cursor,
+        window_gte=next_window_gte,
+        window_lt=next_window_lt,
+        failure_counts=failure_counts,
+        clear_blocked_item=False,
+    )
     return summary
 
 

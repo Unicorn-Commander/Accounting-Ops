@@ -94,6 +94,28 @@ class InvoiceError(Exception):
     """A clean, caller-surfaceable AR error (bad input, missing entity, etc.)."""
 
 
+def normalize_invoice_line_items(
+    line_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Materialize the invoice line-item defaults shared by all callers.
+
+    ``tax_amount`` is optional at the API boundary, but the database snapshot
+    and totals logic use a concrete money value. Copy each line so callers do
+    not receive an unexpected mutation, while preserving every supplied value.
+    """
+    return [
+        {
+            **line_item,
+            "tax_amount": (
+                line_item["tax_amount"]
+                if line_item.get("tax_amount") is not None
+                else Decimal("0")
+            ),
+        }
+        for line_item in line_items
+    ]
+
+
 def _q(amount: Decimal) -> Decimal:
     """Quantize to cents, half-up — money never carries sub-cent dust."""
     return amount.quantize(_CENTS, rounding=ROUND_HALF_UP)
@@ -779,7 +801,10 @@ async def create_invoice_from_draft(
 
     # ---- Lines + totals ----
     norm_lines = await _normalize_lines(
-        session, workspace_id=workspace_id, entity_id=entity_id, line_items=line_items
+        session,
+        workspace_id=workspace_id,
+        entity_id=entity_id,
+        line_items=normalize_invoice_line_items(line_items),
     )
     totals = _compute_totals(norm_lines, _to_decimal(discount or 0, "discount"))
 
@@ -904,27 +929,48 @@ async def create_invoice_from_draft(
         if len(encoded) <= 8000:
             presentation_json = encoded
     public_token = None
-    for _ in range(_PUBLIC_TOKEN_ATTEMPTS):
-        candidate = secrets.token_urlsafe(_PUBLIC_TOKEN_BYTES)
-        inserted = (
+    clear_failed = False
+    try:
+        for _ in range(_PUBLIC_TOKEN_ATTEMPTS):
+            candidate = secrets.token_urlsafe(_PUBLIC_TOKEN_BYTES)
+            # RETURNING reads the new row back, which needs the SELECT policy
+            # (token = app.pay_token). Scope that GUC, transaction-locally, to the
+            # one token we are inserting: the runtime role still cannot see any
+            # other row.
             await session.execute(
-                text(
-                    """
-                    INSERT INTO public.invoice_pay_token (token, workspace_id, invoice_id)
-                    VALUES (:token, :wid, :iid)
-                    ON CONFLICT (token) DO NOTHING
-                    RETURNING token
-                    """
-                ),
-                {"token": candidate, "wid": workspace_id, "iid": str(invoice_id)},
+                text("SELECT set_config('app.pay_token', :tok, true)"),
+                {"tok": candidate},
             )
-        ).first()
-        if inserted is None:
-            continue
-        public_token = candidate
-        break
+            inserted = (
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO public.invoice_pay_token (token, workspace_id, invoice_id)
+                        VALUES (:token, :wid, :iid)
+                        ON CONFLICT (token) DO NOTHING
+                        RETURNING token
+                        """
+                    ),
+                    {"token": candidate, "wid": workspace_id, "iid": str(invoice_id)},
+                )
+            ).first()
+            if inserted is None:
+                continue
+            public_token = candidate
+            break
+    finally:
+        # Clear on EVERY exit (success, exhaustion, error) so a caller that catches
+        # InvoiceError and keeps the transaction cannot see the last candidate's row.
+        try:
+            await session.execute(text("SELECT set_config('app.pay_token', '', true)"))
+        except Exception:  # noqa: BLE001
+            # Aborted transaction: the caller must roll back, which reverts the
+            # transaction-local GUC anyway. Never mask the original error.
+            clear_failed = True
     if public_token is None:
         raise InvoiceError("could not allocate a unique public invoice token")
+    if clear_failed:
+        raise InvoiceError("could not clear the pay-token context")
     await session.execute(
         text(
             """
@@ -1270,11 +1316,17 @@ async def record_payment(
     if pay_amount <= 0:
         raise InvoiceError("payment amount must be positive")
 
+    # Row-lock the invoice BEFORE reading its balance, held to commit. A second
+    # payment (or a void) on the same invoice waits here and then sees the
+    # committed balance, so two distinct payments cannot both pass the check
+    # below and overpay. Every invoice balance/payment writer takes this lock
+    # first, before any other row, so they cannot deadlock against each other.
     inv = (
         await session.execute(
             text(
                 "SELECT id::text, entity_id::text AS entity_id, invoice_number, "
-                "status, total, balance_due, currency FROM invoice WHERE id = :id"
+                "status, total, balance_due, currency FROM invoice WHERE id = :id "
+                "FOR UPDATE"
             ),
             {"id": invoice_id},
         )
@@ -1408,11 +1460,13 @@ async def void_invoice(
     if not reason:
         raise InvoiceError("a void reason is required")
 
+    # Same invoice row lock as record_payment, taken first: the "no payments
+    # recorded" guard below must not race a payment committing in between.
     inv = (
         await session.execute(
             text(
                 "SELECT id::text, entity_id::text AS entity_id, invoice_number, "
-                "status, total FROM invoice WHERE id = :id"
+                "status, total FROM invoice WHERE id = :id FOR UPDATE"
             ),
             {"id": invoice_id},
         )

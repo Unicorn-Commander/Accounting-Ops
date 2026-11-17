@@ -18,9 +18,11 @@ What we cover:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.connectors.stripe import mapper as stripe_mapper
 
@@ -125,6 +127,19 @@ class _StubSession:
         if "FROM closed_period" in sql:
             return _StubResult([])
 
+        # Existing Stripe approval lookup. This models the payload-based
+        # idempotency check used when a transaction is reread from overlap.
+        if "FROM approval_queue" in sql and "stripe_balance_txn_id" in sql:
+            stripe_id = params.get("stripe_id")
+            for approval in self.approvals:
+                payload = json.loads(approval["payload"])
+                if (
+                    approval.get("status", "pending") == "pending"
+                    and payload.get("stripe_balance_txn_id") == stripe_id
+                ):
+                    return _StubResult([_Row({"id": approval["id"]})])
+            return _StubResult([])
+
         # existing Stripe post count
         if "FROM journal_entry" in sql and "AND source = :src" in sql and "count(*)" in sql:
             return _StubResult([_Row({"c": self.existing_posts})])
@@ -145,11 +160,35 @@ class _StubSession:
 
         # approval_queue insert
         if "INSERT INTO approval_queue" in sql:
-            self.approvals.append(dict(params))
+            approval = dict(params)
+            approval["status"] = "pending"
+            self.approvals.append(approval)
+            return _StubResult([])
+
+        # blocked alert refreshes the existing pending approval in place
+        if "UPDATE approval_queue" in sql:
+            for approval in self.approvals:
+                if approval["id"] == params.get("id"):
+                    approval["reasoning"] = params["reasoning"]
+                    payload = json.loads(approval["payload"])
+                    payload.update(json.loads(params["payload"]))
+                    approval["payload"] = json.dumps(payload)
+                    break
             return _StubResult([])
 
         # Fallback
         return _StubResult([])
+
+
+class _NonIdempotencyIntegritySession(_StubSession):
+    async def execute(self, query, params=None):
+        if "INSERT INTO journal_entry" in str(query):
+            original = RuntimeError("duplicate hash-chain value")
+            original.diag = type(
+                "Diag", (), {"constraint_name": "uq_je_entity_this_hash"}
+            )()
+            raise IntegrityError("insert journal_entry", {}, original)
+        return await super().execute(query, params)
 
 
 def _bt(
@@ -347,6 +386,17 @@ async def test_idempotent_hit_returns_blocked_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_non_idempotency_integrity_error_is_not_a_duplicate():
+    session = _NonIdempotencyIntegritySession(accounts=_ACCOUNTS, existing_posts=31)
+    bt = _bt("txn_hash_race", "charge", amount=999)
+
+    with pytest.raises(IntegrityError):
+        await stripe_mapper.map_and_post_balance_transaction(
+            session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
+        )
+
+
+@pytest.mark.asyncio
 async def test_first_run_guard_queues_first_30():
     """With 0-29 existing Stripe posts, every result is queued_first_run."""
     session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
@@ -376,6 +426,74 @@ async def test_first_run_exactly_at_threshold_posts():
         session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
     )
     assert result.outcome == "posted"
+
+
+@pytest.mark.asyncio
+async def test_first_run_reread_does_not_enqueue_duplicate_approval():
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
+    bt = _bt("txn_first_run_reread", "charge", amount=999)
+
+    first = await stripe_mapper.map_and_post_balance_transaction(
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
+    )
+    second = await stripe_mapper.map_and_post_balance_transaction(
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
+    )
+
+    assert first.outcome == "queued_first_run"
+    assert second.outcome == "queued_first_run"
+    assert second.approval_id == first.approval_id
+    assert len(session.approvals) == 1
+
+
+@pytest.mark.asyncio
+async def test_blocked_alert_updates_existing_pending_approval():
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
+    bt = _bt("txn_blocked_existing", "charge", amount=999)
+
+    first = await stripe_mapper.map_and_post_balance_transaction(
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
+    )
+    blocked = await stripe_mapper.enqueue_blocked_balance_transaction(
+        session,
+        workspace_id="wid",
+        entity_id="eid",
+        txn=bt,
+        actor_uc_uid="jane",
+        error="blocked_unknown_account: missing revenue account",
+    )
+
+    assert blocked == first.approval_id
+    assert len(session.approvals) == 1
+    assert session.approvals[0]["reasoning"] == (
+        "(blocked) Stripe txn_blocked_existing 999: "
+        "blocked_unknown_account: missing revenue account"
+    )
+    payload = json.loads(session.approvals[0]["payload"])
+    assert payload["blocked"] is True
+    assert payload["failure_detail"] == (
+        "blocked_unknown_account: missing revenue account"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decided_status", ["approved", "rejected"])
+async def test_decided_approval_does_not_suppress_new_pending_approval(
+    decided_status: str,
+):
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
+    bt = _bt("txn_decided_then_reread", "charge", amount=999)
+
+    first = await stripe_mapper.map_and_post_balance_transaction(
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
+    )
+    session.approvals[0]["status"] = decided_status
+    second = await stripe_mapper.map_and_post_balance_transaction(
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
+    )
+
+    assert first.approval_id != second.approval_id
+    assert len(session.approvals) == 2
 
 
 @pytest.mark.asyncio
