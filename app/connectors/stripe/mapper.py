@@ -93,6 +93,7 @@ StripeTxnType = Literal[
 FIRST_RUN_REVIEW_LIMIT = 30
 
 STRIPE_SOURCE = "stripe_api"
+IDEMPOTENCY_CONSTRAINT = "uq_je_entity_source_external"
 
 
 @dataclass
@@ -112,6 +113,25 @@ class MapResult:
     fee_journal_entry_id: UUID | None = None  # if a stripe-fee child entry was also posted
     approval_id: UUID | None = None
     reason: str = ""
+
+
+def _is_idempotency_integrity_error(exc: IntegrityError) -> bool:
+    """Return true only for the journal idempotency constraint.
+
+    The parent insert also participates in the hash-chain uniqueness
+    constraint and may fail for other integrity reasons. Treating every
+    ``IntegrityError`` as a duplicate can advance the Stripe cursor over an
+    item that was never posted.
+    """
+    original = exc.orig
+    diagnostic = getattr(original, "diag", None)
+    constraint_name = (
+        getattr(diagnostic, "constraint_name", None)
+        or getattr(original, "constraint_name", None)
+    )
+    if constraint_name:
+        return constraint_name == IDEMPOTENCY_CONSTRAINT
+    return IDEMPOTENCY_CONSTRAINT in str(original)
 
 
 # ----------------------------------------------------------------------------
@@ -291,6 +311,25 @@ async def _enqueue_for_review(
     PII guard: we never persist customer email / card last4 / metadata; only
     the Stripe-controlled keyset (sans 'source', 'customer', 'metadata').
     """
+    existing = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text FROM approval_queue
+                WHERE entity_id = :eid
+                  AND subject_type = 'stripe_post_balance_transaction'
+                  AND status = 'pending'
+                  AND payload ->> 'stripe_balance_txn_id' = :stripe_id
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "stripe_id": stripe_balance_txn_id},
+        )
+    ).first()
+    if existing:
+        return UUID(str(existing.id))
+
     approval_id = uuid4()
     subject_id = uuid4()
     safe_keys = sorted([
@@ -335,6 +374,79 @@ async def _enqueue_for_review(
         },
     )
     return approval_id
+
+
+async def enqueue_blocked_balance_transaction(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    entity_id: str,
+    txn: dict[str, Any],
+    actor_uc_uid: str,
+    error: str,
+) -> UUID:
+    """Put a repeatedly failing transaction on the normal human review path."""
+    stripe_balance_txn_id = str(txn.get("id") or "?")
+    stripe_type = str(txn.get("type") or "?").strip().lower()
+    amount_cents = _amount_to_cents(txn.get("amount"))
+    reason = (
+        f"(blocked) Stripe {stripe_balance_txn_id} {txn.get('amount', '?')}: "
+        f"{error}"
+    )
+    existing = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text FROM approval_queue
+                WHERE entity_id = :eid
+                  AND subject_type = 'stripe_post_balance_transaction'
+                  AND status = 'pending'
+                  AND payload ->> 'stripe_balance_txn_id' = :stripe_id
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "stripe_id": stripe_balance_txn_id},
+        )
+    ).first()
+    if existing:
+        await session.execute(
+            text(
+                """
+                UPDATE approval_queue
+                SET reasoning = :reasoning,
+                    payload = payload || CAST(:payload AS jsonb)
+                WHERE id = :id AND status = 'pending'
+                """
+            ),
+            {
+                "id": str(existing.id),
+                "reasoning": reason,
+                "payload": json.dumps({
+                    "debit_account": "(blocked)",
+                    "credit_account": "(blocked)",
+                    "blocked": True,
+                    "failure_detail": error,
+                }),
+            },
+        )
+        return UUID(str(existing.id))
+    return await _enqueue_for_review(
+        session,
+        workspace_id=workspace_id,
+        entity_id=entity_id,
+        stripe_balance_txn_id=stripe_balance_txn_id,
+        stripe_type=stripe_type,
+        amount_cents=amount_cents,
+        debit_account="(blocked)",
+        credit_account="(blocked)",
+        effective_date=_effective_date(txn),
+        payee=_opaque_payee(txn),
+        description=_opaque_description(txn),
+        raw_txn=txn,
+        actor_uc_uid=actor_uc_uid,
+        reason=reason,
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -748,6 +860,8 @@ async def map_and_post_balance_transaction(
                 receipt_link_id=None,
             )
     except IntegrityError as exc:
+        if not _is_idempotency_integrity_error(exc):
+            raise
         await _log_post_attempt(
             session, workspace_id=workspace_id, entity_id=entity_id,
             source=STRIPE_SOURCE, source_external_id=bt_id,
@@ -880,5 +994,6 @@ __all__ = (
     "ACCT_PROCESSOR_FEES",
     "ACCT_CASH_PRIMARY_DEFAULT",
     "DEFAULT_REVENUE_ACCOUNT",
+    "enqueue_blocked_balance_transaction",
     "map_and_post_balance_transaction",
 )

@@ -30,7 +30,7 @@ import json
 import logging
 import random
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 from uuid import UUID
 
 import httpx
@@ -390,6 +390,7 @@ class StripeClient:
         limit: int = 100,
         type: str | None = None,
         created_gte: int | None = None,
+        created_lt: int | None = None,
     ) -> dict[str, Any]:
         """Page through GET /balance_transactions.
 
@@ -404,34 +405,90 @@ class StripeClient:
             params["type"] = type
         if created_gte is not None:
             params["created[gte]"] = created_gte
+        if created_lt is not None:
+            params["created[lt]"] = created_lt
         return await self._request("GET", "/balance_transactions", params=params)
 
 
 async def paginate_balance_transactions(
     client: StripeClient,
     *,
+    starting_after: str | None = None,
     created_gte: int | None = None,
+    created_lt: int | None = None,
     max_pages: int = 50,
-) -> list[dict[str, Any]]:
+) -> "StripePaginationResult":
     """Convenience: pull every page of balance_transactions matching the filter.
 
     Bounded by ``max_pages`` to keep a sync pass from running unbounded when
-    Stripe has, e.g., 10k+ historical txns.
+    Stripe has, e.g., 10k+ historical txns. ``exhausted`` is false when the
+    page cap stopped the pull, in which case ``continuation_cursor`` is the
+    last fetched Stripe object id.
     """
     out: list[dict[str, Any]] = []
-    starting_after: str | None = None
+    # A new chain has no upper bound until Stripe gives us its newest object.
+    # Once the first page arrives, pin that bound for every remaining request.
+    window_lt = created_lt
     for _ in range(max_pages):
         page = await client.list_balance_transactions(
-            starting_after=starting_after, limit=100, created_gte=created_gte
+            starting_after=starting_after,
+            limit=100,
+            created_gte=created_gte,
+            created_lt=window_lt,
         )
         data = page.get("data") or []
         if not data:
-            break
+            return StripePaginationResult(
+                items=out,
+                exhausted=True,
+                continuation_cursor=None,
+                window_lt=window_lt,
+            )
+        if window_lt is None:
+            created_values = [
+                int(item["created"])
+                for item in data
+                if item.get("created") is not None
+            ]
+            if created_values:
+                window_lt = max(created_values) + 1
         out.extend(data)
         if not page.get("has_more"):
-            break
+            return StripePaginationResult(
+                items=out,
+                exhausted=True,
+                continuation_cursor=None,
+                window_lt=window_lt,
+            )
         starting_after = data[-1]["id"]
-    return out
+    return StripePaginationResult(
+        items=out,
+        exhausted=False,
+        continuation_cursor=starting_after,
+        window_lt=window_lt,
+    )
+
+
+@dataclass(frozen=True)
+class StripePaginationResult:
+    """Rows returned by a bounded pull and its durable continuation position."""
+
+    items: list[dict[str, Any]]
+    exhausted: bool
+    continuation_cursor: str | None
+    window_lt: int | None = None
+
+    # Keep the result list-like for existing callers while exposing the
+    # exhaustion signal to workers that must not advance a durable time cursor
+    # past rows they have not seen yet.
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        return iter(self.items)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return self.items[index]
 
 
 __all__ = (
@@ -442,5 +499,6 @@ __all__ = (
     "STRIPE_API_VERSION",
     "load_stripe_credential",
     "paginate_balance_transactions",
+    "StripePaginationResult",
     "persist_stripe_blob",
 )
