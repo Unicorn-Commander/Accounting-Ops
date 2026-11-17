@@ -200,6 +200,11 @@ def _install_worker(
 
     monkeypatch.setattr(stripe_sync, "load_stripe_credential", load_credential)
     monkeypatch.setattr(stripe_sync, "_load_sync_position", load_position)
+
+    async def load_revision(*args: Any, **kwargs: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(stripe_sync, "_load_block_revision", load_revision)
     monkeypatch.setattr(stripe_sync, "_record_sync_outcome", record_cursor)
     monkeypatch.setattr(stripe_sync, "workspace_session", fake_workspace_session)
     monkeypatch.setattr(stripe_sync, "reconcile_one_entity", fake_reconcile)

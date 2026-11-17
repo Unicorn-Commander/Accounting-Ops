@@ -22,7 +22,6 @@ Mirrors app/connectors/ebay/reconcile.py exactly — same shape, same tolerances
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,6 +31,11 @@ from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.connectors.stripe.blocked_resolution import (
+    lock_stripe_state_row,
+    merge_side_state_keys,
+)
 
 _log = logging.getLogger("acctops.stripe_reconcile")
 
@@ -223,22 +227,28 @@ async def reconcile_one_entity(
         "reconciled_at_iso": datetime.now(tz=timezone.utc).isoformat(),
     }
 
-    # Persist into connector_state.state — we add a 'reconciliation' subkey so
-    # the existing 'last_outcome' / sync summary aren't clobbered.
-    existing = (
+    # Persist into connector_state.state under the 'reconciliation' key only.
+    # This is a Stripe state writer, so it takes the shared Stripe row lock
+    # (app/connectors/stripe/blocked_resolution.py lock_stripe_state_row) and
+    # writes a jsonb merge of its own key: a resolve, reopen or worker write
+    # committed meanwhile is never erased or rolled back.
+    target = (
         await session.execute(
             text(
                 """
-                SELECT state FROM connector_state
+                SELECT connector_instance_name FROM connector_state
                 WHERE entity_id = :eid AND connector_name = 'stripe_api'
-                ORDER BY last_sync_at DESC NULLS LAST
+                ORDER BY last_sync_at DESC NULLS LAST, connector_instance_name
                 LIMIT 1
                 """
             ),
             {"eid": str(entity_id)},
         )
     ).first()
-    if existing is None:
+    instance = target.connector_instance_name if target is not None else "default"
+    if target is None:
+        # No row yet: create an empty one (a concurrent creator wins), then
+        # merge into whichever row exists, under the lock, like any update.
         await session.execute(
             text(
                 """
@@ -248,32 +258,16 @@ async def reconcile_one_entity(
                 )
                 VALUES (
                     gen_random_uuid(), :wid, :eid, 'stripe_api',
-                    'default', CAST(:state AS jsonb), now()
+                    'default', '{}'::jsonb, now()
                 )
                 ON CONFLICT (entity_id, connector_name, connector_instance_name) DO NOTHING
                 """
             ),
-            {
-                "wid": str(workspace_id),
-                "eid": str(entity_id),
-                "state": json.dumps({"reconciliation": summary}),
-            },
+            {"wid": str(workspace_id), "eid": str(entity_id)},
         )
-    else:
-        cur = existing.state or {}
-        if not isinstance(cur, dict):
-            cur = {}
-        cur["reconciliation"] = summary
-        await session.execute(
-            text(
-                """
-                UPDATE connector_state
-                SET state = CAST(:state AS jsonb)
-                WHERE entity_id = :eid AND connector_name = 'stripe_api'
-                """
-            ),
-            {"eid": str(entity_id), "state": json.dumps(cur)},
-        )
+    locked = await lock_stripe_state_row(session, entity_id, instance)
+    if locked is not None:
+        await merge_side_state_keys(session, locked[0], {"reconciliation": summary})
     return summary
 
 

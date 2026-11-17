@@ -131,10 +131,11 @@ class _StubSession:
         # idempotency check used when a transaction is reread from overlap.
         if "FROM approval_queue" in sql and "stripe_balance_txn_id" in sql:
             stripe_id = params.get("stripe_id")
+            expected_status = "rejected" if "status = 'rejected'" in sql else "pending"
             for approval in self.approvals:
                 payload = json.loads(approval["payload"])
                 if (
-                    approval.get("status", "pending") == "pending"
+                    approval.get("status", "pending") == expected_status
                     and payload.get("stripe_balance_txn_id") == stripe_id
                 ):
                     return _StubResult([_Row({"id": approval["id"]})])

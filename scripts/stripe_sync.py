@@ -47,6 +47,20 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.connectors.stripe import StripeApiError, StripeClient, load_stripe_credential
+from app.connectors.stripe.blocked_resolution import (
+    BLOCK_REVISION_KEY,
+    MERGE_STATE_SQL,
+    REJECTED_STATE_KEY,
+    REOPENED_STATE_KEY,
+    RESOLVED_STATE_KEY,
+    SUPERSEDED_BY_REOPEN_KEY,
+    block_revision,
+    lock_block_state,
+    lock_stripe_state_row,
+    merge_params,
+    remember_rejection,
+    resolved_ids,
+)
 from app.connectors.stripe.client import paginate_balance_transactions
 from app.connectors.stripe.mapper import (
     DEFAULT_REVENUE_ACCOUNT,
@@ -77,6 +91,7 @@ _ADVANCE_MAPPER_OUTCOMES = frozenset({
     "posted",
     "blocked_idempotent",
     "skipped_zero_amount",
+    "human_rejected",
 })
 _REVIEW_MAPPER_OUTCOMES = frozenset({
     "queued_for_confirm",
@@ -220,6 +235,33 @@ async def _load_last_sync(
     return r.last_sync_at if r and r.last_sync_at else None
 
 
+async def _load_block_revision(workspace_id: UUID, entity_id: UUID) -> int:
+    """Read the block revision a pass carries (see BLOCK_REVISION_KEY).
+
+    Called BEFORE ``_load_sync_position``. Any resolve, reopen or block
+    transition after this read raises the stored revision above the carried
+    one, so the pass's outcome write is treated as stale. A change that lands
+    between the two reads makes the pass look stale while its position is in
+    fact fresh; that only costs one pass that does not move the position.
+    """
+    async with workspace_session(SessionLocal, workspace_id) as session:
+        r = (
+            await session.execute(
+                text(
+                    """
+                    SELECT state FROM connector_state
+                    WHERE entity_id = :eid AND connector_name = 'stripe_api'
+                      AND connector_instance_name = 'default'
+                    LIMIT 1
+                    """
+                ),
+                {"eid": str(entity_id)},
+            )
+        ).first()
+    state = r.state if r is not None and isinstance(r.state, dict) else {}
+    return block_revision(state)
+
+
 async def _load_sync_position(
     workspace_id: UUID, entity_id: UUID
 ) -> tuple[
@@ -304,75 +346,149 @@ async def _record_sync_outcome(
     failure_counts: dict[str, int] | None = None,
     blocked_item: dict[str, Any] | None = None,
     clear_blocked_item: bool = False,
+    carried_blocked_id: str | None = None,
+    carried_revision: int | None = None,
     instance_name: str = "default",
-) -> None:
-    """Upsert connector_state, preserving durable safety state between runs."""
+) -> int:
+    """Merge this pass's keys into connector_state under the shared lock.
+
+    Takes the same row lock as the manual resolve/reopen
+    (app/connectors/stripe/blocked_resolution.py) and writes a jsonb merge of
+    only the worker's own keys, so a resolution committed while this pass ran
+    is never erased. ``carried_blocked_id`` is the blocked item this pass
+    loaded at its start. If a human changed the block since (resolved the
+    carried item, or reopened an item into the blocked slot), this pass is
+    stale: its block, cursor, window and last_sync_at are not written, so a
+    resolved item neither comes back nor rewinds the chain and a reopened item
+    keeps the window it was re-armed in.
+
+    ``carried_revision`` is the block revision the pass loaded before its
+    position. A stored revision above it means a resolve, reopen or another
+    block transition happened since, even when the blocked id is the same one
+    the pass loaded (resolve then reopen of that id). Such a write is stale.
+    A non-stale write that sets a new blocked item or clears one bumps the
+    revision. Returns the revision the pass should carry into its next write:
+    the stored one after a fresh write, the old carried one after a stale
+    write (so every later write of that pass stays stale).
+    """
     async with workspace_session(SessionLocal, workspace_id) as session:
-        existing = (
-            await session.execute(
-                text(
-                    """
-                    SELECT state FROM connector_state
-                    WHERE entity_id = :eid AND connector_name = 'stripe_api'
-                      AND connector_instance_name = :instance
-                    LIMIT 1
-                    """
-                ),
-                {"eid": str(entity_id), "instance": instance_name},
-            )
-        ).first()
-        prior_state = existing.state if existing and isinstance(existing.state, dict) else {}
-        state = dict(prior_state)
-        state.update(
-            {
-                key: value
-                for key, value in outcome_summary.items()
-                if key != "blocked_item"
-            }
-        )
+        locked = await lock_stripe_state_row(session, entity_id, instance_name)
+        existing_id, locked_state = locked if locked is not None else (None, {})
+        resolved = resolved_ids(locked_state)
+        owned_by_human = {
+            RESOLVED_STATE_KEY,
+            REOPENED_STATE_KEY,
+            REJECTED_STATE_KEY,
+            "blocked_item",
+        }
+        patch: dict[str, Any] = {
+            key: value
+            for key, value in outcome_summary.items()
+            if key not in owned_by_human
+        }
+        drop: set[str] = set()
         if blocked_item is not None:
-            state["blocked_item"] = blocked_item
+            patch["blocked_item"] = blocked_item
         elif clear_blocked_item:
-            state.pop("blocked_item", None)
+            drop.add("blocked_item")
         last_outcome = outcome_summary.get("last_outcome")
         if last_outcome == "awaiting_review":
-            state["awaiting_review_item"] = outcome_summary.get(
+            patch["awaiting_review_item"] = outcome_summary.get(
                 "awaiting_review_item"
             )
         elif last_outcome in {"ok", "processing_error", "blocked_item"}:
-            state.pop("awaiting_review_item", None)
+            patch.pop("awaiting_review_item", None)
+            drop.add("awaiting_review_item")
         if continuation_cursor is None:
-            state.pop("_stripe_continuation_cursor", None)
+            drop.add("_stripe_continuation_cursor")
         else:
-            state["_stripe_continuation_cursor"] = continuation_cursor
+            patch["_stripe_continuation_cursor"] = continuation_cursor
         if window_gte is None or window_lt is None:
-            state.pop("window_gte", None)
-            state.pop("window_lt", None)
+            drop.update({"window_gte", "window_lt"})
         else:
-            state["window_gte"] = window_gte
-            state["window_lt"] = window_lt
-        if failure_counts:
-            state["_stripe_failure_counts"] = failure_counts
+            patch["window_gte"] = window_gte
+            patch["window_lt"] = window_lt
+        counts = {
+            key: value
+            for key, value in (failure_counts or {}).items()
+            if key not in resolved
+        }
+        if counts:
+            patch["_stripe_failure_counts"] = counts
         else:
-            state.pop("_stripe_failure_counts", None)
-        result = await session.execute(
-            text(
-                """
-                UPDATE connector_state
-                SET last_sync_at = :last_sync_at, state = CAST(:state AS jsonb)
-                WHERE entity_id = :eid AND connector_name = 'stripe_api'
-                  AND connector_instance_name = :instance
-                """
-            ),
-            {
-                "eid": str(entity_id),
-                "instance": instance_name,
-                "state": json.dumps(state),
-                "last_sync_at": last_sync_at,
-            },
+            drop.add("_stripe_failure_counts")
+        write_last_sync = True
+        locked_block = locked_state.get("blocked_item")
+        locked_block_id = (
+            locked_block.get("id") if isinstance(locked_block, dict) else None
         )
-        if (result.rowcount or 0) > 0:
-            return
+        writing_block_id = (
+            blocked_item.get("id") if isinstance(blocked_item, dict) else None
+        )
+        locked_revision = block_revision(locked_state)
+        new_revision = locked_revision
+        stale = (
+            (carried_revision is not None and carried_revision < locked_revision)
+            or (carried_blocked_id is not None and carried_blocked_id in resolved)
+            or (writing_block_id is not None and writing_block_id in resolved)
+            or (locked_block_id is not None and locked_block_id != carried_blocked_id)
+        )
+        if stale:
+            # A human resolved or reopened a blocked item while this pass ran.
+            # Keep the human's position; re-blocking or rewinding here would
+            # undo that decision.
+            _log.warning(
+                "stripe_sync_stale_outcome workspace=%s entity=%s carried=%s "
+                "now_blocked=%s carried_revision=%s now_revision=%s; "
+                "human change during this pass, position kept",
+                workspace_id,
+                entity_id,
+                carried_blocked_id,
+                locked_block_id,
+                carried_revision,
+                locked_revision,
+            )
+            for key in (
+                "blocked_item",
+                "_stripe_continuation_cursor",
+                "window_gte",
+                "window_lt",
+                "awaiting_review_item",
+                "_stripe_failure_counts",
+            ):
+                patch.pop(key, None)
+                drop.discard(key)
+            patch["last_outcome"] = "superseded_by_resolution"
+            write_last_sync = False
+        elif ("blocked_item" in patch and writing_block_id != locked_block_id) or (
+            "blocked_item" in drop and locked_block_id is not None
+        ):
+            # This pass moves the block itself: a new item blocked, or the
+            # carried block cleared after it posted.
+            new_revision = locked_revision + 1
+        patch.pop(BLOCK_REVISION_KEY, None)
+        drop.discard(BLOCK_REVISION_KEY)
+        if new_revision != locked_revision:
+            patch[BLOCK_REVISION_KEY] = new_revision
+        result_revision = (
+            carried_revision if stale and carried_revision is not None else new_revision
+        )
+        if existing_id is not None:
+            await session.execute(
+                text(
+                    MERGE_STATE_SQL.replace(
+                        "WHERE id = :id",
+                        ", last_sync_at = :last_sync_at WHERE id = :id",
+                    )
+                    if write_last_sync
+                    else MERGE_STATE_SQL
+                ),
+                {
+                    **merge_params(existing_id, patch, drop),
+                    **({"last_sync_at": last_sync_at} if write_last_sync else {}),
+                },
+            )
+            return result_revision
         await session.execute(
             text(
                 """
@@ -385,17 +501,21 @@ async def _record_sync_outcome(
                     :instance, CAST(:state AS jsonb), :last_sync_at
                 )
                 ON CONFLICT (entity_id, connector_name, connector_instance_name) DO UPDATE
-                SET last_sync_at = EXCLUDED.last_sync_at, state = EXCLUDED.state
+                SET last_sync_at = EXCLUDED.last_sync_at,
+                    state = (COALESCE(connector_state.state, '{}'::jsonb)
+                             - CAST(:drop_keys AS text[])) || EXCLUDED.state
                 """
             ),
             {
                 "wid": str(workspace_id),
                 "eid": str(entity_id),
                 "instance": instance_name,
-                "state": json.dumps(state),
+                "state": json.dumps(patch),
+                "drop_keys": sorted(drop - set(patch)),
                 "last_sync_at": last_sync_at,
             },
         )
+        return result_revision
 
 
 def _durable_position_after_item(
@@ -454,6 +574,102 @@ async def _journal_entry_exists(
     return row is not None
 
 
+async def _stripe_item_was_rejected(
+    session: Any,
+    *,
+    entity_id: UUID,
+    stripe_balance_txn_id: str,
+    awaiting_review_only: bool = False,
+) -> bool:
+    """Return whether a human explicitly rejected this Stripe item.
+
+    Normal cursor advancement is limited to the worker's persisted
+    ``awaiting_review_item`` marker, which is only written for review outcomes
+    that may be passed by an explicit human decision. The blocked-item path
+    deliberately uses the broader row check so a rejected blocked approval can
+    be held without invoking the mapper.
+
+    A rejection marked ``superseded_by_reopen`` is ignored: an audited reopen
+    (app/connectors/stripe/blocked_resolution.py reopen_resolved_item) is the
+    later human decision to run the mapper again. An ordinary rejection never
+    carries that marker, so it still never clears a block.
+    """
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT 1 FROM approval_queue
+                WHERE entity_id = :eid
+                  AND subject_type = 'stripe_post_balance_transaction'
+                  AND status = 'rejected'
+                  AND payload ->> 'stripe_balance_txn_id' = :stripe_id
+                  AND payload -> :superseded_key IS NULL
+                  AND (
+                      :awaiting_review_only = false
+                      OR EXISTS (
+                          SELECT 1 FROM connector_state
+                          WHERE entity_id = :eid
+                            AND connector_name = 'stripe_api'
+                            AND connector_instance_name = 'default'
+                            AND state -> 'awaiting_review_item' ->> 'id' = :stripe_id
+                      )
+                  )
+                ORDER BY decided_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "eid": str(entity_id),
+                "stripe_id": stripe_balance_txn_id,
+                "awaiting_review_only": awaiting_review_only,
+                "superseded_key": SUPERSEDED_BY_REOPEN_KEY,
+            },
+        )
+    ).first()
+    return row is not None
+
+
+async def _latest_ordinary_rejection(
+    session: Any, *, entity_id: UUID, stripe_balance_txn_id: str
+) -> str | None:
+    """Approval id when the latest human decision on an ordinary review row
+    for this item is a rejection, else None.
+
+    Not tied to ``awaiting_review_item``: that marker is cleared by the next
+    advancing outcome, while an overlap re-read can return the item again.
+    "(blocked)" rows and reopen-superseded rejections are left to the blocked
+    retry path. A later APPROVED row for the item wins over an older rejection.
+    """
+    if not stripe_balance_txn_id:
+        return None
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text AS id, status::text AS status FROM approval_queue
+                WHERE entity_id = :eid
+                  AND subject_type = 'stripe_post_balance_transaction'
+                  AND status IN ('approved', 'rejected')
+                  AND payload ->> 'stripe_balance_txn_id' = :stripe_id
+                  AND payload -> :superseded_key IS NULL
+                  AND COALESCE(payload ->> 'blocked', 'false') <> 'true'
+                  AND COALESCE(payload ->> 'debit_account', '') <> '(blocked)'
+                ORDER BY decided_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "eid": str(entity_id),
+                "stripe_id": stripe_balance_txn_id,
+                "superseded_key": SUPERSEDED_BY_REOPEN_KEY,
+            },
+        )
+    ).first()
+    if row is None or getattr(row, "status", None) != "rejected":
+        return None
+    return str(row.id)
+
+
 # ---------------------------------------------------------------------------
 # Per-workspace sync
 # ---------------------------------------------------------------------------
@@ -487,6 +703,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         summary["errors"].append("No active entity to attribute Stripe revenue to.")
         return summary
 
+    # Revision first, then position: see _load_block_revision.
+    loaded_revision: int | None = await _load_block_revision(workspace_id, entity_id)
     (
         last_sync,
         continuation_cursor,
@@ -496,6 +714,9 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         blocked_item,
     ) = await _load_sync_position(workspace_id, entity_id)
     loaded_continuation_cursor = continuation_cursor
+    # The block this pass started from. Outcome writes pass it so a human
+    # resolve/reopen that lands mid-pass is never overwritten.
+    loaded_blocked_id = blocked_item["id"] if blocked_item is not None else None
     loaded_window_lt = window_lt
     if window_gte is None:
         start_date = (
@@ -561,6 +782,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 window_gte=window_gte if window_lt is not None else None,
                 window_lt=window_lt,
                 failure_counts=failure_counts,
+                carried_blocked_id=loaded_blocked_id,
+                carried_revision=loaded_revision,
                 blocked_item=blocked_item,
             )
             return summary
@@ -568,7 +791,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     if loaded_window_lt is None and window_lt is not None:
         # Establish the chain window before mapping. If the worker dies while
         # mapping, the retry still uses this exact Stripe-derived upper bound.
-        await _record_sync_outcome(
+        loaded_revision = await _record_sync_outcome(
             workspace_id,
             entity_id,
             outcome_summary=summary,
@@ -577,6 +800,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            carried_blocked_id=loaded_blocked_id,
+            carried_revision=loaded_revision,
             blocked_item=blocked_item,
         )
     summary["balance_transactions_seen"] = len(bts)
@@ -617,6 +842,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 window_gte=window_gte,
                 window_lt=window_lt,
                 failure_counts=failure_counts,
+                carried_blocked_id=loaded_blocked_id,
+                carried_revision=loaded_revision,
                 blocked_item=blocked_item,
             )
             return summary
@@ -624,27 +851,116 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
 
     # ---- 2. Map + post each ----
     revenue_account = cred.default_revenue_account or DEFAULT_REVENUE_ACCOUNT
+    async def _human_rejected(session: Any, locked: Any, bt_id: str) -> bool:
+        """Checked under the held lock, on every pass, before the mapper."""
+        if not retrying_blocked and bt_id in locked.rejected:
+            # Durable record (REJECTED_STATE_KEY): survives the
+            # awaiting_review_item marker being cleared, so an overlap
+            # re-read never posts the item or raises a new review row.
+            # A persisted block is held by its own rejection check, which
+            # an audited reopen may supersede; the record is not consulted
+            # there so it neither clears nor wedges a block.
+            return True
+        approval_id = await _latest_ordinary_rejection(
+            session, entity_id=entity_id, stripe_balance_txn_id=bt_id
+        )
+        if approval_id is not None:
+            # A rejection without the durable record (decided before the
+            # record existed): honour it and record it now, under the lock.
+            await remember_rejection(
+                session, locked, bt_id=bt_id, approval_id=approval_id
+            )
+            return True
+        return await _stripe_item_was_rejected(
+            session,
+            entity_id=entity_id,
+            stripe_balance_txn_id=bt_id,
+            awaiting_review_only=True,
+        )
+
+    async def _map_or_skip_rejected(
+        session: Any, locked: Any, bt: dict[str, Any]
+    ) -> Any:
+        bt_id = bt.get("id")
+        if await _human_rejected(session, locked, str(bt_id or "")):
+            # A rejected review is the one explicit human decision that
+            # permits the cursor to pass without a journal row. For a
+            # persisted block the caller still holds the block (below).
+            return type("RejectedStripeItem", (), {
+                "outcome": "human_rejected",
+                "reason": "Rejected by human reviewer",
+            })()
+        # Keep every statement for one balance transaction inside its own
+        # savepoint. A DBAPI error aborts the current PostgreSQL transaction
+        # until that savepoint is rolled back; without this boundary, earlier
+        # posts are lost when the outer workspace transaction exits.
+        async with session.begin_nested():
+            return await map_and_post_balance_transaction(
+                session,
+                workspace_id=str(workspace_id),
+                entity_id=str(entity_id),
+                txn=bt,
+                actor_uc_uid="agent:stripe_sync",
+                actor_agent_id="stripe_sync_worker",
+                revenue_account=revenue_account,
+            )
+
     last_processed: dict[str, Any] | None = None
     processing_error = False
+    superseded_before_mapping = False
     async with workspace_session(SessionLocal, workspace_id) as session:
+        # Take the shared Stripe state lock FIRST and only then read what a
+        # human decided: the ids resolved elsewhere, the block revision and
+        # blocked id, and (below) any rejection. The lock is held until this
+        # transaction commits, so a resolve, reopen or rejection either
+        # committed before this read and is seen here, or waits for this pass
+        # (decide_approval and the resolve/reopen calls take the same lock
+        # first). Nothing loaded before the lock decides what is posted.
+        locked = await lock_block_state(session, entity_id)
+        resolved_elsewhere = locked.resolved
+        if locked.exists and (
+            (loaded_revision is not None and locked.revision != loaded_revision)
+            or locked.blocked_id != loaded_blocked_id
+        ):
+            # A resolve, reopen or another pass changed the block after this
+            # pass loaded its position. Map nothing and write nothing; the
+            # next pass starts from the human's state.
+            _log.warning(
+                "stripe_sync_superseded_before_mapping workspace=%s entity=%s "
+                "carried=%s now_blocked=%s carried_revision=%s now_revision=%s",
+                workspace_id,
+                entity_id,
+                loaded_blocked_id,
+                locked.blocked_id,
+                loaded_revision,
+                locked.revision,
+            )
+            superseded_before_mapping = True
+            items_to_process = []
         for bt in items_to_process:
             bt_id = bt.get("id")
+            if isinstance(bt_id, str) and bt_id in resolved_elsewhere:
+                last_processed = bt
+                failure_counts.pop(bt_id, None)
+                summary["skipped"] += 1
+                continue
             try:
-                # Keep every statement for one balance transaction inside its
-                # own savepoint. A DBAPI error aborts the current PostgreSQL
-                # transaction until that savepoint is rolled back; without
-                # this boundary, earlier posts are lost when the outer
-                # workspace transaction exits.
-                async with session.begin_nested():
-                    result = await map_and_post_balance_transaction(
-                        session,
-                        workspace_id=str(workspace_id),
-                        entity_id=str(entity_id),
-                        txn=bt,
-                        actor_uc_uid="agent:stripe_sync",
-                        actor_agent_id="stripe_sync_worker",
-                        revenue_account=revenue_account,
+                if retrying_blocked and await _stripe_item_was_rejected(
+                    session,
+                    entity_id=entity_id,
+                    stripe_balance_txn_id=str(bt_id or ""),
+                ):
+                    # An ordinary rejection can release an awaiting-review
+                    # item, but it is not evidence-backed resolution of a
+                    # persisted block. Keep the exact item at the head of the
+                    # chain and do not run the mapper after this decision.
+                    summary["blocked_item"] = blocked_item
+                    summary["errors"].append(
+                        f"persisted blocked Stripe item {bt_id} was rejected; "
+                        "evidence-backed resolution is required"
                     )
+                    break
+                result = await _map_or_skip_rejected(session, locked, bt)
             except Exception as exc:
                 error_text = f"{exc.__class__.__name__}: {exc}"
                 if isinstance(bt_id, str) and bt_id:
@@ -672,6 +988,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                             txn=bt,
                             actor_uc_uid="agent:stripe_sync",
                             error=error_text,
+                            revenue_account=revenue_account,
                         )
                 except Exception as alert_exc:
                     summary["errors"].append(
@@ -773,6 +1090,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                             txn=bt,
                             actor_uc_uid="agent:stripe_sync",
                             error=error_text,
+                            revenue_account=revenue_account,
                         )
                 except Exception as alert_exc:
                     summary["errors"].append(
@@ -797,7 +1115,19 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 )
                 break
 
-            if retrying_blocked and result_outcome not in {"posted", "blocked_idempotent"}:
+            if retrying_blocked and result_outcome == "human_rejected":
+                # Fail closed: a rejection is never success for a persisted
+                # block. It neither clears the block nor moves the cursor;
+                # only fix-and-retry or an evidence-backed resolution does.
+                summary["blocked_item"] = blocked_item
+                summary["errors"].append(
+                    f"persisted blocked Stripe item {bt_id} was rejected; "
+                    "evidence-backed resolution is required"
+                )
+                break
+            if retrying_blocked and result_outcome not in {
+                "posted", "blocked_idempotent"
+            }:
                 error_text = (
                     f"persisted blocked item returned non-posting outcome: "
                     f"{result_outcome}"
@@ -830,6 +1160,11 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             else:
                 summary["skipped"] += 1
 
+    if superseded_before_mapping:
+        summary["last_outcome"] = "superseded_by_resolution"
+        summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
+        return summary
+
     if awaiting_review:
         summary["last_outcome"] = "awaiting_review"
         summary["finished_at"] = datetime.now(tz=timezone.utc).isoformat()
@@ -847,6 +1182,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            carried_blocked_id=loaded_blocked_id,
+            carried_revision=loaded_revision,
             blocked_item=blocked_item,
         )
         return summary
@@ -868,6 +1205,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            carried_blocked_id=loaded_blocked_id,
+            carried_revision=loaded_revision,
             blocked_item=blocked_item,
         )
         return summary
@@ -889,6 +1228,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            carried_blocked_id=loaded_blocked_id,
+            carried_revision=loaded_revision,
             blocked_item=summary.get("blocked_item") or blocked_item,
         )
         return summary
@@ -913,6 +1254,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             window_gte=window_gte,
             window_lt=window_lt,
             failure_counts=failure_counts,
+            carried_blocked_id=loaded_blocked_id,
+            carried_revision=loaded_revision,
             clear_blocked_item=True,
         )
         return summary
@@ -933,7 +1276,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
 
     # Persist the cursor before reconciliation. Reconciliation is best effort,
     # and must not erase progress from a capped pass when it raises.
-    await _record_sync_outcome(
+    loaded_revision = await _record_sync_outcome(
         workspace_id,
         entity_id,
         outcome_summary=summary,
@@ -942,6 +1285,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         window_gte=next_window_gte,
         window_lt=next_window_lt,
         failure_counts=failure_counts,
+        carried_blocked_id=loaded_blocked_id,
+        carried_revision=loaded_revision,
         clear_blocked_item=False,
     )
 
@@ -968,6 +1313,8 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         window_gte=next_window_gte,
         window_lt=next_window_lt,
         failure_counts=failure_counts,
+        carried_blocked_id=loaded_blocked_id,
+        carried_revision=loaded_revision,
         clear_blocked_item=False,
     )
     return summary

@@ -53,6 +53,11 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+from app.connectors.stripe.blocked_resolution import (
+    LOCK_TIMEOUT_MS,
+    lock_stripe_state_row,
+    merge_side_state_keys,
+)
 from app.db import SessionLocal
 from app.security.credentials import (
     delete_credential,
@@ -658,20 +663,32 @@ async def _record_webhook_delivery(
 
     try:
         async with workspace_session(SessionLocal, workspace_id) as session:
-            existing = (
+            target = (
                 await session.execute(
                     text(
                         """
-                        SELECT id::text AS id, state, entity_id::text AS entity_id
+                        SELECT entity_id, connector_instance_name
                         FROM connector_state
                         WHERE connector_name = 'stripe_api'
-                        ORDER BY last_sync_at DESC NULLS LAST
+                        ORDER BY last_sync_at DESC NULLS LAST, id
                         LIMIT 1
                         """
                     )
                 )
             ).first()
-            if existing is None:
+            locked = None
+            if target is not None:
+                # A Stripe state writer: take the shared Stripe row lock and
+                # merge only the webhook keys, so a resolve, reopen or sync
+                # write committed meanwhile is never erased. Bounded wait: a
+                # long sync pass must not hang the webhook response.
+                locked = await lock_stripe_state_row(
+                    session,
+                    target.entity_id,
+                    target.connector_instance_name,
+                    lock_timeout_ms=LOCK_TIMEOUT_MS,
+                )
+            if locked is None:
                 # No connector_state row yet — webhook arrived before first
                 # sync. Skip the audit; the next sync pass will create the row.
                 _log.info(
@@ -679,9 +696,7 @@ async def _record_webhook_delivery(
                     workspace_id, event_id,
                 )
                 return
-            cur = existing.state or {}
-            if not isinstance(cur, dict):
-                cur = {}
+            row_id, cur = locked
             log = cur.get("webhook_log") or []
             if not isinstance(log, list):
                 log = []
@@ -695,17 +710,13 @@ async def _record_webhook_delivery(
                 "reason": reason,
             })
             # Keep the last 100.
-            cur["webhook_log"] = log[-100:]
-            cur["last_webhook_at_iso"] = received_at.isoformat()
-            await session.execute(
-                text(
-                    """
-                    UPDATE connector_state
-                    SET state = CAST(:state AS jsonb)
-                    WHERE id = :id
-                    """
-                ),
-                {"id": existing.id, "state": json.dumps(cur)},
+            await merge_side_state_keys(
+                session,
+                row_id,
+                {
+                    "webhook_log": log[-100:],
+                    "last_webhook_at_iso": received_at.isoformat(),
+                },
             )
     except Exception as exc:
         _log.warning(
