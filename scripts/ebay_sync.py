@@ -727,20 +727,29 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             summary["skipped"] += 1
         return "advance"
 
-    async with workspace_session(SessionLocal, workspace_id) as session:
-        # This lock is held through every item post in this transaction. The
-        # outcome writer uses the same row lock and only merges eBay-owned keys.
-        await session.execute(
-            text(
-                """
-                SELECT id FROM connector_state
-                WHERE entity_id = :eid AND connector_name = 'ebay_finances'
-                  AND connector_instance_name = 'default'
-                FOR UPDATE
-                """
-            ),
-            {"eid": str(entity_id)},
-        )
+    async def process_item_in_transaction(txn: dict[str, Any]) -> str:
+        """Map one item and commit its journal work before the next item.
+
+        The mapper receives the same session that owns this item's transaction
+        and savepoint. Keeping the transaction per item means a PostgreSQL
+        statement error can abort only this item; a later rollback cannot erase
+        journal rows already committed for earlier items.
+        """
+        async with workspace_session(SessionLocal, workspace_id) as item_session:
+            await item_session.execute(
+                text(
+                    """
+                    SELECT id FROM connector_state
+                    WHERE entity_id = :eid AND connector_name = 'ebay_finances'
+                      AND connector_instance_name = 'default'
+                    FOR UPDATE
+                    """
+                ),
+                {"eid": str(entity_id)},
+            )
+            return await process_item(item_session, txn)
+
+    async with workspace_session(SessionLocal, workspace_id) as _session:
         payout_page_offset = payout_offset
         for index, payout in enumerate(payouts_to_process):
             payout_id = payout.get("payoutId") or ""
@@ -794,7 +803,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                     "payout_index": payout_index,
                     "payout_posted": payout_posted,
                 }
-                status = await process_item(session, txn)
+                status = await process_item_in_transaction(txn)
                 if status != "advance":
                     processing_error = status == "fail" or status == "block"
                     awaiting_review = status == "await"
@@ -826,7 +835,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 "payout_index": payout_index,
                 "payout_posted": False,
             }
-            status = await process_item(session, payout_txn)
+            status = await process_item_in_transaction(payout_txn)
             if status != "advance":
                 processing_error = status in {"fail", "block"}
                 awaiting_review = status == "await"
@@ -879,7 +888,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                     transaction_cursors["__loose__"] = {
                         "offset": loose_offset + txn_index
                     }
-                    status = await process_item(session, txn)
+                    status = await process_item_in_transaction(txn)
                     if status != "advance":
                         processing_error = status in {"fail", "block"}
                         awaiting_review = status == "await"
