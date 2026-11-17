@@ -81,10 +81,15 @@ class _Session:
         }
         self.audits: list[dict[str, Any]] = []
         self.journal_inserts = 0
+        self.stripe_posts: set[str] = set()
+        self.lock_timeouts: list[str] = []
 
     async def execute(self, query: Any, params: dict[str, Any] | None = None) -> _Result:
         sql = str(query)
         params = params or {}
+        if sql.startswith("SET LOCAL lock_timeout"):
+            self.lock_timeouts.append(sql)
+            return _Result([])
         if "INSERT INTO journal_entry" in sql or "INSERT INTO posting_log" in sql:
             self.journal_inserts += 1
             return _Result([])
@@ -94,6 +99,8 @@ class _Session:
             return _Result(
                 [{"id": "cs-1", "entity_id": str(EID), "state": json.dumps(self.state)}]
             )
+        if "FROM journal_entry" in sql and "source_external_id = :ext" in sql:
+            return _Result([{"x": 1}] if params["ext"] in self.stripe_posts else [])
         if "FROM journal_entry" in sql:
             assert params["wid"] == str(WID)
             if params["jid"] in self.journal_ids:
@@ -108,13 +115,22 @@ class _Session:
             self.audits.append(dict(params))
             return _Result([])
         if "UPDATE approval_queue" in sql:
-            self.approval["status"] = "rejected"
-            self.approval["decided_by_uc_uid"] = params["uid"]
+            if "decided_by_uc_uid" in sql:
+                self.approval["status"] = "rejected"
+                self.approval["decided_by_uc_uid"] = params["uid"]
             self.approval["reasoning"] += " | " + params["note"]
             self.approval["payload"].update(json.loads(params["payload"]))
             return _Result([])
         if "UPDATE connector_state" in sql:
-            self.state = json.loads(params["state"])
+            # MERGE_STATE_SQL: drop keys, then jsonb || patch. Never a replace.
+            assert "CAST(:state AS jsonb)" not in sql
+            merged = {
+                key: value
+                for key, value in (self.state or {}).items()
+                if key not in params["drop_keys"]
+            }
+            merged.update(json.loads(params["patch"]))
+            self.state = merged
             return _Result([])
         raise AssertionError(f"unexpected SQL: {sql}")
 
@@ -299,14 +315,164 @@ async def test_entity_scope_is_enforced() -> None:
 
 
 @pytest.mark.asyncio
-async def test_load_resolved_ids_reads_state_key() -> None:
+async def test_load_resolved_ids_locks_the_state_row_first() -> None:
+    queries: list[str] = []
+
     class _One:
         async def execute(self, query: Any, params: Any = None) -> Any:
+            queries.append(str(query))
             return SimpleNamespace(
-                first=lambda: SimpleNamespace(resolved=json.dumps({BT: {}, "": {}}))
+                first=lambda: SimpleNamespace(state=json.dumps({br.RESOLVED_STATE_KEY: {BT: {}, "": {}}}))
             )
 
     assert await br.load_resolved_blocked_ids(_One(), EID) == frozenset({BT})
+    assert len(queries) == 1 and "FOR UPDATE" in queries[0]
+
+
+@pytest.mark.asyncio
+async def test_resolve_refuses_an_item_the_sync_already_posted() -> None:
+    session = _Session(state=_blocked_state())
+    session.stripe_posts.add(BT)
+    with pytest.raises(br.BlockedResolutionError) as exc:
+        await _resolve(session)
+    assert exc.value.status_code == 409
+    assert session.state == _blocked_state()
+    assert session.audits == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_waits_briefly_then_409s_while_a_sync_holds_the_lock() -> None:
+    class _LockNotAvailable(Exception):
+        sqlstate = "55P03"
+
+    class _Busy(_Session):
+        async def execute(self, query: Any, params: dict[str, Any] | None = None) -> _Result:
+            if "FOR UPDATE" in str(query) and "connector_state" in str(query):
+                raise RuntimeError("wrapped") from _LockNotAvailable()
+            return await super().execute(query, params)
+
+    session = _Busy(state=_blocked_state())
+    with pytest.raises(br.BlockedResolutionError) as exc:
+        await _resolve(session)
+    assert exc.value.status_code == 409
+    assert "retry" in exc.value.detail
+    assert session.lock_timeouts == [f"SET LOCAL lock_timeout = '{br.LOCK_TIMEOUT_MS}ms'"]
+
+
+def test_merge_never_drops_resolutions() -> None:
+    with pytest.raises(ValueError):
+        br.merge_params("cs-1", {}, {br.RESOLVED_STATE_KEY})
+
+
+async def _resolved_session(**changes: Any) -> _Session:
+    session = _Session(state=_blocked_state(), **changes)
+    await _resolve(session)
+    session.audits.clear()
+    return session
+
+
+async def _reopen(session: _Session, **changes: Any) -> dict[str, Any]:
+    kwargs: dict[str, Any] = dict(
+        ctx=_ctx(role="owner", user_uc_uid="fixture-owner"),
+        bt_id=BT,
+        entity_id=None,
+        reason="Fictional refund was reversed; book it normally",
+        scope_check=lambda ctx, entity: None,
+    )
+    kwargs.update(changes)
+    return await br.reopen_resolved_item(session, **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", [None, "  ", "too short"])
+async def test_reopen_requires_a_reason(reason: str | None) -> None:
+    session = await _resolved_session()
+    before = json.loads(json.dumps(session.state))
+    with pytest.raises(br.BlockedResolutionError) as exc:
+        await _reopen(session, reason=reason)
+    assert exc.value.status_code == 422
+    assert session.state == before and session.audits == []
+
+
+@pytest.mark.asyncio
+async def test_reopen_of_an_unresolved_id_is_409() -> None:
+    session = _Session(state=_blocked_state())
+    with pytest.raises(br.BlockedResolutionError) as exc:
+        await _reopen(session)
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_reopen_refused_while_another_item_is_blocked() -> None:
+    session = await _resolved_session()
+    session.state["blocked_item"] = {"id": "txn_later_block", "amount": 5}
+    with pytest.raises(br.BlockedResolutionError) as exc:
+        await _reopen(session)
+    assert exc.value.status_code == 409
+    assert BT in session.state[br.RESOLVED_STATE_KEY]
+
+
+@pytest.mark.asyncio
+async def test_reopen_rearms_the_item_with_an_audit_trail() -> None:
+    session = await _resolved_session()
+    # The chain moved on after the resolution.
+    session.state.update(
+        {
+            "_stripe_continuation_cursor": "txn_later",
+            "window_gte": 300,
+            "window_lt": 400,
+            "awaiting_review_item": {"id": "txn_review"},
+        }
+    )
+    response = await _reopen(session)
+
+    assert response["posted"] is False and session.journal_inserts == 0
+    assert "warning" not in response  # reason-kind resolution cites no entry
+    state = session.state
+    assert BT not in state[br.RESOLVED_STATE_KEY]
+    assert state["blocked_item"]["id"] == BT
+    assert state["blocked_item"]["amount"] == 1000
+    assert state["blocked_item"]["reopened"]["reopened_by_uc_uid"] == "fixture-owner"
+    # back in the window it was blocked in, read from that window's newest end
+    assert (state["window_gte"], state["window_lt"]) == (100, 200)
+    assert "_stripe_continuation_cursor" not in state
+    assert "awaiting_review_item" not in state
+    assert BT not in state.get("_stripe_failure_counts", {})  # fresh count
+    history = state[br.REOPENED_STATE_KEY][BT]
+    assert len(history) == 1 and history[0]["reason"].startswith("Fictional refund")
+    # audited who / why
+    assert len(session.audits) == 1
+    audit = session.audits[0]
+    assert audit["tool_name"] == "stripe_blocked_item_reopen"
+    assert "fixture-owner" in audit["reasoning"] and "Fictional refund" in audit["reasoning"]
+    # the decided (blocked) row keeps its history and gains the reopen note
+    assert session.approval["status"] == "rejected"
+    assert session.approval["payload"]["blocked_reopen"]["audit_id"] == audit["id"]
+    assert "blocked_resolution" in session.approval["payload"]
+
+    # reopened means blocked again: it can be resolved again, and not reopened twice
+    with pytest.raises(br.BlockedResolutionError) as exc:
+        await _reopen(session)
+    assert exc.value.status_code == 409
+    await _resolve(session)
+    assert BT in session.state[br.RESOLVED_STATE_KEY]
+
+
+@pytest.mark.asyncio
+async def test_reopen_of_a_journal_entry_resolution_warns_about_the_manual_entry() -> None:
+    je = str(uuid4())
+    session = _Session(state=_blocked_state(), journal_ids={je})
+    await _resolve(session, journal_entry_id=UUID(je), not_books_relevant_reason=None)
+    response = await _reopen(session)
+    assert je in response["warning"]
+
+
+def test_reopen_route_is_registered() -> None:
+    from app.main import app
+    from tests.route_introspection import methods_for
+
+    path = "/api/workspaces/{workspace_id}/stripe/blocked-item/reopen"
+    assert methods_for(app, path) == {"POST"}
 
 
 @pytest.mark.asyncio
