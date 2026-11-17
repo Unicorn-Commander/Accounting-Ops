@@ -50,10 +50,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.connectors.ebay import EbayApiError, EbayFinancesClient, load_ebay_credential
-from app.connectors.ebay.decision_state import item_decision
+from app.connectors.ebay.decision_state import (
+    _state_dict,
+    approved_items,
+    consume_approved_item,
+    item_decision,
+)
 from app.connectors.ebay.mapper import (
     map_and_post_transaction,
     normalize_payout_as_txn,
+    approval_snapshot,
 )
 from app.connectors.ebay.reconcile import reconcile_one_entity
 from app.db import SessionLocal
@@ -619,6 +625,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
         txn: dict[str, Any],
         *,
         decision: str | None = None,
+        approval_arm: dict[str, Any] | None = None,
     ) -> str:
         """Return advance, await, fail, or block for one mapper outcome."""
         nonlocal blocked_now
@@ -638,11 +645,33 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 blocked_resolved = True
             return "advance"
         try:
-            mapper_options = (
-                {"first_run_confirmed": True}
-                if decision == "approved"
-                else {}
-            )
+            mapper_options: dict[str, Any] = {}
+            if decision == "approved":
+                current_snapshot = approval_snapshot(txn)
+                arm_matches = (
+                    isinstance(approval_arm, dict)
+                    and all(
+                        key in approval_arm
+                        and approval_arm[key] == current_snapshot[key]
+                        for key in current_snapshot
+                    )
+                )
+                if arm_matches:
+                    mapper_options = {
+                        "first_run_confirmed": True,
+                        "human_attested": True,
+                    }
+                else:
+                    # The human approved a different immutable transaction
+                    # snapshot. Remove the stale arm while this item still
+                    # owns the connector-state row lock, then force a fresh
+                    # approval containing the values returned by eBay.
+                    await consume_approved_item(
+                        session,
+                        entity_id=entity_id,
+                        transaction_id=external_id,
+                    )
+                    mapper_options = {"force_review": True}
             async with session.begin_nested():
                 result = await map_and_post_transaction(
                     session,
@@ -651,10 +680,10 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                     txn=txn,
                     actor_uc_uid="agent:ebay_sync",
                     actor_agent_id="ebay_sync_worker",
-                    # This option is derived from the locked connector state,
-                    # never from approval payload fields. The mapper still
-                    # derives accounts, dates, descriptions, and amounts from
-                    # the raw eBay item returned by the API.
+                    # These options are derived from the locked connector
+                    # state, never from approval payload accounting fields.
+                    # The mapper still derives all posting data from the raw
+                    # eBay item returned by the API.
                     **mapper_options,
                 )
         except Exception as exc:
@@ -702,6 +731,12 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 reason = f"could not confirm duplicate: {exc.__class__.__name__}: {exc}"
             if not confirmed:
                 outcome = "unconfirmed_idempotent"
+            elif decision == "approved":
+                await consume_approved_item(
+                    session,
+                    entity_id=entity_id,
+                    transaction_id=external_id,
+                )
         if outcome in _REVIEW_MAPPER_OUTCOMES:
             summary["queued"] += 1
             summary["awaiting_review_item"] = {
@@ -748,6 +783,12 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             summary["blocked_item"] = blocked_now
             return "block"
         failure_counts.pop(external_id, None)
+        if decision == "approved" and outcome == "posted":
+            await consume_approved_item(
+                session,
+                entity_id=entity_id,
+                transaction_id=external_id,
+            )
         if blocked_item is not None and external_id == blocked_item.get("id"):
             blocked_resolved = True
         if outcome == "posted":
@@ -780,11 +821,16 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                     {"eid": str(entity_id)},
                 )
             ).first()
-            state = getattr(row, "state", None) if row is not None else None
-            decision = item_decision(
-                state if isinstance(state, dict) else {}, _txn_id(txn)
+            state = _state_dict(getattr(row, "state", None)) if row is not None else {}
+            external_id = _txn_id(txn)
+            decision = item_decision(state, external_id)
+            arm = approved_items(state).get(external_id) if decision == "approved" else None
+            return await process_item(
+                item_session,
+                txn,
+                decision=decision,
+                approval_arm=arm,
             )
-            return await process_item(item_session, txn, decision=decision)
 
     payout_page_offset = payout_offset
     for index, payout in enumerate(payouts_to_process):

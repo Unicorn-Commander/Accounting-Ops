@@ -86,6 +86,7 @@ async def record_ebay_decision(
     approval_id: str,
     decision: str,
     decided_by: str | None,
+    approval_payload: dict[str, Any] | None = None,
     instance: str = "default",
 ) -> None:
     """Merge one decision under the connector state row lock.
@@ -113,6 +114,14 @@ async def record_ebay_decision(
         rejected[transaction_id] = entry
         approved.pop(transaction_id, None)
     elif decision == "approve":
+        payload = _state_dict(approval_payload)
+        entry.update({
+            "amount_cents": payload.get("amount_cents"),
+            "currency": str(payload.get("currency") or "").strip().upper(),
+            "transactionType": payload.get("transactionType") or payload.get("ebay_type"),
+            "transactionDate": payload.get("transactionDate")
+            or payload.get("transaction_date"),
+        })
         approved[transaction_id] = entry
         rejected.pop(transaction_id, None)
     else:
@@ -137,10 +146,45 @@ async def record_ebay_decision(
     )
 
 
+async def consume_approved_item(
+    session: AsyncSession,
+    *,
+    entity_id: UUID,
+    transaction_id: str,
+    instance: str = "default",
+) -> None:
+    """Remove a consumed approval arm while holding the connector row lock."""
+    if not transaction_id:
+        return
+    locked = await lock_ebay_state_row(session, entity_id, instance)
+    if locked is None:
+        return
+    row_id, state = locked
+    approved = approved_items(state)
+    if transaction_id not in approved:
+        return
+    approved.pop(transaction_id, None)
+    await session.execute(
+        text(
+            """
+            UPDATE connector_state
+            SET state = (COALESCE(state, '{}'::jsonb)
+                         || CAST(:patch AS jsonb))
+            WHERE id = :id
+            """
+        ),
+        {
+            "id": row_id,
+            "patch": json.dumps({APPROVED_STATE_KEY: approved}),
+        },
+    )
+
+
 __all__ = (
     "APPROVED_STATE_KEY",
     "REJECTED_STATE_KEY",
     "approved_items",
+    "consume_approved_item",
     "item_decision",
     "lock_ebay_state_row",
     "record_ebay_decision",

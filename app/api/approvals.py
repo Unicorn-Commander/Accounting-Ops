@@ -278,7 +278,7 @@ async def decide_approval(
         if subject_type == "manual_journal_entry_proposal":
             _require_manual_proposal_human(auth, workspace)
 
-        if subject_type == "journal_entry_post":
+        if subject_type in ("journal_entry_post", "ebay_post_transaction"):
             if (not isinstance(auth, AuthContext) or not auth.may_autoprovision
                     or auth.agent_id is not None or auth.is_trusted_m2m
                     or auth.uc_uid != workspace.user_uc_uid
@@ -635,6 +635,7 @@ async def _record_ebay_decision(
             approval_id=str(approval_id),
             decision=decision,
             decided_by=decided_by,
+            approval_payload=payload,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
