@@ -153,7 +153,7 @@ async def _counts(db: Any, txn_id: str) -> tuple[int, int, str | None, dict[str,
                        AND source_external_id = $2) AS journal_count,
                     (SELECT count(*) FROM decision_audit
                      WHERE entity_id = $1 AND tool_name = 'approval_decision'
-                       AND reasoning LIKE '%fictional reviewer reason%') AS audit_count,
+                       AND reasoning_trace LIKE '%fictional reviewer reason%') AS audit_count,
                     (SELECT status::text FROM approval_queue
                      WHERE entity_id = $1
                        AND payload ->> 'stripe_balance_txn_id' = $2
