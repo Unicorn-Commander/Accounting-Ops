@@ -149,6 +149,7 @@ app/api/setup.py
 app/api/specialist_pdf.py
 app/api/specialist_runs.py
 app/api/specialty_rules.py
+app/api/stripe_blocked_item.py
 app/api/stripe_oauth.py
 app/api/stripe_webhook.py
 app/api/submission.py
@@ -190,6 +191,7 @@ app/connectors/ebay/client.py
 app/connectors/ebay/mapper.py
 app/connectors/ebay/reconcile.py
 app/connectors/stripe/__init__.py
+app/connectors/stripe/blocked_resolution.py
 app/connectors/stripe/checkout.py
 app/connectors/stripe/client.py
 app/connectors/stripe/mapper.py

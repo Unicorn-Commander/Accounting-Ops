@@ -1,6 +1,7 @@
 // Server-side helpers for the Stripe connector status.
 
 import { auth } from "@/lib/auth";
+import type { BlockedItemView } from "@/lib/stripe-blocked-item";
 
 const INTERNAL_BASE =
   process.env.INTERNAL_API_BASE_URL ??
@@ -43,6 +44,32 @@ export async function getStripeStatus(
     );
     if (!res.ok) return null;
     return (await res.json()) as StripeConnectorStatus;
+  } catch {
+    return null;
+  }
+}
+
+// GET .../stripe/blocked-item (app/api/stripe_blocked_item.py). Read floor is
+// viewer, the same as status. Returns null when the backend is unreachable or
+// refuses, so the page shows "unavailable" rather than an empty panel.
+export async function getStripeBlockedItem(
+  workspaceId: string
+): Promise<BlockedItemView | null> {
+  const session = await auth();
+  if (!session?.accessToken) return null;
+  try {
+    const res = await fetch(
+      `${INTERNAL_BASE}/api/workspaces/${workspaceId}/stripe/blocked-item`,
+      {
+        headers: {
+          Authorization: `Bearer ${session.accessToken}`,
+          Accept: "application/json"
+        },
+        cache: "no-store"
+      }
+    );
+    if (!res.ok) return null;
+    return (await res.json()) as BlockedItemView;
   } catch {
     return null;
   }
