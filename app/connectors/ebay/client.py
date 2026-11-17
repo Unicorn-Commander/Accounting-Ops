@@ -488,10 +488,6 @@ class EbayFinancesClient:
         filters: list[str] = []
         if payout_id:
             filters.append(f"payoutId:{{{payout_id}}}")
-        if start_date or end_date:
-            filters.append(_build_date_filter("transactionDate", start_date, end_date))
-        if filters:
-            params["filter"] = ",".join(filters)
         out: list[dict[str, Any]] = []
         window_start = start_date
         window_end = end_date

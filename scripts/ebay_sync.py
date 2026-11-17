@@ -866,6 +866,10 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 processing_error = True
                 loose_txns = None
             if loose_txns is not None:
+                set_window(loose_txns)
+                if start_date is not None and end_date is not None:
+                    cursor["start_date"] = _iso_datetime(start_date)
+                    cursor["end_date"] = _iso_datetime(end_date)
                 summary["transactions_seen"] += len(loose_txns)
                 for txn_index, txn in enumerate(loose_txns):
                     transaction_cursors["__loose__"] = {
