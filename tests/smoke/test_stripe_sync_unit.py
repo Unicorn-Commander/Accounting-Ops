@@ -385,6 +385,17 @@ async def test_unposted_review_item_holds_cursor_until_journal_exists(monkeypatc
     assert position[3] == created + 1
     assert records[-1]["last_outcome"] == "awaiting_review"
 
+    # Model the approval-posting path having written the idempotency row. The
+    # next pass may advance only after that same-session confirmation succeeds.
+    session.idempotent_hit = True
+    resumed = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert resumed["last_outcome"] == "ok"
+    assert position[0] == datetime.fromtimestamp(created + 1, tz=timezone.utc)
+    assert position[1] is None
+    assert position[2] is None
+    assert position[3] is None
+
 
 @pytest.mark.asyncio
 async def test_persisted_block_survives_deleted_cursor_and_missing_item(monkeypatch):
