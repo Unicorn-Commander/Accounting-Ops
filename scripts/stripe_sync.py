@@ -85,6 +85,7 @@ _ADVANCE_MAPPER_OUTCOMES = frozenset({
     "posted",
     "blocked_idempotent",
     "skipped_zero_amount",
+    "human_rejected",
 })
 _REVIEW_MAPPER_OUTCOMES = frozenset({
     "queued_for_confirm",
@@ -517,6 +518,54 @@ async def _journal_entry_exists(
     return row is not None
 
 
+async def _stripe_item_was_rejected(
+    session: Any,
+    *,
+    entity_id: UUID,
+    stripe_balance_txn_id: str,
+    awaiting_review_only: bool = False,
+) -> bool:
+    """Return whether a human explicitly rejected this Stripe item.
+
+    Normal cursor advancement is limited to the worker's persisted
+    ``awaiting_review_item`` marker, which is only written for review outcomes
+    that may be passed by an explicit human decision. The blocked-item path
+    deliberately uses the broader row check so a rejected blocked approval can
+    be held without invoking the mapper.
+    """
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT 1 FROM approval_queue
+                WHERE entity_id = :eid
+                  AND subject_type = 'stripe_post_balance_transaction'
+                  AND status = 'rejected'
+                  AND payload ->> 'stripe_balance_txn_id' = :stripe_id
+                  AND (
+                      :awaiting_review_only = false
+                      OR EXISTS (
+                          SELECT 1 FROM connector_state
+                          WHERE entity_id = :eid
+                            AND connector_name = 'stripe_api'
+                            AND connector_instance_name = 'default'
+                            AND state -> 'awaiting_review_item' ->> 'id' = :stripe_id
+                      )
+                  )
+                ORDER BY decided_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "eid": str(entity_id),
+                "stripe_id": stripe_balance_txn_id,
+                "awaiting_review_only": awaiting_review_only,
+            },
+        )
+    ).first()
+    return row is not None
+
+
 # ---------------------------------------------------------------------------
 # Per-workspace sync
 # ---------------------------------------------------------------------------
@@ -693,6 +742,35 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
 
     # ---- 2. Map + post each ----
     revenue_account = cred.default_revenue_account or DEFAULT_REVENUE_ACCOUNT
+    async def _map_or_skip_rejected(session: Any, bt: dict[str, Any]) -> Any:
+        bt_id = bt.get("id")
+        if await _stripe_item_was_rejected(
+            session,
+            entity_id=entity_id,
+            stripe_balance_txn_id=str(bt_id or ""),
+            awaiting_review_only=True,
+        ):
+            # A rejected review is the one explicit human decision that
+            # permits the cursor to pass without a journal row.
+            return type("RejectedStripeItem", (), {
+                "outcome": "human_rejected",
+                "reason": "Rejected by human reviewer",
+            })()
+        # Keep every statement for one balance transaction inside its own
+        # savepoint. A DBAPI error aborts the current PostgreSQL transaction
+        # until that savepoint is rolled back; without this boundary, earlier
+        # posts are lost when the outer workspace transaction exits.
+        async with session.begin_nested():
+            return await map_and_post_balance_transaction(
+                session,
+                workspace_id=str(workspace_id),
+                entity_id=str(entity_id),
+                txn=bt,
+                actor_uc_uid="agent:stripe_sync",
+                actor_agent_id="stripe_sync_worker",
+                revenue_account=revenue_account,
+            )
+
     last_processed: dict[str, Any] | None = None
     processing_error = False
     async with workspace_session(SessionLocal, workspace_id) as session:
@@ -712,21 +790,22 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 summary["skipped"] += 1
                 continue
             try:
-                # Keep every statement for one balance transaction inside its
-                # own savepoint. A DBAPI error aborts the current PostgreSQL
-                # transaction until that savepoint is rolled back; without
-                # this boundary, earlier posts are lost when the outer
-                # workspace transaction exits.
-                async with session.begin_nested():
-                    result = await map_and_post_balance_transaction(
-                        session,
-                        workspace_id=str(workspace_id),
-                        entity_id=str(entity_id),
-                        txn=bt,
-                        actor_uc_uid="agent:stripe_sync",
-                        actor_agent_id="stripe_sync_worker",
-                        revenue_account=revenue_account,
+                if retrying_blocked and await _stripe_item_was_rejected(
+                    session,
+                    entity_id=entity_id,
+                    stripe_balance_txn_id=str(bt_id or ""),
+                ):
+                    # An ordinary rejection can release an awaiting-review
+                    # item, but it is not evidence-backed resolution of a
+                    # persisted block. Keep the exact item at the head of the
+                    # chain and do not run the mapper after this decision.
+                    summary["blocked_item"] = blocked_item
+                    summary["errors"].append(
+                        f"persisted blocked Stripe item {bt_id} was rejected; "
+                        "evidence-backed resolution is required"
                     )
+                    break
+                result = await _map_or_skip_rejected(session, bt)
             except Exception as exc:
                 error_text = f"{exc.__class__.__name__}: {exc}"
                 if isinstance(bt_id, str) and bt_id:
@@ -754,6 +833,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                             txn=bt,
                             actor_uc_uid="agent:stripe_sync",
                             error=error_text,
+                            revenue_account=revenue_account,
                         )
                 except Exception as alert_exc:
                     summary["errors"].append(
@@ -855,6 +935,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                             txn=bt,
                             actor_uc_uid="agent:stripe_sync",
                             error=error_text,
+                            revenue_account=revenue_account,
                         )
                 except Exception as alert_exc:
                     summary["errors"].append(
@@ -879,7 +960,9 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                 )
                 break
 
-            if retrying_blocked and result_outcome not in {"posted", "blocked_idempotent"}:
+            if retrying_blocked and result_outcome not in {
+                "posted", "blocked_idempotent", "human_rejected"
+            }:
                 error_text = (
                     f"persisted blocked item returned non-posting outcome: "
                     f"{result_outcome}"

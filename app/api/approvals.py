@@ -262,21 +262,58 @@ async def decide_approval(
         # entities. Out-of-scope -> 403 (same guard as the list endpoint).
         assert_entity_in_scope(workspace, entity_id)
 
+        subject_type = row["subject_type"]
+        subject_id = UUID(row["subject_id"])
+        payload = row["payload"] or {}
         if row["status"] != "pending":
+            # Stripe approval application is idempotent on the external
+            # balance-transaction id. A retried APPROVE after the first
+            # transaction committed is a successful no-op, not a second post.
+            if (
+                subject_type == "stripe_post_balance_transaction"
+                and decision == "approve"
+                and row["status"] == "approved"
+            ):
+                response = {
+                    "ok": True,
+                    "approval_id": str(approval_id),
+                    "decision": "approved",
+                    "subject_type": subject_type,
+                    "applied": False,
+                    "idempotent": True,
+                }
+                audit_id = await write_decision_audit(
+                    session,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    ctx=workspace,
+                    tool_name="approval_decision",
+                    request_payload={
+                        "approval_id": str(approval_id),
+                        "decision": "approve",
+                        "note": body.note,
+                    },
+                    response_payload=response,
+                    reasoning=body.note or "Repeated approval was already applied.",
+                    outcome="approved",
+                )
+                return response
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Approval already {row['status']}",
             )
-
-        subject_type = row["subject_type"]
-        subject_id = UUID(row["subject_id"])
-        payload = row["payload"] or {}
         # Collected inside the transaction; the graph projection runs AFTER the
         # workspace_session below commits (best-effort, never blocks the request).
         applied: dict = {}
 
         if subject_type == "manual_journal_entry_proposal":
             _require_manual_proposal_human(auth, workspace)
+
+        if subject_type == "stripe_post_balance_transaction" and body.category_override is not None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Stripe approval payload does not accept an account override",
+            )
 
         if subject_type == "journal_entry_post":
             if (not isinstance(auth, AuthContext) or not auth.may_autoprovision
@@ -376,6 +413,14 @@ async def decide_approval(
                     approving_human=workspace.user_uc_uid,
                     note=body.note,
                     category_override=body.category_override,
+                )
+            elif subject_type == "stripe_post_balance_transaction":
+                applied = await _approve_stripe_balance_transaction(
+                    session,
+                    workspace_id=workspace_id,
+                    entity_id=entity_id,
+                    payload=payload,
+                    approving_human=workspace.user_uc_uid,
                 )
             else:
                 raise HTTPException(
@@ -704,6 +749,67 @@ async def _approve_compliance_rule(
     return {
         "rule_id": activated["rule_id"],
         "active_profile_id": activated["profile_id"],
+    }
+
+
+async def _approve_stripe_balance_transaction(
+    session,
+    *,
+    workspace_id: UUID,
+    entity_id: UUID,
+    payload: dict,
+    approving_human: str,
+) -> dict:
+    """Replay the Stripe mapper with human confirmation of first-run review.
+
+    The payload stores the safe Stripe inputs used by the worker. The replay
+    skips only the first-run review queue, then runs the normal period-close,
+    account, and materiality gates. In particular, an H-tier or 274(d) refusal
+    remains a 409 and leaves the approval pending for a later decision.
+    """
+    stripe_txn = payload.get("stripe_txn")
+    if not isinstance(stripe_txn, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Stripe approval payload is missing the replay transaction",
+        )
+    stripe_id = str(stripe_txn.get("id") or "").strip()
+    expected_id = str(payload.get("stripe_balance_txn_id") or "").strip()
+    if not stripe_id or stripe_id != expected_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Stripe approval payload has an invalid balance transaction id",
+        )
+
+    from app.connectors.stripe.mapper import map_and_post_balance_transaction
+
+    result = await map_and_post_balance_transaction(
+        session,
+        workspace_id=str(workspace_id),
+        entity_id=str(entity_id),
+        txn=stripe_txn,
+        actor_uc_uid=approving_human,
+        revenue_account=str(payload.get("revenue_account") or "4200"),
+        first_run_confirmed=True,
+        approving_human_uc_uid=approving_human,
+    )
+    if result.outcome == "blocked_idempotent":
+        return {
+            "applied": False,
+            "journal_entry_id": str(result.journal_entry_id) if result.journal_entry_id else None,
+            "idempotent": True,
+        }
+    if result.outcome != "posted":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=result.reason or f"Stripe mapper refused with {result.outcome}",
+        )
+    return {
+        "journal_entry_id": str(result.journal_entry_id) if result.journal_entry_id else None,
+        "fee_journal_entry_id": (
+            str(result.fee_journal_entry_id) if result.fee_journal_entry_id else None
+        ),
+        "idempotent": False,
     }
 
 
