@@ -43,7 +43,7 @@ from app.ar import (
 # path (external_source is None). The import is deferred into the invoice-create
 # path and only invoked when external_source is set, so community boot never
 # hard-imports the entitlement module and standalone invoicing is unaffected.
-from app.ar.invoicing import InvoiceError
+from app.ar.invoicing import InvoiceError, normalize_invoice_line_items
 from sqlalchemy import text
 
 from app.db import SessionLocal
@@ -192,6 +192,7 @@ async def create_invoice_from_draft(
             claims, external_source=external_source, workspace_id=wid
         )
 
+    line_items = normalize_invoice_line_items(line_items)
     try:
         async with workspace_session(SessionLocal, wid) as session:
             view = await _create_invoice(

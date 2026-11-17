@@ -647,6 +647,8 @@ class _SeamStubSession:
             b["void_reason"] = p["reason"]
             return _Result([])
 
+        if "set_config('app.pay_token'" in sql:
+            return _Result([])
         if "INSERT INTO public.invoice_pay_token" in sql:
             return _Result([_Row(token=p["token"])])
         if "UPDATE invoice SET public_token" in sql:
