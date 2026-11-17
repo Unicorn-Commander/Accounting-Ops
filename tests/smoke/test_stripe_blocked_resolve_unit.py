@@ -23,6 +23,7 @@ from tests.smoke.test_stripe_sync_unit import FIXED_NOW, _install_worker, _trans
 WID = uuid4()
 EID = uuid4()
 BT = "txn_blocked_fictional"
+HUMAN_ID = "fixture-human"
 
 
 def _ctx(role: str = "admin", **changes: Any) -> WorkspaceContext:
@@ -53,9 +54,19 @@ def _auth(*, human: bool = True, agent_id: str | None = None) -> AuthContext:
     return AuthContext("fixture-human", agent_id, (), claims, may_autoprovision=human)
 
 
+class _Row(dict):
+    """A row usable both as a mapping and by attribute, like SQLAlchemy's."""
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
 class _Result:
     def __init__(self, rows: list[dict[str, Any]]):
-        self._rows = rows
+        self._rows = [_Row(row) for row in rows]
 
     def mappings(self) -> "_Result":
         return self
@@ -108,13 +119,13 @@ class _Session:
             return _Result([])
         if "FROM approval_queue" in sql:
             assert params["stripe_id"] == BT
-            if self.approval["status"] == "pending":
-                return _Result([dict(self.approval)])
-            return _Result([])
+            # Resolve locks the item's row in ANY state.
+            assert "status = 'pending'" not in sql.split("ORDER BY")[0]
+            return _Result([dict(self.approval)] if self.approval else [])
         if "INSERT INTO decision_audit" in sql:
             self.audits.append(dict(params))
             return _Result([])
-        if "UPDATE approval_queue" in sql and "RETURNING" in sql:
+        if "UPDATE approval_queue" in sql and "marker" in params:
             # reopen: mark every not-yet-superseded rejection of the item
             assert params["stripe_id"] == BT
             if (
@@ -126,11 +137,15 @@ class _Session:
             return _Result([])
         if "UPDATE approval_queue" in sql:
             if "decided_by_uc_uid" in sql:
+                if self.approval["status"] != "pending":
+                    return _Result([])
                 self.approval["status"] = "rejected"
                 self.approval["decided_by_uc_uid"] = params["uid"]
+            elif "status" in params and self.approval["status"] != params["status"]:
+                return _Result([])
             self.approval["reasoning"] += " | " + params["note"]
             self.approval["payload"].update(json.loads(params["payload"]))
-            return _Result([])
+            return _Result([{"id": self.approval["id"]}])
         if "UPDATE connector_state" in sql:
             # MERGE_STATE_SQL: drop keys, then jsonb || patch. Never a replace.
             assert "CAST(:state AS jsonb)" not in sql
@@ -601,3 +616,187 @@ async def test_block_changed_after_load_maps_and_writes_nothing(
     assert len(records) == writes_before
     assert position[1] == "txn_00000"
     assert position[5]["id"] == "txn_00001"
+
+
+# ---------------------------------------------------------------------------
+# Review 706 / 718 P2: a block whose approval a human already decided
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior", ["skipped", "rejected"])
+async def test_resolve_links_an_already_decided_approval(prior: str) -> None:
+    """The decided row keeps its history and gets the resolution attached."""
+    session = _Session(state=_blocked_state())
+    session.approval.update(
+        status=prior,
+        decided_by_uc_uid="fixture-earlier-reviewer",
+        decided_at=None,
+    )
+    before_reasoning = session.approval["reasoning"]
+
+    response = await _resolve(session)
+
+    assert response["approval_id"] == session.approval["id"]
+    assert response["resolution"]["approval_id"] == session.approval["id"]
+    assert response["resolution"]["approval_prior_decision"]["status"] == prior
+    assert session.approval["status"] == prior
+    assert session.approval["decided_by_uc_uid"] == "fixture-earlier-reviewer"
+    assert session.approval["reasoning"].startswith(before_reasoning + " | Resolved elsewhere")
+    linked = session.approval["payload"]["blocked_resolution"]
+    assert linked["approval_id"] == session.approval["id"]
+    assert linked["not_books_relevant_reason"]
+    assert "blocked_item" not in session.state
+    assert BT in session.state[br.RESOLVED_STATE_KEY]
+    assert session.state[br.RESOLVED_STATE_KEY][BT]["approval_id"] == session.approval["id"]
+    assert session.journal_inserts == 0
+
+
+@pytest.mark.asyncio
+async def test_resolve_without_an_approval_row_is_refused() -> None:
+    session = _Session(state=_blocked_state())
+    session.approval = None
+    before = json.loads(json.dumps(session.state))
+
+    with pytest.raises(br.BlockedResolutionError) as exc:
+        await _resolve(session)
+
+    assert exc.value.status_code == 409
+    assert session.state == before
+    assert session.audits == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_of_an_approved_item_is_refused() -> None:
+    session = _Session(state=_blocked_state())
+    session.approval["status"] = "approved"
+    before = json.loads(json.dumps(session.state))
+
+    with pytest.raises(br.BlockedResolutionError) as exc:
+        await _resolve(session)
+
+    assert exc.value.status_code == 409
+    assert session.state == before
+
+
+# ---------------------------------------------------------------------------
+# Review 706 / 718 P1: a rejection is durable across overlap re-reads
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reject_records_the_item_and_approve_clears_it() -> None:
+    session = _Session(state={"last_outcome": "awaiting_review"})
+    payload = {"stripe_balance_txn_id": BT, "debit_account": "1210"}
+
+    entry = await br.record_stripe_decision(
+        session, entity_id=EID, bt_id=BT, approval_id="a-1",
+        decision="reject", decided_by=HUMAN_ID, payload=payload,
+    )
+    assert entry is not None and entry["approval_id"] == "a-1"
+    assert session.state[br.REJECTED_STATE_KEY][BT]["rejected_by_uc_uid"] == HUMAN_ID
+    assert session.state["last_outcome"] == "awaiting_review"  # merged, not replaced
+
+    await br.record_stripe_decision(
+        session, entity_id=EID, bt_id=BT, approval_id="a-2",
+        decision="approve", decided_by=HUMAN_ID, payload=payload,
+    )
+    assert BT not in session.state[br.REJECTED_STATE_KEY]
+
+
+@pytest.mark.asyncio
+async def test_rejection_of_a_blocked_row_is_not_recorded() -> None:
+    """A persisted block keeps its own hold; the record is for review items."""
+    session = _Session(state=_blocked_state())
+    await br.record_stripe_decision(
+        session, entity_id=EID, bt_id=BT, approval_id="a-1", decision="reject",
+        decided_by=HUMAN_ID, payload={"stripe_balance_txn_id": BT, "blocked": True},
+    )
+    assert br.REJECTED_STATE_KEY not in session.state
+
+
+@pytest.mark.asyncio
+async def test_rejection_without_state_row_fails_closed() -> None:
+    session = _Session(state=None)
+    with pytest.raises(br.BlockedResolutionError) as exc:
+        await br.record_stripe_decision(
+            session, entity_id=EID, bt_id=BT, approval_id="a-1", decision="reject",
+            decided_by=HUMAN_ID, payload={"stripe_balance_txn_id": BT},
+        )
+    assert exc.value.status_code == 409
+
+
+def test_merge_never_drops_rejections() -> None:
+    with pytest.raises(ValueError):
+        br.merge_params("cs-1", {}, {br.REJECTED_STATE_KEY})
+
+
+@pytest.mark.asyncio
+async def test_sync_never_maps_an_item_with_a_durable_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No awaiting_review_item marker, no rejected row lookup: the record holds."""
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
+    seen: list[str] = []
+
+    async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        seen.append(txn["id"])
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    async def locked(session: Any, entity_id: Any) -> br.LockedBlockState:
+        return br.LockedBlockState(True, frozenset(), 0, None, frozenset({"txn_00001"}))
+
+    async def no_row(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def no_marker(*args: Any, **kwargs: Any) -> bool:
+        return False
+
+    workspace_id, _, session, position, _ = _install_worker(
+        monkeypatch, _transactions(3, created), mapper=mapper
+    )
+    monkeypatch.setattr(stripe_sync, "lock_block_state", locked)
+    monkeypatch.setattr(stripe_sync, "_latest_ordinary_rejection", no_row)
+    monkeypatch.setattr(stripe_sync, "_stripe_item_was_rejected", no_marker)
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "ok"
+    assert seen == ["txn_00000", "txn_00002"]
+    assert summary["skipped"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_backfills_the_record_for_an_older_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected row without the record is honoured and recorded under the lock."""
+    created = int((FIXED_NOW - timedelta(days=2)).timestamp())
+    seen: list[str] = []
+    remembered: list[tuple[str, str | None]] = []
+
+    async def mapper(session: Any, *, txn: dict[str, Any], **kwargs: Any):
+        seen.append(txn["id"])
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    async def locked(session: Any, entity_id: Any) -> br.LockedBlockState:
+        return br.LockedBlockState(True, frozenset(), 0, None, row_id="cs-1")
+
+    async def latest(session: Any, *, stripe_balance_txn_id: str, **kwargs: Any):
+        return "approval-old" if stripe_balance_txn_id == "txn_00001" else None
+
+    async def remember(session: Any, locked: Any, *, bt_id: str, approval_id: str | None):
+        remembered.append((bt_id, approval_id))
+
+    workspace_id, _, _, _, _ = _install_worker(
+        monkeypatch, _transactions(3, created), mapper=mapper
+    )
+    monkeypatch.setattr(stripe_sync, "lock_block_state", locked)
+    monkeypatch.setattr(stripe_sync, "_latest_ordinary_rejection", latest)
+    monkeypatch.setattr(stripe_sync, "remember_rejection", remember)
+
+    summary = await stripe_sync._sync_one_workspace(workspace_id)
+
+    assert summary["last_outcome"] == "ok"
+    assert seen == ["txn_00000", "txn_00002"]
+    assert remembered == [("txn_00001", "approval-old")]

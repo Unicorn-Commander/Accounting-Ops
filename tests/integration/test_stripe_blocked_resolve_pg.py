@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import HTTPException
 
-from app.api.approvals import DecideRequest, decide_approval
+from app.api.approvals import DecideRequest, SkipRequest, decide_approval, skip_approval
 from app.api.stripe_blocked_item import (
     ReopenResolvedItemRequest,
     ResolveBlockedItemRequest,
@@ -369,6 +369,7 @@ class _Worker:
         self.seen: list[str] = []
         self.mapper_entered = asyncio.Event()
         self.mapper_release: asyncio.Event | None = None
+        self.app_db: Any = None
 
         async def load_credential(workspace_id: UUID, **kwargs: Any) -> StripeCredentialBlob:
             return StripeCredentialBlob(
@@ -1158,3 +1159,163 @@ async def test_webhook_log_never_erases_a_resolve_or_reopen(
     )
     logged = [entry["event_id"] for entry in (await _state(app_db))["webhook_log"]]
     assert logged[-2:] == events
+
+
+# ---------------------------------------------------------------------------
+# Review 706 / 718 P1: a human rejection protects the item on every later pass
+# ---------------------------------------------------------------------------
+
+
+async def _first_run_posts(*args: Any, **kwargs: Any) -> int:
+    return 0
+
+
+async def _reject_on_first_run(
+    worker: _Worker, monkeypatch: pytest.MonkeyPatch, bt_id: str
+) -> str:
+    """Pass 1 queues the item for first-run review; a human rejects it; pass 2
+    honours the rejection, advances and clears awaiting_review_item."""
+    monkeypatch.setattr(stripe_mapper, "_count_existing_stripe_posts", _first_run_posts)
+    assert (await worker.run())["last_outcome"] == "awaiting_review"
+    assert (await _state(worker.app_db))["awaiting_review_item"]["id"] == bt_id
+    rows = await _approval_rows(worker.app_db, bt_id)
+    assert [row["status"] for row in rows] == ["pending"]
+    decided = await _decide_in_process(
+        "admin", rows[0]["id"], "reject", note="Fictional: not our revenue, never post"
+    )
+    assert decided["decision"] == "rejected"
+    second = await worker.run()
+    assert second["last_outcome"] == "ok" and second["skipped"] == 1
+    state = await _state(worker.app_db)
+    assert "awaiting_review_item" not in state, "the marker the old check relied on is gone"
+    return rows[0]["id"]
+
+
+async def _overlap_pass_posts_nothing(
+    worker: _Worker, monkeypatch: pytest.MonkeyPatch, bt_id: str, approval_id: str
+) -> None:
+    """The first-run guard is off now, so the mapper WOULD post the item."""
+
+    async def past_first_run(*args: Any, **kwargs: Any) -> int:
+        return 31
+
+    monkeypatch.setattr(stripe_mapper, "_count_existing_stripe_posts", past_first_run)
+    worker.seen.clear()
+    for _ in range(2):  # overlap re-read, twice
+        summary = await worker.run()
+        assert summary["last_outcome"] == "ok"
+        assert summary["skipped"] == 1 and summary["posted"] == 0
+    assert worker.seen == [], "the mapper ran for a rejected item"
+    assert await _posts_for(worker.app_db, bt_id) == 0
+    rows = await _approval_rows(worker.app_db, bt_id)
+    assert [(row["id"], row["status"]) for row in rows] == [(approval_id, "rejected")]
+    record = (await _state(worker.app_db))["rejected_stripe_items"][bt_id]
+    assert record["approval_id"] == approval_id
+
+
+@pytest.mark.asyncio
+async def test_rejected_review_stays_unposted_on_next_overlap(
+    db: Any, app_db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real worker, state loader and outcome writer over three passes."""
+    del seeded_workspace
+    bt_id = f"stripe-pg-overlap-reject-{uuid4().hex[:10]}"
+    await _seed(db, TEST_WORKSPACE_ID, TEST_ENTITY_ID)
+    worker = _Worker(monkeypatch, [_txn(bt_id, CREATED + 1)])
+    worker.app_db = app_db
+    approval_id = await _reject_on_first_run(worker, monkeypatch, bt_id)
+    record = (await _state(app_db))["rejected_stripe_items"][bt_id]
+    assert record["source"] == "approval_decision"
+    assert record["rejected_by_uc_uid"] == HUMAN
+    await _overlap_pass_posts_nothing(worker, monkeypatch, bt_id, approval_id)
+
+
+@pytest.mark.asyncio
+async def test_older_rejection_without_the_record_is_honoured_and_recorded(
+    db: Any, app_db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejection decided before the durable record existed still holds."""
+    del seeded_workspace
+    bt_id = f"stripe-pg-overlap-legacy-{uuid4().hex[:10]}"
+    await _seed(db, TEST_WORKSPACE_ID, TEST_ENTITY_ID)
+    worker = _Worker(monkeypatch, [_txn(bt_id, CREATED + 1)])
+    worker.app_db = app_db
+    approval_id = await _reject_on_first_run(worker, monkeypatch, bt_id)
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await _scoped(conn, TEST_WORKSPACE_ID)
+            await conn.execute(
+                """
+                UPDATE connector_state SET state = state - 'rejected_stripe_items'
+                WHERE entity_id = $1 AND connector_name = 'stripe_api'
+                """,
+                str(TEST_ENTITY_ID),
+            )
+    await _overlap_pass_posts_nothing(worker, monkeypatch, bt_id, approval_id)
+    record = (await _state(app_db))["rejected_stripe_items"][bt_id]
+    assert record["source"] == "sync_worker_backfill"
+
+
+# ---------------------------------------------------------------------------
+# Review 706 / 718 P2: resolving a block whose approval is already decided
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior", ["skipped", "rejected"])
+async def test_resolve_links_an_approval_already_rejected_or_skipped(
+    db: Any, app_db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch, prior: str
+) -> None:
+    del seeded_workspace
+    feed, _, blocked, _ = _feed(uuid4().hex[:10])
+    await _seed(db, TEST_WORKSPACE_ID, TEST_ENTITY_ID)
+    worker = _Worker(monkeypatch, feed)
+    await _block(worker, blocked)
+    rows = await _approval_rows(app_db, blocked)
+    assert [row["status"] for row in rows] == ["pending"]
+    approval_id = rows[0]["id"]
+    ctx, auth = _caller("admin", TEST_WORKSPACE_ID)
+    if prior == "rejected":
+        await _decide_in_process("admin", approval_id, "reject", note="Fictional earlier rejection")
+    else:
+        await skip_approval(
+            workspace_id=TEST_WORKSPACE_ID,
+            approval_id=UUID(approval_id),
+            body=SkipRequest(note="Fictional: decide later"),
+            workspace=ctx,
+        )
+    before = await _fetch(
+        app_db,
+        TEST_WORKSPACE_ID,
+        """
+        SELECT status::text AS status, decided_by_uc_uid, decided_at, reasoning
+        FROM approval_queue WHERE id = $1
+        """,
+        approval_id,
+    )
+
+    resolved = await _call("admin", bt_id=blocked, not_books_relevant_reason=REASON)
+
+    assert resolved["approval_id"] == approval_id
+    assert resolved["resolution"]["approval_prior_decision"]["status"] == prior
+    after = await _fetch(
+        app_db,
+        TEST_WORKSPACE_ID,
+        """
+        SELECT status::text AS status, decided_by_uc_uid, decided_at, reasoning, payload
+        FROM approval_queue WHERE id = $1
+        """,
+        approval_id,
+    )
+    assert after[0]["status"] == prior
+    assert after[0]["decided_by_uc_uid"] == before[0]["decided_by_uc_uid"]
+    assert after[0]["decided_at"] == before[0]["decided_at"]
+    assert after[0]["reasoning"].startswith(before[0]["reasoning"] + " | Resolved elsewhere")
+    linked = _json(after[0]["payload"])["blocked_resolution"]
+    assert linked["approval_id"] == approval_id
+    assert linked["audit_id"] == resolved["audit_id"]
+    state = await _state(app_db)
+    assert "blocked_item" not in state
+    assert state["resolved_blocked_items"][blocked]["approval_id"] == approval_id
+    assert await _posts_for(app_db, blocked) == 0
+    assert await _audits(app_db, "stripe_blocked_item_resolve", blocked) == 1

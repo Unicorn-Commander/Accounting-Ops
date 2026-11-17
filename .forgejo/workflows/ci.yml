@@ -242,7 +242,7 @@ jobs:
               if "test_stripe_blocked_resolve_pg" in (case.get("classname") or "")
           ]
           print(f"integration gate: tests={tests} skipped={skipped} failures={failures} errors={errors} stripe_tests={len(stripe_cases)} stripe_resolve_tests={len(resolve_cases)}")
-          assert tests >= 35 and len(stripe_cases) >= 19 and len(resolve_cases) >= 13 and skipped == 0 and failures == 0 and errors == 0, "required integration tests did not all execute and pass"
+          assert tests >= 39 and len(stripe_cases) >= 23 and len(resolve_cases) >= 17 and skipped == 0 and failures == 0 and errors == 0, "required integration tests did not all execute and pass"
           PY
 
       - name: Dump app logs on failure
