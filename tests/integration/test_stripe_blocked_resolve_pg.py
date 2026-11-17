@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import HTTPException
 
+from app.api.approvals import DecideRequest, decide_approval
 from app.api.stripe_blocked_item import (
     ReopenResolvedItemRequest,
     ResolveBlockedItemRequest,
@@ -565,12 +566,12 @@ async def test_outcome_write_never_erases_a_resolution(
     real_record = stripe_sync._record_sync_outcome
     resolved_mid_write: list[dict[str, Any]] = []
 
-    async def record_after_resolution(*args: Any, **kwargs: Any) -> None:
+    async def record_after_resolution(*args: Any, **kwargs: Any) -> int:
         if not resolved_mid_write:
             resolved_mid_write.append(
                 await _call("owner", bt_id=blocked, not_books_relevant_reason=REASON)
             )
-        await real_record(*args, **kwargs)
+        return await real_record(*args, **kwargs)
 
     monkeypatch.setattr(stripe_sync, "_record_sync_outcome", record_after_resolution)
     # Still failing: this pass wants to write the block back, with the cursor
@@ -690,14 +691,14 @@ async def test_outcome_write_never_overwrites_a_reopen(
     real_record = stripe_sync._record_sync_outcome
     reopened: list[dict[str, Any]] = []
 
-    async def record_after_reopen(*args: Any, **kwargs: Any) -> None:
+    async def record_after_reopen(*args: Any, **kwargs: Any) -> int:
         if not reopened:
             reopened.append(
                 await _reopen_call(
                     "owner", bt_id=blocked, reason="Fictional: reopen during a sync pass"
                 )
             )
-        await real_record(*args, **kwargs)
+        return await real_record(*args, **kwargs)
 
     monkeypatch.setattr(stripe_sync, "_record_sync_outcome", record_after_reopen)
     await worker.run()  # this pass loaded no block and wants to clear the window
@@ -714,3 +715,255 @@ async def test_outcome_write_never_overwrites_a_reopen(
     await worker.run()
     assert worker.seen == [blocked]
     assert await _posts_for(app_db, blocked) == 1
+
+
+# ---------------------------------------------------------------------------
+# Review 8a42b2b7 round 2, on the tree stacked on #84.
+# ---------------------------------------------------------------------------
+
+
+async def _approval_rows(app_db: Any, bt_id: str) -> list[Any]:
+    return await _fetch(
+        app_db,
+        TEST_WORKSPACE_ID,
+        """
+        SELECT id::text AS id, status::text AS status, payload
+        FROM approval_queue
+        WHERE subject_type = 'stripe_post_balance_transaction'
+          AND payload ->> 'stripe_balance_txn_id' = $1
+        ORDER BY created_at
+        """,
+        bt_id,
+    )
+
+
+async def _decide_in_process(
+    role: str, approval_id: str, decision: str, note: str | None = None
+) -> dict[str, Any]:
+    ctx, auth = _caller(role, TEST_WORKSPACE_ID)
+    return await decide_approval(
+        workspace_id=TEST_WORKSPACE_ID,
+        approval_id=UUID(approval_id),
+        body=DecideRequest(decision=decision, note=note),
+        workspace=ctx,
+        auth=auth,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reopen_survives_worker_that_loaded_the_same_block_id(
+    db: Any, app_db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolve then reopen X while a pass that loaded block X is running.
+
+    The blocked id the pass carried equals the blocked id it finds under the
+    lock, so only the block revision tells the pass it is stale.
+    """
+    del seeded_workspace
+    feed, _, blocked, oldest = _feed(uuid4().hex[:10])
+    await _seed(db, TEST_WORKSPACE_ID, TEST_ENTITY_ID)
+    worker = _Worker(monkeypatch, feed)
+    await _block(worker, blocked)
+    blocked_state = await _state(app_db)
+    window = blocked_state["window_gte"], blocked_state["window_lt"]
+    revision_at_block = blocked_state["block_revision"]
+
+    real_lock = stripe_sync.load_resolved_blocked_ids
+    at_lock = asyncio.Event()
+    go = asyncio.Event()
+
+    async def paused_lock(session: Any, entity_id: UUID, *args: Any) -> frozenset[str]:
+        at_lock.set()
+        await go.wait()
+        return await real_lock(session, entity_id, *args)
+
+    monkeypatch.setattr(stripe_sync, "load_resolved_blocked_ids", paused_lock)
+    worker.failing = set()  # config fixed: this pass will post X and clear
+    worker.seen.clear()
+    sync = asyncio.create_task(worker.run())  # loads block X, revision r
+    await asyncio.wait_for(at_lock.wait(), timeout=10)
+    await _call("admin", bt_id=blocked, not_books_relevant_reason=REASON)
+    reopen = await _reopen_call(
+        "owner", bt_id=blocked, reason="Fictional: reopen while a stale pass runs"
+    )
+    reopened_state = await _state(app_db)
+    assert reopened_state["blocked_item"]["id"] == blocked  # the SAME id
+    assert reopened_state["block_revision"] == revision_at_block + 2
+    go.set()
+    await asyncio.wait_for(sync, timeout=10)
+    monkeypatch.setattr(stripe_sync, "load_resolved_blocked_ids", real_lock)
+
+    # The stale pass mapped X (a reopen asks for normal processing), but its
+    # outcome write was rejected: the reopen's block, window and fresh failure
+    # count are all still there.
+    assert worker.seen == [blocked]
+    state = await _state(app_db)
+    assert state["blocked_item"]["id"] == blocked, "stale pass erased the reopen"
+    assert state["blocked_item"]["reopened"]["audit_id"] == reopen["audit_id"]
+    assert (state["window_gte"], state["window_lt"]) == window
+    assert "_stripe_continuation_cursor" not in state
+    assert blocked not in state.get("_stripe_failure_counts", {})
+    assert state["last_outcome"] == "superseded_by_resolution"
+    assert state["block_revision"] == revision_at_block + 2
+    assert await _posts_for(app_db, blocked) == 1
+
+    # A fresh pass carries the new revision: it confirms the existing post
+    # (mapper idempotency), clears the block itself and moves on. One post.
+    worker.seen.clear()
+    assert (await worker.run())["last_outcome"] == "ok"
+    assert worker.seen == [blocked]
+    state = await _state(app_db)
+    assert "blocked_item" not in state
+    assert state["block_revision"] == revision_at_block + 3
+    worker.seen.clear()
+    await worker.run()
+    assert oldest in worker.seen
+    assert await _posts_for(app_db, blocked) == 1
+
+
+@pytest.mark.asyncio
+async def test_reopen_supersedes_the_rejection_but_ordinary_rejection_still_holds(
+    db: Any, app_db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del seeded_workspace
+    feed, _, blocked, _ = _feed(uuid4().hex[:10])
+    await _seed(db, TEST_WORKSPACE_ID, TEST_ENTITY_ID)
+    worker = _Worker(monkeypatch, feed)
+    await _block(worker, blocked)
+    resolved = await _call("admin", bt_id=blocked, not_books_relevant_reason=REASON)
+    reopen = await _reopen_call(
+        "owner", bt_id=blocked, reason="Fictional: book it after all, retry it"
+    )
+    assert reopen["superseded_rejection_ids"] == [resolved["approval_id"]]
+    rows = await _approval_rows(app_db, blocked)
+    assert [row["status"] for row in rows] == ["rejected"]
+    marker = _json(rows[0]["payload"])["superseded_by_reopen"]
+    assert marker["audit_id"] == reopen["audit_id"]
+
+    # Still failing after the reopen: the worker runs the mapper again (the
+    # superseded rejection does not hold it), counts up and raises a FRESH
+    # pending "(blocked)" row.
+    worker.seen.clear()
+    outcomes = [(await worker.run())["last_outcome"] for _ in range(3)]
+    assert outcomes == ["processing_error", "processing_error", "blocked_item"]
+    assert worker.seen == [blocked, blocked, blocked]
+    rows = await _approval_rows(app_db, blocked)
+    assert [row["status"] for row in rows] == ["rejected", "pending"]
+
+    # An ORDINARY rejection of that fresh row never clears the block: the
+    # worker holds the item without running the mapper, nothing is posted.
+    decided = await _decide_in_process(
+        "admin", rows[1]["id"], "reject", note="Fictional ordinary rejection"
+    )
+    assert decided["decision"] == "rejected"
+    worker.failing = set()  # even with the config fixed
+    worker.seen.clear()
+    for _ in range(2):
+        assert (await worker.run())["last_outcome"] == "blocked_item"
+    assert worker.seen == []
+    state = await _state(app_db)
+    assert state["blocked_item"]["id"] == blocked
+    assert await _posts_for(app_db, blocked) == 0
+    rows = await _approval_rows(app_db, blocked)
+    assert "superseded_by_reopen" not in _json(rows[1]["payload"])
+
+
+@pytest.mark.asyncio
+async def test_resolve_waits_for_approval_posting_then_409s(
+    db: Any, app_db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Approval posting holds the Stripe state lock; a racing resolve waits."""
+    del seeded_workspace
+    feed, _, blocked, _ = _feed(uuid4().hex[:10])
+    await _seed(db, TEST_WORKSPACE_ID, TEST_ENTITY_ID)
+    worker = _Worker(monkeypatch, feed)
+    await _block(worker, blocked)
+    pending = [row for row in await _approval_rows(app_db, blocked) if row["status"] == "pending"]
+    assert len(pending) == 1
+
+    real_map = stripe_mapper.map_and_post_balance_transaction
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def paused_map(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        await release.wait()
+        return await real_map(*args, **kwargs)
+
+    # app/api/approvals.py imports the mapper at call time from this module.
+    monkeypatch.setattr(stripe_mapper, "map_and_post_balance_transaction", paused_map)
+    approve = asyncio.create_task(
+        _decide_in_process("admin", pending[0]["id"], "approve", note="Fictional approval")
+    )
+    await asyncio.wait_for(entered.wait(), timeout=10)
+    resolve = asyncio.create_task(
+        _call("owner", bt_id=blocked, not_books_relevant_reason=REASON)
+    )
+    await asyncio.sleep(0.5)
+    assert not resolve.done(), "resolve did not wait for the approval posting"
+    release.set()
+    approved = await asyncio.wait_for(approve, timeout=10)
+    assert approved["applied"] is True and approved["journal_entry_id"]
+    with pytest.raises(HTTPException) as refused:
+        await asyncio.wait_for(resolve, timeout=10)
+    assert refused.value.status_code == 409
+    monkeypatch.setattr(stripe_mapper, "map_and_post_balance_transaction", real_map)
+
+    # No double book: one post, no resolution, no resolve audit.
+    assert await _posts_for(app_db, blocked) == 1
+    assert await _audits(app_db, "stripe_blocked_item_resolve", blocked) == 0
+    state = await _state(app_db)
+    assert blocked not in state.get("resolved_blocked_items", {})
+    # The worker confirms the approval's post and clears the block itself.
+    worker.failing = set()
+    assert (await worker.run())["last_outcome"] == "ok"
+    assert "blocked_item" not in await _state(app_db)
+    assert await _posts_for(app_db, blocked) == 1
+
+
+@pytest.mark.asyncio
+async def test_approval_of_an_item_resolved_elsewhere_is_refused(
+    db: Any, app_db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolve first: the approval path re-checks under the state lock."""
+    del seeded_workspace
+    feed, _, blocked, _ = _feed(uuid4().hex[:10])
+    await _seed(db, TEST_WORKSPACE_ID, TEST_ENTITY_ID)
+    worker = _Worker(monkeypatch, feed)
+    await _block(worker, blocked)
+    pending = [row for row in await _approval_rows(app_db, blocked) if row["status"] == "pending"]
+    # A second pending review row for the same item (e.g. an older first-run
+    # review) that the resolve does not decide.
+    await _fetch(
+        db,
+        TEST_WORKSPACE_ID,
+        """
+        INSERT INTO approval_queue (
+            id, workspace_id, entity_id, subject_type, subject_id,
+            amount, currency_code, usd_equivalent_at_event_time,
+            status, reasoning, requested_by_identity, payload, created_at
+        )
+        SELECT gen_random_uuid(), workspace_id, entity_id, subject_type,
+               gen_random_uuid(), amount, currency_code,
+               usd_equivalent_at_event_time, 'pending',
+               'fictional second review row', requested_by_identity, payload,
+               created_at + interval '1 second'
+        FROM approval_queue WHERE id = $1::uuid
+        RETURNING id
+        """,
+        pending[0]["id"],
+    )
+    await _call("admin", bt_id=blocked, not_books_relevant_reason=REASON)
+
+    rows = await _approval_rows(app_db, blocked)
+    decided = [row for row in rows if row["id"] == pending[0]["id"]][0]
+    other = [row for row in rows if row["id"] != pending[0]["id"]][0]
+    assert decided["status"] == "rejected" and other["status"] == "pending"
+    with pytest.raises(HTTPException) as already:
+        await _decide_in_process("admin", decided["id"], "approve")
+    assert already.value.status_code == 409
+    with pytest.raises(HTTPException) as resolved_elsewhere:
+        await _decide_in_process("admin", other["id"], "approve")
+    assert resolved_elsewhere.value.status_code == 409
+    assert "resolved elsewhere" in resolved_elsewhere.value.detail
+    assert await _posts_for(app_db, blocked) == 0
