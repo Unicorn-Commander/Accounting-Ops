@@ -24,7 +24,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 from uuid import UUID
 
@@ -48,6 +48,7 @@ DEFAULT_MARKETPLACE_ID = "EBAY_US"
 # Buffer: refresh ~5 min before the actual expiry so a concurrent burst of
 # calls doesn't all race the boundary.
 ACCESS_TOKEN_REFRESH_BUFFER_S = 300
+DEFAULT_EBAY_WINDOW_DAYS = 30
 
 
 class EbayApiError(Exception):
@@ -393,32 +394,79 @@ class EbayFinancesClient:
         if start_date or end_date:
             params["filter"] = _build_date_filter("payoutDate", start_date, end_date)
         out: list[dict[str, Any]] = []
+        window_start = start_date
+        window_end = end_date
         pages = 0
         while pages < max_pages:
+            params["filter"] = (
+                _build_date_filter("payoutDate", window_start, window_end)
+                if (window_start or window_end)
+                else None
+            )
+            if params.get("filter") is None:
+                params.pop("filter", None)
             data = await self._request("GET", "/payout", params=params)
             page = data.get("payouts") or []
             if not page:
-                return EbayPaginationResult(items=out, exhausted=True, continuation_offset=None)
+                return EbayPaginationResult(
+                    items=out,
+                    exhausted=True,
+                    continuation_offset=None,
+                    window_start=window_start,
+                    window_end=window_end,
+                    continuation_invalid=bool(offset),
+                )
+            page_timestamps = _item_timestamps(page, "payoutDate")
+            if window_end is None and page_timestamps:
+                window_end = max(page_timestamps) + timedelta(seconds=1)
+            if window_start is None and page_timestamps:
+                window_start = max(page_timestamps) - timedelta(
+                    days=DEFAULT_EBAY_WINDOW_DAYS
+                )
             remaining = output_limit - len(out)
-            out.extend(page[:remaining])
+            accepted = page[:remaining]
+            out.extend(
+                item
+                for item in accepted
+                if window_start is None
+                or _item_timestamp(item, "payoutDate") is None
+                or _item_timestamp(item, "payoutDate") >= window_start
+            )
             pages += 1
             total = int(data.get("total") or 0)
-            params["offset"] += len(page)
+            page_offset = int(params["offset"])
+            params["offset"] = page_offset + len(page)
             if total and params["offset"] >= total:
-                return EbayPaginationResult(items=out, exhausted=True, continuation_offset=None)
+                return EbayPaginationResult(
+                    items=out,
+                    exhausted=True,
+                    continuation_offset=None,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
             if len(out) >= output_limit:
                 return EbayPaginationResult(
                     items=out,
                     exhausted=False,
-                    continuation_offset=int(params["offset"]),
+                    continuation_offset=page_offset + len(accepted),
+                    window_start=window_start,
+                    window_end=window_end,
                 )
             if len(page) < int(params["limit"]):
-                return EbayPaginationResult(items=out, exhausted=True, continuation_offset=None)
+                return EbayPaginationResult(
+                    items=out,
+                    exhausted=True,
+                    continuation_offset=None,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
             params["limit"] = min(output_limit - len(out), 200)
         return EbayPaginationResult(
             items=out,
             exhausted=False,
             continuation_offset=int(params["offset"]),
+            window_start=window_start,
+            window_end=window_end,
         )
 
     async def list_transactions(
@@ -445,32 +493,77 @@ class EbayFinancesClient:
         if filters:
             params["filter"] = ",".join(filters)
         out: list[dict[str, Any]] = []
+        window_start = start_date
+        window_end = end_date
         pages = 0
         while pages < max_pages:
+            params["filter"] = ",".join(
+                filters + [_build_date_filter("transactionDate", window_start, window_end)]
+            ) if (filters or (window_start or window_end)) else None
+            if params.get("filter") is None:
+                params.pop("filter", None)
             data = await self._request("GET", "/transaction", params=params)
             page = data.get("transactions") or []
             if not page:
-                return EbayPaginationResult(items=out, exhausted=True, continuation_offset=None)
+                return EbayPaginationResult(
+                    items=out,
+                    exhausted=True,
+                    continuation_offset=None,
+                    window_start=window_start,
+                    window_end=window_end,
+                    continuation_invalid=bool(offset),
+                )
+            page_timestamps = _item_timestamps(page, "transactionDate")
+            if window_end is None and page_timestamps:
+                window_end = max(page_timestamps) + timedelta(seconds=1)
+            if window_start is None and page_timestamps:
+                window_start = max(page_timestamps) - timedelta(
+                    days=DEFAULT_EBAY_WINDOW_DAYS
+                )
             remaining = output_limit - len(out)
-            out.extend(page[:remaining])
+            accepted = page[:remaining]
+            out.extend(
+                item
+                for item in accepted
+                if window_start is None
+                or _item_timestamp(item, "transactionDate") is None
+                or _item_timestamp(item, "transactionDate") >= window_start
+            )
             pages += 1
             total = int(data.get("total") or 0)
-            params["offset"] += len(page)
+            page_offset = int(params["offset"])
+            params["offset"] = page_offset + len(page)
             if total and params["offset"] >= total:
-                return EbayPaginationResult(items=out, exhausted=True, continuation_offset=None)
+                return EbayPaginationResult(
+                    items=out,
+                    exhausted=True,
+                    continuation_offset=None,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
             if len(out) >= output_limit:
                 return EbayPaginationResult(
                     items=out,
                     exhausted=False,
-                    continuation_offset=int(params["offset"]),
+                    continuation_offset=page_offset + len(accepted),
+                    window_start=window_start,
+                    window_end=window_end,
                 )
             if len(page) < int(params["limit"]):
-                return EbayPaginationResult(items=out, exhausted=True, continuation_offset=None)
+                return EbayPaginationResult(
+                    items=out,
+                    exhausted=True,
+                    continuation_offset=None,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
             params["limit"] = min(output_limit - len(out), 200)
         return EbayPaginationResult(
             items=out,
             exhausted=False,
             continuation_offset=int(params["offset"]),
+            window_start=window_start,
+            window_end=window_end,
         )
 
 
@@ -481,6 +574,9 @@ class EbayPaginationResult:
     items: list[dict[str, Any]]
     exhausted: bool
     continuation_offset: int | None
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    continuation_invalid: bool = False
 
     def __len__(self) -> int:
         return len(self.items)
@@ -523,6 +619,29 @@ class EbayPaginationResult:
         if filters:
             params["filter"] = ",".join(filters)
         return await self._request("GET", "/payout_summary", params=params)
+
+
+def _item_timestamp(item: dict[str, Any], field_name: str) -> datetime | None:
+    value = item.get(field_name)
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _item_timestamps(
+    items: list[dict[str, Any]], field_name: str
+) -> list[datetime]:
+    return [
+        timestamp
+        for item in items
+        if (timestamp := _item_timestamp(item, field_name)) is not None
+    ]
 
 
 def _build_date_filter(
