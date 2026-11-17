@@ -50,6 +50,7 @@ from app.connectors.stripe import StripeApiError, StripeClient, load_stripe_cred
 from app.connectors.stripe.blocked_resolution import (
     BLOCK_REVISION_KEY,
     MERGE_STATE_SQL,
+    REJECTED_STATE_KEY,
     REOPENED_STATE_KEY,
     RESOLVED_STATE_KEY,
     SUPERSEDED_BY_REOPEN_KEY,
@@ -57,6 +58,7 @@ from app.connectors.stripe.blocked_resolution import (
     lock_block_state,
     lock_stripe_state_row,
     merge_params,
+    remember_rejection,
     resolved_ids,
 )
 from app.connectors.stripe.client import paginate_balance_transactions
@@ -373,7 +375,12 @@ async def _record_sync_outcome(
         locked = await lock_stripe_state_row(session, entity_id, instance_name)
         existing_id, locked_state = locked if locked is not None else (None, {})
         resolved = resolved_ids(locked_state)
-        owned_by_human = {RESOLVED_STATE_KEY, REOPENED_STATE_KEY, "blocked_item"}
+        owned_by_human = {
+            RESOLVED_STATE_KEY,
+            REOPENED_STATE_KEY,
+            REJECTED_STATE_KEY,
+            "blocked_item",
+        }
         patch: dict[str, Any] = {
             key: value
             for key, value in outcome_summary.items()
@@ -622,6 +629,47 @@ async def _stripe_item_was_rejected(
     return row is not None
 
 
+async def _latest_ordinary_rejection(
+    session: Any, *, entity_id: UUID, stripe_balance_txn_id: str
+) -> str | None:
+    """Approval id when the latest human decision on an ordinary review row
+    for this item is a rejection, else None.
+
+    Not tied to ``awaiting_review_item``: that marker is cleared by the next
+    advancing outcome, while an overlap re-read can return the item again.
+    "(blocked)" rows and reopen-superseded rejections are left to the blocked
+    retry path. A later APPROVED row for the item wins over an older rejection.
+    """
+    if not stripe_balance_txn_id:
+        return None
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text AS id, status::text AS status FROM approval_queue
+                WHERE entity_id = :eid
+                  AND subject_type = 'stripe_post_balance_transaction'
+                  AND status IN ('approved', 'rejected')
+                  AND payload ->> 'stripe_balance_txn_id' = :stripe_id
+                  AND payload -> :superseded_key IS NULL
+                  AND COALESCE(payload ->> 'blocked', 'false') <> 'true'
+                  AND COALESCE(payload ->> 'debit_account', '') <> '(blocked)'
+                ORDER BY decided_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "eid": str(entity_id),
+                "stripe_id": stripe_balance_txn_id,
+                "superseded_key": SUPERSEDED_BY_REOPEN_KEY,
+            },
+        )
+    ).first()
+    if row is None or getattr(row, "status", None) != "rejected":
+        return None
+    return str(row.id)
+
+
 # ---------------------------------------------------------------------------
 # Per-workspace sync
 # ---------------------------------------------------------------------------
@@ -803,16 +851,41 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
 
     # ---- 2. Map + post each ----
     revenue_account = cred.default_revenue_account or DEFAULT_REVENUE_ACCOUNT
-    async def _map_or_skip_rejected(session: Any, bt: dict[str, Any]) -> Any:
-        bt_id = bt.get("id")
-        if await _stripe_item_was_rejected(
+    async def _human_rejected(session: Any, locked: Any, bt_id: str) -> bool:
+        """Checked under the held lock, on every pass, before the mapper."""
+        if not retrying_blocked and bt_id in locked.rejected:
+            # Durable record (REJECTED_STATE_KEY): survives the
+            # awaiting_review_item marker being cleared, so an overlap
+            # re-read never posts the item or raises a new review row.
+            # A persisted block is held by its own rejection check, which
+            # an audited reopen may supersede; the record is not consulted
+            # there so it neither clears nor wedges a block.
+            return True
+        approval_id = await _latest_ordinary_rejection(
+            session, entity_id=entity_id, stripe_balance_txn_id=bt_id
+        )
+        if approval_id is not None:
+            # A rejection without the durable record (decided before the
+            # record existed): honour it and record it now, under the lock.
+            await remember_rejection(
+                session, locked, bt_id=bt_id, approval_id=approval_id
+            )
+            return True
+        return await _stripe_item_was_rejected(
             session,
             entity_id=entity_id,
-            stripe_balance_txn_id=str(bt_id or ""),
+            stripe_balance_txn_id=bt_id,
             awaiting_review_only=True,
-        ):
+        )
+
+    async def _map_or_skip_rejected(
+        session: Any, locked: Any, bt: dict[str, Any]
+    ) -> Any:
+        bt_id = bt.get("id")
+        if await _human_rejected(session, locked, str(bt_id or "")):
             # A rejected review is the one explicit human decision that
-            # permits the cursor to pass without a journal row.
+            # permits the cursor to pass without a journal row. For a
+            # persisted block the caller still holds the block (below).
             return type("RejectedStripeItem", (), {
                 "outcome": "human_rejected",
                 "reason": "Rejected by human reviewer",
@@ -887,7 +960,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
                         "evidence-backed resolution is required"
                     )
                     break
-                result = await _map_or_skip_rejected(session, bt)
+                result = await _map_or_skip_rejected(session, locked, bt)
             except Exception as exc:
                 error_text = f"{exc.__class__.__name__}: {exc}"
                 if isinstance(bt_id, str) and bt_id:

@@ -86,6 +86,15 @@ BLOCK_REVISION_KEY = "block_revision"
 # rejected-approval checks (scripts/stripe_sync.py _stripe_item_was_rejected)
 # skip superseded rows; an ordinary rejection never carries this key.
 SUPERSEDED_BY_REOPEN_KEY = "superseded_by_reopen"
+# Durable per-item record of a human REJECTION of an ordinary Stripe review
+# row: {bt_id: {approval_id, rejected_by_uc_uid, rejected_at, ...}}. Written
+# under the shared lock by decide_approval (record_stripe_decision) and by the
+# worker when it honours a rejected row it finds. The worker checks it on every
+# pass before the mapper, so an overlap re-read never posts a rejected item or
+# raises a new review row for it. Never dropped by a merge; an entry leaves
+# only when a human APPROVES a new approval row for that bt_id.
+# It does not touch a persisted block: a blocked retry keeps its own hold.
+REJECTED_STATE_KEY = "rejected_stripe_items"
 MIN_REASON_CHARS = 10
 MAX_REASON_CHARS = 2000
 # How long a human call waits for a running sync pass to release the lock.
@@ -168,6 +177,7 @@ BLOCK_PROTOCOL_KEYS = frozenset(
         "last_outcome",
         RESOLVED_STATE_KEY,
         REOPENED_STATE_KEY,
+        REJECTED_STATE_KEY,
         BLOCK_REVISION_KEY,
     }
 )
@@ -200,6 +210,111 @@ def resolved_ids(state: dict[str, Any] | None) -> frozenset[str]:
     return frozenset(key for key in resolved if isinstance(key, str) and key)
 
 
+def rejected_items(state: dict[str, Any] | None) -> dict[str, Any]:
+    """The ``rejected_stripe_items`` map of a state dict (a copy)."""
+    rejected = (state or {}).get(REJECTED_STATE_KEY)
+    if isinstance(rejected, str):
+        try:
+            rejected = json.loads(rejected)
+        except ValueError:
+            rejected = None
+    if not isinstance(rejected, dict):
+        return {}
+    return {key: value for key, value in rejected.items() if isinstance(key, str) and key}
+
+
+def is_blocked_review_row(payload: dict[str, Any] | None) -> bool:
+    """True for a "(blocked)" alert row (mapper.enqueue_blocked_balance_transaction)."""
+    payload = payload or {}
+    return bool(payload.get("blocked")) or payload.get("debit_account") == "(blocked)"
+
+
+async def record_stripe_decision(
+    session: AsyncSession,
+    *,
+    entity_id: UUID,
+    bt_id: str,
+    approval_id: str,
+    decision: str,
+    decided_by: str | None,
+    payload: dict[str, Any] | None,
+    instance: str = "default",
+) -> dict[str, Any] | None:
+    """Keep ``rejected_stripe_items`` in step with a Stripe approval decision.
+
+    Called by decide_approval on the same transaction, AFTER it took the
+    shared lock (lock_stripe_state_for_approval). A REJECT of an ordinary
+    review row adds ``bt_id``; an APPROVE removes it. A "(blocked)" row's
+    rejection is not recorded here: a persisted block keeps its own hold in
+    the worker, and a reopen may supersede it. Returns the entry written for
+    a rejection, else None. Fails closed with 409 when a rejection cannot be
+    recorded because the Stripe state row is missing.
+    """
+    if not bt_id:
+        return None
+    if decision == "reject" and is_blocked_review_row(payload):
+        return None
+    locked = await lock_stripe_state_row(session, entity_id, instance)
+    if locked is None:
+        if decision == "reject":
+            raise BlockedResolutionError(
+                409,
+                "Stripe sync state is missing for this entity; the rejection "
+                "cannot be recorded durably",
+            )
+        return None
+    row_id, state = locked
+    rejected = rejected_items(state)
+    entry: dict[str, Any] | None = None
+    if decision == "reject":
+        entry = {
+            "approval_id": approval_id,
+            "rejected_by_uc_uid": decided_by,
+            "rejected_at": datetime.now(tz=timezone.utc).isoformat(),
+            "source": "approval_decision",
+        }
+        rejected[bt_id] = entry
+    elif decision == "approve" and bt_id in rejected:
+        rejected.pop(bt_id)
+    else:
+        return None
+    await session.execute(
+        text(MERGE_STATE_SQL),
+        merge_params(row_id, {REJECTED_STATE_KEY: rejected}, set()),
+    )
+    return entry
+
+
+async def remember_rejection(
+    session: AsyncSession,
+    locked: "LockedBlockState",
+    *,
+    bt_id: str,
+    approval_id: str | None,
+) -> None:
+    """Worker-side backfill of ``rejected_stripe_items`` under its held lock.
+
+    For a rejection decided before decide_approval recorded it durably. Reads
+    the map again under the same lock so a concurrent merge is never lost.
+    """
+    if locked.row_id is None or not bt_id:
+        return
+    state = await lock_stripe_state(session, locked.entity_id, locked.instance)
+    rejected = rejected_items(state)
+    if bt_id in rejected:
+        return
+    rejected[bt_id] = {
+        "approval_id": approval_id,
+        "rejected_by_uc_uid": None,
+        "rejected_at": datetime.now(tz=timezone.utc).isoformat(),
+        "source": "sync_worker_backfill",
+    }
+    await session.execute(
+        text(MERGE_STATE_SQL),
+        merge_params(locked.row_id, {REJECTED_STATE_KEY: rejected}, set()),
+    )
+
+
 async def load_resolved_blocked_ids(
     session: AsyncSession, entity_id: UUID, instance: str = "default"
 ) -> frozenset[str]:
@@ -220,6 +335,11 @@ class LockedBlockState:
     resolved: frozenset[str]
     revision: int
     blocked_id: str | None
+    # Items a human rejected as ordinary review rows (REJECTED_STATE_KEY).
+    rejected: frozenset[str] = frozenset()
+    row_id: str | None = None
+    entity_id: UUID | None = None
+    instance: str = "default"
 
 
 async def lock_block_state(
@@ -244,6 +364,10 @@ async def lock_block_state(
         resolved_ids(state),
         block_revision(state),
         block_id if isinstance(block_id, str) and block_id else None,
+        frozenset(rejected_items(state)),
+        locked[0],
+        entity_id,
+        instance,
     )
 
 
@@ -259,6 +383,8 @@ def merge_params(row_id: str, patch: dict[str, Any], drop_keys: set[str]) -> dic
     """Bind values for MERGE_STATE_SQL. The resolutions key is never dropped."""
     if RESOLVED_STATE_KEY in drop_keys:
         raise ValueError("resolved_blocked_items is never dropped by a merge")
+    if REJECTED_STATE_KEY in drop_keys:
+        raise ValueError("rejected_stripe_items is never dropped by a merge")
     return {
         "id": row_id,
         "patch": json.dumps(patch),
@@ -528,25 +654,57 @@ async def resolve_blocked_item(
             )
         journal_ref = {"journal_entry_id": je["id"], "journal_entry_entity_id": je["entity_id"]}
 
-    approval = (
+    # The item's approval row in ANY state, locked (state row first, then
+    # approval rows: the one lock order). A pending "(blocked)" row is
+    # decided by this resolution; a row a human already rejected or skipped
+    # keeps its status and decision history and gets the resolution attached.
+    # Without a row to link, the resolution is refused rather than recorded
+    # with no approval.
+    approvals = (
         await session.execute(
             text(
                 """
-                SELECT id::text AS id, reasoning
+                SELECT id::text AS id, status::text AS status,
+                       decided_by_uc_uid, decided_at
                 FROM approval_queue
                 WHERE entity_id = :eid
                   AND subject_type = 'stripe_post_balance_transaction'
-                  AND status = 'pending'
                   AND payload ->> 'stripe_balance_txn_id' = :stripe_id
-                ORDER BY created_at ASC
-                LIMIT 1
+                ORDER BY (status = 'pending') DESC,
+                         CASE WHEN status = 'pending' THEN created_at END ASC,
+                         decided_at DESC NULLS LAST, created_at DESC
                 FOR UPDATE
                 """
             ),
             {"eid": str(row_entity), "stripe_id": bt_id},
         )
-    ).mappings().first()
-    approval_id = approval["id"] if approval else None
+    ).mappings().all()
+    approval = approvals[0] if approvals else None
+    if approval is None:
+        raise BlockedResolutionError(
+            409,
+            "No approval row exists for this blocked Stripe item, so the "
+            "resolution cannot be linked; let the next sync pass raise it, then retry",
+        )
+    if approval["status"] not in {"pending", "rejected", "skipped"}:
+        raise BlockedResolutionError(
+            409,
+            f"The approval for this Stripe item is already {approval['status']}; "
+            "nothing to resolve",
+        )
+    approval_id = approval["id"]
+    prior_decision: dict[str, Any] | None = None
+    if approval["status"] != "pending":
+        decided_at = approval.get("decided_at")
+        prior_decision = {
+            "status": approval["status"],
+            "decided_by_uc_uid": approval.get("decided_by_uc_uid"),
+            "decided_at": (
+                decided_at.isoformat()
+                if hasattr(decided_at, "isoformat")
+                else decided_at
+            ),
+        }
 
     resolved_by = ctx.user_uc_uid
     resolution: dict[str, Any] = {
@@ -557,6 +715,7 @@ async def resolve_blocked_item(
         "not_books_relevant_reason": reason,
         "blocked_item": blocked_item,
         "approval_id": approval_id,
+        "approval_prior_decision": prior_decision,
         # The window the item was blocked in, so a reopen can re-arm it.
         "position": {
             "window_gte": _epoch(state.get("window_gte")),
@@ -596,8 +755,8 @@ async def resolve_blocked_item(
     )
     resolution["audit_id"] = str(audit_id)
 
-    if approval_id is not None:
-        await session.execute(
+    if prior_decision is None:
+        linked = await session.execute(
             text(
                 """
                 UPDATE approval_queue
@@ -607,6 +766,7 @@ async def resolve_blocked_item(
                     reasoning = reasoning || ' | ' || :note,
                     payload = payload || CAST(:payload AS jsonb)
                 WHERE id = :id AND status = 'pending'
+                RETURNING id::text AS id
                 """
             ),
             {
@@ -615,6 +775,33 @@ async def resolve_blocked_item(
                 "note": note,
                 "payload": json.dumps({"blocked_resolution": resolution}),
             },
+        )
+    else:
+        # Keep the human's earlier rejection or skip as it was: status,
+        # decided_by and decided_at are untouched; only the note and the
+        # resolution are attached.
+        linked = await session.execute(
+            text(
+                """
+                UPDATE approval_queue
+                SET reasoning = reasoning || ' | ' || :note,
+                    payload = payload || CAST(:payload AS jsonb)
+                WHERE id = :id AND status = CAST(:status AS approval_status)
+                RETURNING id::text AS id
+                """
+            ),
+            {
+                "id": approval_id,
+                "status": prior_decision["status"],
+                "note": note,
+                "payload": json.dumps({"blocked_resolution": resolution}),
+            },
+        )
+    if linked.mappings().first() is None:
+        # The row is locked above, so this means it changed under us anyway.
+        # Refuse: the caller's transaction rolls back the audit row too.
+        raise BlockedResolutionError(
+            409, "The approval for this Stripe item changed; retry the resolution"
         )
 
     patch, drop = resolution_patch(state, bt_id, resolution)

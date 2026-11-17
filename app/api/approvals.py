@@ -406,6 +406,12 @@ async def decide_approval(
                 session, approval_id=approval_id, new_status="rejected",
                 decided_by=workspace.user_uc_uid,
             )
+            if subject_type == "stripe_post_balance_transaction":
+                await _record_stripe_decision(
+                    session, entity_id=entity_id, approval_id=approval_id,
+                    payload=payload, decision="reject",
+                    decided_by=workspace.user_uc_uid,
+                )
             response = {
                 "ok": True,
                 "approval_id": str(approval_id),
@@ -507,6 +513,12 @@ async def decide_approval(
                 session, approval_id=approval_id, new_status="approved",
                 decided_by=workspace.user_uc_uid,
             )
+            if subject_type == "stripe_post_balance_transaction":
+                await _record_stripe_decision(
+                    session, entity_id=entity_id, approval_id=approval_id,
+                    payload=payload, decision="approve",
+                    decided_by=workspace.user_uc_uid,
+                )
             response = {
                 "ok": True,
                 "approval_id": str(approval_id),
@@ -823,6 +835,40 @@ async def _approve_compliance_rule(
         "rule_id": activated["rule_id"],
         "active_profile_id": activated["profile_id"],
     }
+
+
+async def _record_stripe_decision(
+    session,
+    *,
+    entity_id: UUID,
+    approval_id: UUID,
+    payload: dict,
+    decision: str,
+    decided_by: str | None,
+) -> None:
+    """Durable rejected-item record, on this transaction, under the state lock.
+
+    The shared Stripe state lock is already held (taken before the approval
+    row lock above). A reject of an ordinary review row is recorded so no
+    later sync pass posts the item; only a new approve removes it.
+    """
+    from app.connectors.stripe.blocked_resolution import (
+        BlockedResolutionError,
+        record_stripe_decision,
+    )
+
+    try:
+        await record_stripe_decision(
+            session,
+            entity_id=entity_id,
+            bt_id=str(payload.get("stripe_balance_txn_id") or "").strip(),
+            approval_id=str(approval_id),
+            decision=decision,
+            decided_by=decided_by,
+            payload=payload,
+        )
+    except BlockedResolutionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
 async def _approve_stripe_balance_transaction(

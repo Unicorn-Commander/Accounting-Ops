@@ -85,6 +85,7 @@ async def _decide(kind: str, decision: str, row_status: str = "pending"):
     apply = AsyncMock(return_value={"journal_entry_id": str(uuid4())})
     mark = AsyncMock()
     audit = AsyncMock(return_value=uuid4())
+    record = AsyncMock()
     with (
         patch.object(approvals, "workspace_session", ws),
         patch(
@@ -94,6 +95,7 @@ async def _decide(kind: str, decision: str, row_status: str = "pending"):
         patch.object(approvals, "_mark_decided", mark),
         patch.object(approvals, "write_decision_audit", audit),
         patch.object(approvals, "_project_approval_decision"),
+        patch.object(approvals, "_record_stripe_decision", record),
     ):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -102,6 +104,7 @@ async def _decide(kind: str, decision: str, row_status: str = "pending"):
                 f"/api/workspaces/{ctx.workspace_id}/approvals/{aid}/decide",
                 json={"decision": decision},
             )
+    _decide.last_record = record  # type: ignore[attr-defined]
     return result, lock, apply, mark, audit
 
 
@@ -134,6 +137,8 @@ def test_human_accountant_approves_stripe_row():
     assert result.json()["applied"] is True
     assert apply.call_args.kwargs["approving_human"] == HUMAN
     assert mark.call_args.kwargs["decided_by"] == HUMAN
+    # An approve clears any durable rejection of this item.
+    assert _decide.last_record.call_args.kwargs["decision"] == "approve"
 
 
 def test_human_accountant_rejects_stripe_row():
@@ -142,6 +147,10 @@ def test_human_accountant_rejects_stripe_row():
     assert result.json()["decision"] == "rejected"
     apply.assert_not_awaited()
     assert mark.call_args.kwargs["new_status"] == "rejected"
+    # The rejection is recorded durably in the same transaction.
+    record = _decide.last_record
+    assert record.call_args.kwargs["decision"] == "reject"
+    assert record.call_args.kwargs["payload"]["stripe_balance_txn_id"] == "txn_fixture_1"
 
 
 def test_human_retry_of_approved_row_stays_idempotent():
