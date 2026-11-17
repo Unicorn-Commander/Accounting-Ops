@@ -47,6 +47,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.connectors.stripe import StripeApiError, StripeClient, load_stripe_credential
+from app.connectors.stripe.blocked_resolution import load_resolved_blocked_ids
 from app.connectors.stripe.client import paginate_balance_transactions
 from app.connectors.stripe.mapper import (
     DEFAULT_REVENUE_ACCOUNT,
@@ -627,8 +628,17 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
     last_processed: dict[str, Any] | None = None
     processing_error = False
     async with workspace_session(SessionLocal, workspace_id) as session:
+        # A human resolved these elsewhere (manual journal entry or "not
+        # books-relevant"). Posting one now would double-book it, so a re-read
+        # from the window overlap moves past it without calling the mapper.
+        resolved_elsewhere = await load_resolved_blocked_ids(session, entity_id)
         for bt in items_to_process:
             bt_id = bt.get("id")
+            if isinstance(bt_id, str) and bt_id in resolved_elsewhere:
+                last_processed = bt
+                failure_counts.pop(bt_id, None)
+                summary["skipped"] += 1
+                continue
             try:
                 # Keep every statement for one balance transaction inside its
                 # own savepoint. A DBAPI error aborts the current PostgreSQL

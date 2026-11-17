@@ -16,6 +16,7 @@ from app.api.approval_recommendations import router as approval_recommendations_
 from app.api.chat import router as chat_router
 from app.api.ebay_oauth import router as ebay_oauth_router
 from app.api.stripe_oauth import router as stripe_oauth_router
+from app.api.stripe_blocked_item import router as stripe_blocked_item_router
 from app.api.irs_forms import router as irs_forms_router
 from app.api.open_items import router as open_items_router
 from app.api.specialist_runs import router as specialist_runs_router
@@ -231,6 +232,8 @@ app.include_router(consolidated_router)
 app.include_router(ebay_oauth_router)
 # Stripe API key + webhook (no OAuth; webhook is unauthenticated — security via HMAC signature verification)
 app.include_router(stripe_oauth_router)
+# Manual "resolved elsewhere" unblock for a blocked Stripe sync item (human owner/admin only)
+app.include_router(stripe_blocked_item_router)
 
 # ---------------------------------------------------------------------------
 # ENTERPRISE-HOLD routers (suite / Brigade federation surface).
