@@ -238,7 +238,7 @@ jobs:
               if "test_stripe_sync_postgres" in (case.get("classname") or "")
           ]
           print(f"integration gate: tests={tests} skipped={skipped} failures={failures} errors={errors} stripe_tests={len(stripe_cases)}")
-          assert tests >= 17 and len(stripe_cases) == 1 and skipped == 0 and failures == 0 and errors == 0, "required integration tests did not all execute and pass"
+          assert tests >= 18 and len(stripe_cases) >= 2 and skipped == 0 and failures == 0 and errors == 0, "required integration tests did not all execute and pass"
           PY
 
       - name: Dump app logs on failure
