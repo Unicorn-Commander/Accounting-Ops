@@ -178,14 +178,9 @@ class SkipRequest(BaseModel):
     note: str | None = None
 
 
-def _require_manual_proposal_human(auth: AuthContext, workspace: WorkspaceContext) -> None:
-    """Require a verified owner/admin interactive human for manual journals."""
-    if workspace.role not in {"owner", "admin"}:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Manual journal proposals require an owner or admin human reviewer",
-        )
-    if (
+def _is_interactive_human(auth: AuthContext, workspace: WorkspaceContext) -> bool:
+    """True only for a verified interactive browser session of this workspace's human."""
+    return not (
         not isinstance(auth, AuthContext)
         or not auth.may_autoprovision
         or auth.agent_id is not None
@@ -198,8 +193,36 @@ def _require_manual_proposal_human(auth: AuthContext, workspace: WorkspaceContex
         or auth.claims.get("auth_time", 0) <= 0
         or not (auth.claims.get("sid") or auth.claims.get("session_state"))
         or str(auth.claims.get("preferred_username", "")).startswith("service-account-")
-    ):
+    )
+
+
+def _require_manual_proposal_human(auth: AuthContext, workspace: WorkspaceContext) -> None:
+    """Require a verified owner/admin interactive human for manual journals."""
+    if workspace.role not in {"owner", "admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Manual journal proposals require an owner or admin human reviewer",
+        )
+    if not _is_interactive_human(auth, workspace):
         raise HTTPException(status_code=403, detail="Manual journal proposal requires a human session")
+
+
+def _require_stripe_decision_human(auth: AuthContext, workspace: WorkspaceContext) -> None:
+    """Stripe review rows exist for a human: no agent, PAT, service or M2M caller.
+
+    Approving records the caller as the approving human with first-run
+    confirmation, and rejecting lets the worker advance without posting, so
+    both need the same interactive-human proof the journal proposals use.
+    """
+    if (
+        workspace.agent_id is not None
+        or workspace.pat_scopes is not None
+        or not _is_interactive_human(auth, workspace)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Stripe approval decisions require a human session",
+        )
 
 
 @router.post("/api/workspaces/{workspace_id}/approvals/{approval_id}/decide")
@@ -262,6 +285,9 @@ async def decide_approval(
             )
 
             assert_entity_in_scope(workspace, UUID(head["entity_id"]))
+            # Before the lock, both decision branches and the approved-row
+            # retry shortcut below.
+            _require_stripe_decision_human(auth, workspace)
             try:
                 stripe_resolved = await lock_stripe_state_for_approval(
                     session, workspace.workspace_id, UUID(head["entity_id"])
