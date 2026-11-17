@@ -15,6 +15,7 @@ What we cover:
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -81,6 +82,7 @@ class _StubSession:
         self.posted_entries: list[dict] = []
         self.posting_log: list[dict] = []
         self.approvals: list[dict] = []
+        self.pending_approval_id: str | None = None
         self.idempotent_hit = False
         self.linked_external_id_response = None  # if set, _resolve_cash_for_payout returns this
 
@@ -124,6 +126,12 @@ class _StubSession:
         if "FROM journal_entry" in sql and "AND source = :src" in sql and "count(*)" in sql:
             return _StubResult([_Row({"c": self.existing_posts})])
 
+        # Pending approval dedupe
+        if "FROM approval_queue" in sql and "ebay_transaction_id" in sql:
+            if self.pending_approval_id is None:
+                return _StubResult([])
+            return _StubResult([_Row({"id": self.pending_approval_id})])
+
         # Hash chain last hash
         if "FROM journal_entry" in sql and "this_hash IS NOT NULL" in sql:
             return _StubResult([])  # GENESIS_HASH default
@@ -141,6 +149,7 @@ class _StubSession:
         # approval_queue insert
         if "INSERT INTO approval_queue" in sql:
             self.approvals.append(dict(params))
+            self.pending_approval_id = str(params["id"])
             return _StubResult([])
 
         # Fallback
@@ -318,6 +327,31 @@ async def test_first_run_guard_queues_first_30():
 
 
 @pytest.mark.asyncio
+async def test_first_run_review_queue_dedupes_repeated_passes():
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
+    txn = _txn("TXN-FIRST-RUN-DEDUPE", "SALE", "9.99")
+
+    results = [
+        await ebay_mapper.map_and_post_transaction(
+            session,
+            workspace_id="wid",
+            entity_id="eid",
+            txn=txn,
+            actor_uc_uid="jane",
+        )
+        for _ in range(3)
+    ]
+
+    assert [result.outcome for result in results] == [
+        "queued_first_run",
+        "queued_first_run",
+        "queued_first_run",
+    ]
+    assert results[0].approval_id == results[1].approval_id == results[2].approval_id
+    assert len(session.approvals) == 1
+
+
+@pytest.mark.asyncio
 async def test_first_run_exactly_at_threshold_posts():
     """existing_posts == FIRST_RUN_REVIEW_LIMIT means we're past the guard."""
     session = _StubSession(
@@ -329,6 +363,58 @@ async def test_first_run_exactly_at_threshold_posts():
         session, workspace_id="wid", entity_id="eid", txn=txn, actor_uc_uid="jane",
     )
     assert result.outcome == "posted"
+
+
+@pytest.mark.asyncio
+async def test_approved_first_run_item_bypasses_only_the_review_guard():
+    """A worker-approved raw item posts even while the entity has zero posts."""
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
+    result = await ebay_mapper.map_and_post_transaction(
+        session,
+        workspace_id="wid",
+        entity_id="eid",
+        txn=_txn("TXN-APPROVED-FIRST-RUN", "SALE", "9.99"),
+        actor_uc_uid="agent:ebay_sync",
+        first_run_confirmed=True,
+    )
+    assert result.outcome == "posted"
+    assert not session.approvals
+
+
+@pytest.mark.parametrize("amount", ["80.00", "1500.00"])
+@pytest.mark.asyncio
+async def test_verified_approval_attestation_posts_m_and_h_items(amount):
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
+    result = await ebay_mapper.map_and_post_transaction(
+        session,
+        workspace_id="wid",
+        entity_id="eid",
+        txn=_txn(f"TXN-ATTEST-{amount}", "SALE", amount),
+        actor_uc_uid="agent:ebay_sync",
+        human_attested=True,
+    )
+    assert result.outcome == "posted", result.reason
+    assert not session.approvals
+
+
+@pytest.mark.asyncio
+async def test_changed_approved_item_is_forced_back_to_review():
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
+    result = await ebay_mapper.map_and_post_transaction(
+        session,
+        workspace_id="wid",
+        entity_id="eid",
+        txn=_txn("TXN-CHANGED", "SALE", "60.00"),
+        actor_uc_uid="agent:ebay_sync",
+        force_review=True,
+    )
+    assert result.outcome == "queued_for_confirm"
+    assert session.approvals
+    assert not session.posted_entries
+    payload = json.loads(session.approvals[0]["payload"])
+    assert payload["amount_cents"] == 6000
+    assert payload["transactionType"] == "SALE"
+    assert payload["transactionDate"] == "2026-05-01T12:00:00.000Z"
 
 
 @pytest.mark.asyncio

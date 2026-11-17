@@ -128,6 +128,25 @@ def _payout_amount_cents(payout: dict[str, Any]) -> int:
     return _decimal_to_cents(amount)
 
 
+def approval_snapshot(txn: dict[str, Any]) -> dict[str, Any]:
+    """Return the eBay values a human must have seen before approving."""
+    ebay_type = str(txn.get("transactionType") or txn.get("_type") or "").strip().upper()
+    amount = txn.get("amount") or txn.get("totalAmount") or {}
+    currency = amount.get("currency") if isinstance(amount, dict) else None
+    amount_cents = (
+        _payout_amount_cents(txn)
+        if ebay_type == "PAYOUT"
+        else _txn_amount_cents(txn)
+    )
+    return {
+        "amount_cents": amount_cents,
+        "currency": str(currency or "").strip().upper(),
+        "transactionType": ebay_type,
+        "transactionDate": txn.get("transactionDate") or txn.get("payoutDate")
+        or txn.get("transactionCreationDate"),
+    }
+
+
 def _parse_iso_date(value: str | None) -> date | None:
     if not value:
         return None
@@ -295,6 +314,25 @@ async def _enqueue_for_review(
     post the entry without re-mapping. subject_id is a fresh UUID because the
     eBay txn isn't yet in the journal.
     """
+    existing = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text FROM approval_queue
+                WHERE entity_id = :eid
+                  AND subject_type = 'ebay_post_transaction'
+                  AND status = 'pending'
+                  AND payload ->> 'ebay_transaction_id' = :ebay_id
+                ORDER BY created_at ASC
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "ebay_id": ebay_transaction_id},
+        )
+    ).first()
+    if existing:
+        return UUID(str(existing.id))
+
     approval_id = uuid4()
     subject_id = uuid4()
     payload = {
@@ -309,6 +347,7 @@ async def _enqueue_for_review(
         "description": description,
         "raw_txn_keys": sorted([k for k in raw_txn.keys() if k != "buyer"]),
     }
+    payload.update(approval_snapshot(raw_txn))
     await session.execute(
         text(
             """
@@ -350,6 +389,9 @@ async def map_and_post_transaction(
     txn: dict[str, Any],
     actor_uc_uid: str,
     actor_agent_id: str | None = None,
+    first_run_confirmed: bool = False,
+    human_attested: bool = False,
+    force_review: bool = False,
 ) -> MapResult:
     """Map ONE eBay transaction to a journal entry and post it.
 
@@ -554,7 +596,40 @@ async def map_and_post_transaction(
     # of materiality. The operator eyeballs them and approves; after that we trust
     # the mapper.
     existing_ebay_count = await _count_existing_ebay_posts(session, entity_id=entity_id)
-    if existing_ebay_count < FIRST_RUN_REVIEW_LIMIT:
+    if force_review:
+        approval_id = await _enqueue_for_review(
+            session,
+            workspace_id=workspace_id,
+            entity_id=entity_id,
+            ebay_transaction_id=ebay_id,
+            ebay_type=ebay_type,
+            amount_cents=amount_cents,
+            debit_account=debit_canonical,
+            credit_account=credit_canonical,
+            effective_date=eff_date,
+            payee=payee,
+            description=description,
+            raw_txn=txn,
+            actor_uc_uid=actor_uc_uid,
+            reason="Previously approved eBay item changed; fresh human review required.",
+        )
+        await _log_post_attempt(
+            session, workspace_id=workspace_id, entity_id=entity_id,
+            source=EBAY_SOURCE, source_external_id=ebay_id,
+            outcome="queued_for_confirm", journal_entry_id=None,
+            reason="Approved eBay snapshot changed",
+            actor_uc_uid=actor_uc_uid, actor_agent_id=actor_agent_id,
+            amount_cents=amount_cents, category=category,
+        )
+        return MapResult(
+            outcome="queued_for_confirm",
+            ebay_transaction_id=ebay_id,
+            ebay_type=ebay_type,
+            approval_id=approval_id,
+            reason="Previously approved eBay item changed; fresh human review required.",
+        )
+
+    if existing_ebay_count < FIRST_RUN_REVIEW_LIMIT and not first_run_confirmed:
         approval_id = await _enqueue_for_review(
             session,
             workspace_id=workspace_id,
@@ -603,7 +678,7 @@ async def map_and_post_transaction(
         entity_mapped=True,
         sign_matched=True,
         has_receipt_link=False,
-        user_confirmed=False,
+        user_confirmed=human_attested,
     )
     if verdict.outcome != "auto_post":
         # Queue (M tier) or block (H tier). For eBay specifically we treat
@@ -739,6 +814,7 @@ def normalize_payout_as_txn(payout: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = (
+    "approval_snapshot",
     "MapResult",
     "EBAY_SOURCE",
     "FIRST_RUN_REVIEW_LIMIT",
