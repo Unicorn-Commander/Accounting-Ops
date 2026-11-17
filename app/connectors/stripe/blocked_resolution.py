@@ -26,7 +26,11 @@ Concurrency: ONE lock serializes every writer of the Stripe
 ``lock_stripe_state``). The sync worker takes it at the start of its mapping
 transaction and re-reads the resolved ids under it; the worker's outcome
 write takes it and merges only its own keys; resolve and reopen take it and
-decide only from state read after it. All of them write with a jsonb merge
+decide only from state read after it. The side writers (payout reconciliation
+in reconcile.py, the webhook delivery log in app/api/stripe_oauth.py) take it
+too and merge only their own keys through ``merge_side_state_keys``, which
+refuses every block-protocol key. tests/unit/test_stripe_state_writers.py
+fails when a new connector_state writer appears outside this set. All of them write with a jsonb merge
 (MERGE_STATE_SQL), never a whole-state replacement, and none of the worker's
 writes can drop ``resolved_blocked_items`` or put a resolved id back as the
 blocked item.
@@ -96,23 +100,35 @@ class BlockedResolutionError(Exception):
         self.detail = detail
 
 
-async def lock_stripe_state(
-    session: AsyncSession, entity_id: UUID, instance: str = "default"
-) -> dict[str, Any] | None:
-    """Take THE Stripe sync lock for one entity and return its fresh state.
+async def lock_stripe_state_row(
+    session: AsyncSession,
+    entity_id: UUID,
+    instance: str = "default",
+    *,
+    lock_timeout_ms: int | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Take THE Stripe sync lock on one exact row; return (row id, fresh state).
 
     Every writer of ``connector_state.state`` for the Stripe connector takes
     this row lock first: the sync worker's mapping transaction, the worker's
-    outcome write, the manual resolve and the manual reopen. Whatever a caller
-    decides from the returned state stays true until its transaction ends.
-    Returns None when the row does not exist yet (nothing can be blocked or
-    resolved then).
+    outcome write, the payout reconciliation, the webhook delivery log, the
+    manual resolve and the manual reopen. Whatever a caller decides from the
+    returned state stays true until its transaction ends. Returns None when
+    the row does not exist yet (nothing can be blocked or resolved then).
+    tests/test_stripe_state_writers.py fails if a new writer skips it.
+
+    ``lock_timeout_ms`` bounds the wait (a request path must not hang behind a
+    long sync pass); the timeout then raises from the driver as usual.
     """
+    if lock_timeout_ms is not None:
+        await session.execute(
+            text(f"SET LOCAL lock_timeout = '{int(lock_timeout_ms)}ms'")
+        )
     row = (
         await session.execute(
             text(
                 """
-                SELECT state FROM connector_state
+                SELECT id::text AS id, state FROM connector_state
                 WHERE entity_id = :eid AND connector_name = 'stripe_api'
                   AND connector_instance_name = :instance
                 FOR UPDATE
@@ -121,9 +137,53 @@ async def lock_stripe_state(
             {"eid": str(entity_id), "instance": instance},
         )
     ).first()
+    if lock_timeout_ms is not None:
+        await session.execute(text("SET LOCAL lock_timeout = 0"))
     if row is None:
         return None
-    return _state_dict(getattr(row, "state", None))
+    return str(row.id), _state_dict(getattr(row, "state", None))
+
+
+async def lock_stripe_state(
+    session: AsyncSession, entity_id: UUID, instance: str = "default"
+) -> dict[str, Any] | None:
+    """lock_stripe_state_row, returning only the fresh state."""
+    locked = await lock_stripe_state_row(session, entity_id, instance)
+    return None if locked is None else locked[1]
+
+
+# Keys the block protocol owns. Only the worker's outcome write
+# (scripts/stripe_sync.py _record_sync_outcome, revision-checked), resolve
+# and reopen may write them. Side writers (reconciliation, webhook log) merge
+# their own keys through merge_side_state_keys, which refuses these.
+BLOCK_PROTOCOL_KEYS = frozenset(
+    {
+        "blocked_item",
+        "awaiting_review_item",
+        "_stripe_continuation_cursor",
+        "_stripe_failure_counts",
+        "window_gte",
+        "window_lt",
+        "last_outcome",
+        RESOLVED_STATE_KEY,
+        REOPENED_STATE_KEY,
+        BLOCK_REVISION_KEY,
+    }
+)
+
+
+async def merge_side_state_keys(
+    session: AsyncSession, row_id: str, patch: dict[str, Any]
+) -> None:
+    """jsonb-merge ``patch`` into a row the caller locked with lock_stripe_state_row.
+
+    Writes ONLY the keys in ``patch``; every other key (block, resolutions,
+    revision, cursor) is whatever the row holds at write time.
+    """
+    forbidden = set(patch) & BLOCK_PROTOCOL_KEYS
+    if forbidden:
+        raise ValueError(f"side writers may not write {sorted(forbidden)}")
+    await session.execute(text(MERGE_STATE_SQL), merge_params(row_id, patch, set()))
 
 
 def resolved_ids(state: dict[str, Any] | None) -> frozenset[str]:

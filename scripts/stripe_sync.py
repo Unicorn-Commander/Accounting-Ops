@@ -55,6 +55,7 @@ from app.connectors.stripe.blocked_resolution import (
     SUPERSEDED_BY_REOPEN_KEY,
     block_revision,
     load_resolved_blocked_ids,
+    lock_stripe_state_row,
     merge_params,
     resolved_ids,
 )
@@ -369,22 +370,8 @@ async def _record_sync_outcome(
     write (so every later write of that pass stays stale).
     """
     async with workspace_session(SessionLocal, workspace_id) as session:
-        existing = (
-            await session.execute(
-                text(
-                    """
-                    SELECT id::text AS id, state FROM connector_state
-                    WHERE entity_id = :eid AND connector_name = 'stripe_api'
-                      AND connector_instance_name = :instance
-                    FOR UPDATE
-                    """
-                ),
-                {"eid": str(entity_id), "instance": instance_name},
-            )
-        ).first()
-        locked_state = (
-            existing.state if existing and isinstance(existing.state, dict) else {}
-        )
+        locked = await lock_stripe_state_row(session, entity_id, instance_name)
+        existing_id, locked_state = locked if locked is not None else (None, {})
         resolved = resolved_ids(locked_state)
         owned_by_human = {RESOLVED_STATE_KEY, REOPENED_STATE_KEY, "blocked_item"}
         patch: dict[str, Any] = {
@@ -479,7 +466,7 @@ async def _record_sync_outcome(
         result_revision = (
             carried_revision if stale and carried_revision is not None else new_revision
         )
-        if existing is not None:
+        if existing_id is not None:
             await session.execute(
                 text(
                     MERGE_STATE_SQL.replace(
@@ -490,7 +477,7 @@ async def _record_sync_outcome(
                     else MERGE_STATE_SQL
                 ),
                 {
-                    **merge_params(existing.id, patch, drop),
+                    **merge_params(existing_id, patch, drop),
                     **({"last_sync_at": last_sync_at} if write_last_sync else {}),
                 },
             )
