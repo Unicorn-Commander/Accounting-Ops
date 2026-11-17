@@ -181,6 +181,76 @@ def test_ebay_decision_rejects_agent_session_before_applying():
     asyncio.run(run())
 
 
+def test_ebay_approval_http_route_forwards_stored_snapshot():
+    async def run():
+        wid, eid, aid = uuid4(), uuid4(), uuid4()
+        ctx = WorkspaceContext(wid, "isolated", "accountant", "human", None, None, False)
+        auth = AuthContext(
+            "human",
+            None,
+            (),
+            {
+                "sid": "verified-session",
+                "azp": get_settings().keycloak_client_id,
+                "auth_time": 1789520000,
+            },
+            may_autoprovision=True,
+        )
+        payload = {
+            "action": "ebay_post_transaction",
+            "ebay_transaction_id": "TXN-SNAPSHOT",
+            "amount_cents": 900,
+            "currency": "USD",
+            "transactionType": "SALE",
+            "transactionDate": "2026-11-05T00:00:00+00:00",
+        }
+        row = {
+            "id": str(aid),
+            "entity_id": str(eid),
+            "subject_type": "ebay_post_transaction",
+            "subject_id": str(aid),
+            "status": "pending",
+            "payload": payload,
+            "reasoning": "fixture",
+        }
+        session = SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(
+                    mappings=lambda: SimpleNamespace(first=lambda: row)
+                )
+            )
+        )
+
+        @asynccontextmanager
+        async def ws(*args):
+            yield session
+
+        app = FastAPI()
+        app.include_router(approvals.router)
+        app.dependency_overrides[resolve_workspace] = lambda: ctx
+        app.dependency_overrides[validate_bearer_token] = lambda: auth
+        record = AsyncMock()
+        with (
+            patch.object(approvals, "workspace_session", ws),
+            patch("app.connectors.ebay.decision_state.record_ebay_decision", record),
+            patch.object(approvals, "_mark_decided", AsyncMock()),
+            patch.object(approvals, "write_decision_audit", AsyncMock(return_value=uuid4())),
+            patch.object(approvals, "_project_approval_decision"),
+        ):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                result = await client.post(
+                    f"/api/workspaces/{wid}/approvals/{aid}/decide",
+                    json={"decision": "approve"},
+                )
+        assert result.status_code == 200, result.text
+        assert record.await_count == 1
+        assert record.call_args.kwargs["approval_payload"] == payload
+
+    asyncio.run(run())
+
+
 def test_legacy_direct_tool_delegate_keeps_working_without_new_auth_parameter():
     async def run():
         wid, eid, aid = uuid4(), uuid4(), uuid4()

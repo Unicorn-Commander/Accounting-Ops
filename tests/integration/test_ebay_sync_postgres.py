@@ -679,6 +679,13 @@ async def test_approved_first_run_batch_posts_once_and_replays_idempotently(
 
     async with workspace_session(SessionLocal, TEST_WORKSPACE_ID) as session:
         for transaction_id, approval_id in queued_ids:
+            row = (
+                await session.execute(
+                    text("SELECT payload FROM approval_queue WHERE id = :id"),
+                    {"id": str(approval_id)},
+                )
+            ).first()
+            payload = row.payload if isinstance(row.payload, dict) else json.loads(row.payload)
             await session.execute(
                 text(
                     """
@@ -697,6 +704,7 @@ async def test_approved_first_run_batch_posts_once_and_replays_idempotently(
                 approval_id=str(approval_id),
                 decision="approve",
                 decided_by="fictional-reviewer",
+                approval_payload=payload,
             )
 
     async def load_credential(*args: Any, **kwargs: Any) -> EbayCredentialBlob:
