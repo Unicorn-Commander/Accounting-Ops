@@ -4,19 +4,8 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { Check, Loader2, X } from "lucide-react";
 import { cn } from "@/lib/cn";
-
-type DecideResponse = {
-  ok?: boolean;
-  decision?: "approved" | "rejected";
-  applied?: boolean;
-  detail?: string;
-  // recat
-  reversal_entry_id?: string;
-  restated_entry_id?: string;
-  // rule
-  rule_id?: string;
-  active_profile_id?: string;
-};
+import { decideApproval } from "@/lib/approval-decide";
+import type { ApiFailureKind } from "@/lib/api-error";
 
 export function ApprovalActions({
   workspaceId,
@@ -30,30 +19,19 @@ export function ApprovalActions({
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ kind: ApiFailureKind; message: string } | null>(null);
   const [done, setDone] = useState<"approved" | "rejected" | null>(null);
 
   function decide(decision: "approve" | "reject") {
     setError(null);
     startTransition(async () => {
-      try {
-        const res = await fetch(
-          `/api/workspaces/${workspaceId}/approvals/${approvalId}/decide`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ decision })
-          }
-        );
-        const body = (await res.json().catch(() => ({}))) as DecideResponse;
-        if (!res.ok) {
-          throw new Error(body.detail ?? `HTTP ${res.status}`);
-        }
-        setDone(body.decision ?? (decision === "approve" ? "approved" : "rejected"));
-        router.refresh();
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Unknown error");
+      const result = await decideApproval(fetch, workspaceId, approvalId, decision);
+      if (!result.ok) {
+        setError({ kind: result.kind, message: result.message });
+        return;
       }
+      setDone(result.data.decision ?? (decision === "approve" ? "approved" : "rejected"));
+      router.refresh();
     });
   }
 
@@ -104,8 +82,15 @@ export function ApprovalActions({
         </button>
       </div>
       {error && (
-        <span className="max-w-[260px] text-right text-[10px] text-debit" title={error}>
-          {error}
+        <span
+          role={error.kind === "retry" ? "status" : "alert"}
+          className={cn(
+            "max-w-[260px] text-right text-[10px]",
+            error.kind === "retry" ? "text-pending" : "text-debit"
+          )}
+          title={error.message}
+        >
+          {error.message}
         </span>
       )}
     </div>

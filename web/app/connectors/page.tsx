@@ -216,6 +216,14 @@ function ConnectorCard({
               defaultEntityId={defaultEntityId ?? null}
             />
           )}
+          {connector.id === "stripe" && workspaceId && (
+            <Link
+              href="/connectors/stripe"
+              className="mt-3 inline-flex items-center gap-1 text-[12px] font-medium text-brand-400 underline-offset-2 hover:underline"
+            >
+              Stripe settings and blocked items <ArrowRight size={12} />
+            </Link>
+          )}
 
           <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-subtle pt-4">
             {connector.id === "simplefin" && workspaceId ? (

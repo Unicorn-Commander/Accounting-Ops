@@ -19,6 +19,7 @@ export type ApprovalSubjectType =
   | "compliance_rule"
   | "journal_entry_post"
   | "bank_transaction_import"
+  | "stripe_post_balance_transaction"
   | typeof MANUAL_JOURNAL_ENTRY_PROPOSAL;
 
 export type ManualJournalSide = "debit" | "credit";

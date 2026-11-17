@@ -27,6 +27,8 @@ import {
   withoutManualJournalClusterReview,
   withoutManualJournalRecommendations,
 } from "@/components/manual-journal-proposal-details";
+import { StripeApprovalDetails } from "@/components/stripe-approval-details";
+import { isBlockedStripeRow, isStripeSubject } from "@/lib/stripe-review";
 import { BankTxnBatchPanel } from "@/components/bank-txn-batch-panel";
 import { RecommendationsView } from "@/app/approvals/recommendations-view";
 import { ClusterReview } from "@/components/approvals/cluster-review";
@@ -71,6 +73,11 @@ function subjectLabel(a: Approval): string {
   if (a.subject_type === "compliance_rule") return "Compliance rule";
   if (a.subject_type === "journal_entry_post") return "Journal entry";
   if (isManualJournalSubject(a.subject_type)) return "Manual journal";
+  if (isStripeSubject(a.subject_type)) {
+    return isBlockedStripeRow(a.payload, a.reasoning)
+      ? "Stripe balance transaction (blocked)"
+      : "Stripe balance transaction";
+  }
   return a.subject_type;
 }
 
@@ -90,6 +97,7 @@ function ApprovalCard({
   const isRecat = approval.subject_type === "journal_recategorization";
   const isJournal = approval.subject_type === "journal_entry_post";
   const isManual = isManualJournalSubject(approval.subject_type);
+  const isStripe = isStripeSubject(approval.subject_type);
   const journalScopeMatches = p.workspace_id === workspaceId && p.entity_id === approval.entity_id;
   const journalReviewable = !isManual && (!isJournal || (
     canReviewJournalProposal(p) && journalScopeMatches
@@ -120,7 +128,7 @@ function ApprovalCard({
             {approval.entity_display_name && (
               <StatusChip tone="ink">{approval.entity_display_name}</StatusChip>
             )}
-            {approval.amount && (
+            {approval.amount && !isStripe && (
               <span className="font-mono text-xs text-ink-secondary">
                 {formatAmount(approval.amount, approval.currency_code ?? "USD")}
               </span>
@@ -159,6 +167,13 @@ function ApprovalCard({
             />
           )}
           {isJournal && journalScopeMatches && <JournalProposalDetails payload={p} />}
+          {isStripe && (
+            <StripeApprovalDetails
+              payload={p}
+              reasoning={approval.reasoning}
+              currencyCode={approval.currency_code}
+            />
+          )}
           {isJournal && !journalScopeMatches &&
             <p role="alert" className="mt-3 text-sm text-ink-secondary">This request's workspace or entity does not match the approval. Review is unavailable.</p>}
 
@@ -317,9 +332,16 @@ export default async function ApprovalsPage({
 
   const approvals = data?.approvals ?? [];
   const skippedApprovals = skippedData?.approvals ?? [];
+  // Rows that must be decided one at a time on their own card, never in a
+  // cluster or a bulk decision: manual journal proposals and Stripe review
+  // rows (each Stripe decision is a human attestation of one transaction).
   const manualApprovalIds = new Set(
     approvals
-      .filter((approval) => isManualJournalSubject(approval.subject_type))
+      .filter(
+        (approval) =>
+          isManualJournalSubject(approval.subject_type) ||
+          isStripeSubject(approval.subject_type)
+      )
       .map((approval) => approval.id)
   );
   const skippedVisible = withoutManualJournalApprovals(skippedApprovals);
