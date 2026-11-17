@@ -16,7 +16,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.ar.invoicing import create_invoice_from_draft
+from app.ar.invoicing import InvoiceError, create_invoice_from_draft
 from app.workspace_session import workspace_session
 from tests.conftest import StackConfig
 
@@ -113,3 +113,84 @@ async def test_runtime_role_still_cannot_enumerate_pay_tokens(
         async with session.begin():
             n = (await session.execute(text("SELECT count(*) FROM public.invoice_pay_token"))).scalar_one()
     assert n == 0
+
+
+async def _guc(session) -> str:
+    return (
+        await session.execute(text("SELECT coalesce(current_setting('app.pay_token', true), '')"))
+    ).scalar_one()
+
+
+async def test_guc_cleared_after_successful_create_and_candidates_isolated(
+    runtime_sessionmaker, workspace
+) -> None:
+    """After a successful create the GUC is empty in the SAME transaction, and a
+    token candidate for workspace A cannot expose B's row (checked both ways)."""
+    if len(workspace) < 2:
+        pytest.skip("needs two provisioned workspaces")
+    a, b = workspace[0], workspace[1]
+    tok = {}
+    for ws in (a, b):
+        async with workspace_session(runtime_sessionmaker, ws["workspace_id"]) as session:
+            view = await create_invoice_from_draft(
+                session,
+                workspace_id=ws["workspace_id"],
+                entity_id=ws["entity_id"],
+                actor_uc_uid="rls-test",
+                external_source="rls-test",
+                external_ref=f"iso-{uuid.uuid4()}",
+                customer={"name": "Example Customer LLC", "email": "ap@example.com"},
+                line_items=[{"description": "Consulting", "quantity": 1, "unit_price": "10.00"}],
+            )
+            assert await _guc(session) == ""
+            n = (await session.execute(text("SELECT count(*) FROM public.invoice_pay_token"))).scalar_one()
+            assert n == 0
+            tok[ws["workspace_id"]] = view["public_token"]
+    for mine, other in ((a, b), (b, a)):
+        async with workspace_session(runtime_sessionmaker, mine["workspace_id"]) as session:
+            await session.execute(
+                text("SELECT set_config('app.pay_token', :t, true)"),
+                {"t": tok[mine["workspace_id"]]},
+            )
+            rows = (
+                await session.execute(text("SELECT workspace_id::text FROM public.invoice_pay_token"))
+            ).scalars().all()
+            assert other["workspace_id"] not in rows
+
+
+async def test_exhausted_attempts_clear_guc_and_hide_other_workspace(
+    runtime_sessionmaker, workspace, monkeypatch
+) -> None:
+    """Force every candidate to collide with B's token: allocation fails, the GUC is
+    cleared, and the still-usable transaction sees none of B's rows."""
+    if len(workspace) < 2:
+        pytest.skip("needs two provisioned workspaces")
+    a, b = workspace[0], workspace[1]
+    async with workspace_session(runtime_sessionmaker, b["workspace_id"]) as session:
+        view = await create_invoice_from_draft(
+            session,
+            workspace_id=b["workspace_id"],
+            entity_id=b["entity_id"],
+            actor_uc_uid="rls-test",
+            external_source="rls-test",
+            external_ref=f"coll-{uuid.uuid4()}",
+            customer={"name": "Example Customer LLC", "email": "ap@example.com"},
+            line_items=[{"description": "Consulting", "quantity": 1, "unit_price": "10.00"}],
+        )
+    b_token = view["public_token"]
+    monkeypatch.setattr("app.ar.invoicing.secrets.token_urlsafe", lambda *_a, **_k: b_token)
+    async with workspace_session(runtime_sessionmaker, a["workspace_id"]) as session:
+        with pytest.raises(InvoiceError):
+            await create_invoice_from_draft(
+                session,
+                workspace_id=a["workspace_id"],
+                entity_id=a["entity_id"],
+                actor_uc_uid="rls-test",
+                external_source="rls-test",
+                external_ref=f"coll-a-{uuid.uuid4()}",
+                customer={"name": "Example Customer LLC", "email": "ap@example.com"},
+                line_items=[{"description": "Consulting", "quantity": 1, "unit_price": "10.00"}],
+            )
+        assert await _guc(session) == ""
+        n = (await session.execute(text("SELECT count(*) FROM public.invoice_pay_token"))).scalar_one()
+        assert n == 0
