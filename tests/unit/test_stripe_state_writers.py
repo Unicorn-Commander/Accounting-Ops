@@ -22,8 +22,9 @@ ROOT = Path(__file__).resolve().parents[2]
 WRITE_SQL = re.compile(
     r"(UPDATE\s+connector_state\s|INSERT\s+INTO\s+connector_state\s)", re.IGNORECASE
 )
-# Not the Stripe connector: these files only touch connector_name 'ebay_api'.
+# Not the Stripe connector: these files only touch connector_name 'ebay_finances'.
 NON_STRIPE = {
+    "app/connectors/ebay/decision_state.py",
     "app/connectors/ebay/reconcile.py",
     "scripts/ebay_sync.py",
 }
