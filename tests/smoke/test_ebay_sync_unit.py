@@ -110,6 +110,7 @@ def _install_sync(
     session: Any,
     position: dict[str, Any],
     mapper: Any,
+    fail_final_once: bool = False,
 ):
     workspace_id = client.blob.workspace_id
     entity_id = uuid4()
@@ -130,6 +131,13 @@ def _install_sync(
         return entity_id
 
     async def record_outcome(*args: Any, **kwargs: Any):
+        if (
+            fail_final_once
+            and "finished_at" in kwargs["outcome_summary"]
+            and not position.get("_crashed")
+        ):
+            position["_crashed"] = True
+            raise RuntimeError("fictional crash between page and state write")
         position["last_sync_at"] = kwargs["last_sync_at"]
         position["continuation_cursor"] = kwargs["continuation_cursor"]
         position["failure_counts"] = dict(kwargs.get("failure_counts") or {})
@@ -501,3 +509,37 @@ async def test_db_error_savepoint_preserves_prior_payout(monkeypatch):
     assert [entry["source_external_id"] for entry in session.posted_entries] == ["PAY-000"]
     assert position["continuation_cursor"]["payouts"]["offset"] == 1
     assert position["failure_counts"] == {"PAY-001": 1}
+
+
+@pytest.mark.asyncio
+async def test_crash_before_final_state_write_replays_without_double_post(monkeypatch):
+    workspace_id = uuid4()
+    entity_id = uuid4()
+    http = _EbayHttp([_payout(0)], {})
+    client = EbayFinancesClient(blob=_blob(workspace_id, entity_id), _http_factory=lambda: http)
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
+    position = {"last_sync_at": None, "continuation_cursor": None}
+    posted_ids: list[str] = []
+
+    async def mapper(*args: Any, **kwargs: Any):
+        external_id = kwargs["txn"].get("transactionId")
+        if external_id in posted_ids:
+            session.idempotent_hit = True
+            return SimpleNamespace(outcome="blocked_idempotent", reason="duplicate")
+        posted_ids.append(external_id)
+        return SimpleNamespace(outcome="posted", fee_journal_entry_id=None)
+
+    _install_sync(
+        monkeypatch,
+        client=client,
+        session=session,
+        position=position,
+        mapper=mapper,
+        fail_final_once=True,
+    )
+    with pytest.raises(RuntimeError, match="crash between page"):
+        await ebay_sync._sync_one_workspace(workspace_id)
+    await ebay_sync._sync_one_workspace(workspace_id)
+
+    assert posted_ids == ["PAY-000"]
+    assert position["continuation_cursor"] is None
