@@ -14,16 +14,19 @@ Per pass, for each workspace:
   1. Load + decrypt the ebay_finances credential blob (via the same
      CredCrypto envelope the rest of the app uses).
   2. Open an eBay client (auto-refresh access token if expired).
-  3. Pull payouts updated since `connector_state.last_sync_at` (default = 30d ago).
+  3. Pull payouts in a fixed window whose bounds come from eBay timestamps;
+     the first window covers the client's 30-day backfill.
   4. For each payout: pull its associated /transaction rows.
   5. Pass every txn (+ the synthetic PAYOUT entry) through
      ``app.connectors.ebay.mapper.map_and_post_transaction`` — the first 30
      rows queue for human review, then auto-post by materiality.
-  6. UPDATE connector_state.last_sync_at + state.last_outcome.
+  6. Merge the eBay-owned cursor and outcome keys into connector_state under
+     its row lock.
 
 Safety
 ~~~~~~
-* Multi-row UPDATE only against connector_state (state.* + last_sync_at).
+* Each page continuation and item failure is durable in connector_state.state;
+  last_sync_at advances only after both pulls and all mappings are complete.
 * journal_entry is INSERT-only (the materiality gate refuses; the DB role
   REVOKEs UPDATE/DELETE).
 * On any exception, the per-workspace transaction rolls back and the loop
@@ -62,7 +65,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
 )
 
-DEFAULT_BACKFILL_DAYS = 30
 DEFAULT_LOOP_INTERVAL_S = int(os.getenv("EBAY_SYNC_INTERVAL_S", "3600"))
 EBAY_WINDOW_OVERLAP = timedelta(days=1)
 
@@ -670,6 +672,7 @@ async def _sync_one_workspace(workspace_id: UUID) -> dict[str, Any]:
             if not confirmed:
                 outcome = "unconfirmed_idempotent"
         if outcome in _REVIEW_MAPPER_OUTCOMES:
+            summary["queued"] += 1
             summary["awaiting_review_item"] = {
                 "id": external_id,
                 "amount": txn.get("amount"),
