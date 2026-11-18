@@ -11,8 +11,8 @@
 FROM node:22-slim AS builder
 
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm install
+COPY package.json package-lock.json ./
+RUN npm ci
 COPY . .
 # Feature flag for the v2 "Living Ledger" dashboard. NEXT_PUBLIC_* values are
 # inlined at build time, so it must be present here. Default off → v1 dashboard.
