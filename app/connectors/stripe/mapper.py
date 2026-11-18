@@ -63,7 +63,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.business_time import business_date, business_today
 from app.journal.hash_chain import compute_hash, get_last_chain_hash
-from app.journal.materiality import evaluate
+from app.journal.materiality import evaluate, materiality_tier
 from app.journal.posting import _insert_journal_entry, _log_post_attempt
 
 _log = logging.getLogger("acctops.stripe_mapper")
@@ -487,6 +487,7 @@ async def map_and_post_balance_transaction(
     revenue_account: str = DEFAULT_REVENUE_ACCOUNT,
     first_run_confirmed: bool = False,
     approving_human_uc_uid: str | None = None,
+    human_attested: bool = False,
 ) -> MapResult:
     """Map ONE Stripe balance_transaction to a journal entry and post it.
 
@@ -796,6 +797,9 @@ async def map_and_post_balance_transaction(
         )
 
     # ---- 6. Materiality gate ----
+    # human_attested is set ONLY by the approvals decide path after an
+    # authenticated human approved this row (never by the worker). It clears
+    # tier M. Tier H stays blocked here (a $1000+ Stripe row is held by design).
     verdict = evaluate(
         amount_cents=amount_cents,
         category=category,
@@ -803,7 +807,7 @@ async def map_and_post_balance_transaction(
         entity_mapped=True,
         sign_matched=True,
         has_receipt_link=False,
-        user_confirmed=False,
+        user_confirmed=human_attested and materiality_tier(amount_cents) != "H",
     )
     if verdict.outcome != "auto_post":
         approval_id = await _enqueue_for_review(
