@@ -652,6 +652,11 @@ async def resolve_blocked_item(
             raise BlockedResolutionError(
                 422, "journal_entry_id does not exist in this workspace's books"
             )
+        if je["entity_id"] != str(row_entity):
+            raise BlockedResolutionError(
+                422,
+                "journal_entry_id belongs to a different entity than the blocked Stripe item",
+            )
         journal_ref = {"journal_entry_id": je["id"], "journal_entry_entity_id": je["entity_id"]}
 
     # The item's approval row in ANY state, locked (state row first, then

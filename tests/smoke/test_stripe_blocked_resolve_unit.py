@@ -81,9 +81,16 @@ class _Result:
 class _Session:
     """Just enough of the books for resolve_blocked_item."""
 
-    def __init__(self, *, state: dict[str, Any] | None, journal_ids: set[str] | None = None):
+    def __init__(
+        self,
+        *,
+        state: dict[str, Any] | None,
+        journal_ids: set[str] | None = None,
+        journal_entities: dict[str, str] | None = None,
+    ):
         self.state = state
         self.journal_ids = journal_ids or set()
+        self.journal_entities = journal_entities or {}
         self.approval = {
             "id": str(uuid4()),
             "status": "pending",
@@ -115,7 +122,16 @@ class _Session:
         if "FROM journal_entry" in sql:
             assert params["wid"] == str(WID)
             if params["jid"] in self.journal_ids:
-                return _Result([{"id": params["jid"], "entity_id": str(EID)}])
+                return _Result(
+                    [
+                        {
+                            "id": params["jid"],
+                            "entity_id": self.journal_entities.get(
+                                params["jid"], str(EID)
+                            ),
+                        }
+                    ]
+                )
             return _Result([])
         if "FROM approval_queue" in sql:
             assert params["stripe_id"] == BT
@@ -276,6 +292,34 @@ async def test_journal_entry_outside_this_workspace_is_rejected() -> None:
     assert exc.value.status_code == 422
     assert session.state == _blocked_state()
     assert session.audits == []
+
+
+@pytest.mark.asyncio
+async def test_journal_entry_from_another_entity_is_rejected() -> None:
+    """A manual entry from entity B cannot resolve a block on entity A."""
+    je = str(uuid4())
+    other_entity = uuid4()
+    session = _Session(
+        state=_blocked_state(),
+        journal_ids={je},
+        journal_entities={je: str(other_entity)},
+    )
+    before_state = json.loads(json.dumps(session.state))
+    before_reasoning = session.approval["reasoning"]
+
+    with pytest.raises(br.BlockedResolutionError) as exc:
+        await _resolve(session, journal_entry_id=UUID(je), not_books_relevant_reason=None)
+
+    assert exc.value.status_code == 422
+    assert "different entity" in exc.value.detail
+    # nothing recorded: no resolution, approval row unchanged, no audit, no post
+    assert session.state == before_state
+    assert "blocked_item" in session.state
+    assert session.approval["status"] == "pending"
+    assert session.approval["reasoning"] == before_reasoning
+    assert "blocked_resolution" not in session.approval["payload"]
+    assert session.audits == []
+    assert session.journal_inserts == 0
 
 
 @pytest.mark.asyncio
