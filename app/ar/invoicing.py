@@ -59,7 +59,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.journal.accounts import canonical_form
 from app.journal.hash_chain import compute_hash, get_last_chain_hash
 from app.journal.materiality import materiality_tier
-from app.journal.posting import _insert_journal_entry, _log_post_attempt
+from app.journal.posting import (
+    _insert_journal_entry,
+    _log_post_attempt,
+    assert_period_open,
+)
 from app.core.business_time import business_today
 
 # journal_entry.source label for every AR posting (issue + payment + void).
@@ -551,6 +555,18 @@ async def _post_balanced_row(
     (issue treats it as idempotent). ``amount`` is a positive Decimal (the row's
     DR == CR magnitude).
     """
+    # Period-close guard (audit c1360430 F2): every AR posting (issue, payment,
+    # void/credit) funnels through here, so this single check reuses the SAME
+    # assert_period_open the journal/recat paths use and refuses BEFORE any row
+    # is written. A returned date means the entry date falls in a closed window.
+    closed_end = await assert_period_open(
+        session, entity_id=entity_id, effective_date=effective_date
+    )
+    if closed_end is not None:
+        raise InvoiceError(
+            f"cannot post AR invoice entry dated {effective_date}: closed period "
+            f"(entity {entity_id} closed through {closed_end})"
+        )
     amount_cents = _cents(amount)
     tier = materiality_tier(amount_cents)
     posted_at = datetime.now(tz=timezone.utc)

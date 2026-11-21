@@ -211,7 +211,9 @@ class _StubSession:
     """
 
     def __init__(self, *, existing_invoice: dict | None = None,
-                 issue_rows_for_void: list[dict] | None = None):
+                 issue_rows_for_void: list[dict] | None = None,
+                 closed_period_end: date | None = None):
+        self.closed_period_end = closed_period_end
         self.journal_entries: list[dict] = []
         self.invoices: list[dict] = []
         self.invoice_lines: list[dict] = []
@@ -231,6 +233,17 @@ class _StubSession:
     async def execute(self, query, params=None):  # noqa: C901 - dispatch table
         sql = " ".join(str(query).split())
         p = params or {}
+
+        # ---- closed_period guard (assert_period_open) ----
+        # SELECT period_end FROM closed_period WHERE entity_id=:eid
+        #   AND period_end >= :effective_date ... LIMIT 1
+        # Returns a positional row so the caller's ``closed_row[0]`` works.
+        if "FROM closed_period" in sql:
+            eff = p.get("effective_date")
+            if self.closed_period_end is not None and eff is not None \
+                    and self.closed_period_end >= eff:
+                return _StubResult([(self.closed_period_end,)])
+            return _StubResult([])
 
         # ---- chart_of_account: resolve canonical by account_number ----
         if "FROM chart_of_account" in sql and "account_number = :num" in sql and "id::text AS id" in sql:
@@ -716,6 +729,79 @@ async def test_void_refuses_when_payments_exist():
             reason="oops",
         )
     # No reversing entries posted.
+    assert s.journal_entries == []
+
+
+# ---------------------------------------------------------------------------
+# Period-close guard (audit c1360430 F2): AR invoicing must refuse to post a
+# journal entry into a CLOSED period, reusing assert_period_open like every
+# other posting path. Money path — refuse, write nothing.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_invoice_in_closed_period_is_refused():
+    """An invoice dated inside a closed period is refused and writes NO rows."""
+    s = _StubSession(closed_period_end=date(2026, 3, 31))
+    with pytest.raises(ar.InvoiceError, match="closed period"):
+        await ar.create_invoice_from_draft(
+            s, workspace_id="wid", entity_id="eid", actor_uc_uid="tester",
+            external_source="manual", external_ref="ext-closed",
+            customer={"name": "Closed Co"},
+            line_items=[{"description": "Work", "quantity": 1,
+                         "unit_price": "250.00", "tax_amount": "20.00"}],
+            issue_date=date(2026, 2, 15),
+        )
+    # Nothing written to the ledger.
+    assert s.journal_entries == []
+
+
+@pytest.mark.asyncio
+async def test_create_invoice_in_open_period_posts_unchanged():
+    """An invoice dated after the close boundary posts normally (regression)."""
+    s = _StubSession(closed_period_end=date(2026, 3, 31))
+    await ar.create_invoice_from_draft(
+        s, workspace_id="wid", entity_id="eid", actor_uc_uid="tester",
+        external_source="manual", external_ref="ext-open",
+        customer={"name": "Open Co"},
+        line_items=[{"description": "Work", "quantity": 1, "unit_price": "250.00"}],
+        issue_date=date(2026, 5, 1),
+    )
+    assert len(s.journal_entries) == 1
+
+
+@pytest.mark.asyncio
+async def test_void_into_closed_period_is_refused():
+    """Voiding an invoice whose issue rows sit in a closed period is refused
+    and appends NO reversing entries."""
+    rev_row_id = "11111111-1111-1111-1111-111111111111"
+    issue_rows = [{
+        "id": rev_row_id, "amount": Decimal("1000.00"),
+        "debit_account": _COA["1100"], "credit_account": _COA["4030"],
+        "effective_date": date(2026, 2, 15), "payee": "Closed Co",
+        "description": "Invoice INV-2026-0001",
+        "source_external_id": "invoice:inv-9:rev1",
+    }]
+    s = _StubSession(issue_rows_for_void=issue_rows,
+                     closed_period_end=date(2026, 3, 31))
+    s.invoices.append({
+        "id": "inv-9", "workspace_id": "wid", "entity_id": "eid",
+        "counterparty_id": "cp-1", "invoice_number": "INV-2026-0001",
+        "status": "sent", "currency": "USD",
+        "issue_date": date(2026, 2, 15), "due_date": date(2026, 3, 17),
+        "net_terms": 30, "subtotal": Decimal("1000.00"),
+        "discount_total": Decimal("0"), "tax_total": Decimal("0"),
+        "total": Decimal("1000.00"), "balance_due": Decimal("1000.00"),
+        "notes": None, "po_number": None, "external_source": "manual",
+        "external_ref": "ext-9", "journal_entry_id": rev_row_id,
+        "void_journal_entry_id": None, "voided_at": None, "void_reason": None,
+        "hosted_pay_url": None, "pdf_key": None, "created_by_uc_uid": "tester",
+    })
+    with pytest.raises(ar.InvoiceError, match="closed period"):
+        await ar.void_invoice(
+            s, workspace_id="wid", invoice_id="inv-9", actor_uc_uid="tester",
+            reason="customer cancelled",
+        )
     assert s.journal_entries == []
 
 
