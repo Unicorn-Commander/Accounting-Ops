@@ -80,6 +80,7 @@ class MapResult:
         "blocked_unknown_type", "blocked_unknown_account",
         "blocked_idempotent", "blocked_period_closed",
         "blocked_materiality", "skipped_zero_amount",
+        "human_rejected",
     ]
     ebay_transaction_id: str
     ebay_type: str
@@ -307,13 +308,42 @@ async def _enqueue_for_review(
     raw_txn: dict[str, Any],
     actor_uc_uid: str,
     reason: str,
-) -> UUID:
+) -> UUID | None:
     """Insert a row in approval_queue for human review.
 
     The payload carries the structured action so the approve-apply path can
     post the entry without re-mapping. subject_id is a fresh UUID because the
     eBay txn isn't yet in the journal.
+
+    Returns ``None`` (and inserts nothing) when a REJECTED proposal already
+    exists for the same (entity, source, source_external_id): a human
+    rejection is durable, and a worker replay of the same source item must
+    never re-propose it.
     """
+    rejected = (
+        await session.execute(
+            text(
+                """
+                SELECT id::text FROM approval_queue
+                WHERE entity_id = :eid
+                  AND subject_type = 'ebay_post_transaction'
+                  AND status = 'rejected'
+                  AND payload ->> 'ebay_transaction_id' = :ebay_id
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ),
+            {"eid": entity_id, "ebay_id": ebay_transaction_id},
+        )
+    ).first()
+    if rejected is not None:
+        _log.warning(
+            "ebay re-proposal blocked: entity=%s source=%s "
+            "source_external_id=%s rejected_approval_id=%s",
+            entity_id, EBAY_SOURCE, ebay_transaction_id, rejected.id,
+        )
+        return None
+
     existing = (
         await session.execute(
             text(
@@ -547,6 +577,23 @@ async def map_and_post_transaction(
             reason=f"Unhandled eBay transaction type: {ebay_type!r}",
         )
 
+    async def _rejected_hold() -> MapResult:
+        """Durable human rejection: skip re-proposal, log the refusal."""
+        await _log_post_attempt(
+            session, workspace_id=workspace_id, entity_id=entity_id,
+            source=EBAY_SOURCE, source_external_id=ebay_id,
+            outcome="human_rejected", journal_entry_id=None,
+            reason="Rejected by human reviewer; not re-proposed",
+            actor_uc_uid=actor_uc_uid, actor_agent_id=actor_agent_id,
+            amount_cents=amount_cents, category=category,
+        )
+        return MapResult(
+            outcome="human_rejected",
+            ebay_transaction_id=ebay_id,
+            ebay_type=ebay_type,
+            reason="Rejected by human reviewer; not re-proposed",
+        )
+
     # ---- 3. Effective date ----
     eff_date = _effective_date(txn)
 
@@ -613,6 +660,8 @@ async def map_and_post_transaction(
             actor_uc_uid=actor_uc_uid,
             reason="Previously approved eBay item changed; fresh human review required.",
         )
+        if approval_id is None:
+            return await _rejected_hold()
         await _log_post_attempt(
             session, workspace_id=workspace_id, entity_id=entity_id,
             source=EBAY_SOURCE, source_external_id=ebay_id,
@@ -650,6 +699,8 @@ async def map_and_post_transaction(
                 "before auto-posting trust is established."
             ),
         )
+        if approval_id is None:
+            return await _rejected_hold()
         await _log_post_attempt(
             session, workspace_id=workspace_id, entity_id=entity_id,
             source=EBAY_SOURCE, source_external_id=ebay_id,
@@ -693,6 +744,8 @@ async def map_and_post_transaction(
             raw_txn=txn, actor_uc_uid=actor_uc_uid,
             reason=f"Materiality tier {verdict.tier}: {verdict.reason}",
         )
+        if approval_id is None:
+            return await _rejected_hold()
         outcome_map = {
             "queue_for_confirm": "queued_for_confirm",
             "block_high_value": "blocked_materiality",
