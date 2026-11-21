@@ -127,7 +127,11 @@ class _StubSession:
             return _StubResult([_Row({"c": self.existing_posts})])
 
         # Pending approval dedupe
-        if "FROM approval_queue" in sql and "ebay_transaction_id" in sql:
+        if (
+            "FROM approval_queue" in sql
+            and "ebay_transaction_id" in sql
+            and "status = 'pending'" in sql
+        ):
             if self.pending_approval_id is None:
                 return _StubResult([])
             return _StubResult([_Row({"id": self.pending_approval_id})])
