@@ -77,9 +77,21 @@ def _service_auth() -> AuthContext:
     return AuthContext(HUMAN_UID, None, (), {"clientId": "fixture-service"}, may_autoprovision=False)
 
 
+class _FakeResult:
+    def __init__(self, row: tuple[int] | None) -> None:
+        self._row = row
+
+    def first(self) -> tuple[int] | None:
+        return self._row
+
+
 class _FakeSession:
-    async def execute(self, stmt: Any, params: dict[str, Any] | None = None) -> Any:
-        raise AssertionError("no SQL expected: external_account_id is unset")
+    """Answers only the account_entity_mapping probe (entity_mapped=True)."""
+
+    async def execute(self, stmt: Any, params: dict[str, Any] | None = None) -> _FakeResult:
+        if "account_entity_mapping" in str(stmt):
+            return _FakeResult((1,))
+        raise AssertionError(f"unexpected SQL: {str(stmt)[:80]}")
 
 
 class _SessionCtx:
@@ -128,6 +140,7 @@ async def _post(*, workspace: WorkspaceContext, auth: AuthContext, amount_cents:
         description="Fictional expense",
         category="SaaS · AI",
         category_status="auto",
+        external_account_id="ACC-fixture-checking",
         user_confirmed=True,
     )
     with (

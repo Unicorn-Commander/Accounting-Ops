@@ -24,6 +24,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+from app.api.approvals import _is_interactive_human
+from app.auth import AuthContext, validate_bearer_token
 from app.db import SessionLocal
 from app.journal import (
     PostingOutcome,
@@ -446,6 +448,7 @@ async def post_entry(
     workspace_id: UUID,
     body: PostRequest,
     workspace: WorkspaceContext = Depends(resolve_workspace),
+    auth: AuthContext = Depends(validate_bearer_token),
 ) -> dict:
     """Atomically post a transaction to the journal.
 
@@ -453,6 +456,15 @@ async def post_entry(
     or 'blocked_*' on refusal. Idempotent on (entity_id, source, source_external_id).
     """
     require_role(workspace, "bookkeeper")
+
+    # TRUST CONTRACT (materiality.py): user_confirmed=True asserts a HUMAN
+    # attested this post. A body field is never such evidence — an agent or
+    # service token can set it freely, and resolve_workspace never blocks them.
+    # Count it ONLY for a verified interactive human session (same check the
+    # approval decide path uses); for any machine principal force False so the
+    # materiality gate stages above-auto-tier entries for human review,
+    # exactly like the MCP tool (journal_tools.py forces approving_human=None).
+    user_confirmed = bool(body.user_confirmed) and _is_interactive_human(auth, workspace)
 
     # Check entity mapping: account_entity_mapping must connect the source+ext_id to this entity
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
@@ -498,7 +510,7 @@ async def post_entry(
             receipt_link_id=body.receipt_link_id,
             posted_by_uc_uid=workspace.user_uc_uid,
             posted_by_agent_id=workspace.agent_id,
-            user_confirmed=body.user_confirmed,
+            user_confirmed=user_confirmed,
             reasoning_trace=body.reasoning_trace,
             model_version=body.model_version,
             force_queue=workspace.role == "bookkeeper",
