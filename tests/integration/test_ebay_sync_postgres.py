@@ -1113,3 +1113,148 @@ async def test_stale_approval_snapshot_is_cleared_and_requeued(
     assert pending["amount_cents"] == "6000"
     state = json.loads(state) if isinstance(state, str) else state
     assert transaction_id not in state.get("approved_ebay_items", {})
+
+
+@pytest.mark.asyncio
+async def test_rejected_item_mapper_replay_logs_human_rejected_outcome(
+    db: Any, seeded_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replaying a rejected item through the mapper must land human_rejected.
+
+    Review round 2 (PR #93): the rejected-hold path logs
+    ``outcome='human_rejected'`` into ``posting_log``, which the original
+    ``ck_posting_log_outcome`` CHECK refuses — on Postgres the replay died
+    with a CheckViolation instead of skipping. This test runs the real
+    mapper against the real schema: queue, human-reject, replay.
+    """
+    del seeded_workspace
+    transaction_id = "ebay-pg-rejected-replay-log"
+    txn = {
+        "transactionId": transaction_id,
+        "transactionType": "SALE",
+        "amount": {"value": "9.00", "currency": "USD"},
+        "transactionDate": "2026-11-05T00:00:00+00:00",
+    }
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            await conn.executemany(
+                """
+                INSERT INTO chart_of_account (
+                    workspace_id, entity_id, account_number, account_name,
+                    canonical_form, account_type, normal_balance,
+                    is_active, is_system, notes
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, true, false, $8)
+                ON CONFLICT (entity_id, account_number)
+                DO UPDATE SET is_active = true
+                """,
+                [
+                    (str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID), "1220", "eBay receivable", "1220·eBay receivable", "asset", "debit", "eBay rejected-replay test"),
+                    (str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID), "4150", "eBay revenue", "4150·eBay revenue", "revenue", "credit", "eBay rejected-replay test"),
+                ],
+            )
+            await conn.execute(
+                """
+                DELETE FROM approval_queue
+                WHERE entity_id = $1 AND payload ->> 'ebay_transaction_id' = $2
+                """,
+                str(TEST_ENTITY_ID), transaction_id,
+            )
+            await conn.execute(
+                """
+                DELETE FROM journal_entry
+                WHERE entity_id = $1 AND source = 'ebay_finances'
+                  AND source_external_id = $2
+                """,
+                str(TEST_ENTITY_ID), transaction_id,
+            )
+            await conn.execute(
+                """
+                DELETE FROM posting_log
+                WHERE entity_id = $1 AND source = 'ebay_finances'
+                  AND source_external_id = $2
+                """,
+                str(TEST_ENTITY_ID), transaction_id,
+            )
+
+    async def no_existing_posts(*args: Any, **kwargs: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(ebay_mapper, "_count_existing_ebay_posts", no_existing_posts)
+
+    async with workspace_session(SessionLocal, TEST_WORKSPACE_ID) as session:
+        queued = await ebay_mapper.map_and_post_transaction(
+            session,
+            workspace_id=str(TEST_WORKSPACE_ID),
+            entity_id=str(TEST_ENTITY_ID),
+            txn=txn,
+            actor_uc_uid="agent:ebay_sync",
+        )
+    assert queued.outcome == "queued_first_run", queued.reason
+    assert queued.approval_id is not None
+
+    async with workspace_session(SessionLocal, TEST_WORKSPACE_ID) as session:
+        await session.execute(
+            text(
+                """
+                UPDATE approval_queue
+                SET status = CAST('rejected' AS approval_status),
+                    decided_by_uc_uid = 'fictional-reviewer', decided_at = now()
+                WHERE id = :id
+                """
+            ),
+            {"id": str(queued.approval_id)},
+        )
+
+    async with workspace_session(SessionLocal, TEST_WORKSPACE_ID) as session:
+        replayed = await ebay_mapper.map_and_post_transaction(
+            session,
+            workspace_id=str(TEST_WORKSPACE_ID),
+            entity_id=str(TEST_ENTITY_ID),
+            txn=txn,
+            actor_uc_uid="agent:ebay_sync",
+        )
+    assert replayed.outcome == "human_rejected", replayed.reason
+    assert replayed.approval_id is None
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL search_path = books, public")
+            await conn.execute(
+                "SELECT set_config('app.current_workspace', $1, true)",
+                str(TEST_WORKSPACE_ID),
+            )
+            logged = await conn.fetchval(
+                """
+                SELECT count(*) FROM posting_log
+                WHERE entity_id = $1 AND source = 'ebay_finances'
+                  AND source_external_id = $2 AND outcome = 'human_rejected'
+                """,
+                str(TEST_ENTITY_ID), transaction_id,
+            )
+            approval_counts = await conn.fetchrow(
+                """
+                SELECT count(*) AS total,
+                       count(*) FILTER (WHERE status = 'pending') AS pending
+                FROM approval_queue
+                WHERE entity_id = $1 AND payload ->> 'ebay_transaction_id' = $2
+                """,
+                str(TEST_ENTITY_ID), transaction_id,
+            )
+            journal_count = await conn.fetchval(
+                """
+                SELECT count(*) FROM journal_entry
+                WHERE entity_id = $1 AND source = 'ebay_finances'
+                  AND source_external_id = $2
+                """,
+                str(TEST_ENTITY_ID), transaction_id,
+            )
+    assert logged == 1
+    assert approval_counts["total"] == 1
+    assert approval_counts["pending"] == 0
+    assert journal_count == 0
