@@ -27,18 +27,24 @@ _REJECTED_APPROVAL_ID = "11111111-1111-1111-1111-111111111111"
 
 
 class _ReplayStubSession(_StubSession):
-    """Stub session that can hold a REJECTED approval for one external id."""
+    """Stub session that can hold a decided approval for one external id."""
 
-    def __init__(self, *, rejected_approval_id: str | None = None, **kwargs: Any):
+    def __init__(
+        self,
+        *,
+        latest_decision: tuple[str, str] | None = None,
+        **kwargs: Any,
+    ):
         super().__init__(**kwargs)
-        self.rejected_approval_id = rejected_approval_id
+        self.latest_decision = latest_decision
 
     async def execute(self, query, params=None):  # type: ignore[no-untyped-def]
         sql = str(query)
-        if "FROM approval_queue" in sql and "status = 'rejected'" in sql:
-            if self.rejected_approval_id is None:
+        if "FROM approval_queue" in sql and "status IN ('approved', 'rejected')" in sql:
+            if self.latest_decision is None:
                 return _StubResult([])
-            return _StubResult([_Row({"id": self.rejected_approval_id})])
+            approval_id, status = self.latest_decision
+            return _StubResult([_Row({"id": approval_id, "status": status})])
         return await super().execute(query, params)
 
 
@@ -48,7 +54,7 @@ async def test_rejected_item_replay_creates_no_new_proposal(caplog):
     session = _ReplayStubSession(
         accounts=_ACCOUNTS,
         existing_posts=0,
-        rejected_approval_id=_REJECTED_APPROVAL_ID,
+        latest_decision=(_REJECTED_APPROVAL_ID, "rejected"),
     )
     txn = _txn("TXN-REJECTED-1", "SALE", "9.99")
     with caplog.at_level(logging.INFO, logger="acctops.ebay_mapper"):
@@ -92,6 +98,26 @@ async def test_never_seen_item_is_still_proposed():
     )
     assert result.outcome == "queued_first_run", result.reason
     assert result.approval_id is not None
+    assert len(session.approvals) == 1
+
+
+@pytest.mark.asyncio
+async def test_later_approval_wins_over_older_rejection():
+    """A newer APPROVED decision for the item is not blocked by an old row."""
+    session = _ReplayStubSession(
+        accounts=_ACCOUNTS,
+        existing_posts=0,
+        latest_decision=(_REJECTED_APPROVAL_ID, "approved"),
+    )
+    txn = _txn("TXN-REAPPROVED-1", "SALE", "9.99")
+    result = await ebay_mapper.map_and_post_transaction(
+        session,
+        workspace_id="wid",
+        entity_id="eid",
+        txn=txn,
+        actor_uc_uid="agent:ebay_sync",
+    )
+    assert result.outcome == "queued_first_run", result.reason
     assert len(session.approvals) == 1
 
 

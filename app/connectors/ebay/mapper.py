@@ -320,27 +320,27 @@ async def _enqueue_for_review(
     rejection is durable, and a worker replay of the same source item must
     never re-propose it.
     """
-    rejected = (
+    latest_decision = (
         await session.execute(
             text(
                 """
-                SELECT id::text FROM approval_queue
+                SELECT id::text, status::text AS status FROM approval_queue
                 WHERE entity_id = :eid
                   AND subject_type = 'ebay_post_transaction'
-                  AND status = 'rejected'
+                  AND status IN ('approved', 'rejected')
                   AND payload ->> 'ebay_transaction_id' = :ebay_id
-                ORDER BY created_at DESC
+                ORDER BY decided_at DESC NULLS LAST, created_at DESC
                 LIMIT 1
                 """
             ),
             {"eid": entity_id, "ebay_id": ebay_transaction_id},
         )
     ).first()
-    if rejected is not None:
+    if latest_decision is not None and latest_decision.status == "rejected":
         _log.warning(
             "ebay re-proposal blocked: entity=%s source=%s "
             "source_external_id=%s rejected_approval_id=%s",
-            entity_id, EBAY_SOURCE, ebay_transaction_id, rejected.id,
+            entity_id, EBAY_SOURCE, ebay_transaction_id, latest_decision.id,
         )
         return None
 
