@@ -796,7 +796,7 @@ class AddClientRequest(BaseModel):
         min_length=2,
         max_length=160,
         description=(
-            "The client's name — a business or an individual the practice files "
+            "The client's name - a business or an individual the practice files "
             "for. Becomes the workspace display name."
         ),
     )
