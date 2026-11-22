@@ -77,7 +77,7 @@ export default async function ConnectorsPage({
               Just want to dump your paperwork?
             </p>
             <p className="mt-0.5 text-xs text-ink-secondary">
-              Drag receipts, invoices, and statements into Documents — we read
+              Drag receipts, invoices, and statements into Documents. We read
               what we can and queue everything for your review. No connector setup
               required.
             </p>
