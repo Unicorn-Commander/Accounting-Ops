@@ -79,7 +79,7 @@ function HandoffDownloadButton({
       link.click();
       URL.revokeObjectURL(link.href);
     } catch {
-      setErr("Network error — please try again.");
+      setErr("Network error: please try again.");
     } finally {
       setBusy(false);
     }
@@ -329,7 +329,7 @@ export function YearView({
       {activeTab === "irs-forms" && (
         <Card>
           <h3 className="mb-4 text-xs font-semibold uppercase tracking-wider text-ink-secondary">
-            IRS Forms — Pre-filled DRAFT PDFs
+            IRS Forms: Pre-filled DRAFT PDFs
           </h3>
           <IrsFormsSection
             workspaceId={workspaceId}
