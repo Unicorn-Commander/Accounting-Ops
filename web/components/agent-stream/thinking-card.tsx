@@ -65,7 +65,7 @@ export function ThinkingCard({
         </div>
         <div className="title">
           <span className="shimmer">{a.verb}</span>
-          {" — "}
+          {" · "}
           <span ref={twRef} />
           <span className="cursor-char" />
         </div>
