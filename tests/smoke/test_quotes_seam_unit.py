@@ -1084,7 +1084,7 @@ def test_apportion_cents_exact_sum():
 def _a32_lines() -> list[dict[str, Any]]:
     return [
         {"kind": "one_time", "label": "Setup", "amount_cents": 100_000, "position": 1},
-        {"kind": "recurring", "label": "Improve it — package", "amount_cents": 140_000, "position": 2,
+        {"kind": "recurring", "label": "Improve it - package", "amount_cents": 140_000, "position": 2,
          "recurring": {"interval": "month", "term_months": 12}},
         {"kind": "recurring", "label": "Managed hosting", "amount_cents": 35_000, "position": 3,
          "recurring": {"interval": "month", "term_months": 12}},
