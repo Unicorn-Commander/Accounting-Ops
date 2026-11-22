@@ -231,13 +231,13 @@ _SUMMARY_LINES: tuple[tuple[str, str], ...] = (
     ("retail_license_number", "Retail License / Use Tax Registration No."),
     ("fein", "FEIN"),
     ("period", "Period Ended (MM-YYYY)"),
-    ("gross_proceeds", "Line 1 — Total gross proceeds of sales"),
-    ("deductions", "Line 2 — Total allowable deductions"),
-    ("net_taxable", "Line 3 — Net taxable sales and purchases"),
-    ("state_tax", "Line 4 — State Sales and Use Tax (line 3 x 6%)"),
-    ("local_tax", "Line 5 — Additional local tax (from ST-389)"),
-    ("total_state_local_tax", "Line 6 — Total State and Local Taxes due"),
-    ("total_tax", "Line 10 — TOTAL AMOUNT DUE"),
+    ("gross_proceeds", "Line 1 - Total gross proceeds of sales"),
+    ("deductions", "Line 2 - Total allowable deductions"),
+    ("net_taxable", "Line 3 - Net taxable sales and purchases"),
+    ("state_tax", "Line 4 - State Sales and Use Tax (line 3 x 6%)"),
+    ("local_tax", "Line 5 - Additional local tax (from ST-389)"),
+    ("total_state_local_tax", "Line 6 - Total State and Local Taxes due"),
+    ("total_tax", "Line 10 - TOTAL AMOUNT DUE"),
 )
 
 
@@ -262,12 +262,12 @@ def _build_summary_pdf(values: dict[str, str]) -> bytes:
     # Title block.
     c.setFillColor(HexColor("#0F3D2E"))
     c.setFont("Helvetica-Bold", 16)
-    c.drawString(54, LETTER_H - 70, "SC ST-3 — Prepared Summary")
+    c.drawString(54, LETTER_H - 70, "SC ST-3 - Prepared Summary")
     c.setFillColor(Color(0.3, 0.3, 0.3))
     c.setFont("Helvetica", 9)
     c.drawString(
         54, LETTER_H - 88,
-        "State Sales & Use Tax Return — computed line summary "
+        "State Sales & Use Tax Return - computed line summary "
         "(official ST-3 PDF not available; this is a worksheet, not the filing form).",
     )
 
