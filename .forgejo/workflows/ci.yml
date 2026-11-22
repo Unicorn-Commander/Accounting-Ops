@@ -227,14 +227,17 @@ jobs:
         # the gate now queues/blocks where the tests expect 'posted'. These are
         # the batch items; their exact test node ids are deselected below (not
         # whole files, so their passing tests keep running):
-        #   test_approvals.py x4 (queued_for_confirm, "Amount in M tier
+        #   test_approvals.py x5 (queued_for_confirm, "Amount in M tier
         #     ($75.00 - $1,000.00); awaits human confirm."):
         #     test_reject_material_recat_leaves_ledger_untouched,
         #     test_decide_denied_below_accountant_floor,
         #     test_decide_denied_out_of_scope_entity,
+        #     test_approve_material_recat_applies_reversal_and_restatement
+        #     (the 5th, PR #96 CI on 3436c446 run 11662: same M-tier
+        #     queued_for_confirm — the test seeds a tier-M entry and posts it
+        #     asserting outcome == 'posted', which the service-token trust
+        #     contract now refuses)
         #     test_approve_bank_transaction_import_posts_journal_entry
-        #     (approve of a seeded tier-M bank_transaction_import re-runs the
-        #     materiality gate; its reject sibling passes — reject needs no post)
         #   test_e2e_pipeline.py::test_full_pipeline (line 112: tier-M revenue
         #     with user_confirmed -> queued_for_confirm, not 'posted')
         #   test_get_1099_payees_delegation.py::test_get_1099_payees_nets_
@@ -261,9 +264,11 @@ jobs:
             --deselect tests/integration/test_document_upload.py \
             --deselect tests/integration/test_approval_recommendations.py \
             --deselect tests/integration/test_tax_review_queue.py \
+            # pre-existing: materiality tiers, batch item
             --deselect tests/integration/test_approvals.py::test_reject_material_recat_leaves_ledger_untouched \
             --deselect tests/integration/test_approvals.py::test_decide_denied_below_accountant_floor \
             --deselect tests/integration/test_approvals.py::test_decide_denied_out_of_scope_entity \
+            --deselect tests/integration/test_approvals.py::test_approve_material_recat_applies_reversal_and_restatement \
             --deselect tests/integration/test_approvals.py::test_approve_bank_transaction_import_posts_journal_entry \
             --deselect tests/integration/test_e2e_pipeline.py::test_full_pipeline \
             --deselect tests/integration/test_get_1099_payees_delegation.py::test_get_1099_payees_nets_refunds_like_form_1099_nec \
@@ -308,9 +313,11 @@ jobs:
           # pre-existing materiality-tier failures are deselected per test, so
           # their files keep running with their other tests and stay >= 1.
           # test_e2e_pipeline and test_get_1099_payees_delegation are NOT here:
-          # their only test is a pre-existing materiality-tier failure, deselected
-          # per test above, so each collects 0 testcases in this run. Requiring >= 1
-          # would wrongly fail the job. Every other newly-included file keeps >= 1.
+          # each file's only test is a pre-existing materiality-tier failure,
+          # deselected per node above, so each collects 0 testcases in this run.
+          # Requiring >= 1 would wrongly fail the job. test_approvals keeps its
+          # >= 1 floor: 5 of its 11 tests are deselected per node, 6 still run.
+          # Every other newly-included file keeps >= 1.
           minimums = {
               # Original six: the old per-file floors (review round 2).
               "tests.integration.test_db_rls_roles": 16,
