@@ -142,7 +142,7 @@ async def flag_for_cpa_review(
         "tax_year": tax_year,
         "entity_id": str(entity_id),
         "_draft_notice": (
-            "DRAFT — for CPA review only. "
+            "DRAFT - for CPA review only. "
             "This flagged position was identified by the 1120 Preparer specialist. "
             "No tax position has been established. "
             "CPA must review and resolve before inclusion in the return."
