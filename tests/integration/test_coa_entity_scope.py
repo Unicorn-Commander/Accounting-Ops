@@ -309,40 +309,56 @@ async def test_mcp_update_coa_account_scoped_member_denied(
     real auth bridge (no in-process shortcut).
     """
     b_acct_id = await _b_account_id(db)
-    # Streamable-HTTP POST to /mcp/v1/messages — the same surface FastMCP exposes.
-    # We use the JSON-RPC envelope for the registered ``update_coa_account`` tool.
-    rpc = {
-        "jsonrpc": "2.0",
-        "id": "test-bug2",
-        "method": "tools/call",
-        "params": {
-            "name": "update_coa_account",
-            "arguments": {
-                "workspace_id": str(TEST_WORKSPACE_ID),
-                "account_id": b_acct_id,
-                "account_name": "Hostile · MCP scoped CPA rename",
-            },
-        },
-    }
-    r = await client.post("/mcp/v1/messages", json=rpc)
-    # The MCP tool raises PermissionError; FastMCP renders that as an error
-    # result inside the JSON-RPC response (HTTP 200) or a 4xx — both are
-    # acceptable denial signals so long as the row is not mutated.
-    is_denied = r.status_code in (403, 200)
-    assert is_denied, f"unexpected status {r.status_code}: {r.text}"
-    if r.status_code == 200:
-        body = r.json()
-        # Either an explicit "error" envelope or a tool error inside result.
-        error_text = (
-            str(body.get("error", ""))
-            + str(body.get("result", {}).get("isError", ""))
-            + str(body.get("result", {}).get("content", ""))
-        )
-        # Be tolerant: any denial word is fine.
-        assert any(
-            kw in error_text.lower()
-            for kw in ("scope", "permission", "forbid", "denied")
-        ), f"expected denial in MCP error envelope, got: {body!r}"
+    # Drive the tool through the mounted MCP streamable-HTTP surface (same
+    # pattern as test_mcp_tools._call_tool) so we exercise the real auth bridge.
+    from mcp.client.session import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    base_url = client.base_url
+    token = client.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        from tests.conftest import env
+        token = env("ACCTOPS_TEST_TOKEN", "")
+
+    headers = {"Authorization": f"Bearer {token}"}
+    call_result = None
+    call_error: Exception | None = None
+    try:
+        async with streamablehttp_client(f"{base_url}/mcp", headers=headers) as (
+            read,
+            write,
+            _,
+        ):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                call_result = await session.call_tool(
+                    "update_coa_account",
+                    {
+                        "workspace_id": str(TEST_WORKSPACE_ID),
+                        "account_id": b_acct_id,
+                        "account_name": "Hostile · MCP scoped CPA rename",
+                    },
+                )
+    except Exception as exc:  # noqa: BLE001 - MCP transport errors are a valid denial
+        call_error = exc
+
+    # The MCP tool raises a PermissionError / HTTPException; the MCP client
+    # surfaces that as a tool error (isError=True) or raises. Either way the
+    # row must NOT be mutated.
+    if call_result is not None:
+        error_text = ""
+        if getattr(call_result, "isError", False):
+            error_text = " ".join(
+                c.text for c in (call_result.content or []) if getattr(c, "text", None)
+            )
+        sc = getattr(call_result, "structuredContent", None)
+        if isinstance(sc, dict):
+            error_text += str(sc)
+        assert call_result.isError or any(
+            kw in error_text.lower() for kw in ("scope", "permission", "forbid", "denied")
+        ), f"expected denial in MCP result, got: {call_result!r}"
+    else:
+        assert call_error is not None, "MCP call returned no result and no error"
 
     # The row MUST NOT have been mutated.
     async with db.acquire() as conn:
