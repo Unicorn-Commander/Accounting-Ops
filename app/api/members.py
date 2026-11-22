@@ -283,7 +283,7 @@ async def update_member(
             if row.uc_uid == workspace.user_uc_uid:
                 raise HTTPException(
                     status_code=400,
-                    detail="Cannot mutate your own membership — ask another admin",
+                    detail="Cannot mutate your own membership - ask another admin",
                 )
             # Block demoting the LAST owner (avoids permanently locking out a workspace).
             if patch.role and row.old_role in {"owner", "client_owner"} and patch.role not in {
@@ -307,7 +307,7 @@ async def update_member(
                 if count_row and count_row.c <= 1:
                     raise HTTPException(
                         status_code=400,
-                        detail="Cannot demote the last owner — promote another member first",
+                        detail="Cannot demote the last owner - promote another member first",
                     )
 
             sets: list[str] = []
@@ -407,7 +407,7 @@ def _invite_email_body(
         f"This link expires on {expires_str}. If you don't have an "
         f"Accounting-Ops account yet, you'll be prompted to create one when "
         f"you click the link.\n\n"
-        f"Accounting-Ops — Your books. Your machine. Your rules.\n"
+        f"Accounting-Ops: Your books. Your machine. Your rules.\n"
     )
     html_body = (
         f"<p>You've been invited{by} to join the <strong>{workspace_name}</strong> "
@@ -416,7 +416,7 @@ def _invite_email_body(
         f"<p>This link expires on <code>{expires_str}</code>. If you don't "
         f"have an Accounting-Ops account yet, you'll be prompted to create one "
         f"when you click the link.</p>"
-        f"<hr><p style='color:#888;font-size:12px;'>Accounting-Ops — "
+        f"<hr><p style='color:#888;font-size:12px;'>Accounting-Ops: "
         f"Your books. Your machine. Your rules.</p>"
     )
     return text_body, html_body
