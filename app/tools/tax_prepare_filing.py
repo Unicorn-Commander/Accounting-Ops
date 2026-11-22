@@ -102,7 +102,7 @@ async def tax_prepare_filing(
         "download_path": download_path,
         "field_count": len(inputs),
         "_draft_notice": (
-            f"DRAFT — this {kind.upper()} carries a DRAFT watermark until reviewed "
+            f"DRAFT - this {kind.upper()} carries a DRAFT watermark until reviewed "
             "by a professional or self-certified (if none is available). Review "
             "every figure and sign before submitting."
         ),
