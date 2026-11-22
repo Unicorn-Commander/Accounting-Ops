@@ -160,7 +160,7 @@ async def get_1099_payees(
         # old category-name heuristic.
         "categories_checked": list(result.get("basis_accounts", [])),
         "_draft_notice": (
-            "DRAFT — for CPA review only. "
+            "DRAFT - for CPA review only. "
             "Payee aggregation is heuristic (category-based). "
             "Actual 1099-NEC filing obligations depend on entity type, services "
             "rendered, and IRS thresholds for the applicable year. "
