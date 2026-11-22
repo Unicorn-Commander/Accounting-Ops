@@ -114,7 +114,7 @@ export function CategorizeAction({
     return (
       <div className="flex items-center gap-1.5 rounded-md bg-pending/15 px-2.5 py-1.5 text-[11px] font-medium text-pending">
         <Clock size={12} />
-        Queued for admin approval — category will not change until attested.
+        Queued for admin approval: category will not change until attested.
       </div>
     );
   }
@@ -129,7 +129,7 @@ export function CategorizeAction({
   if (result?.ok && result.outcome === "noop") {
     return (
       <div className="flex items-center gap-1.5 rounded-md bg-white/5 px-2.5 py-1.5 text-[11px] text-ink-secondary">
-        Already {currentCategory ?? "this category"} — nothing to change.
+        Already {currentCategory ?? "this category"}: nothing to change.
       </div>
     );
   }
@@ -155,7 +155,7 @@ export function CategorizeAction({
           onChange={(e) => setCategory(e.target.value)}
           className="rounded border border-default bg-canvas px-2 py-1.5 text-xs text-ink-primary focus:border-brand-500 focus:outline-none"
         >
-          <option value="">— pick a category —</option>
+          <option value="">Pick a category…</option>
           {CATEGORY_OPTIONS.map((c) => (
             <option key={c} value={c} disabled={c === currentCategory}>
               {c}
@@ -165,7 +165,7 @@ export function CategorizeAction({
         </select>
       </label>
       <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wider text-ink-tertiary">
-        Reasoning (required — goes in the audit trail)
+        Reasoning (required; goes in the audit trail)
         <textarea
           value={reasoning}
           onChange={(e) => setReasoning(e.target.value)}
@@ -177,7 +177,7 @@ export function CategorizeAction({
       <p className="text-[10px] text-ink-tertiary">
         A material change (M/H) or a bookkeeper-initiated change queues to{" "}
         <span className="font-medium">/approvals</span> for an admin to
-        attest — it does not take effect immediately.
+        attest; it does not take effect immediately.
       </p>
       {error && <span className="text-[10px] text-debit">{error}</span>}
       <div className="flex items-center gap-1.5">
