@@ -248,7 +248,7 @@ async def _diagnose_resolution_failure(
     if not cash:
         return (
             f"No active chart-of-accounts cash/card account is linked to "
-            f"external_account_id '{external_account_id}' for this entity — link a "
+            f"external_account_id '{external_account_id}' for this entity - link a "
             f"COA account to it (connector setup) before posting from this account.",
             "blocked_unmapped",
         )
@@ -753,7 +753,7 @@ async def post_journal_entry(
         return PostingRefusal(
             outcome="blocked_idempotent",
             reason=(
-                f"Chain race exhausted {_MAX_CHAIN_RETRIES} retries — caller should retry"
+                f"Chain race exhausted {_MAX_CHAIN_RETRIES} retries - caller should retry"
             ),
         )
 
@@ -1265,7 +1265,7 @@ async def _apply_recategorization(
             outcome="blocked_idempotent",
             reason=(
                 f"Recategorization chain race exhausted {_MAX_CHAIN_RETRIES} "
-                "retries — concurrent posts contesting this entity's chain"
+                "retries - concurrent posts contesting this entity's chain"
             ),
         )
 
