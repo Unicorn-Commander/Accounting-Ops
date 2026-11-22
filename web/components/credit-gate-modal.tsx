@@ -57,7 +57,7 @@ export function CreditGateModal() {
             <Dialog.Description className="text-sm leading-relaxed text-ink-secondary">
               {gate?.detail ??
                 "The CFO advisor and tax specialists run on paid inference."}{" "}
-              Add Unicorn Commander credits — or bring your own API key — to turn
+              Add Unicorn Commander credits (or bring your own API key) to turn
               the smart AI advisors on for this workspace.
             </Dialog.Description>
 
@@ -66,7 +66,7 @@ export function CreditGateModal() {
                 Bookkeeping stays free.
               </span>{" "}
               Categorizing transactions, reconciliations, and reports never use
-              credits — only the smart AI advisors do.
+              credits: only the smart AI advisors do.
             </div>
 
             {hasCta && (
