@@ -38,7 +38,7 @@ _CPA_EXPORT_IDENTITY_ASSERTION_ERROR = "cpa-export identity assertion unavailabl
 _CPA_EXPORT_CONSOLIDATED_ENTITY_IDS = frozenset({"all", "consolidated"})
 
 _DRAFT_NOTICE = (
-    "DRAFT — for CPA review only. "
+    "DRAFT - for CPA review only. "
     "This package was generated from the platform's journal entries and has NOT "
     "been reviewed or approved by a licensed tax professional. "
     "Do not file without CPA sign-off."
