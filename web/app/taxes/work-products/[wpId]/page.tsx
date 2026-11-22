@@ -92,9 +92,9 @@ export default async function WorkProductDetailPage({
           <Card>
             <p className="text-sm text-ink-secondary">
               A work product belongs to a single person or entity. Pick a
-              specific entity (use the selector above) to open this form — the
-              consolidated view can&apos;t hold a single client&apos;s work
-              product.
+               specific entity (use the selector above) to open this form: the
+               consolidated view can&apos;t hold a single client&apos;s work
+               product.
             </p>
           </Card>
         )}
