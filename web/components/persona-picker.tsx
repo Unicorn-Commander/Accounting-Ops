@@ -218,7 +218,7 @@ function BrigadePill({ online, reason }: { online: boolean; reason: string }) {
   }
   return (
     <span
-      title={`Brigade offline (${reason}). Cross-app tools unavailable — local-only.`}
+      title={`Brigade offline (${reason}). Cross-app tools unavailable (local-only).`}
       className="inline-flex items-center gap-1 rounded-full bg-white/5 px-2 py-0.5 text-[10px] font-medium text-ink-tertiary"
     >
       <Cloud size={10} />

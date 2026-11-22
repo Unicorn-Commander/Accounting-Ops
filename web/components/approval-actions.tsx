@@ -76,7 +76,7 @@ export function ApprovalActions({
           onClick={() => decide("reject")}
           disabled={pending}
           className="inline-flex h-8 items-center gap-1.5 rounded-md border border-subtle bg-surface px-3 text-xs text-ink-secondary hover:bg-elevated disabled:opacity-50"
-          title="Reject — leaves the ledger / rules untouched"
+          title="Reject: leaves the ledger / rules untouched"
         >
           <X size={13} /> Reject
         </button>
