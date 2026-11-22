@@ -173,9 +173,9 @@ function InboxRow({
         // keep the row and point the user at the workspace.
         const reason =
           res.status === 403
-            ? "You can't attest in this client — open it to decide."
+            ? "You can't attest in this client: open it to decide."
             : res.status === 409
-              ? "Already decided elsewhere — open the client to refresh."
+              ? "Already decided elsewhere: open the client to refresh."
               : j.detail ?? `Couldn't ${decision} (HTTP ${res.status}).`;
         setError(reason);
         setState("idle");
@@ -185,7 +185,7 @@ function InboxRow({
       setState("done");
       startTransition(() => onDecided(item, decision));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Network error — try again.");
+      setError(e instanceof Error ? e.message : "Network error: try again.");
       setState("idle");
     }
   }
@@ -377,7 +377,7 @@ export function InboxView({ data }: { data: WorkInboxResponse }) {
             Showing <span className="font-semibold text-ink-primary">{data.totals.total}</span>{" "}
             ·{" "}
             <span className="font-semibold text-pending">{data.dropped}</span>{" "}
-            older item{data.dropped === 1 ? "" : "s"} not shown — raise the
+            older item{data.dropped === 1 ? "" : "s"} not shown; raise the
             limit or open the busiest client to clear the backlog. The oldest
             (most urgent) items are kept; the newest overflow is dropped.
           </p>
