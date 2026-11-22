@@ -33,6 +33,8 @@ import datetime as dt
 import asyncpg
 import httpx
 import pytest
+import pytest_asyncio
+from typing import AsyncIterator
 
 from tests.conftest import (
     TEST_ENTITY_ID,
@@ -127,7 +129,7 @@ async def _list_items(
     if tax_year:
         params["tax_year"] = tax_year
     if status_filter:
-        params["status_filter"] = status_filter
+        params["status"] = status_filter
     if item_type:
         params["item_type"] = item_type
 
@@ -432,14 +434,88 @@ async def test_double_resolve_conflict(
 # ---------------------------------------------------------------------------
 
 
+@pytest_asyncio.fixture
+async def outsider_token(db: asyncpg.Pool) -> AsyncIterator[str]:
+    """A second service token whose user has NO membership in workspace B.
+
+    The shared `test-service` user (ACCTOPS_TEST_UC_UID) may hold a workspace-B
+    membership that other suites rely on, so this test must not delete or
+    restore it. Instead: create a throwaway user_account (membership in
+    workspace A only) and a throwaway service token entry that impersonates
+    it, injected into the in-process app's token cache for the duration of the
+    test. The integration suite runs pytest in the app's own process (see
+    scripts/integration_env.py cmd_test), so the cache patch reaches the app;
+    the throwaway rows are deleted on teardown.
+    """
+    import uuid as _uuid
+
+    import app.auth as auth_mod
+
+    uc_uid = f"taxq-outlier-{_uuid.uuid4().hex[:10]}"
+    token = "taxq-outlier-" + "0" * 28
+    prev_cache = auth_mod._service_tokens_cache
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            user_id = await conn.fetchval(
+                """
+                INSERT INTO public.user_account (id, uc_uid, is_active, created_at)
+                VALUES (gen_random_uuid(), $1, true, now())
+                RETURNING id::text
+                """,
+                uc_uid,
+            )
+            await conn.execute(
+                """
+                INSERT INTO public.workspace_membership
+                    (id, workspace_id, user_id, role, status, created_at)
+                VALUES (gen_random_uuid(), $1, $2::uuid, 'owner', 'active', now())
+                """,
+                str(TEST_WORKSPACE_ID),
+                user_id,
+            )
+    cache = dict(prev_cache or {})
+    cache[token] = {
+        "uc_uid": uc_uid,
+        "agent_id": "tax-review-queue-itest",
+        "workspace_ids": None,
+        "entity_ids": None,
+        "role_floor": None,
+    }
+    auth_mod._service_tokens_cache = cache
+    try:
+        yield token
+    finally:
+        auth_mod._service_tokens_cache = prev_cache
+        async with db.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    DELETE FROM public.workspace_membership m
+                    USING public.user_account u
+                    WHERE u.id = m.user_id AND u.uc_uid = $1
+                    """,
+                    uc_uid,
+                )
+                await conn.execute(
+                    "DELETE FROM public.user_account WHERE uc_uid = $1", uc_uid
+                )
+
+
 @pytest.mark.asyncio
-async def test_cross_workspace_list_denied(seeded_workspace: StackConfig) -> None:
-    """A caller with no membership in workspace B cannot list its items (403)."""
-    base, token = seeded_workspace.base_url, seeded_workspace.token
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(base_url=base, headers=headers, timeout=30) as c:
+async def test_cross_workspace_list_denied(
+    db: asyncpg.Pool, seeded_workspace: StackConfig, outsider_token: str
+) -> None:
+    """A caller with no membership in workspace B cannot list its items (403).
+
+    Uses a second, throwaway user (the `outsider_token` fixture) so the shared
+    service user's workspace-B membership — which the H2 suite relies on — is
+    never mutated: a failure mid-test cannot leave the shared stack changed.
+    """
+    base = seeded_workspace.base_url
+    async with httpx.AsyncClient(base_url=base, timeout=30) as c:
         r = await c.get(
             f"/api/workspaces/{TEST_WORKSPACE_B_ID}/tax-review-queue",
+            headers={"Authorization": f"Bearer {outsider_token}"},
         )
     assert r.status_code in (401, 403), r.text
 

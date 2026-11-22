@@ -54,11 +54,14 @@ async def _post_expense(
 ) -> str:
     """Post one expense via HTTP, returning its journal_entry_id.
 
-    Tier-M (e.g. -$300) needs user_confirmed=True to post in the first place (so
-    we have an entry to later RECATEGORIZE). The recat of that posted entry is
-    what then queues, since post_correction passes user_confirmed=False.
+    The seed amount stays tier L (< $75) so the machine principal's post
+    auto-lands (the HTTP route only counts user_confirmed for verified
+    interactive humans — trust contract, app/api/journal.py — a material seed
+    would queue and there would be no posted entry to recategorize). The
+    MATERIALITY of the held action is carried by the queued recat's payload
+    (materiality_tier='M'), not by the seed entry's amount: the approve/reject
+    apply path runs the shared apply-primitive either way.
     """
-    tier_h_or_m = abs(cents) >= 7_500  # >= $75 -> not tier L
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(base_url=base_url, headers=headers, timeout=30) as c:
         r = await c.post(
@@ -76,8 +79,8 @@ async def _post_expense(
                 "category_status": "auto",
                 "sign_matched": True,
                 "external_account_id": TEST_EXTERNAL_ACCOUNT_ID,
-                # tier M/H won't auto-post; confirm so the seed entry lands.
-                "user_confirmed": bool(tier_h_or_m),
+                # tier L auto-posts for a machine principal; no confirm needed.
+                "user_confirmed": False,
             },
         )
     assert r.status_code == 200, r.text
@@ -182,9 +185,10 @@ async def test_approve_material_recat_applies_reversal_and_restatement(
     db: asyncpg.Pool, seeded_workspace: StackConfig
 ) -> None:
     base, token = seeded_workspace.base_url, seeded_workspace.token
-    # -$300 => tier M. Post it (confirmed), then recategorize -> queues.
+    # -$25 tier L seed: posts cleanly for the machine principal. The recat of
+    # this posted entry is the material action that queues (payload tier M).
     original_id = await _post_expense(
-        base, token, f"appr-recat-{_run_tag()}", cents=-30000, category="SaaS · AI"
+        base, token, f"appr-recat-{_run_tag()}", cents=-2500, category="SaaS · AI"
     )
 
     # Chain clean before.
@@ -283,8 +287,9 @@ async def test_reject_material_recat_leaves_ledger_untouched(
     db: asyncpg.Pool, seeded_workspace: StackConfig
 ) -> None:
     base, token = seeded_workspace.base_url, seeded_workspace.token
+    # -$25 tier L seed (see test 1): the machine principal's post auto-lands.
     original_id = await _post_expense(
-        base, token, f"appr-rej-{_run_tag()}", cents=-30000, category="SaaS · AI"
+        base, token, f"appr-rej-{_run_tag()}", cents=-2500, category="SaaS · AI"
     )
     approval_id = await _queue_material_recat(
         db, original_id, "Infrastructure · VPS"
@@ -480,8 +485,9 @@ async def test_decide_denied_below_accountant_floor(
     a CPA/accountant serving a client can act on it). A bookkeeper — below
     accountant — is denied, and the held action is NOT applied."""
     base, token = seeded_workspace.base_url, seeded_workspace.token
+    # -$25 tier L seed (see test 1): the machine principal's post auto-lands.
     original_id = await _post_expense(
-        base, token, f"appr-rbac-{_run_tag()}", cents=-30000, category="SaaS · AI"
+        base, token, f"appr-rbac-{_run_tag()}", cents=-2500, category="SaaS · AI"
     )
     approval_id = await _queue_material_recat(
         db, original_id, "Infrastructure · VPS"
@@ -530,8 +536,9 @@ async def test_decide_denied_out_of_scope_entity(
     """A member scoped to a DIFFERENT entity cannot decide an approval that
     belongs to the test entity — entity-scope enforced through the real token."""
     base, token = seeded_workspace.base_url, seeded_workspace.token
+    # -$25 tier L seed (see test 1): the machine principal's post auto-lands.
     original_id = await _post_expense(
-        base, token, f"appr-scope-{_run_tag()}", cents=-30000, category="SaaS · AI"
+        base, token, f"appr-scope-{_run_tag()}", cents=-2500, category="SaaS · AI"
     )
     approval_id = await _queue_material_recat(
         db, original_id, "Infrastructure · VPS"
@@ -635,7 +642,9 @@ async def test_approve_bank_transaction_import_posts_journal_entry(
         db,
         sxid=sxid,
         effective_date="2022-01-15",
-        amount_cents=-5000,  # -$50, Banking · Fees outflow (tier M — needs confirm)
+        # -$99: tier-M amount, matching the payload's materiality_tier="M"
+        # ($75.00-$1,000.00 band, app/journal/materiality.py).
+        amount_cents=-9900,
         category="Banking · Fees",
     )
 
@@ -716,7 +725,7 @@ async def test_reject_bank_transaction_import_leaves_ledger_untouched(
         db,
         sxid=sxid,
         effective_date="2022-01-20",
-        amount_cents=-9999,
+        amount_cents=-9900,  # -$99 tier M, matching the payload's tier
         category="Banking · Fees",
     )
 
@@ -767,7 +776,8 @@ async def test_approve_bank_transaction_import_with_category_override(
         db,
         sxid=sxid,
         effective_date="2022-02-15",
-        amount_cents=-2500,  # -$25, tier L but payload says M for test coverage
+        # -$99: tier-M amount, matching the payload's materiality_tier="M".
+        amount_cents=-9900,
         category="Banking · Fees",
     )
 
@@ -821,7 +831,7 @@ async def test_approve_bank_transaction_import_invalid_category_override_rejecte
         db,
         sxid=sxid,
         effective_date="2022-02-20",
-        amount_cents=-1000,
+        amount_cents=-9900,  # -$99 tier M, matching the payload's tier
         category="Banking · Fees",
     )
 

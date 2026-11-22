@@ -3,6 +3,8 @@
 !.env.example
 __pycache__/
 *.py[cod]
+# Build artifact from `pip install -e .` (regenerated on every install).
+*.egg-info/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

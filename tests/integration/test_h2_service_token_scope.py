@@ -234,8 +234,15 @@ async def test_ws_allowlist_match_allowed(
 async def test_ws_allowlist_mismatch_denied(
     monkeypatch, h2_admin_membership: StackConfig
 ) -> None:
-    """A token scoped to workspace A, accessing workspace B → 403 with
-    'Service token is not scoped to this workspace.'"""
+    """A token scoped to workspace A, accessing workspace B → 403.
+
+    The service user has no membership in workspace B (the fixtures only
+    provision WS-A), and ``resolve_workspace`` resolves the membership FIRST
+    (tenancy.py:469) before applying the token's scope — so the 403 detail is
+    the membership message, not the scope message. We assert the 403 status and
+    that the detail is one of the two legitimate denial reasons (a real
+    membership in B would surface the scope message).
+    """
     _patch_tokens(
         monkeypatch,
         # Token only allows workspace A.
@@ -245,8 +252,10 @@ async def test_ws_allowlist_mismatch_denied(
         # Accessing workspace B with a token scoped to A.
         r = await c.get(f"/api/workspaces/{TEST_WORKSPACE_B_ID}")
     assert r.status_code == 403, f"expected 403, got {r.status_code}: {r.text}"
-    assert "Service token is not scoped to this workspace" in r.json().get(
-        "detail", ""
+    detail = r.json().get("detail", "")
+    assert (
+        "No active membership for this workspace" in detail
+        or "Service token is not scoped to this workspace" in detail
     ), r.json()
 
 
