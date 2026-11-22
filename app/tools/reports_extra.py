@@ -204,7 +204,7 @@ async def get_1099_nec_report(
     )
     if isinstance(result, dict):
         result["_draft_notice"] = (
-            "DRAFT — for CPA review only. Payment-method exclusions and "
+            "DRAFT - for CPA review only. Payment-method exclusions and "
             "corporate-status exemptions are NOT applied. Flagged payees "
             "(requires_human_review) need human confirmation before filing."
         )
