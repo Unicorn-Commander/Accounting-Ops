@@ -1182,7 +1182,7 @@ async def form_1099_nec(
                 "corporations are generally exempt (legal fees excepted), and "
                 "credit-card / third-party-network payments belong on 1099-K, "
                 "not 1099-NEC. Payees flagged requires_human_review match a "
-                "known payment processor — verify the payment rail and the "
+                "known payment processor - verify the payment rail and the "
                 "payee's tax status before filing.",
     }
 
