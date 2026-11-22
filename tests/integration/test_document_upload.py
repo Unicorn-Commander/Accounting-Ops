@@ -172,7 +172,7 @@ async def test_out_of_scope_entity_is_403(
 
     other_entity = _uuid.uuid5(_uuid.NAMESPACE_DNS, f"{TEST_WORKSPACE_ID}:scope-other")
     # Flip the token's membership to be scoped to `other_entity` only.
-    async with _membership_as(db, live_stack.uc_uid, "accountant", entity_scope=[str(other_entity)]):
+    async with _membership_as(db, live_stack.uc_uid, role="accountant", entity_scope=[str(other_entity)]):
         png = _tiny_png(seed=999)
         res = await _upload(client, png, "scoped.png", "image/png")
         assert res.status_code == 403, res.text
