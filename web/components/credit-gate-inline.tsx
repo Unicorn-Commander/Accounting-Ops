@@ -23,8 +23,8 @@ export function CreditGateInline({ gate }: { gate: CreditGate }) {
             to turn the smart AI advisors on for this workspace.
           </p>
           <p className="mt-1.5">
-            <span className="font-medium text-pending">Bookkeeping stays free</span>{" "}
-            — categorizing, reconciliations, and reports never use credits.
+            <span className="font-medium text-pending">Bookkeeping stays free</span>:
+            {" "}categorizing, reconciliations, and reports never use credits.
           </p>
         </>
       }
