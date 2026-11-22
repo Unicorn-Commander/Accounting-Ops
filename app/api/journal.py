@@ -274,7 +274,7 @@ async def update_coa_account(
             await session.execute(
                 text(
                     "SELECT id::text, entity_id::text AS entity_id, account_number, "
-                    "account_name, account_type, normal_balance, is_active, is_system "
+                    "account_name, account_type, is_active, is_system "
                     "FROM chart_of_account "
                     "WHERE id = :aid AND entity_id IN ("
                     "  SELECT id FROM entity WHERE workspace_id = :wid"
@@ -293,20 +293,22 @@ async def update_coa_account(
         # by guessing the account UUID.
         assert_entity_in_scope(workspace, UUID(existing["entity_id"]))
 
-        new_name = existing["account_name"]
-        new_type = existing["account_type"]
-        new_nb = existing["normal_balance"]
+        updates: dict[str, Any] = {}
         if body.account_name is not None:
-            new_name = body.account_name
+            updates["account_name"] = body.account_name
         if body.account_type is not None:
-            new_type = body.account_type
-            new_nb = (
-                "debit" if new_type in ("asset", "expense", "cogs", "other_expense", "tax")
+            updates["account_type"] = body.account_type
+            updates["normal_balance"] = (
+                "debit" if body.account_type in ("asset", "expense", "cogs", "other_expense", "tax")
                 else "credit"
             )
 
-        if new_name != existing["account_name"] or new_type != existing["account_type"]:
-            canonical = f"{existing['account_number']}·{new_name}"
+        if updates:
+            # If account_name changed, update canonical_form
+            new_name = updates.get("account_name", existing["account_name"])
+            new_type = updates.get("account_type", existing["account_type"])
+            updates["canonical_form"] = f"{existing['account_number']}·{new_name}"
+
             await session.execute(
                 text(
                     """
@@ -318,9 +320,9 @@ async def update_coa_account(
                 ),
                 {
                     "name": new_name,
-                    "canonical": canonical,
+                    "canonical": updates["canonical_form"],
                     "atype": new_type,
-                    "nb": new_nb,
+                    "nb": updates["normal_balance"],
                     "aid": str(account_id),
                 },
             )
@@ -328,8 +330,8 @@ async def update_coa_account(
     return {
         "id": existing["id"],
         "account_number": existing["account_number"],
-        "account_name": new_name,
-        "account_type": new_type,
+        "account_name": updates.get("account_name", existing["account_name"]),
+        "account_type": updates.get("account_type", existing["account_type"]),
         "is_active": existing["is_active"],
     }
 
