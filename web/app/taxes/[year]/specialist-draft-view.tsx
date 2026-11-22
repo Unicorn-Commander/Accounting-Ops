@@ -233,7 +233,7 @@ function ResolveModal({
       }
       onDone(itemId, status);
     } catch {
-      setErr("Network error — please try again.");
+      setErr("Network error: please try again.");
     } finally {
       setBusy(false);
     }
@@ -656,12 +656,12 @@ function QuestionCard({
 
 // Slug → human-readable title (mirrors backend _SLUG_META).
 const SPECIALIST_TITLE_MAP: Record<string, string> = {
-  "form-1120": "Form 1120 — Federal Corporate Income Tax Return",
+  "form-1120": "Form 1120: Federal Corporate Income Tax Return",
   "1099-nec": "1099-NEC Nonemployee Compensation Analysis",
-  "sc1120": "SC1120 — South Carolina Corporate Income Tax Return",
+  "sc1120": "SC1120: South Carolina Corporate Income Tax Return",
   "officer-compensation": "Officer Compensation Schedule",
   "nol-schedule-l": "Net Operating Loss & Schedule L Analysis",
-  "audit-defense-scdor-ftf": "Audit Defense — SCDOR Failure-to-File",
+  "audit-defense-scdor-ftf": "Audit Defense: SCDOR Failure-to-File",
   "coordinator-summary": "Tax Operations Coordinator Summary",
 };
 
@@ -830,7 +830,7 @@ export function SpecialistDraftView({
       <div className="rounded-lg border border-pending/50 bg-pending/[0.07] px-4 py-3 text-sm font-semibold text-pending">
         <div className="flex items-center gap-2">
           <AlertTriangle size={15} className="shrink-0" />
-          DRAFT — AI-prepared, awaiting CPA review. Items below were generated
+          DRAFT: AI-prepared, awaiting CPA review. Items below were generated
           by the 1120 Preparer specialist. Each must be reviewed before filing.
         </div>
       </div>
@@ -882,7 +882,7 @@ export function SpecialistDraftView({
               <p className="text-sm text-ink-tertiary">
                 No {statusFilter} items.{" "}
                 {statusFilter === "pending" &&
-                  "All items have been reviewed — good work."}
+                  "All items have been reviewed: good work."}
               </p>
             </Card>
           ) : (
