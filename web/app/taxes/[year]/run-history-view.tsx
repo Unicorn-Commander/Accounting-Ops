@@ -483,7 +483,7 @@ export function RunHistoryView({
           prev.map((r) => (r.id === runId ? { ...r, status: "cancelled" } : r))
         );
       } catch {
-        setCancelError("Network error — the run was not cancelled.");
+        setCancelError("Network error: the run was not cancelled.");
       } finally {
         setCancelling(null);
       }
