@@ -301,7 +301,7 @@ export function DraftMarkdownViewer({
           <div className="flex items-center gap-1.5 text-[10px] text-pending">
             <AlertTriangle size={11} className="shrink-0" />
             <span className="font-medium">
-              DRAFT — AI-prepared. CPA review and sign-off required before filing.
+              DRAFT: AI-prepared. CPA review and sign-off required before filing.
             </span>
           </div>
           <div className="flex items-center gap-2">
