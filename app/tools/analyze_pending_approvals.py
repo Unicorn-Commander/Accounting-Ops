@@ -199,7 +199,7 @@ def _score_confidence(
         return (
             "low",
             "flag_for_review",
-            f"Amount ${dollar:,.2f} exceeds $1,000 materiality threshold — requires CPA attestation.",
+            f"Amount ${dollar:,.2f} exceeds $1,000 materiality threshold - requires CPA attestation.",
         )
 
     # 4. Unrecognized payee + non-trivial amount (> $200)
@@ -233,7 +233,7 @@ def _score_confidence(
         )
     elif known and not llm_suggested:
         reasons.append(
-            f"'{payee}' is a well-known vendor but category was not AI-suggested — "
+            f"'{payee}' is a well-known vendor but category was not AI-suggested - "
             "verify the category mapping is correct."
         )
     elif not known:
