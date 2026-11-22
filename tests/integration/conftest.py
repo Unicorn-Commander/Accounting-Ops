@@ -354,6 +354,216 @@ async def seeded_workspace(
 # --------------------------------------------------------------------------
 # Helpers reused across tests
 # --------------------------------------------------------------------------
+async def post_material_entry_via_approval(
+    pool: "asyncpg.Pool",
+    base_url: str,
+    token: str,
+    *,
+    ext_id: str,
+    amount_cents: int,
+    category: str,
+    description: str,
+    payee: str,
+    memo: str | None = None,
+    effective_date: str,
+) -> str:
+    """Post a material (M/H tier) entry through the REAL human-confirm path.
+
+    The integration stack's bearer is a service token (machine principal,
+    scripts/integration_env.py), so the HTTP POST /journal-entries route does
+    NOT count its user_confirmed claim (trust contract, app/api/journal.py) and
+    the material entry arrives at the gate as QUEUED ('queued_for_confirm'),
+    never 'posted'. The legitimate way to post it is the approval-confirm loop:
+    a 'journal_entry_post' proposal row is decided by a human, which applies the
+    held post with user_confirmed=True + the attesting human stamped
+    (apply_proposal -> post_journal_entry).
+
+    The stack token CANNOT be the decider: the decide route rejects a
+    non-interactive principal for journal proposals with 403 "Journal proposal
+    requires a human session" (app/api/approvals.py:359-365). The established
+    pattern for this in integration tests (tests/integration/
+    test_stripe_approval_postgres.py::_human_decide) drives the REAL
+    decide_approval handler in-process with a synthetic verified-interactive-
+    human AuthContext, against the live database. This helper does the same:
+      1. POST the entry over HTTP as the service token (user_confirmed=True is
+         the honest claim; the route ignores it for a machine principal).
+         outcome='queued_for_confirm' — the correct product behavior, asserted.
+      2. Seed the SAME approval_queue 'journal_entry_post' row the MCP enqueue
+         path would write for this exact request (deterministic id, immutable
+         request envelope, resolved debit/credit pair — resolved live from the
+         COA the same way resolve_accounts_for_txn does).
+      3. Drive the REAL decide_approval handler in-process as a synthetic
+         interactive human (owner role, Keycloak browser-session claims).
+         apply_proposal re-resolves the pair, re-checks the mapping, re-derives
+         sign_matched and posts with user_confirmed=True + the human stamped.
+
+    Policy is never weakened: the entry still passes the materiality gate's
+    queue and a decision row; only the attesting human is the test identity.
+    Returns the posted journal_entry_id.
+    """
+    import json
+    import uuid as _uuid
+
+    from fastapi import HTTPException
+
+    from app.api.approvals import DecideRequest, decide_approval
+    from app.auth import AuthContext
+    from app.config import get_settings
+    from app.tenancy import WorkspaceContext
+    from tests.conftest import (
+        TEST_ENTITY_ID,
+        TEST_SOURCE,
+        TEST_WORKSPACE_ID,
+        TEST_WORKSPACE_SLUG,
+    )
+
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(base_url=base_url, headers=headers, timeout=30) as c:
+        r = await c.post(
+            f"/api/workspaces/{TEST_WORKSPACE_ID}/journal-entries",
+            json={
+                "entity_id": str(TEST_ENTITY_ID),
+                "source": TEST_SOURCE,
+                "source_external_id": ext_id,
+                "effective_date": effective_date,
+                "amount_cents": amount_cents,
+                "description": description,
+                "payee": payee,
+                "memo": memo,
+                "category": category,
+                "category_status": "auto",
+                "sign_matched": True,
+                "external_account_id": TEST_EXTERNAL_ACCOUNT_ID,
+                "user_confirmed": True,
+            },
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Machine principal: the confirm claim is not trusted, the entry queues.
+    assert body["ok"] is False and body["outcome"] == "queued_for_confirm", body
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            cash = await conn.fetchrow(
+                """
+                SELECT canonical_form FROM chart_of_account
+                WHERE entity_id = $1
+                  AND linked_external_account_id = $2
+                  AND is_active = true
+                LIMIT 1
+                """,
+                str(TEST_ENTITY_ID),
+                TEST_EXTERNAL_ACCOUNT_ID,
+            )
+            assert cash is not None, "cash COA account not linked to the test account"
+            acct = await conn.fetchrow(
+                """
+                SELECT canonical_form FROM chart_of_account
+                WHERE entity_id = $1
+                  AND account_name ILIKE $2
+                  AND is_active = true
+                LIMIT 1
+                """,
+                str(TEST_ENTITY_ID),
+                f"%{category}",
+            )
+            assert acct is not None, f"no active COA account for category {category!r}"
+            if amount_cents < 0:
+                debit, credit = acct["canonical_form"], cash["canonical_form"]
+            else:
+                debit, credit = cash["canonical_form"], acct["canonical_form"]
+
+    request = {
+        "source": TEST_SOURCE,
+        "source_external_id": ext_id,
+        "effective_date": effective_date,
+        "amount_cents": amount_cents,
+        "description": description,
+        "category": category,
+        "category_status": "auto",
+        "payee": payee,
+        "memo": memo,
+        "sign_matched": True,
+        "external_account_id": TEST_EXTERNAL_ACCOUNT_ID,
+        "receipt_link_id": None,
+        "reasoning_trace": "integration: material entry via approval-confirm path",
+        "model_version": "",
+    }
+    # A fresh, unique proposal id per run (uuid4). apply_proposal does not
+    # derive the id from the envelope, so this is safe; the per-run ext_id keeps
+    # the entry itself unique.
+    ident = _uuid.uuid4()
+    payload = {
+        "version": 1,
+        "workspace_id": str(TEST_WORKSPACE_ID),
+        "entity_id": str(TEST_ENTITY_ID),
+        "request": request,
+        "debit_account": debit,
+        "credit_account": credit,
+    }
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            await conn.execute(
+                """
+                INSERT INTO approval_queue (
+                    id, workspace_id, entity_id, subject_type, subject_id,
+                    amount, currency_code, usd_equivalent_at_event_time,
+                    status, reasoning, requested_by_identity, payload
+                ) VALUES (
+                    $1::uuid, $2, $3, 'journal_entry_post', $1::uuid,
+                    $4, 'USD', $4, 'pending', $5, 'integration-test', $6::jsonb
+                )
+                """,
+                ident,
+                str(TEST_WORKSPACE_ID),
+                str(TEST_ENTITY_ID),
+                abs(amount_cents) / 100,
+                "Material entry queued for human confirm.",
+                json.dumps(payload),
+            )
+
+    # Decide in-process as a verified interactive human (owner). The stack
+    # service token cannot decide journal proposals (403 at
+    # app/api/approvals.py:359-365), so — as in test_stripe_approval_postgres —
+    # the REAL decide_approval handler runs against the live DB with a synthetic
+    # Keycloak browser-session identity. apply_proposal -> post_journal_entry
+    # posts with user_confirmed=True and stamps this human.
+    human = "integration-reviewer"
+    workspace_ctx = WorkspaceContext(
+        TEST_WORKSPACE_ID, TEST_WORKSPACE_SLUG, "owner", human, None, None, False
+    )
+    auth = AuthContext(
+        human,
+        None,
+        (),
+        {
+            "azp": get_settings().keycloak_client_id,
+            "auth_time": 1,
+            "sid": "integration-fixture-session",
+            "preferred_username": human,
+        },
+        may_autoprovision=True,
+    )
+    try:
+        decided = await decide_approval(
+            workspace_id=TEST_WORKSPACE_ID,
+            approval_id=ident,
+            body=DecideRequest(decision="approve", note="integration: confirm material entry"),
+            workspace=workspace_ctx,
+            auth=auth,
+        )
+    except HTTPException as exc:
+        raise AssertionError(
+            f"decide_approval failed: HTTP {exc.status_code} {exc.detail}"
+        ) from exc
+    assert isinstance(decided, dict), decided
+    assert decided.get("ok") is True and decided.get("applied") is True, decided
+    assert decided.get("journal_entry_id"), decided
+    return decided["journal_entry_id"]
+
+
 async def fetch_chain_rows(pool: "asyncpg.Pool", entity_id: uuid.UUID) -> list:
     """Return journal_entry rows for one entity, oldest-first (chain order)."""
     async with pool.acquire() as conn:

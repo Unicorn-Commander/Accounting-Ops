@@ -19,8 +19,10 @@ The two transactions:
   * expense: "Anthropic" -$12.00 -> SaaS · AI (6210). Tier L, vendor rule
     matches cleanly + entity mapped + sign matches => AUTO-POST (the headline
     SimpleFIN happy path).
-  * revenue: "Stripe payout" +$500.00 -> Revenue · Marketplace (4010). Tier M,
-    so it requires user_confirmed=True (the human-confirm path).
+  * revenue: "Stripe payout" +$500.00 -> Revenue · Marketplace (4010). Tier M:
+    as a machine principal the post queues for human confirm, and the test
+    completes the REAL approval-confirm path (POST /approvals/{id}/decide)
+    which posts it with the human attestation.
 """
 from __future__ import annotations
 
@@ -36,7 +38,10 @@ from tests.conftest import (
     TEST_WORKSPACE_ID,
     StackConfig,
 )
-from tests.integration.conftest import fetch_chain_rows
+from tests.integration.conftest import (
+    fetch_chain_rows,
+    post_material_entry_via_approval,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -77,7 +82,9 @@ def _revenue_payload(ext_id: str) -> dict:
         "category_status": "auto",
         "sign_matched": True,
         "external_account_id": TEST_EXTERNAL_ACCOUNT_ID,
-        "user_confirmed": True,  # human-confirm path for a material entry
+        # The machine principal's claim is not trusted; the confirm path runs
+        # through the approval decision (see test body).
+        "user_confirmed": True,
     }
 
 
@@ -104,15 +111,25 @@ async def test_full_pipeline(
     assert expense_id
 
     # ---- 2. Inject + confirm the revenue (human-confirmed material entry) ----
-    r = await client.post(
-        f"/api/workspaces/{wid}/journal-entries", json=_revenue_payload(rev_ext)
+    # The test client is a service token (machine principal), so the HTTP post
+    # route does NOT count its user_confirmed claim (trust contract,
+    # app/api/journal.py): a tier-M entry queues for human confirm instead of
+    # posting. We complete the REAL confirm path — the queued entry is applied
+    # through POST /approvals/{id}/decide, which posts it with
+    # user_confirmed=True and stamps the attesting human (apply_proposal ->
+    # post_journal_entry). No product policy is weakened.
+    revenue_id = await post_material_entry_via_approval(
+        db,
+        client.base_url,
+        client.headers["Authorization"].removeprefix("Bearer "),
+        ext_id=rev_ext,
+        amount_cents=50000,
+        category="Revenue · Marketplace",
+        description="Stripe payout",
+        payee="Stripe",
+        memo="April marketplace payout",
+        effective_date=EFFECTIVE_DATE,
     )
-    assert r.status_code == 200, f"revenue post failed: {r.status_code} {r.text}"
-    rev = r.json()
-    assert rev["ok"] is True, rev
-    assert rev["outcome"] == "posted", rev
-    assert rev["materiality_tier"] == "M", rev
-    revenue_id = rev["journal_entry_id"]
 
     # ---- 3. A journal_entry row was actually persisted (verify via DB) ----
     async with db.acquire() as conn:

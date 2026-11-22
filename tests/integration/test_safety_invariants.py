@@ -33,7 +33,10 @@ from tests.conftest import (
     TEST_WORKSPACE_ID,
     StackConfig,
 )
-from tests.integration.conftest import fetch_chain_rows
+from tests.integration.conftest import (
+    fetch_chain_rows,
+    post_material_entry_via_approval,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -161,45 +164,51 @@ async def test_high_value_entry_without_confirm_is_blocked(
 async def test_high_value_entry_with_confirm_and_memo_posts(
     client: httpx.AsyncClient, db: asyncpg.Pool, seeded_workspace: StackConfig
 ) -> None:
-    """The same >$1000 entry posts once a human confirms it (with a memo)."""
+    """The same >$1000 entry posts once a human confirms it (with a memo).
+
+    The integration caller is a service token (machine principal), so the HTTP
+    post route refuses to count its user_confirmed claim (trust contract,
+    app/api/journal.py) and the tier-H entry QUEUES (blocked_materiality /
+    queued_for_confirm) until a human decision row applies it. We drive the
+    REAL approval-confirm path: the queued entry is applied through
+    POST /approvals/{id}/decide, which posts with user_confirmed=True and
+    stamps the attesting human on the row (apply_proposal ->
+    post_journal_entry). No product policy is weakened — the entry still goes
+    through the materiality gate's queue and a decision.
+    """
     ext_id = f"txn-material-confirm-{_run_tag()}"
-    payload = {
-        "entity_id": str(TEST_ENTITY_ID),
-        "source": TEST_SOURCE,
-        "source_external_id": ext_id,
-        "effective_date": EFFECTIVE_DATE,
-        "amount_cents": -150000,
-        "description": "Big vendor invoice",
-        "payee": "Anthropic",
-        "memo": "Confirmed annual Claude Enterprise prepayment — approved by the owner",
-        "category": "SaaS · AI",
-        "category_status": "auto",
-        "sign_matched": True,
-        "external_account_id": TEST_EXTERNAL_ACCOUNT_ID,
-        "user_confirmed": True,
-    }
-    r = await client.post(
-        f"/api/workspaces/{TEST_WORKSPACE_ID}/journal-entries", json=payload
+    memo = "Confirmed annual Claude Enterprise prepayment — approved by the owner"
+    entry_id = await post_material_entry_via_approval(
+        db,
+        seeded_workspace.base_url,
+        seeded_workspace.token,
+        ext_id=ext_id,
+        amount_cents=-150000,
+        category="SaaS · AI",
+        description="Big vendor invoice",
+        payee="Anthropic",
+        memo=memo,
+        effective_date=EFFECTIVE_DATE,
     )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["ok"] is True, body
-    assert body["outcome"] == "posted", body
-    assert body["materiality_tier"] == "H", body
 
     async with db.acquire() as conn:
         async with conn.transaction():
             await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
             row = await conn.fetchrow(
                 """
-                SELECT status, approving_human_uc_uid, memo
+                SELECT id::text AS id, status, approving_human_uc_uid, memo,
+                       materiality_tier
                 FROM journal_entry WHERE source_external_id = $1
                 """,
                 ext_id,
             )
     assert row is not None and row["status"] == "posted"
-    # user_confirmed=True records the approving human on the row.
+    assert row["id"] == entry_id
+    # Tier-H materiality is recorded on the row (the gate saw the amount).
+    assert row["materiality_tier"] == "H"
+    # The approval-confirm decision records the approving human on the row.
     assert row["approving_human_uc_uid"] is not None
+    assert row["memo"] == memo
 
 
 # ==========================================================================
