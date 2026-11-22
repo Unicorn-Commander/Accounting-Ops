@@ -1043,7 +1043,7 @@ async def test_schedule_runner_bills_the_partner_for_every_generated_period():
     for b in ai_bills:
         row = s.bills[b["bill_id"]]
         assert row["external_ref"] == f"Q-2026-0001 v2:partner:recurring:6:{b['period_no']}"
-        assert row["lines"][0]["description"].startswith("Delivery partner share — AI allowance")
+        assert row["lines"][0]["description"].startswith("Delivery partner share - AI allowance")
         assert "net monthly recurring pool ($50.00 - recurring direct costs $0.00 = $50.00) = $25.00" in row["lines"][0]["description"]
     assert hosting_sched["partner_periods_billed"] == 4 and len(hosting_sched["generated_bill_ids"]) == 3
     assert ai_sched["partner_periods_billed"] == 4 and len(ai_sched["generated_bill_ids"]) == 3
@@ -1112,7 +1112,7 @@ def test_a32_improve_it_package_shares_per_period_net_of_recurring_costs():
     assert plan.partner is not None
     assert [pl.amount_cents for pl in plan.partner.lines] == [50_000, 35_000, 67_500]
     assert plan.partner.total_cents == 152_500
-    assert "Delivery partner share (period 1) — Improve it — package: 50% of net monthly recurring pool ($1,400.00" in plan.partner.lines[2].description
+    assert "Delivery partner share (period 1) - Improve it - package: 50% of net monthly recurring pool ($1,400.00" in plan.partner.lines[2].description
     # The v1 alias name is accepted too.
     alias = _payload(lines=_a32_lines(), totals=None,
                      split_rule={"kind": "percent_net", "percent": 50, "hosting_to_partner": True,
@@ -1137,7 +1137,7 @@ async def test_a32_runner_bills_improve_it_share_every_period():
     for b in bills:
         row = s.bills[b["bill_id"]]
         assert row["status"] == "draft" and row["journal_entry_id"] is None
-        assert "Delivery partner share — Improve it — package" in row["lines"][0]["description"]
+        assert "Delivery partner share - Improve it - package" in row["lines"][0]["description"]
         assert "$675.00" in row["lines"][0]["description"]
     hosting = s.schedules[(WID, "Q-2026-0001 v2", 3)]
     assert [b["amount_cents"] for b in res["partner_bills"] if b["schedule_id"] == hosting["id"]] == [35_000, 35_000]
