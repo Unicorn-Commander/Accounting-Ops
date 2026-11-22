@@ -270,22 +270,16 @@ jobs:
         #     posts >= $1,000 without the confirm path (blocked_materiality is correct policy); test needs the confirm flow
         #   tests/integration/test_safety_invariants.py::test_high_value_entry_with_confirm_and_memo_posts
         #     same: blocked_materiality; test must send the explicit human confirmation the policy asks for
+        #   tests/integration/test_data_rights.py::test_purging_a_disposable_workspace_leaves_other_chains_verifiable
+        #     destructive erasure, needs ACCTOPS_TEST_ALLOW_DESTRUCTIVE=1 + ACCTOPS_TEST_DISPOSABLE_WORKSPACE_ID;
+        #     the zero-skip gate fails on its self-skip
         run: |
           python3 scripts/integration_env.py test -- \
             -m integration tests/integration \
-            --deselect tests/integration/test_pat_auth.py \
             --deselect tests/integration/test_coa_entity_scope.py::test_scoped_member_can_still_update_own_entity_account \
             --deselect tests/integration/test_coa_entity_scope.py::test_unscoped_owner_can_touch_any_entity_coa \
-            --deselect tests/integration/test_h2_service_token_scope.py \
             --deselect tests/integration/test_data_rights.py::test_export_produces_an_archive_scoped_to_this_workspace_only \
-            --deselect tests/integration/test_document_upload.py \
-            --deselect tests/integration/test_approval_recommendations.py \
-            --deselect tests/integration/test_tax_review_queue.py \
-            --deselect tests/integration/test_approvals.py::test_reject_material_recat_leaves_ledger_untouched \
-            --deselect tests/integration/test_approvals.py::test_decide_denied_below_accountant_floor \
-            --deselect tests/integration/test_approvals.py::test_decide_denied_out_of_scope_entity \
-            --deselect tests/integration/test_approvals.py::test_approve_material_recat_applies_reversal_and_restatement \
-            --deselect tests/integration/test_approvals.py::test_approve_bank_transaction_import_posts_journal_entry \
+            --deselect tests/integration/test_data_rights.py::test_purging_a_disposable_workspace_leaves_other_chains_verifiable \
             --deselect tests/integration/test_e2e_pipeline.py::test_full_pipeline \
             --deselect tests/integration/test_get_1099_payees_delegation.py::test_get_1099_payees_nets_refunds_like_form_1099_nec \
             --deselect tests/integration/test_safety_invariants.py::test_high_value_entry_with_confirm_and_memo_posts \
@@ -340,14 +334,19 @@ jobs:
               "tests.integration.test_provisioning_contract_pg": 40,
               # Newly included: >= 1 testcase each.
               "tests.integration.test_add_client": 1,
+              "tests.integration.test_approval_recommendations": 3,
               "tests.integration.test_approvals": 1,
               "tests.integration.test_ar_payment_concurrency_pg": 1,
+              "tests.integration.test_data_rights": 6,
+              "tests.integration.test_document_upload": 4,
               "tests.integration.test_ebay_sync_postgres": 1,
+              "tests.integration.test_h2_service_token_scope": 9,
               "tests.integration.test_handoff_package_zip": 1,
               "tests.integration.test_invoice_pay_token_rls": 1,
               "tests.integration.test_mcp_tools": 1,
               "tests.integration.test_mcp_write_tools": 1,
               "tests.integration.test_onboarding_provision": 1,
+              "tests.integration.test_pat_auth": 7,
               "tests.integration.test_quotes_seam_rls": 1,
               "tests.integration.test_safety_invariants": 1,
               "tests.integration.test_specialist_runs_api": 1,
@@ -355,6 +354,7 @@ jobs:
               "tests.integration.test_stripe_blocked_resolve_pg": 17,
               "tests.integration.test_stripe_sync_postgres": 2,
               "tests.integration.test_tax_mcp_tools": 1,
+              "tests.integration.test_tax_review_queue": 10,
               "tests.integration.test_tenant_isolation": 1,
           }
           details = [
