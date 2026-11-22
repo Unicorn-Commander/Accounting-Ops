@@ -465,10 +465,10 @@ export function DocumentUploader({
                 {doneRows.length === 1
                   ? "1 document added"
                   : `${doneRows.length} documents added`}
-              </span>{" "}
+              </span>
               <span className="text-credit/90">
-                : {successLabel} {doneRows.length === 1 ? "is" : "are"} queued for
-                review.
+                : {successLabel} {doneRows.length === 1 ? "is" : "are"} queued
+                for review.
               </span>
               {dupeRows.length > 0 && (
                 <span className="text-credit/70">

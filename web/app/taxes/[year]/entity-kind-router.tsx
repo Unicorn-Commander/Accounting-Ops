@@ -207,9 +207,9 @@ export function TaxFormPlaceholder({
                 href={personaHref}
                 className="text-brand-400 underline-offset-2 hover:underline"
               >
-                {variant.specialistDisplayName}
+                {variant.specialistDisplayName}:
               </Link>{" "}
-               : they can answer questions about {variant.formName} and draft
+               they can answer questions about {variant.formName} and draft
                memos / flagged positions that land in the CPA review queue.
             </span>
           </li>

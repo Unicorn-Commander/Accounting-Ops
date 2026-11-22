@@ -176,7 +176,7 @@ export default async function HelpPage() {
               <li>Post all manual adjustments (depreciation, accruals) via <Link href="/journal/new" className="text-brand-400 hover:underline">/journal/new</Link></li>
               <li><Link href="/reports" className="text-brand-400 hover:underline">/reports</Link> → full-year P&L + as-of Dec 31 Balance Sheet</li>
               <li><Link href="/cpa-export" className="text-brand-400 hover:underline">/cpa-export</Link> → IIF + CSV + PDFs per entity</li>
-              <li>Verify chain on every entity, screenshot the green badges</li>
+              <li>Verify chain on every entity and screenshot the green badges</li>
               <li>Email the bundle to your CPA. They import IIF directly into QuickBooks Desktop.</li>
             </ol>
           </Card>

@@ -259,9 +259,9 @@ export default async function JournalPage(props: {
                               href="/documents"
                               className="text-brand-300 underline hover:text-brand-200"
                             >
-                              drop in a few documents
+                              drop in a few documents:
                             </Link>{" "}
-                             : your transactions flow in, get categorized, and land
+                              your transactions flow in, get categorized, and land
                              here once approved. A manual entry is for one-off
                              adjustments.
                           </p>

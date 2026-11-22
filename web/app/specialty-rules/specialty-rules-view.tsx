@@ -279,7 +279,7 @@ export function SpecialtyRulesView({
         >
           /chat
         </Link>{" "}
-         The Compliance agent drafts a proposal for your review.
+         . The Compliance agent drafts a proposal for your review.
         {data ? (
           <span className="ml-auto text-ink-tertiary">
             {total} rule{total === 1 ? "" : "s"} · as of{" "}

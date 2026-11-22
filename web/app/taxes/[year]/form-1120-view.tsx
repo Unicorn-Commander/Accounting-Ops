@@ -710,7 +710,7 @@ async function downloadPdf(
   // Taxable income
   doc.setFont("helvetica", "bold");
   doc.text(
-    `Line 28: Taxable Income Before NOL ${dollarsStr(pkg.taxable_income_before_nol_cents)}`,
+    `Line 28: Taxable Income Before NOL: ${dollarsStr(pkg.taxable_income_before_nol_cents)}`,
     14,
     startY
   );
