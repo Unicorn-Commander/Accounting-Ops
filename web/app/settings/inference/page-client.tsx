@@ -99,7 +99,7 @@ export function InferenceSettingsClient({
                   <p className="mt-1 text-xs leading-relaxed text-ink-secondary">
                     AI usage in <strong>{workspaceName}</strong> runs on this
                     key and is billed by {providerLabel(status.provider)}{" "}
-                    directly — we don&apos;t meter or mark it up.
+                    directly: we don&apos;t meter or mark it up.
                     {status.base_url ? (
                       <>
                         {" "}
@@ -166,12 +166,12 @@ export function InferenceSettingsClient({
         </p>
         <ul className="mt-3 space-y-1.5 text-xs text-ink-tertiary">
           <li>
-            <span className="font-medium text-ink-secondary">Anthropic</span> —
+            <span className="font-medium text-ink-secondary">Anthropic</span>:
             a Claude API key (<code className="font-mono text-[11px]">sk-ant-…</code>
             ).
           </li>
           <li>
-            <span className="font-medium text-ink-secondary">OpenRouter</span> —
+            <span className="font-medium text-ink-secondary">OpenRouter</span>:
             an OpenRouter key (<code className="font-mono text-[11px]">sk-or-…</code>
             ) for breadth across models.
           </li>
