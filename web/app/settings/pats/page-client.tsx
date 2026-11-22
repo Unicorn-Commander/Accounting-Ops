@@ -437,7 +437,7 @@ function CreateModal({
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      setError("Clipboard write failed — copy manually.");
+      setError("Clipboard write failed: copy manually.");
     }
   }
 
@@ -496,7 +496,7 @@ function CreateModal({
                   type="text"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. Claude Desktop — laptop"
+                   placeholder="e.g. Claude Desktop (laptop)"
                   maxLength={100}
                   className="mt-1.5 w-full rounded-md border border-default bg-canvas px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
                 />
