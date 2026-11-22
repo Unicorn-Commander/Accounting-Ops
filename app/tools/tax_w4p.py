@@ -128,7 +128,7 @@ async def tax_fill_w4p(
         "summary": built["summary"],
         "assumptions": built["assumptions"],
         "_draft_notice": (
-            "DRAFT — this W-4P carries a DRAFT watermark until it is reviewed by a "
+            "DRAFT - this W-4P carries a DRAFT watermark until it is reviewed by a "
             "professional or self-certified (if no professional is available). It "
             "goes to your pension payer, not the IRS. Review every figure, enter "
             "your SSN, and sign Step 5 before giving it to your payer."

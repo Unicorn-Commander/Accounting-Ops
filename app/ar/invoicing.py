@@ -1551,7 +1551,7 @@ async def void_invoice(
             payee=r["payee"],
             memo=f"Reversal of {r['id']}",
             reasoning=(
-                f"AR invoice {inv['invoice_number']} voided — reversing entry of "
+                f"AR invoice {inv['invoice_number']} voided - reversing entry of "
                 f"{r['id']} (debit/credit flipped). Reason: {reason[:200]}"
             ),
             actor_uc_uid=actor_uc_uid,

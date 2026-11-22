@@ -263,7 +263,7 @@ async def stripe_store_key(
 
     # 3. Persist (encrypted).
     short_eid = body.entity_id[:8]
-    label = f"{business_name or 'Stripe'} ({blob['environment']}) — entity {short_eid}"
+    label = f"{business_name or 'Stripe'} ({blob['environment']}) - entity {short_eid}"
     async with SessionLocal() as session:
         async with session.begin():
             cred_id = await store_credential(
@@ -455,7 +455,7 @@ async def stripe_status(
         )
     if not blob.get("webhook_secret"):
         warnings.append(
-            "Webhook secret not configured — real-time events (charge.succeeded "
+            "Webhook secret not configured - real-time events (charge.succeeded "
             "etc.) won't be received until the secret is set."
         )
 

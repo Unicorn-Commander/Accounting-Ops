@@ -609,14 +609,14 @@ def compute_partner_share(
         )
         basis_parts.append(basis)
         if share > 0:
-            lines.append(PartnerLine(f"Delivery partner share — {basis}", share))
+            lines.append(PartnerLine(f"Delivery partner share - {basis}", share))
     elif split_rule.kind == "fee":
         if split_rule.fee_cents is None:
             raise QuoteSeamError("PARTNER_RULE_INVALID", "split_rule.kind=fee requires fee_cents")
         basis = f"flat partner fee {_fmt_money(split_rule.fee_cents, currency)}"
         basis_parts.append(basis)
         if split_rule.fee_cents > 0:
-            lines.append(PartnerLine(f"Delivery partner fee — {basis}", int(split_rule.fee_cents)))
+            lines.append(PartnerLine(f"Delivery partner fee - {basis}", int(split_rule.fee_cents)))
     elif split_rule.kind == "none":
         basis_parts.append("no share of the fixed scope (kind=none)")
     else:  # pragma: no cover - pydantic Literal already restricts this
@@ -626,12 +626,12 @@ def compute_partner_share(
     if split_rule.hosting_to_partner:
         for label, cents in hosting_lines:
             if cents > 0:
-                lines.append(PartnerLine(f"Hosting passed through in full — {label} (period 1)", int(cents)))
+                lines.append(PartnerLine(f"Hosting passed through in full - {label} (period 1)", int(cents)))
         basis_parts.append("hosting to partner in full")
     # A32: non-hosting recurring lines share per period; period 1 rides this bill.
     for label, cents, basis in recurring_shares:
         if cents > 0:
-            lines.append(PartnerLine(f"Delivery partner share (period 1) — {label}: {basis}", int(cents)))
+            lines.append(PartnerLine(f"Delivery partner share (period 1) - {label}: {basis}", int(cents)))
     if any(cents > 0 for _, cents, _ in recurring_shares):
         basis_parts.append("recurring lines shared per period net of recurring direct costs")
     total = sum(pl.amount_cents for pl in lines)
@@ -1366,7 +1366,7 @@ async def apply_quote_acceptance(
     if plan.deposit_cents > 0:
         line_items = [
             {
-                "description": f"Deposit ({p.percent}%) — {p.label}"[:512],
+                "description": f"Deposit ({p.percent}%) - {p.label}"[:512],
                 "quantity": 1,
                 "unit_price": str(_cents_to_amount(p.amount_cents)),
                 "amount": str(_cents_to_amount(p.amount_cents)),
@@ -1389,7 +1389,7 @@ async def apply_quote_acceptance(
     milestone_invoice_ids: list[str] = []
     for d in plan.milestone_drafts:
         line_items = [{
-            "description": f"{d.label} — {d.percent}% ({d.memo})"[:512],
+            "description": f"{d.label} - {d.percent}% ({d.memo})"[:512],
             "quantity": 1,
             "unit_price": str(_cents_to_amount(d.amount_cents)),
             "amount": str(_cents_to_amount(d.amount_cents)),
@@ -1433,9 +1433,9 @@ async def apply_quote_acceptance(
     for s in plan.schedules:
         period_label = _PERIOD_LABEL[s.cadence]
         of_n = f" of {s.periods_total}" if s.periods_total else ""
-        memo = f"{period_label} 1{of_n} — {s.label}"
+        memo = f"{period_label} 1{of_n} - {s.label}"
         line_items = [{
-            "description": f"{s.label} — {period_label.lower()} 1{of_n}"[:512],
+            "description": f"{s.label} - {period_label.lower()} 1{of_n}"[:512],
             "quantity": 1,
             "unit_price": str(_cents_to_amount(s.amount_cents)),
             "amount": str(_cents_to_amount(s.amount_cents)),
@@ -1548,7 +1548,7 @@ async def apply_quote_acceptance(
         try:
             async with session.begin_nested():
                 notes = (
-                    f"PARTNER SPLIT DRAFT — bill from {partner_name} (delivery partner) to the vendor of "
+                    f"PARTNER SPLIT DRAFT - bill from {partner_name} (delivery partner) to the vendor of "
                     f"record for quote {fq}. Basis: {plan.partner.basis}. Accounts PAYABLE for this entity, "
                     "never AR. Never auto-issued: review, then approve/post through the AP path. "
                     "Later recurring periods are billed by the schedule runner."
@@ -1714,7 +1714,7 @@ async def generate_due_schedule_invoices(
                     "period_date": p_date.isoformat(), "reason": f"period closed through {closed_end}",
                 })
                 break
-            memo = f"{period_label} {period_no}{of_n} — {r['description']}"
+            memo = f"{period_label} {period_no}{of_n} - {r['description']}"
             try:
                 view = await create_invoice_from_draft(
                     session,
@@ -1725,7 +1725,7 @@ async def generate_due_schedule_invoices(
                     external_ref=f"{r['quote_ref']}:recurring:{int(r['line_position'])}:{period_no}",
                     customer=customer,
                     line_items=[{
-                        "description": f"{r['description']} — {period_label.lower()} {period_no}{of_n}"[:512],
+                        "description": f"{r['description']} - {period_label.lower()} {period_no}{of_n}"[:512],
                         "quantity": 1,
                         "unit_price": str(_cents_to_amount(int(r["amount_cents"]))),
                         "amount": str(_cents_to_amount(int(r["amount_cents"]))),
@@ -1794,9 +1794,9 @@ async def generate_due_schedule_invoices(
             ref = f"{r['quote_ref']}:partner:recurring:{int(r['line_position'])}:{n}"
             when = f"({period_label.lower()} {n}{of_n}, {p_date.isoformat()})"
             if split.get("is_hosting"):
-                line_desc = f"Hosting passed through in full — {r['description']} {when}"
+                line_desc = f"Hosting passed through in full - {r['description']} {when}"
             else:
-                line_desc = f"Delivery partner share — {r['description']} {when}: {split.get('basis') or ''}".rstrip(": ")
+                line_desc = f"Delivery partner share - {r['description']} {when}: {split.get('basis') or ''}".rstrip(": ")
             try:
                 async with session.begin_nested():
                     row, created = await _ensure_bill_draft(
@@ -1806,7 +1806,7 @@ async def generate_due_schedule_invoices(
                         currency=str(r["currency"]), issue_date=p_date, net_terms=net_terms,
                         lines=[PartnerLine(line_desc[:512], partner_amount)],
                         notes=(
-                            f"PARTNER SPLIT DRAFT — bill from {partner_name} (delivery partner) to the vendor "
+                            f"PARTNER SPLIT DRAFT - bill from {partner_name} (delivery partner) to the vendor "
                             f"of record for quote {r['quote_ref']}, {period_label.lower()} {n}{of_n}. "
                             "Accounts PAYABLE for this entity, never AR. Never auto-issued."
                         ),

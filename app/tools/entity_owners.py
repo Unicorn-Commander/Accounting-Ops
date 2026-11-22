@@ -164,7 +164,7 @@ async def upsert_entity_owner(
     if len(name) > _MAX_OWNER_NAME:
         raise ValueError(f"owner_name must be at most {_MAX_OWNER_NAME} characters")
     if not (reasoning or "").strip():
-        raise ValueError("reasoning is required — this write is audited")
+        raise ValueError("reasoning is required - this write is audited")
     if owner_type not in _OWNER_TYPES:
         raise ValueError(f"owner_type must be one of {sorted(_OWNER_TYPES)}, got {owner_type!r}")
     if allocation_basis is not None and allocation_basis not in _ALLOCATION_BASES:

@@ -72,7 +72,7 @@ def _assert_provenance(inputs: dict[str, Any]) -> None:
             continue  # blank is allowed — conservative blank-fill
         if not rec.get("source_ref"):
             raise ValueError(
-                f"work-product input {key!r} has a value but no source_ref — "
+                f"work-product input {key!r} has a value but no source_ref - "
                 "refusing to render a figure without provenance"
             )
 

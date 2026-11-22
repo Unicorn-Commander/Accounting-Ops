@@ -252,7 +252,7 @@ _IDENTITY_UNPROVISIONED_DETAIL = (
     "Caller identity is not provisioned: no user account exists for this "
     "token's uc_uid. If this is a service token, PAT, or federated caller, "
     "its stored uc_uid is stale (identity re-keyed) or the user was never "
-    "provisioned — re-register it against the identity's current uc_uid."
+    "provisioned - re-register it against the identity's current uc_uid."
 )
 
 
@@ -666,7 +666,7 @@ async def resolve_tenant(
     if not raw_tenant_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Tenant is required (use /api/workspaces/{workspace_id}/ — tenant is deprecated)",
+            detail="Tenant is required (use /api/workspaces/{workspace_id}/ - tenant is deprecated)",
         )
     try:
         return TenantContext(

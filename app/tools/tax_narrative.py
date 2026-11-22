@@ -121,7 +121,7 @@ async def get_tax_narrative(
         "status": row.get("status", ""),
         "markdown": markdown_text,
         "_draft_notice": (
-            "DRAFT — for CPA review only. The CPA narrative was synthesised "
+            "DRAFT - for CPA review only. The CPA narrative was synthesised "
             "by an LLM and is NOT a substitute for licensed CPA sign-off."
         ),
     }
@@ -263,7 +263,7 @@ async def trigger_tax_narrative(
             "Poll get_tax_narrative in 30-60 seconds for the result."
         ),
         "_draft_notice": (
-            "DRAFT — the generated narrative is for CPA review only and not a "
+            "DRAFT - the generated narrative is for CPA review only and not a "
             "substitute for licensed CPA sign-off."
         ),
     }

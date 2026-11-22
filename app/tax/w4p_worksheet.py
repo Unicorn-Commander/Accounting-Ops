@@ -152,7 +152,7 @@ def compute_w4p_worksheet(inp: W4PWorksheetInput) -> W4PWorksheetResult:
         if inp.estimated_annual_income is None and (children or others):
             assumptions.append(
                 "No estimated income was provided; assumed at/under the Step 3 "
-                f"threshold (${threshold:,}). Confirm before signing — above it "
+                f"threshold (${threshold:,}). Confirm before signing - above it "
                 "the dependent credit is reduced."
             )
 

@@ -60,7 +60,7 @@ _CONNECTOR_PROFILES: dict[str, dict[str, Any]] = {
     "ecommerce": {
         "connectors": ["simplefin_bank", "shopify", "stripe", "amazon_seller"],
         "invites": ["cpa"],
-        "notes": "E-commerce: bank + commerce platform + processor. Sales tax tracking is critical — Avalara/TaxJar later.",
+        "notes": "E-commerce: bank + commerce platform + processor. Sales tax tracking is critical - Avalara/TaxJar later.",
     },
     "brick_and_mortar_retail": {
         "connectors": ["simplefin_bank", "square"],

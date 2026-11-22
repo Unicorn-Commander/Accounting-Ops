@@ -689,13 +689,13 @@ def _build_approval(
         if ext == "csv":
             reasoning = (
                 f"Uploaded CSV '{filename or content_hash[:8]}' stored for review. "
-                "Bank-statement/CSV parsing is not automated yet — a human should "
+                "Bank-statement/CSV parsing is not automated yet - a human should "
                 "review and import the relevant rows."
             )
         else:
             reasoning = (
                 f"Uploaded PDF '{filename or content_hash[:8]}' stored for review. "
-                "PDF extraction is not automated yet — a human should review it."
+                "PDF extraction is not automated yet - a human should review it."
             )
     elif extraction.tier == "high":
         reasoning = (
@@ -748,7 +748,7 @@ def _summary_message(extraction, ext: str) -> str:
     if extraction.tier == "high":
         return "Receipt read and queued for your confirmation."
     if extraction.tier == "low":
-        return "Receipt partially read — queued for review."
+        return "Receipt partially read - queued for review."
     return "Stored and queued for review (couldn't read it automatically)."
 
 

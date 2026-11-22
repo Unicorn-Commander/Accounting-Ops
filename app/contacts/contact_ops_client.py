@@ -81,7 +81,7 @@ def _exchange_client_creds() -> tuple[str, str]:
     if not secret:
         raise ContactOpsNotConfigured(
             "Contact-Ops sync is not connected yet (no dedicated client secret "
-            "configured — set CONTACT_OPS_CLIENT_SECRET)."
+            "configured - set CONTACT_OPS_CLIENT_SECRET)."
         )
     client_id = s.contact_ops_client_id or s.keycloak_client_id
     return client_id, secret

@@ -83,13 +83,13 @@ FORM_PATHS_2023: dict[str, Path] = {
     "1120-schedule-l": IRS_FORMS_DIR / "f1120_2023.pdf",
 }
 
-DRAFT_BANNER_TEXT = "DRAFT — CPA review required — do not file as-is"
+DRAFT_BANNER_TEXT = "DRAFT - CPA review required - do not file as-is"
 DRAFT_WATERMARK_TEXT = "DRAFT"
 # Softer banner used when a user with no tax professional has self-certified a
 # work product. It is honest about provenance without the alarming "do not file"
 # language, because a self-attested W-4P/return IS meant to be used.
 SELF_CERT_BANNER_TEXT = (
-    "Prepared via self-certification — review carefully before you sign and submit"
+    "Prepared via self-certification - review carefully before you sign and submit"
 )
 
 # Page size constants (IRS forms are US Letter: 8.5 × 11 in = 612 × 792 pt)

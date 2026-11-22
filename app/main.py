@@ -351,7 +351,7 @@ async def well_known_mcps() -> dict:
         "name": "Accounting-Ops",
         "version": "0.1.0",
         "description": (
-            "Agent-first financial operations for Magic Unicorn — journal, "
+            "Agent-first financial operations for Magic Unicorn - journal, "
             "approvals, tax review queue, runway, P&L, 1120 working data."
         ),
         "mcp_endpoint": canonical_mcp_url(),

@@ -119,7 +119,7 @@ async def resolve_tax_review_item(
         "reviewer_uc_uid": ctx.user_uc_uid,
         "resolved_at": dt.datetime.now(tz=dt.timezone.utc).isoformat(),
         "_draft_notice": (
-            "DRAFT — for CPA review only. This resolution was recorded by an "
+            "DRAFT - for CPA review only. This resolution was recorded by an "
             "agent on the CPA's behalf and is NOT a substitute for licensed "
             "CPA sign-off before any return is filed."
         ),

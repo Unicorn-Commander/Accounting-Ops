@@ -149,7 +149,7 @@ def generate_cover_sheet_pdf(data: CoverSheetData) -> bytes:
     c.drawCentredString(
         LETTER_W / 2,
         LETTER_H - banner_height + 9,
-        "DRAFT COVER SHEET — review with CPA before mailing",
+        "DRAFT COVER SHEET - review with CPA before mailing",
     )
 
     cursor_y -= banner_height + 24
@@ -257,7 +257,7 @@ def generate_cover_sheet_pdf(data: CoverSheetData) -> bytes:
     )
     c.drawString(
         margin_x, footer_y,
-        "DRAFT — not a substitute for CPA review. Verify every line on the enclosed return."
+        "DRAFT - not a substitute for CPA review. Verify every line on the enclosed return."
     )
 
     c.save()

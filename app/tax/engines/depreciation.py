@@ -179,7 +179,7 @@ class BonusRule(BaseModel):
                 f"asset {asset_id!r}: the §168(k) percentage for this year "
                 f"depends on whether the property was ACQUIRED after "
                 f"{self.acquisition_cutoff.isoformat()} (OBBBA, P.L. 119-21), "
-                "but the asset has no acquired_on date. Supply it — the engine "
+                "but the asset has no acquired_on date. Supply it - the engine "
                 "will not guess between the phase-down rate and 100%."
             )
         if acquired_on > self.acquisition_cutoff:
@@ -194,7 +194,7 @@ class BonusRule(BaseModel):
                 f"before the {self.acquisition_cutoff.isoformat()} OBBBA "
                 "cutoff), but no verified residual TCJA phase-down percentage "
                 "is on file for this tax year. This return cannot be prepared "
-                "automatically — verify the rate against Pub 946 and add it."
+                "automatically - verify the rate against Pub 946 and add it."
             )
         return self.percentage
 
@@ -282,7 +282,7 @@ class AssetInput(BaseModel):
             raise ValueError(
                 f"asset {self.asset_id!r} is listed property but has no "
                 "listed_property_type. It must be one of "
-                f"{[t.value for t in ListedPropertyType]} — the §280F(a) dollar "
+                f"{[t.value for t in ListedPropertyType]} - the §280F(a) dollar "
                 "caps apply to a passenger automobile and not to a heavy "
                 "vehicle, and defaulting the wrong way OVER-DEDUCTS. The engine "
                 "will not infer it."
@@ -290,7 +290,7 @@ class AssetInput(BaseModel):
         if self.listed_property_type is not None and not self.is_listed_property:
             raise ValueError(
                 f"asset {self.asset_id!r}: listed_property_type is set but "
-                "is_listed_property is False — that is contradictory."
+                "is_listed_property is False - that is contradictory."
             )
         return self
 
@@ -749,7 +749,7 @@ def compute_depreciation(
     if inputs.tax_year != config.tax_year:
         raise ValueError(
             f"config is for TY{config.tax_year} but inputs are for "
-            f"TY{inputs.tax_year} — refusing to apply the wrong year's limits"
+            f"TY{inputs.tax_year} - refusing to apply the wrong year's limits"
         )
     if inputs.is_short_tax_year:
         raise ValueError(
@@ -796,7 +796,7 @@ def compute_depreciation(
                 system = DepreciationSystem.ADS
                 assumptions.append(
                     f"asset {asset.asset_id}: listed property at "
-                    f"{business_use}% business use (<=50%) — forced to ADS "
+                    f"{business_use}% business use (<=50%) - forced to ADS "
                     "straight line per §280F(b)(1); §179 and §168(k) bonus "
                     "disallowed."
                 )
@@ -811,7 +811,7 @@ def compute_depreciation(
             assumptions.append(
                 f"asset {asset.asset_id}: placed in service "
                 f"{asset.placed_in_service.isoformat()} (a prior year) with no "
-                "explicit convention — assumed half-year. Supply "
+                "explicit convention - assumed half-year. Supply "
                 "`convention` if the mid-quarter convention applied in that year."
             )
 
@@ -884,7 +884,7 @@ def compute_depreciation(
         if inputs.business_taxable_income_cents is None:
             raise ValueError(
                 "business_taxable_income_cents is required when §179 is elected "
-                "or a §179 carryforward exists — §179(b)(3)(A) limits the "
+                "or a §179 carryforward exists - §179(b)(3)(A) limits the "
                 "deduction to taxable income derived from the active conduct of "
                 "a trade or business. Refusing to guess it."
             )
@@ -956,7 +956,7 @@ def compute_depreciation(
                     f"{asset.placed_in_service.year} (before the current tax "
                     f"year) but no prior_bonus_cents was supplied and no "
                     "config resolver is available for that year. Supply the "
-                    "§168(k) allowance actually taken — the engine will not "
+                    "§168(k) allowance actually taken - the engine will not "
                     "guess it."
                 )
             if asset.prior_section_179_cents is not None:
@@ -1029,7 +1029,7 @@ def compute_depreciation(
                     f"({raw_cap} cents x {business_use}% business use); "
                     f"{capped_c} cents was disallowed this year. Basis "
                     "disallowed by the cap is recoverable AFTER the recovery "
-                    "period (Pub 946 ch. 5) — this engine does NOT extend the "
+                    "period (Pub 946 ch. 5) - this engine does NOT extend the "
                     "schedule past the recovery period, so that later deduction "
                     "must be taken manually."
                 )

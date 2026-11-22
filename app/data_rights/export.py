@@ -338,7 +338,7 @@ async def build_export(
                 ),
                 "files": (
                     "Stored documents are under files/<receipt_id>/. Anything "
-                    "omitted is listed explicitly in contents.files_skipped — "
+                    "omitted is listed explicitly in contents.files_skipped - "
                     "this export never drops a file silently."
                 ),
             },

@@ -86,7 +86,7 @@ async def list_submission_channels(
         elif policy.rail_kill_switch:
             reason = "Blocked: the submission-rail kill-switch is engaged."
         else:
-            reason = "Disabled (default OFF — not enabled in the engagement policy)."
+            reason = "Disabled (default OFF - not enabled in the engagement policy)."
         channels.append(
             {
                 "channel": channel,

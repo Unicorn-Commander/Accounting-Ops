@@ -187,7 +187,7 @@ def assert_entitled_for_invoice(
             "Creating an invoice from a Project-Ops PO requires a subscription that "
             "includes BOTH Project-Ops and Accounting-Ops. The caller's token does "
             "not carry both entitlements. (Standalone Accounting-Ops invoicing is "
-            "not gated — omit the project-ops origin to invoice directly.)"
+            "not gated - omit the project-ops origin to invoice directly.)"
         )
 
 

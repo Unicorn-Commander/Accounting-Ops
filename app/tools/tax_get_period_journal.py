@@ -112,7 +112,7 @@ async def get_period_journal(
         "limit_applied": clamped_limit,
         "entries": entries,
         "_draft_notice": (
-            "DRAFT — for CPA review only. "
+            "DRAFT - for CPA review only. "
             "Raw journal entries for specialist analysis. "
             "Not a substitute for professional tax advice."
         ),

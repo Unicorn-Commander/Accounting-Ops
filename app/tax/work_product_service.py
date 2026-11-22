@@ -55,7 +55,7 @@ def normalize_provenance_fields(fields: dict[str, Any] | None) -> dict[str, dict
             continue  # conservative blank-fill — omit blanks
         if not rec.get("source_ref"):
             raise ValueError(
-                f"field {key!r} has a value but no source_ref — never fabricate a "
+                f"field {key!r} has a value but no source_ref - never fabricate a "
                 "figure; tag every value with where it came from"
             )
         inputs[key] = {
@@ -319,7 +319,7 @@ async def build_w4p_computed(
         "source_extraction_id": src_ref,
         "ssn_note": "SSN is intentionally left blank for the taxpayer to enter by hand.",
     }
-    title = f"Form W-4P {tax_year}" + (f" — {first or ''} {last or ''}".rstrip())
+    title = f"Form W-4P {tax_year}" + (f" - {first or ''} {last or ''}".rstrip())
     summary = (
         f"Prepared a DRAFT Form W-4P ({tax_year}, {status}). "
         f"Step 3 dependent credit ${ws.step3_total:,}; "

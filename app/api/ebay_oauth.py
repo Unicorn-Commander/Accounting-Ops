@@ -432,7 +432,7 @@ async def ebay_oauth_callback(
     # shows what the connection actually points at.
     short_eid = str(entity_id)[:8]
     label = (
-        f"{ebay_user_handle or 'eBay seller'} ({cfg['environment']}) — entity {short_eid}"
+        f"{ebay_user_handle or 'eBay seller'} ({cfg['environment']}) - entity {short_eid}"
     )
     async with SessionLocal() as session:
         async with session.begin():
