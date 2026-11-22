@@ -964,7 +964,7 @@ async def _undo_queue_item(
                 detail={
                     "code": "queue_item_already_decided",
                     "message": (
-                        "The memo was decided between our read and write — "
+                        "The memo was decided between our read and write - "
                         "refresh and try again."
                     ),
                 },
@@ -1131,7 +1131,7 @@ async def undo_ai_action(
                 detail={
                     "code": "not_reversible",
                     "message": (
-                        f"Action '{tool_name}' is not reversible — use "
+                        f"Action '{tool_name}' is not reversible - use "
                         "POST /challenge to flag a disagreement."
                     ),
                 },
@@ -1147,7 +1147,7 @@ async def undo_ai_action(
                     "code": "window_expired",
                     "message": (
                         f"The {window_h}-hour undo window for this action "
-                        "has passed — use POST /challenge instead."
+                        "has passed - use POST /challenge instead."
                     ),
                 },
             )
@@ -1231,7 +1231,7 @@ async def undo_ai_action(
                         "code": "queue_item_already_decided",
                         "message": (
                             "The memo was already reviewed/resolved/rejected "
-                            "by someone — cannot undo. Open the queue item "
+                            "by someone - cannot undo. Open the queue item "
                             "to see the current state."
                         ),
                     },
@@ -1255,7 +1255,7 @@ async def undo_ai_action(
                 detail={
                     "code": "contra_not_supported_v1",
                     "message": (
-                        "Ledger-level undo isn't wired in this release — "
+                        "Ledger-level undo isn't wired in this release - "
                         "click 'Challenge this' to flag the disagreement "
                         "for CPA review."
                     ),
@@ -1268,7 +1268,7 @@ async def undo_ai_action(
                 detail={
                     "code": "categorization_undo_not_supported_v1",
                     "message": (
-                        "Categorization undo isn't wired in this release — "
+                        "Categorization undo isn't wired in this release - "
                         "click 'Challenge this' to flag the disagreement."
                     ),
                 },
