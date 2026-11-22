@@ -248,6 +248,7 @@ jobs:
         #     memo_posts (line 186: tier-H entry with user_confirmed ->
         #     queued_for_confirm, not 'posted'; the no-confirm sibling that
         #     expects blocked_materiality still passes)
+        # pre-existing: materiality tiers, batch item
         #
         # Runs INSIDE the app container (scripts/integration_env.py test),
         # not out here. Running pytest inside `app` reaches Postgres at its
@@ -264,7 +265,6 @@ jobs:
             --deselect tests/integration/test_document_upload.py \
             --deselect tests/integration/test_approval_recommendations.py \
             --deselect tests/integration/test_tax_review_queue.py \
-            # pre-existing: materiality tiers, batch item
             --deselect tests/integration/test_approvals.py::test_reject_material_recat_leaves_ledger_untouched \
             --deselect tests/integration/test_approvals.py::test_decide_denied_below_accountant_floor \
             --deselect tests/integration/test_approvals.py::test_decide_denied_out_of_scope_entity \
