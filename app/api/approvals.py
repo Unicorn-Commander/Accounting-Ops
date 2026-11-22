@@ -816,6 +816,7 @@ async def _approve_stripe_balance_transaction(
         revenue_account=str(payload.get("revenue_account") or "4200"),
         first_run_confirmed=True,
         approving_human_uc_uid=approving_human,
+        human_attested=True,
     )
     if result.outcome == "blocked_idempotent":
         return {

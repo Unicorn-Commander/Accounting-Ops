@@ -415,6 +415,61 @@ async def test_first_run_guard_queues_first_30():
     assert payload["stripe_type"] == "charge"
 
 
+async def _replay(amount: int, **kw):
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=0)
+    bt = _bt(f"txn_mat_{amount}", "charge", amount=amount)
+    result = await stripe_mapper.map_and_post_balance_transaction(
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane", **kw,
+    )
+    return session, result
+
+
+@pytest.mark.asyncio
+async def test_worker_path_still_queues_m_tier_even_past_first_run():
+    """No human attestation: a $200 charge queues for confirm, never posts."""
+    session = _StubSession(accounts=_ACCOUNTS, existing_posts=31)
+    bt = _bt("txn_m_worker", "charge", amount=20000)
+    result = await stripe_mapper.map_and_post_balance_transaction(
+        session, workspace_id="wid", entity_id="eid", txn=bt, actor_uc_uid="jane",
+    )
+    assert result.outcome == "queued_for_confirm"
+    assert not session.posted_entries
+
+
+@pytest.mark.asyncio
+async def test_decide_replay_without_attestation_cannot_post_m_tier():
+    """first_run_confirmed alone does not clear the materiality gate."""
+    session, result = await _replay(
+        20000, first_run_confirmed=True, approving_human_uc_uid="jane",
+    )
+    assert result.outcome == "queued_for_confirm"
+    assert not session.posted_entries
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amount", [5000, 20000])
+async def test_decide_replay_with_human_attestation_posts_l_and_m_once(amount):
+    session, result = await _replay(
+        amount, first_run_confirmed=True, approving_human_uc_uid="jane",
+        human_attested=True,
+    )
+    assert result.outcome == "posted", result.reason
+    assert len(session.posted_entries) == 1
+    assert session.posted_entries[0]["debit"] == _ACCOUNTS["1210"]
+    assert session.posted_entries[0]["credit"] == _ACCOUNTS["4200"]
+
+
+@pytest.mark.asyncio
+async def test_decide_replay_h_tier_stays_blocked_even_when_attested():
+    """H-tier behaviour is unchanged: the decide path still gets blocked."""
+    session, result = await _replay(
+        150000, first_run_confirmed=True, approving_human_uc_uid="jane",
+        human_attested=True,
+    )
+    assert result.outcome == "blocked_materiality"
+    assert not session.posted_entries
+
+
 @pytest.mark.asyncio
 async def test_first_run_exactly_at_threshold_posts():
     """existing_posts == FIRST_RUN_REVIEW_LIMIT means we're past the guard."""
