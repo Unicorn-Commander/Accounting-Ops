@@ -205,8 +205,8 @@ export function ImportContactsButton({
                 <Dialog.Description className="text-sm leading-relaxed text-ink-secondary">
                   Upload a <strong>.vcf</strong> (macOS / iPhone / Google /
                   Outlook contacts) or a <strong>.csv</strong>. Nothing is saved
-                  until you review and confirm below — tag each as customer or
-                  vendor, or untick to skip.
+                   until you review and confirm below; tag each as customer or
+                   vendor, or untick to skip.
                 </Dialog.Description>
                 {contactOpsAvailable ? (
                   <div className="mt-3 rounded-md border border-brand-500/30 bg-brand-500/[0.06] px-4 py-3">
@@ -214,7 +214,7 @@ export function ImportContactsButton({
                       <p className="text-sm text-ink-secondary">
                         <strong className="text-ink-primary">Recommended:</strong>{" "}
                         pull straight from Contact-Ops (your synced iCloud /
-                        Microsoft / Gmail contacts) — no file needed.
+                        Microsoft / Gmail contacts): no file needed.
                       </p>
                       <button
                         onClick={pullFromContactOps}
@@ -245,7 +245,7 @@ export function ImportContactsButton({
                 {filename && rows.length > 0 ? (
                   <p className="mt-2 text-xs text-ink-tertiary">
                     {rows.length} contact{rows.length === 1 ? "" : "s"} found in{" "}
-                    <span className="font-mono">{filename}</span> — {includedCount}{" "}
+                    <span className="font-mono">{filename}</span>: {includedCount}{" "}
                     selected.
                   </p>
                 ) : null}
