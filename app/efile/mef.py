@@ -174,7 +174,7 @@ def assert_inputs_provenance(inputs: dict[str, Any]) -> None:
             continue  # blank is allowed — left out of the return
         if not rec.get("source_ref"):
             raise ValueError(
-                f"e-file input {key!r} has a value but no source_ref — refusing "
+                f"e-file input {key!r} has a value but no source_ref - refusing "
                 "to build a return figure without provenance"
             )
 
@@ -195,17 +195,17 @@ def validate_1040_inputs(inputs: dict[str, Any]) -> list[str]:
 
     if not _present("filing_status"):
         warnings.append(
-            "Missing filing status — a transmittable 1040 requires a filing "
+            "Missing filing status - a transmittable 1040 requires a filing "
             "status (single / mfj / mfs / hoh / qss)."
         )
     elif str(inputs["filing_status"].get("value", "")).strip().lower() not in FILING_STATUS_CD:
         warnings.append(
-            "Filing status value is not one of single/mfj/mfs/hoh/qss — no MeF "
+            "Filing status value is not one of single/mfj/mfs/hoh/qss - no MeF "
             "filing-status code was written (not fabricated)."
         )
     if not (_present("first_name_mi") or _present("last_name")):
         warnings.append(
-            "Missing filer identity (name) — the ReturnHeader has no filer name; "
+            "Missing filer identity (name) - the ReturnHeader has no filer name; "
             "a transmitter would reject the return."
         )
     if not _present("agi_11"):
