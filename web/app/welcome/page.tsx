@@ -38,7 +38,7 @@ export default async function WelcomePage() {
               Welcome to Accounting-Ops
             </h1>
             <p className="mt-1 text-sm text-ink-secondary">
-              Let&apos;s set up your books — about a minute.
+              Let&apos;s set up your books: about a minute.
             </p>
           </div>
         </div>
