@@ -14,11 +14,11 @@ const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono"
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
 
 export const metadata: Metadata = {
-  title: "Accounting-Ops — Books that can answer for themselves",
+  title: "Accounting-Ops: Books that can answer for themselves",
   description:
-    "Accounting-Ops is a verifiable financial operating system — append-only, tamper-evident books where every number shows its source. Agents do the work, you keep the authority, on your own infrastructure.",
+    "Accounting-Ops is a verifiable financial operating system: append-only, tamper-evident books where every number shows its source. Agents do the work, you keep the authority, on your own infrastructure.",
   openGraph: {
-    title: "Accounting-Ops — Books that can answer for themselves",
+    title: "Accounting-Ops: Books that can answer for themselves",
     description: "Every number gets a source, a decision trail, and someone accountable. Your books. Your infrastructure. Your agents.",
     siteName: "Accounting-Ops",
     type: "website"
