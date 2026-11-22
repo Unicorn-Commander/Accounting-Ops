@@ -91,7 +91,7 @@ export function EfilePanel({
       <div className="space-y-4 p-4">
         <p className="text-[11px] leading-relaxed text-ink-tertiary">
           Generate a MeF-style XML package for this return. This builds the file
-          only — it is <strong>not</strong> transmitted to the IRS.
+          only; it is <strong>not</strong> transmitted to the IRS.
         </p>
 
         <div className="flex items-center gap-3">
