@@ -455,7 +455,7 @@ async def stripe_status(
         )
     if not blob.get("webhook_secret"):
         warnings.append(
-            "Webhook secret not configured — real-time events (charge.succeeded "
+            "Webhook secret not configured - real-time events (charge.succeeded "
             "etc.) won't be received until the secret is set."
         )
 
