@@ -175,7 +175,7 @@ def compute_st3_worksheet(inp: ST3WorksheetInput) -> ST3WorksheetResult:
     if net < 0:
         assumptions.append(
             "Net taxable is negative; the ST-3 instructs DO NOT REPORT NEGATIVE "
-            "AMOUNTS — this likely means an over-stated deduction. Review before "
+            "AMOUNTS - this likely means an over-stated deduction. Review before "
             "filing (a credit/refund is claimed on the ST-14, not a negative ST-3)."
         )
 
@@ -195,13 +195,13 @@ def compute_st3_worksheet(inp: ST3WorksheetInput) -> ST3WorksheetResult:
             f"Local tax (line 5) ESTIMATED as net taxable {_money(net)} × "
             f"{inp.county_local_rate} (caller-supplied combined county rate). "
             "Local option taxes VARY BY COUNTY and must be computed and attached "
-            "on the ST-389 — confirm this rate and the ST-389 Column B total per "
+            "on the ST-389 - confirm this rate and the ST-389 Column B total per "
             "county before filing; the rate was not validated by this engine."
         )
     else:
         local_tax = 0
         assumptions.append(
-            "Local tax (line 5) left at $0 — no county local rate was supplied. "
+            "Local tax (line 5) left at $0 - no county local rate was supplied. "
             "Local option taxes (LOST, capital-projects, transportation, "
             "education, etc.) VARY BY COUNTY and are reported on the separate "
             "ST-389. If any local tax applies to these sales, complete and "
