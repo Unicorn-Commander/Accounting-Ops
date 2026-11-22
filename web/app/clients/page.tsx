@@ -28,9 +28,9 @@ export default async function ClientsPage() {
           title="Clients"
           subtitle={
             triage?.persona === "cpa"
-              ? "Cross-client triage — most-urgent work first."
+              ? "Cross-client triage: most-urgent work first."
               : triage?.persona === "platform_admin"
-                ? "All workspaces in the platform — platform_admin view."
+                ? "All workspaces in the platform (platform_admin view)."
                 : "Every workspace you belong to."
           }
           action={
@@ -61,7 +61,7 @@ export default async function ClientsPage() {
             title="No clients yet."
             description={
               canAddClients
-                ? "Add your first client to set up their books — you'll own the new workspace, and you can invite the client so they hold their own data too. (A workspace owner can also invite you directly.)"
+                ? "Add your first client to set up their books. You'll own the new workspace, and you can invite the client so they hold their own data too. (A workspace owner can also invite you directly.)"
                 : "A workspace owner needs to invite you with the CPA or accountant role before assigned clients show up here."
             }
             primaryAction={canAddClients ? <AddClientButton /> : undefined}
@@ -73,7 +73,7 @@ export default async function ClientsPage() {
             title="No clients in this view yet."
             description={
               canAddClients
-                ? "Add a client to set up their books — they'll appear here with open items and review status. (A workspace owner can also invite you to existing books.)"
+                ? "Add a client to set up their books. They'll appear here with open items and review status. (A workspace owner can also invite you to existing books.)"
                 : triage.persona === "cpa"
                   ? "Once a workspace owner invites you to their books, the client will appear here with open items and review status."
                   : "You belong to no workspaces. Ask an owner to invite you, or create your own from /setup."
@@ -94,7 +94,7 @@ export default async function ClientsPage() {
                 <p className="text-xs text-ink-tertiary">
                   Last {activity?.days ?? 30} days across your workspaces
                   {activity?.items.length
-                    ? ` — ${activity.items.length} item${activity.items.length === 1 ? "" : "s"}`
+                    ? `, ${activity.items.length} item${activity.items.length === 1 ? "" : "s"}`
                     : ""}
                 </p>
               </div>
