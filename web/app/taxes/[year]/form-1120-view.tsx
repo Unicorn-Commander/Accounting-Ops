@@ -633,7 +633,7 @@ async function downloadPdf(
   // Title block
   doc.setFontSize(14);
   doc.setFont("helvetica", "bold");
-  doc.text("Form 1120 — U.S. Corporation Income Tax Return", 14, 18);
+  doc.text("Form 1120: U.S. Corporation Income Tax Return", 14, 18);
   doc.setFontSize(9);
   doc.setFont("helvetica", "normal");
   doc.text(
@@ -648,7 +648,7 @@ async function downloadPdf(
   doc.setTextColor(80, 50, 0);
   doc.setFontSize(8);
   doc.setFont("helvetica", "bold");
-  doc.text("DRAFT — FOR CPA REVIEW ONLY. NOT A FILED RETURN.", pageWidth / 2, 37, {
+  doc.text("DRAFT: FOR CPA REVIEW ONLY. NOT A FILED RETURN.", pageWidth / 2, 37, {
     align: "center"
   });
   doc.setTextColor(0, 0, 0);
@@ -710,7 +710,7 @@ async function downloadPdf(
   // Taxable income
   doc.setFont("helvetica", "bold");
   doc.text(
-    `Line 28 — Taxable Income Before NOL: ${dollarsStr(pkg.taxable_income_before_nol_cents)}`,
+    `Line 28: Taxable Income Before NOL ${dollarsStr(pkg.taxable_income_before_nol_cents)}`,
     14,
     startY
   );
@@ -723,7 +723,7 @@ async function downloadPdf(
   }
 
   doc.setFont("helvetica", "bold");
-  doc.text("SCHEDULE L — BALANCE SHEET (approximate from journal entries)", 14, startY);
+  doc.text("SCHEDULE L: BALANCE SHEET (approximate from journal entries)", 14, startY);
   startY += 2;
 
   autoTable(doc, {
