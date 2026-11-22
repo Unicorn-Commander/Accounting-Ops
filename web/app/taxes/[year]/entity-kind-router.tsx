@@ -177,7 +177,7 @@ export function TaxFormPlaceholder({
           <Sparkles size={20} className="mt-0.5 shrink-0 text-brand-300" />
           <div className="min-w-0 flex-1">
             <h2 className="text-base font-semibold text-ink-primary">
-              {variant.formName} surface — work in progress for{" "}
+              {variant.formName} surface: work in progress for{" "}
               {entity?.kind ?? "this entity kind"}
             </h2>
             <p className="mt-1.5 text-sm leading-relaxed text-ink-secondary">
@@ -209,8 +209,8 @@ export function TaxFormPlaceholder({
               >
                 {variant.specialistDisplayName}
               </Link>{" "}
-              — they can answer questions about {variant.formName} and draft
-              memos / flagged positions that land in the CPA review queue.
+               : they can answer questions about {variant.formName} and draft
+               memos / flagged positions that land in the CPA review queue.
             </span>
           </li>
           <li className="flex items-start gap-2">
@@ -332,7 +332,7 @@ export async function EntityKindRouter({
         {!isConsolidated && entity && entity.kind !== "c_corp" ? (
           <Card className="border-brand-500/40 bg-brand-500/5 mb-3">
             <p className="text-sm text-ink-primary">
-              Routed to Form 1120 as a default — entity{" "}
+              Routed to Form 1120 as a default: entity{" "}
               <strong>{entityDisplayName}</strong> is kind &ldquo;{entity.kind}
               &rdquo; without a dedicated surface yet.
             </p>
@@ -394,13 +394,13 @@ export function titleFor(
 ): { title: string; subtitle: string } {
   if (isConsolidated) {
     return {
-      title: `Form 1120 — ${year}`,
+      title: `Form 1120 (${year})`,
       subtitle: `All entities (consolidated) · ${FORM_BY_KIND.c_corp.shortBlurb}`
     };
   }
   const variant = getFormVariant(entity?.kind);
   return {
-    title: `${variant.formName} — ${year}`,
+    title: `${variant.formName} (${year})`,
     subtitle: `${entity?.display_name ?? "—"} · ${variant.shortBlurb}`
   };
 }
