@@ -63,7 +63,7 @@ _log = logging.getLogger(__name__)
 
 _SLUG_META: dict[str, dict[str, str]] = {
     "form-1120": {
-        "title": "Form 1120 — Federal Corporate Income Tax Return",
+        "title": "Form 1120 - Federal Corporate Income Tax Return",
         "filename_prefix": "01-form-1120-draft",
         "draft_file": "{year}-form-1120-draft.md",
     },
@@ -73,7 +73,7 @@ _SLUG_META: dict[str, dict[str, str]] = {
         "draft_file": "{year}-1099-nec-draft.md",
     },
     "sc1120": {
-        "title": "SC1120 — South Carolina Corporate Income Tax Return",
+        "title": "SC1120 - South Carolina Corporate Income Tax Return",
         "filename_prefix": "03-SC1120-draft",
         "draft_file": "{year}-sc1120-draft.md",
     },
@@ -88,7 +88,7 @@ _SLUG_META: dict[str, dict[str, str]] = {
         "draft_file": "{year}-nol-schedule-l-draft.md",
     },
     "audit-defense-scdor-ftf": {
-        "title": "Audit Defense — SCDOR Failure-to-File",
+        "title": "Audit Defense - SCDOR Failure-to-File",
         "filename_prefix": "06-audit-defense-SCDOR-FTF",
         "draft_file": "{year}-audit-defense-scdor-ftf-draft.md",
     },
@@ -132,7 +132,7 @@ _WATERMARK_CSS = """
    below uses a page-break-independent fixed box. */
 
 body::before {
-    content: "DRAFT — CPA REVIEW REQUIRED";
+    content: "DRAFT - CPA REVIEW REQUIRED";
     position: fixed;
     top: 50%;
     left: 50%;
@@ -268,7 +268,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 {body_html}
 <div class="disclaimer">
-  <strong>DRAFT — CPA REVIEW REQUIRED.</strong>
+  <strong>DRAFT - CPA REVIEW REQUIRED.</strong>
   This document was prepared by an AI tax specialist and has NOT been reviewed or
   signed by a licensed CPA or attorney. It does not constitute legal, tax, or
   financial advice. Do not file any return based solely on this draft without
@@ -588,7 +588,7 @@ def _build_cover_letter_pdf(
         body_md=cover_md,
         entity_name=entity_name,
         tax_year=tax_year,
-        doc_title="CPA Handoff Package — Cover Letter",
+        doc_title="CPA Handoff Package - Cover Letter",
     )
     return _html_to_pdf(html)
 
@@ -755,7 +755,7 @@ async def get_handoff_package(
         pdf_bytes = _html_to_pdf(html)
         zip_name = f"{meta['filename_prefix']}.pdf"
         specialist_pdfs.append((zip_name, pdf_bytes))
-        included_docs.append(f"{zip_name} — {meta['title']}")
+        included_docs.append(f"{zip_name} - {meta['title']}")
 
     # Data files.
     cpa_json, cpa_json_reason = await _fetch_cpa_export_json(
@@ -769,24 +769,24 @@ async def get_handoff_package(
     data_files: list[tuple[str, bytes]] = []
     if cpa_json:
         data_files.append(("data/form-1120-package.json", cpa_json))
-        included_docs.append("data/form-1120-package.json — CPA Export JSON (Form 1120 line mapping)")
+        included_docs.append("data/form-1120-package.json - CPA Export JSON (Form 1120 line mapping)")
     else:
         reason = cpa_json_reason or "No response body"
         _log.warning("CPA export JSON missing: %s", reason)
         marker = "data/MISSING-form-1120-package.json.txt"
         data_files.append((marker, f"Missing CPA export JSON: {reason}\n".encode("utf-8")))
-        included_docs.append(f"{marker} — {reason}")
+        included_docs.append(f"{marker} - {reason}")
     if journal_csv:
         data_files.append((f"data/journal-{tax_year}.csv", journal_csv))
-        included_docs.append(f"data/journal-{tax_year}.csv — Full journal export (CSV)")
+        included_docs.append(f"data/journal-{tax_year}.csv - Full journal export (CSV)")
     else:
         reason = journal_csv_reason or "No response body"
         _log.warning("CPA journal export missing: %s", reason)
         marker = f"data/MISSING-journal-{tax_year}.csv.txt"
         data_files.append((marker, f"Missing CPA journal export: {reason}\n".encode("utf-8")))
-        included_docs.append(f"{marker} — {reason}")
+        included_docs.append(f"{marker} - {reason}")
     data_files.append(("data/tax-review-queue.json", queue_json))
-    included_docs.append("data/tax-review-queue.json — AI specialist review queue items")
+    included_docs.append("data/tax-review-queue.json - AI specialist review queue items")
 
     # Cover letter (built after we know what's in the package).
     cover_pdf = _build_cover_letter_pdf(
@@ -798,7 +798,7 @@ async def get_handoff_package(
 
     # README.txt
     readme_lines = [
-        f"{safe_name} — Tax Year {tax_year} — CPA Handoff Package",
+        f"{safe_name} - Tax Year {tax_year} - CPA Handoff Package",
         "=" * 60,
         f"Generated: {generated_dt}",
         f"Entity: {entity_name}",
@@ -806,12 +806,12 @@ async def get_handoff_package(
         "",
         "CONTENTS",
         "--------",
-        "00-cover-letter.pdf    — Package cover letter and disclaimer",
+        "00-cover-letter.pdf    - Package cover letter and disclaimer",
     ]
     for zip_name, _bytes in specialist_pdfs:
-        readme_lines.append(f"{zip_name:<30} — Specialist draft (DRAFT, CPA review required)")
+        readme_lines.append(f"{zip_name:<30} - Specialist draft (DRAFT, CPA review required)")
     for zip_name, _bytes in data_files:
-        readme_lines.append(f"{zip_name:<30} — Supporting data export")
+        readme_lines.append(f"{zip_name:<30} - Supporting data export")
     readme_lines += [
         "",
         "DISCLAIMER",
