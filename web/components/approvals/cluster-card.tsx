@@ -488,7 +488,7 @@ export function ClusterCard({
                 {cluster.flagged_count} item{cluster.flagged_count !== 1 ? "s" : ""}{" "}
                 flagged
               </span>
-              <span className="text-ink-tertiary">— excluded from bulk approve</span>
+              <span className="text-ink-tertiary">(excluded from bulk approve)</span>
               {showFlagged ? (
                 <ChevronUp size={11} className="ml-auto" />
               ) : (
@@ -563,7 +563,7 @@ export function ClusterCard({
               onClick={() => submit("reject")}
               disabled={pending}
               className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-subtle bg-elevated px-3 text-sm text-debit hover:bg-debit/10 disabled:opacity-50"
-              title="Reject all — ledger untouched"
+              title="Reject all: ledger untouched"
             >
               <X size={13} />
               Reject all

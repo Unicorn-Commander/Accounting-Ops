@@ -281,7 +281,7 @@ export default async function InvoicesPage(props: {
         <p className="mt-4 flex items-center gap-2 text-[11px] text-ink-tertiary">
           <Shield size={11} />
           Every invoice posts double-entry to the per-entity hash chain. Voids
-          create reversing entries — the ledger is never rewritten.
+          create reversing entries; the ledger is never rewritten.
         </p>
       </PageShell>
     </AppShell>

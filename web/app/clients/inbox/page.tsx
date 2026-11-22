@@ -28,7 +28,7 @@ export default async function WorkInboxPage() {
       <PageShell>
         <SectionHeader
           title="Work inbox"
-          subtitle="Every open item across all your clients — stalest first. Act inline or open the client."
+          subtitle="Every open item across all your clients, stalest first. Act inline or open the client."
           breadcrumb={
             <Link
               href="/clients"

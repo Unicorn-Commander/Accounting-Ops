@@ -76,7 +76,7 @@ export default async function AgentActivityPage() {
           entityId={entityId}
           emptyMsg={
             aiActivity === null
-              ? "Activity log unavailable — backend returned no data. Try refreshing in a moment."
+              ? "Activity log unavailable: backend returned no data. Try refreshing in a moment."
               : "No AI agent actions yet for the selected scope. Once an agent drafts a memo, posts a JE, or runs a specialist, you'll see it here."
           }
         />

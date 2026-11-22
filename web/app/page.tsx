@@ -5,9 +5,9 @@ import { getActiveContext } from "@/lib/active-context";
 import { PremiumLanding } from "@/components/premium-landing";
 
 export const metadata: Metadata = {
-  title: "Accounting-Ops — Books that can answer for themselves",
+  title: "Accounting-Ops: Books that can answer for themselves",
   description:
-    "Accounting-Ops is a verifiable financial operating system — append-only, tamper-evident books where every number shows its source. Agents do the work, you keep the authority: reconciliation, reporting, invoicing, and tax preparation on your own infrastructure.",
+    "Accounting-Ops is a verifiable financial operating system: append-only, tamper-evident books where every number shows its source. Agents do the work, you keep the authority: reconciliation, reporting, invoicing, and tax preparation on your own infrastructure.",
   // Customer production is unicorncommander.ai; magicunicorn.dev is the internal
   // deployment. Canonicalling to .dev pointed customers and crawlers at the
   // internal instance. metadataBase is required or Next resolves relative OG
@@ -15,7 +15,7 @@ export const metadata: Metadata = {
   metadataBase: new URL("https://accounting-ops.unicorncommander.ai"),
   alternates: { canonical: "https://accounting-ops.unicorncommander.ai/" },
   openGraph: {
-    title: "Accounting-Ops — Books that can answer for themselves",
+    title: "Accounting-Ops: Books that can answer for themselves",
     description:
       "Every number gets a source, a decision trail, and someone accountable. Your books. Your infrastructure. Your agents.",
     type: "website",

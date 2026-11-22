@@ -56,7 +56,7 @@ const REVIEW_MODES: {
   {
     value: "self_attest_allowed",
     label: "Self-certification allowed",
-    desc: "When no professional is available, the user can review and self-certify their own work — the bypassable gate.",
+    desc: "When no professional is available, the user can review and self-certify their own work (the bypassable gate).",
     icon: PenLine,
   },
   {
@@ -79,14 +79,14 @@ const CHANNELS: {
     key: "esign",
     label: "E-signature",
     helper:
-      "Safe to enable — the client signs their OWN document (no IRS transmission).",
+      "Safe to enable: the client signs their OWN document (no IRS transmission).",
     icon: PenLine,
   },
   {
     key: "efile_irs",
     label: "E-file to the IRS (MeF)",
     helper:
-      "Stays gated on your firm's EFIN enrollment even when enabled — the package is generated, the wire is off until enrollment.",
+      "Stays gated on your firm's EFIN enrollment even when enabled: the package is generated, the wire is off until enrollment.",
     icon: Send,
   },
   {
@@ -388,7 +388,7 @@ export function EngagementClient({
         <Scale size={16} className="mt-0.5 shrink-0 text-brand-400" />
         <div className="min-w-0 text-xs leading-relaxed text-ink-secondary">
           <p className="font-semibold text-ink-primary">
-            These apps are designed to take you all the way — to DO the work of
+            These apps are designed to take you all the way: to DO the work of
             a CPA when one isn&apos;t available.
           </p>
           <p className="mt-1">
@@ -597,7 +597,7 @@ export function EngagementClient({
         {killed ? (
           <p className="mt-3 flex items-center gap-1.5 text-[11px] text-debit">
             <AlertTriangle size={12} />
-            The emergency kill switch is ON — all channels are disabled
+            The emergency kill switch is ON: all channels are disabled
             regardless of the toggles above.
           </p>
         ) : null}

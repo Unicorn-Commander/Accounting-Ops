@@ -308,7 +308,7 @@ export function ClusterReview({
         showToast(`Rejected ${count}`, "reject");
       } else {
         setSessionSkipped((n) => n + count);
-        showToast(`Skipped ${count} — decide later`, "skip");
+        showToast(`Skipped ${count}; decide later`, "skip");
       }
     },
     [data.clusters, showToast]
@@ -479,7 +479,7 @@ export function ClusterReview({
           <p className="flex items-center gap-2 font-medium">
             <Flag size={14} />
             All bulk-approvable items handled. {data.totals.flagged_pending}{" "}
-            flagged item{data.totals.flagged_pending !== 1 ? "s" : ""} remain —
+            flagged item{data.totals.flagged_pending !== 1 ? "s" : ""} remain;
             each needs an individual decision.
           </p>
         </div>
@@ -490,7 +490,7 @@ export function ClusterReview({
         <div className="rounded-2xl border border-default bg-surface px-6 py-16 text-center">
           <CheckCircle2 size={32} className="mx-auto mb-3 text-credit" />
           <p className="text-lg font-medium text-ink-primary">
-            Inbox zero — books are caught up.
+            Inbox zero: books are caught up.
           </p>
           <p className="mt-1 text-sm text-ink-tertiary">
             No pending approvals for this entity right now.

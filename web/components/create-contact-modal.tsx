@@ -30,8 +30,8 @@ type CreateResponse = {
 };
 
 const KINDS: { value: string; label: string }[] = [
-  { value: "customer", label: "Customer — you bill them" },
-  { value: "vendor", label: "Vendor — you pay them" },
+  { value: "customer", label: "Customer (you bill them)" },
+  { value: "vendor", label: "Vendor (you pay them)" },
   { value: "both", label: "Both" }
 ];
 

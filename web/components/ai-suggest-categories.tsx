@@ -61,7 +61,7 @@ export function AiSuggestCategoriesPanel({
   if (!entityId) {
     return (
       <div className="rounded-lg border border-subtle bg-elevated/40 px-4 py-2.5 text-[11px] text-ink-tertiary">
-        AI-suggest categories runs one entity at a time — pick a specific
+        AI-suggest categories runs one entity at a time: pick a specific
         entity (not consolidated) to use it.
       </div>
     );
@@ -127,7 +127,7 @@ export function AiSuggestCategoriesPanel({
 
       <p className="text-[11px] leading-relaxed text-ink-secondary">
         Runs the Tier-2 model over Uncategorized pending rows for this entity
-        and writes a <em>suggestion</em> — it never auto-posts. Every
+        and writes a <em>suggestion</em>; it never auto-posts. Every
         suggestion still needs a human to approve or override it in the
         queue below. Very low-confidence rows may be escalated to a
         separately configured frontier model, if your deployment enables
@@ -183,7 +183,7 @@ export function AiSuggestCategoriesPanel({
             </div>
           )}
           <p className="text-[10px] text-pending">
-            Nothing has been written yet — these are still "Uncategorized" in
+            Nothing has been written yet: these are still "Uncategorized" in
             the queue. Confirm to write them as suggestions (status stays
             pending; still needs approval).
           </p>
@@ -197,7 +197,7 @@ export function AiSuggestCategoriesPanel({
               )}
             >
               {pending ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
-              Confirm — write {preview.suggested} suggestion{preview.suggested === 1 ? "" : "s"}
+              Confirm: write {preview.suggested} suggestion{preview.suggested === 1 ? "" : "s"}
             </button>
             <button
               onClick={() => setPreview(null)}
@@ -213,8 +213,8 @@ export function AiSuggestCategoriesPanel({
       {confirmed && (
         <div className="flex items-center gap-1.5 rounded-md bg-credit/15 px-3 py-2 text-[11px] font-medium text-credit">
           <Check size={12} />
-          Wrote {confirmed.suggested} suggestion{confirmed.suggested === 1 ? "" : "s"} to the queue
-          — still pending human approval below.
+          Wrote {confirmed.suggested} suggestion{confirmed.suggested === 1 ? "" : "s"} to the queue:
+          still pending human approval below.
         </div>
       )}
     </div>

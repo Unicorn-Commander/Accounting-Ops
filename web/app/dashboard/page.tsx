@@ -568,7 +568,7 @@ function EmptyWorkspaceState() {
         </Link>
         <p className="mt-2 max-w-md text-[11px] text-ink-tertiary">
           New here? Once you&apos;re in, you&apos;ll start by connecting your
-          bank or dropping in a few documents — your transactions, reports, and
+          bank or dropping in a few documents. Your transactions, reports, and
           taxes fill in from there. Nothing posts to your books without you.
         </p>
       </div>

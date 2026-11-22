@@ -80,7 +80,7 @@ const SPECIALIST_LABELS: Record<string, string> = {
   "tax-sc1120-specialist": "SC1120 Specialist",
   "tax-officer-comp": "Officer Compensation",
   "tax-nol-schedule-l": "NOL & Schedule L",
-  "tax-audit-defense-scdor": "Audit Defense — SCDOR",
+  "tax-audit-defense-scdor": "Audit Defense: SCDOR",
   "tax-coordinator": "Tax Operations Coordinator",
 };
 
@@ -138,7 +138,7 @@ function detectDraftStamp(markdown: string): {
   }
   return {
     status: "missing",
-    detail: "no DRAFT stamp detected — narrative may need re-running",
+    detail: "no DRAFT stamp detected: narrative may need re-running",
   };
 }
 
@@ -350,7 +350,7 @@ export function NarrativeView({
               title={stamp.detail}
               className="inline-flex items-center gap-1.5 rounded-full border border-debit/40 bg-debit/[0.08] px-2.5 py-0.5 text-[10px] font-medium text-debit"
             >
-              DRAFT stamp missing — narrative may need re-running
+              DRAFT stamp missing: narrative may need re-running
             </span>
           )}
           {markdown && (

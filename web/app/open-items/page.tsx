@@ -93,7 +93,7 @@ export default async function OpenItemsPage({
         ) : !openItems ? (
           <Card>
             <p className="text-sm text-ink-tertiary">
-              Open-items service unavailable. Backend returned no data — try
+              Open-items service unavailable. Backend returned no data; try
               refreshing in a moment.
             </p>
             <p className="mt-2 text-[11px] text-ink-tertiary">

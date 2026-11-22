@@ -184,8 +184,8 @@ export function SpecialtyRulesView({
               >
                 /chat
               </Link>{" "}
-              to draft your first rule — every addition queues for human
-              approval so the audit trail is preserved.
+               to draft your first rule. Every addition queues for human
+               approval so the audit trail is preserved.
             </p>
           ) : null}
         </Card>
@@ -277,9 +277,9 @@ export function SpecialtyRulesView({
           href="/chat"
           className="text-brand-400 underline-offset-2 hover:underline"
         >
-          /chat
+          /chat.
         </Link>{" "}
-        — the Compliance agent drafts a proposal for your review.
+        The Compliance agent drafts a proposal for your review.
         {data ? (
           <span className="ml-auto text-ink-tertiary">
             {total} rule{total === 1 ? "" : "s"} · as of{" "}

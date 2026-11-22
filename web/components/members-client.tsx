@@ -220,7 +220,7 @@ export function MembersClient({
           <div>
             <h2 className="text-sm font-semibold">Active members</h2>
             <p className="text-xs text-ink-tertiary">
-              {workspaceName} — {members.length} member{members.length === 1 ? "" : "s"}
+              {workspaceName} ({members.length} member{members.length === 1 ? "" : "s"})
             </p>
           </div>
           <button
@@ -412,7 +412,7 @@ export function MembersClient({
                 immediately.
               </p>
               <p className="mt-2 text-ink-tertiary">
-                Their decision history and audit trail stay in place — only
+                Their decision history and audit trail stay in place. Only
                 the active membership is removed.
               </p>
             </>
@@ -591,7 +591,7 @@ function InviteModal({
                 (r) => !ELEVATED.includes(r.value) || canOwner
               ).map((r) => (
                 <option key={r.value} value={r.value}>
-                  {r.label} {r.hint ? `— ${r.hint}` : ""}
+                  {r.label}{r.hint ? ` (${r.hint})` : ""}
                 </option>
               ))}
             </select>

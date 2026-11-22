@@ -72,7 +72,7 @@ export default async function TaxesPage(props: {
       <PageShell>
         <SectionHeader
           title="Taxes"
-          subtitle="Multi-year filing status — for CPA review only, not filed returns."
+          subtitle="Multi-year filing status (for CPA review only, not filed returns)."
           action={
             <EntitySelector
               entities={ctx.entities}
@@ -100,7 +100,7 @@ export default async function TaxesPage(props: {
 
         {/* DRAFT disclaimer */}
         <div className="mb-6 rounded-lg border border-pending/40 bg-pending/[0.06] px-4 py-3 text-sm text-pending">
-          <strong>DRAFT — For CPA review only.</strong> This section aggregates
+          <strong>DRAFT: For CPA review only.</strong> This section aggregates
           Form 1120 data from your journal entries. The CPA reviews, adjusts,
           and files. No submission to the IRS or SCDOR happens from this
           platform.
@@ -115,7 +115,7 @@ export default async function TaxesPage(props: {
             </p>
             <p className="mt-1 text-xs leading-relaxed text-ink-tertiary">
               New here? Connect your bank or drop in a few documents to get
-              started — your transactions, reports, and taxes fill in from there.
+              started: your transactions, reports, and taxes fill in from there.
             </p>
             <div className="mt-3 flex flex-wrap gap-2">
               <Link

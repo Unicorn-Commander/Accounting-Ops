@@ -96,7 +96,7 @@ export function EbayStatusCard({
                 <span className="ml-1 text-credit">· sell.finances ✓</span>
               ) : (
                 <span className="ml-1 text-pending">
-                  · sell.finances missing — reconnect required
+                  · sell.finances missing: reconnect required
                 </span>
               )}
             </div>

@@ -341,7 +341,7 @@ export function ConfidenceDot({ value }: { value: number }) {
   const cls =
     value >= 0.9 ? "bg-conf-high" : value >= 0.7 ? "bg-conf-medium" : "bg-conf-low";
   const label =
-    value >= 0.9 ? "Confident" : value >= 0.7 ? "Some uncertainty" : "Low confidence — needs review";
+    value >= 0.9 ? "Confident" : value >= 0.7 ? "Some uncertainty" : "Low confidence: needs review";
   return (
     <span
       className={cn("inline-block h-1.5 w-1.5 rounded-full", cls)}

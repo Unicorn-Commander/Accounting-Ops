@@ -20,7 +20,7 @@ export default async function FormsHubPage() {
         <PageShell>
           <SectionHeader
             title="Tax Forms"
-            subtitle="Prepare any of these forms — filled, ready to review, sign, and file"
+            subtitle="Prepare any of these forms: filled, ready to review, sign, and file"
           />
           <Card>
             <p className="text-sm text-ink-secondary">
@@ -47,7 +47,7 @@ export default async function FormsHubPage() {
       <PageShell>
         <SectionHeader
           title="Tax Forms"
-          subtitle="Prepare any of these forms — filled, ready to review, sign, and file"
+          subtitle="Prepare any of these forms: filled, ready to review, sign, and file"
           action={
             <EntitySelector
               entities={ctx.entities}

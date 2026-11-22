@@ -172,7 +172,7 @@ function ClusterCard({
       <div className="rounded-lg border border-credit/30 bg-credit/[0.04] px-5 py-4">
         <p className="flex items-center gap-2 text-sm text-credit">
           <Check size={14} />
-          {cluster.count} rows approved — ledger updated.
+          {cluster.count} rows approved: ledger updated.
         </p>
       </div>
     );

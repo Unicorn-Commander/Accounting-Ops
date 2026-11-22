@@ -48,7 +48,7 @@ const CPA_FLAGGED: Record<string, string> = {
     "§163(j) interest limitation may apply; CPA must classify.",
   "SaaS · AI": "May qualify as COGS rather than deduction; CPA must split.",
   "Inter-entity transfer":
-    "Management fees vs intercompany loan vs elimination — CPA classifies.",
+    "Management fees vs intercompany loan vs elimination; CPA classifies.",
   "Contractor · 1099-NEC":
     "If payee is an officer, belongs on Form 1125-E not Other deductions."
 };
@@ -524,7 +524,7 @@ export function BankTxnGroupedView({
     return (
       <div className="rounded-lg border border-default bg-surface px-5 py-8 text-center">
         <p className="text-sm text-ink-secondary">
-          Nothing to review — books are caught up.
+          Nothing to review: books are caught up.
         </p>
       </div>
     );

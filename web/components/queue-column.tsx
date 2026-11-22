@@ -153,7 +153,11 @@ export function QueueColumnClient({
         if (body.ok || body.outcome === "blocked_idempotent") {
           okList.push(txn.id);
         } else {
-          failed.push(`${txn.payee ?? txn.description}: ${body.outcome} — ${body.reason ?? ""}`);
+          failed.push(
+            body.reason
+              ? `${txn.payee ?? txn.description}: ${body.outcome} (${body.reason})`
+              : `${txn.payee ?? txn.description}: ${body.outcome}`
+          );
         }
       } catch {
         failed.push(`${txn.payee ?? txn.description}: network error`);

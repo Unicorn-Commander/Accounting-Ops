@@ -33,7 +33,7 @@ export default function DocumentsError({
         This page hit a snag
       </h2>
       <p className="mt-1.5 text-xs leading-relaxed text-ink-tertiary">
-        Your uploaded documents are safe — they&apos;re stored and queued for
+        Your uploaded documents are safe. They&apos;re stored and queued for
         review. Reloading shows the latest.
         {error?.digest ? (
           <span className="mt-2 block font-mono text-[10px] text-ink-disabled">

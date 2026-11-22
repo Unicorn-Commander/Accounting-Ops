@@ -235,7 +235,7 @@ export function ManualEntryForm({
             onChange={(e) => setCategory(e.target.value)}
             className="w-full rounded-md border border-default bg-canvas py-1.5 px-3 text-sm"
           >
-            <option value="">— pick category —</option>
+            <option value="">Pick category…</option>
             {CATEGORY_OPTIONS.map((c) => (
               <option key={c} value={c}>
                 {c}
@@ -284,7 +284,7 @@ export function ManualEntryForm({
         <Field
           id="manual-source-id"
           label="Source ID"
-          hint="Optional — for idempotency. Defaults to manual-{timestamp}."
+          hint="Optional: for idempotency. Defaults to manual-{timestamp}."
         >
           <input
             id="manual-source-id"
@@ -303,7 +303,7 @@ export function ManualEntryForm({
             type="text"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder="e.g. Owner contribution — Q2 cash injection"
+            placeholder="e.g. Owner contribution (Q2 cash injection)"
             className="w-full rounded-md border border-default bg-canvas py-1.5 px-3 text-sm"
           />
         </Field>
@@ -415,7 +415,7 @@ function AccountSelect({
       onChange={(e) => onChange(e.target.value)}
       className="w-full rounded-md border border-default bg-canvas py-1.5 px-3 text-sm font-mono"
     >
-      <option value="">— pick account —</option>
+      <option value="">Pick account…</option>
       {order
         .filter((k) => groups[k])
         .map((k) => (

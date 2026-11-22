@@ -53,7 +53,7 @@ export default async function TaxYearPage(props: {
       <AppShell>
         <PageShell>
           <SectionHeader
-            title={`Taxes — ${year}`}
+            title={`Taxes (${year})`}
             subtitle="No workspace selected"
           />
           <Card>

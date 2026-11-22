@@ -21,7 +21,7 @@ export function LegalDraftBanner() {
         />
         <p className="min-w-0">
           <span className="font-semibold uppercase tracking-wide text-pending print:text-amber-900">
-            Draft — not in force
+            Draft: not in force
           </span>
           <span className="text-ink-tertiary print:text-amber-700"> · </span>
           <span>

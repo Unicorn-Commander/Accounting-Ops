@@ -62,7 +62,7 @@ export function Composer({
           disabled={disabled}
           placeholder={
             placeholder ??
-            "Ask the agent anything — Cmd+Enter to send"
+            "Ask the agent anything (Cmd+Enter to send)"
           }
           className={cn(
             "w-full resize-none rounded-lg border border-default bg-canvas px-4 py-3 pr-32 text-sm",

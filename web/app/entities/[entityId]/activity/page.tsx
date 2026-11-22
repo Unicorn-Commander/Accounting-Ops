@@ -58,7 +58,7 @@ export default async function EntityActivityPage({
     <AppShell>
       <PageShell>
         <SectionHeader
-          title={`AI activity — ${entityName}`}
+          title={`AI activity (${entityName})`}
           subtitle="Chronological feed of every AI agent action against this entity. Click any row for the reasoning trace and (when reversible) the undo button."
         />
         <AIActivityTimeline

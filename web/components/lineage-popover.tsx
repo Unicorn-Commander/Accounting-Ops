@@ -166,7 +166,7 @@ export function LineagePopover({
 
       {target?.metric === "cash" && state.kind === "ready" && (
         <div className="linmore">
-          Posted ledger cash (10xx) — your live bank balance may differ until all activity is posted.
+          Posted ledger cash (10xx): your live bank balance may differ until all activity is posted.
         </div>
       )}
 

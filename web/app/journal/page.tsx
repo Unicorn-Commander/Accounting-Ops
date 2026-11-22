@@ -259,11 +259,11 @@ export default async function JournalPage(props: {
                               href="/documents"
                               className="text-brand-300 underline hover:text-brand-200"
                             >
-                              drop in a few documents
+                              drop in a few documents:
                             </Link>{" "}
-                            — your transactions flow in, get categorized, and land
-                            here once approved. A manual entry is for one-off
-                            adjustments.
+                              your transactions flow in, get categorized, and land
+                             here once approved. A manual entry is for one-off
+                             adjustments.
                           </p>
                         </>
                       ) : (
@@ -372,7 +372,7 @@ export default async function JournalPage(props: {
         <p className="mt-4 flex items-center gap-2 text-[11px] text-ink-tertiary">
           <Shield size={11} />
           Every entry is part of a per-entity SHA-256 hash chain. Mutations create
-          reversing entries — the chain is never rewritten.
+          reversing entries; the chain is never rewritten.
         </p>
       </PageShell>
     </AppShell>

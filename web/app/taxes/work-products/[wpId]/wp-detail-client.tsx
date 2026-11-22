@@ -50,7 +50,7 @@ function StatusPill({ status }: { status: WorkProductStatus }) {
 function statusBlurb(status: WorkProductStatus): string {
   switch (status) {
     case "draft":
-      return "Draft — carries a DRAFT watermark until certified.";
+      return "Draft: carries a DRAFT watermark until certified.";
     case "self_approved":
       return "Self-certified by you.";
     case "pro_reviewed":
@@ -294,7 +294,7 @@ export function WpDetailClient({
           <div className="border-b border-subtle px-4 py-3">
             <h3 className="text-sm font-semibold">What&apos;s on this form</h3>
             <p className="mt-0.5 text-[11px] text-ink-tertiary">
-              Every figure shows where it came from — nothing is fabricated.
+              Every figure shows where it came from: nothing is fabricated.
             </p>
           </div>
           {inputs.length === 0 ? (

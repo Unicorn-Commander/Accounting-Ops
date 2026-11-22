@@ -53,7 +53,7 @@ export default async function PrepareFormPage({
     ctx.isConsolidated || !ctx.activeEntity ? null : ctx.activeEntity.id;
 
   const subtitle = entityId
-    ? `Filling on behalf of ${ctx.activeEntity?.display_name} — creates a draft to review, sign, and file`
+    ? `Filling on behalf of ${ctx.activeEntity?.display_name}: creates a draft to review, sign, and file`
     : "Pick a specific entity to prepare a form on its behalf";
 
   return (
@@ -84,8 +84,8 @@ export default async function PrepareFormPage({
             <p className="text-sm text-ink-secondary">
               A tax form is prepared for a single person or entity. Pick a
               specific entity (use the selector above) to fill out this form on
-              its behalf — the consolidated view can&apos;t hold a single
-              client&apos;s form.
+               its behalf: the consolidated view can&apos;t hold a single
+               client&apos;s form.
             </p>
           </Card>
         )}

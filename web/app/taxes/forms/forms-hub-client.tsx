@@ -238,7 +238,7 @@ export function FormsHubClient({ workspaceId }: FormsHubClientProps) {
             </p>
             <p className="text-xs leading-relaxed text-ink-tertiary">
               {items.length === 0
-                ? "The form catalog is empty for now. Check back shortly — new forms are added regularly."
+                ? "The form catalog is empty for now. Check back shortly: new forms are added regularly."
                 : "Try a different search term or clear the category filter to see everything."}
             </p>
             {items.length > 0 && (query || activeCategory) && (
@@ -362,14 +362,14 @@ function IntroBanner() {
       <Info size={16} className="mt-0.5 shrink-0 text-brand-400" />
       <div className="min-w-0 text-xs leading-relaxed text-ink-secondary">
         <p className="font-semibold text-ink-primary">
-          Every figure is computed or sourced — nothing is filed until you say
+          Every figure is computed or sourced: nothing is filed until you say
           so.
         </p>
         <p className="mt-1">
           <strong>Computed</strong> forms (Form 1040, W-4P) calculate the figures
           with a deterministic engine. <strong>Fill</strong> forms place the
           figures you provide onto the official PDF. Nothing is filed until you
-          choose to — every draft is yours to review, sign, and submit.
+          choose to; every draft is yours to review, sign, and submit.
         </p>
       </div>
     </div>

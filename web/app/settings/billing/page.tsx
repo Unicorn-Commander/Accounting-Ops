@@ -26,7 +26,7 @@ export default async function BillingSettingsPage() {
       <PageShell>
         <SectionHeader
           title="Billing & Credits"
-          subtitle="Turn on the smart AI advisors for this workspace — with Unicorn Commander credits or your own provider key. Free bookkeeping never uses credits."
+          subtitle="Turn on the smart AI advisors for this workspace, with Unicorn Commander credits or your own provider key. Free bookkeeping never uses credits."
         />
 
         {!workspace ? (

@@ -47,7 +47,7 @@ export default async function DocumentsPage() {
         <PageShell>
           <SectionHeader
             title="Documents"
-            subtitle="Drag in receipts, invoices, and statements — we read them and queue them for review."
+            subtitle="Drag in receipts, invoices, and statements. We read them and queue them for review."
           />
           <EmptyState
             variant="permission-denied"
@@ -77,12 +77,12 @@ export default async function DocumentsPage() {
         <PageShell>
           <SectionHeader
             title="Documents"
-            subtitle="Drag in receipts, invoices, and statements — we read them and queue them for review."
+            subtitle="Drag in receipts, invoices, and statements. We read them and queue them for review."
           />
           <EmptyState
             variant="not-connected"
             title="Let's set up your business first"
-            description="Documents are filed under a specific business's books, so you'll create your first one in a quick guided setup. After that, drop in receipts here (the on-prem AI reads them — nothing leaves the server) or connect your bank to pull transactions automatically."
+            description="Documents are filed under a specific business's books, so you'll create your first one in a quick guided setup. After that, drop in receipts here (the on-prem AI reads them; nothing leaves the server) or connect your bank to pull transactions automatically."
             primaryAction={
               <Link
                 href="/setup"
@@ -102,7 +102,7 @@ export default async function DocumentsPage() {
       <PageShell>
         <SectionHeader
           title="Documents"
-          subtitle="Drag in everything — receipts, invoices, PDFs, bank CSVs. We read receipts automatically and queue every document for your review. Nothing posts to your books without you."
+          subtitle="Drag in everything: receipts, invoices, PDFs, bank CSVs. We read receipts automatically and queue every document for your review. Nothing posts to your books without you."
           action={
             <EntitySelector
               entities={ctx.entities}
@@ -115,7 +115,7 @@ export default async function DocumentsPage() {
         {ctx.isConsolidated ? (
           <Card>
             <p className="text-sm text-ink-secondary">
-              Pick a single entity above to upload documents — each document is
+              Pick a single entity above to upload documents. Each document is
               filed under one entity&apos;s books.
             </p>
           </Card>
@@ -153,8 +153,8 @@ export default async function DocumentsPage() {
                   under{" "}
                   <Link href="/taxes/forms" className="text-brand-400 hover:underline">
                     Taxes → Forms
-                  </Link>{" "}
-                  — the finished, downloadable PDF will appear here.
+                   </Link>{" "}
+                   (the finished, downloadable PDF will appear here).
                 </p>
               </Card>
             ) : (
@@ -207,7 +207,7 @@ export default async function DocumentsPage() {
                 variant="no-data"
                 icon={<Inbox size={28} className="text-ink-disabled" />}
                 title="No documents uploaded yet"
-                description="Drag a receipt, invoice, or statement into the box above — the on-prem AI reads the vendor, date, and amount (nothing leaves the server), then queues it here for your approval. Prefer the fast path? Connecting your bank pulls transactions in automatically."
+                description="Drag a receipt, invoice, or statement into the box above. The on-prem AI reads the vendor, date, and amount (nothing leaves the server), then queues it here for your approval. Prefer the fast path? Connecting your bank pulls transactions in automatically."
                 primaryAction={
                   <Link
                     href="/connectors"

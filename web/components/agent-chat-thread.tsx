@@ -87,7 +87,7 @@ export function ChatComposer({
           placeholder={
             compact
               ? "Ask the agents anything…"
-              : "Ask the agents anything — try 'What's my burn this quarter?' or 'Categorize today's Stripe payouts'"
+              : "Ask the agents anything; try 'What's my burn this quarter?' or 'Categorize today's Stripe payouts'"
           }
           className="w-full resize-none rounded-lg border border-default bg-canvas px-4 py-3 pr-24 text-sm placeholder:text-ink-disabled focus:border-brand-500 focus:outline-none"
         />

@@ -50,7 +50,7 @@ const ROUTE_META: Record<
   },
   stale: {
     label: "Last client activity > 30d",
-    subtitle: "Client hasn't fed new data — check in",
+    subtitle: "Client hasn't fed new data; check in",
     tone: "border-subtle bg-elevated text-ink-tertiary",
     icon: ClipboardList,
   },

@@ -42,12 +42,12 @@ export function OnboardingHero({
           </span>
           <div className="min-w-0">
             <h2 className="text-base font-semibold text-ink-primary">
-              Two ways to start — pick either (or both)
+              Two ways to start: pick either (or both)
             </h2>
             <p className="mt-1 text-sm text-ink-secondary">
               Connect your bank and/or drop in your receipts, invoices, and
               statements. We read what we can, propose entries, and queue
-              everything for your review — your transactions, reports, and taxes
+              everything for your review. Your transactions, reports, and taxes
               fill in from there. Nothing posts to your books without you.
             </p>
           </div>
@@ -79,7 +79,7 @@ export function OnboardingHero({
               </h3>
             </div>
             <p className="flex-1 text-xs text-ink-tertiary">
-              The fastest path. Link your bank + cards via SimpleFIN — we pull
+              The fastest path. Link your bank + cards via SimpleFIN; we pull
               balances and transactions read-only and auto-categorize them. The
               first batch goes to your approval queue, never straight to the
               ledger.
@@ -114,7 +114,7 @@ export function OnboardingHero({
         </button>
         {showGuided && (
           <p className="mt-2 rounded-md border border-subtle bg-elevated/50 px-3 py-2 text-xs text-ink-secondary">
-            No problem — the <strong>Setup Assistant</strong> below will walk you
+            No problem: the <strong>Setup Assistant</strong> below will walk you
             through your business profile, entity, tax facts, banking, and chart
             of accounts one question at a time. You can do both: dump documents
             now and chat with the assistant whenever you like.

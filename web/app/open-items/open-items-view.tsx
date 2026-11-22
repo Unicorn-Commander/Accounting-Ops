@@ -640,7 +640,7 @@ function DecisionsSection({
                     </span>
                     {dec.notes ? (
                       <span className="text-[11px] text-ink-secondary">
-                        — {dec.notes}
+                        Note: {dec.notes}
                       </span>
                     ) : null}
                     <button
@@ -787,7 +787,7 @@ function WaitingList({
         ))}
         {rows.length > 12 && (
           <li className="px-5 py-2.5 text-center text-[11px] text-ink-tertiary">
-            +{rows.length - 12} more — open /taxes/&lt;year&gt; for the full list
+            +{rows.length - 12} more; open /taxes/&lt;year&gt; for the full list
           </li>
         )}
       </ul>
@@ -804,7 +804,7 @@ function ResolvedList({ rows }: { rows: ResolvedRow[] }) {
     return (
       <Card>
         <p className="text-sm text-ink-tertiary">
-          No items resolved in the last 7 days yet — your first win is around
+          No items resolved in the last 7 days yet: your first win is around
           the corner.
         </p>
       </Card>
@@ -915,7 +915,7 @@ export function OpenItemsView({
             <PartyPopper size={28} className="text-credit" />
             <div>
               <h2 className="text-base font-semibold text-credit">
-                All clear — nothing on your plate right now.
+                All clear: nothing on your plate right now.
               </h2>
               <p className="mt-1 text-sm text-ink-secondary">
                 No time-sensitive items, no documents pending, no decisions
@@ -961,7 +961,7 @@ export function OpenItemsView({
           title="Decisions awaiting you"
           count={data.counts.decisions_pending}
           tone={data.counts.decisions_pending > 0 ? "brand" : "credit"}
-          subtitle="Each has a recommendation — accept or pick something else."
+          subtitle="Each has a recommendation: accept or pick something else."
         />
         <DecisionsSection
           decisions={data.decisions}
@@ -976,7 +976,7 @@ export function OpenItemsView({
           title="Waiting on the CPA"
           count={data.counts.waiting_on_cpa}
           tone="agent"
-          subtitle="Informational — nothing for you to do, but here's what your CPA sees."
+          subtitle="Informational: nothing for you to do, but here's what your CPA sees."
         />
         <WaitingList
           rows={data.waiting_on_cpa}
@@ -1008,7 +1008,7 @@ export function OpenItemsView({
           title="Resolved this week"
           count={data.counts.resolved_this_week}
           tone="credit"
-          subtitle="Wins from the last 7 days — progress, not just pile-of-work."
+          subtitle="Wins from the last 7 days: progress, not just pile-of-work."
         />
         <ResolvedList rows={data.resolved_this_week} />
       </section>
@@ -1028,7 +1028,7 @@ export function OpenItemsView({
           entityId={entityId}
           emptyMsg={
             aiActivity === null
-              ? "AI activity feed unavailable — backend returned no data."
+              ? "AI activity feed unavailable: backend returned no data."
               : "No AI agent actions yet for the selected scope. Once an agent drafts a memo, posts a JE, or runs a specialist, you'll see it here."
           }
         />
@@ -1041,8 +1041,8 @@ export function OpenItemsView({
           dateStyle: "medium",
           timeStyle: "short"
         })}{" "}
-        — sourced from <code className="text-ink-secondary">tax_review_queue</code> +
-        document checklist. Marking items here writes audit rows; nothing is
+        (sourced from <code className="text-ink-secondary">tax_review_queue</code> +
+        document checklist). Marking items here writes audit rows; nothing is
         filed.
       </p>
     </div>

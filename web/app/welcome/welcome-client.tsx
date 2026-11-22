@@ -35,7 +35,7 @@ export function WelcomeClient({ defaultName = "" }: { defaultName?: string }) {
           className="w-full rounded-md border border-default bg-canvas px-3 py-2 text-sm text-ink-primary focus:border-brand-500 focus:outline-none disabled:opacity-60"
         />
         <p className="mt-2 text-xs text-ink-tertiary">
-          You&apos;ll be the owner — you can rename it or invite people later.
+          You&apos;ll be the owner; you can rename it or invite people later.
         </p>
       </div>
 

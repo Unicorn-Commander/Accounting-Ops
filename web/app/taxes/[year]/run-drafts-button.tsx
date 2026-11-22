@@ -99,7 +99,7 @@ export function RunDraftsButton({
       onLaunched(body.run);
       setOpen(false);
     } catch {
-      setError("Network error — the run was not started.");
+      setError("Network error: the run was not started.");
     } finally {
       setSubmitting(false);
     }

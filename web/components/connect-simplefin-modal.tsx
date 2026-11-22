@@ -97,12 +97,12 @@ export function ConnectSimplefinModal({
                   </p>
                   <p className="mt-1 text-ink-secondary">
                     Your bank connection is encrypted and stored securely in your
-                    workspace — we never log it or keep it in plaintext, and you can
+                    workspace: we never log it or keep it in plaintext, and you can
                     revoke it any time.
                   </p>
                   <p className="mt-2 text-ink-secondary">
                     <strong>Next step:</strong> your transactions flow into the{" "}
-                    <strong>Reconciliation Queue</strong> — review them, assign each
+                    <strong>Reconciliation Queue</strong>: review them, assign each
                     account to an entity, and post them to your books. Nothing hits
                     your ledger until you post it (that&apos;s why you start at zero).
                   </p>
@@ -126,14 +126,14 @@ export function ConnectSimplefinModal({
                 }}
                 className="w-full rounded-md border border-default px-4 py-2 text-sm text-ink-secondary hover:text-ink-primary"
               >
-                Later — just show the dashboard
+                Later, just show the dashboard
               </button>
             </div>
           ) : (
             <div className="space-y-5 px-6 py-5">
               <div className="space-y-3">
                 <Dialog.Description className="text-sm leading-relaxed text-ink-secondary">
-                  Accounting-Ops reads your bank through <strong>SimpleFIN</strong> — a
+                  Accounting-Ops reads your bank through <strong>SimpleFIN</strong>, a
                   privacy-first, <strong>read-only</strong> aggregator. It can never move
                   money, and you can revoke access any time.
                 </Dialog.Description>
@@ -154,7 +154,7 @@ export function ConnectSimplefinModal({
                   </li>
                   <li>
                     <span className="font-medium text-ink-primary">2.</span> It gives you a
-                    one-time <strong>setup token</strong> — a long string of letters and
+                    one-time <strong>setup token</strong>, a long string of letters and
                     numbers.
                   </li>
                   <li>

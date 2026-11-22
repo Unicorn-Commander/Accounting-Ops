@@ -93,8 +93,8 @@ export default async function SetupPage({
   if (!hasEntities) {
     subtitleParts.push(
       fromWelcome
-        ? "Your workspace is ready — let's set up your first business."
-        : "Welcome — let's get your first entity set up."
+        ? "Your workspace is ready: let's set up your first business."
+        : "Welcome: let's get your first entity set up."
     );
   } else if (dbaParam) {
     subtitleParts.push("Add a DBA (no new entity row, just a sub-account label).");

@@ -60,7 +60,7 @@ export function BillingClient({
         body: (
           <>
             {isCommunity
-              ? "This is the self-hosted Community Edition — there's no hosted credit plan."
+              ? "This is the self-hosted Community Edition: there's no hosted credit plan."
               : "Hosted credits aren't reachable right now."}{" "}
             Bring your own provider API key and the smart AI advisors run on it,
             billed by the provider directly.
@@ -85,7 +85,7 @@ export function BillingClient({
           </>
         ) : (
           <>
-            Smart AI is available on this deployment — nothing to buy for{" "}
+            Smart AI is available on this deployment: nothing to buy for{" "}
             <strong>{workspaceName}</strong>.
           </>
         ),
@@ -159,8 +159,8 @@ export function BillingClient({
           Free bookkeeping is never blocked.
         </span>{" "}
         Categorizing transactions, reconciliations, journal entries, and reports
-        run without credits. Only the smart AI advisors — the CFO agent and the
-        tax specialists — draw on credits or your own key.
+        run without credits. Only the smart AI advisors (the CFO agent and the
+        tax specialists) draw on credits or your own key.
       </div>
 
       {/* Ways to pay explainer ------------------------------------------- */}
@@ -178,7 +178,7 @@ export function BillingClient({
                 Unicorn Commander credits
               </p>
               <p className="mt-1 text-xs leading-relaxed text-ink-tertiary">
-                Prepaid credits with a hard spend cap — we handle the provider
+                Prepaid credits with a hard spend cap: we handle the provider
                 billing. {byokOnly ? "Available on the hosted plan." : "Top up any time."}
               </p>
             </div>
@@ -219,7 +219,7 @@ export function BillingClient({
       {!byokOnly && !gateEnabled && (
         <div className="flex items-center gap-2 text-xs text-ink-tertiary">
           <Lock size={11} />
-          Credit metering is disabled on this deployment — smart AI is available
+          Credit metering is disabled on this deployment: smart AI is available
           to every workspace.
         </div>
       )}

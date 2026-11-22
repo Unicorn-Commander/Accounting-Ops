@@ -278,7 +278,7 @@ function CreatedNotice({
     <div className="flex items-start gap-3 rounded-lg border border-credit/30 bg-credit/[0.06] px-4 py-3.5">
       <Check size={16} className="mt-0.5 shrink-0 text-credit" />
       <div className="min-w-0 text-xs leading-relaxed text-credit">
-        <p className="font-semibold">Draft prepared — opening it now…</p>
+        <p className="font-semibold">Draft prepared: opening it now…</p>
         {computed && Object.keys(computed).length > 0 ? (
           <dl className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2">
             {Object.entries(computed).map(([k, v]) => (
@@ -443,7 +443,7 @@ function Compute1040Form({
         <h3 className="text-sm font-semibold text-ink-primary">Income & deductions</h3>
         <p className="mt-1 text-xs text-ink-tertiary">
           Enter the figures from the client&apos;s documents. The engine computes
-          AGI, taxable income, and tax from these — leave anything that does not
+          AGI, taxable income, and tax from these; leave anything that does not
           apply blank.
         </p>
         <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -477,7 +477,7 @@ function DeterministicNote() {
       <ShieldCheck size={16} className="mt-0.5 shrink-0 text-brand-400" />
       <div className="min-w-0 text-xs leading-relaxed text-ink-secondary">
         <p className="font-semibold text-ink-primary">
-          Figures are computed by the deterministic engine — never typed or guessed.
+          Figures are computed by the deterministic engine; never typed or guessed.
         </p>
         <p className="mt-1">
           You enter the source amounts (wages, interest, deductions). The engine
@@ -592,9 +592,9 @@ function ComputeW4pForm({
           </p>
           <p className="mt-1">
             Enter the worksheet inputs below. The engine computes the W-4P
-            withholding figures — the taxpayer signs Step 5 and gives page 1 to
-            their pension payer (this form is <strong>never</strong> filed with the
-            IRS).
+             withholding figures: the taxpayer signs Step 5 and gives page 1 to
+             their pension payer (this form is <strong>never</strong> filed with the
+             IRS).
           </p>
         </div>
       </div>
@@ -795,7 +795,7 @@ function GenericFieldsForm({
           <Field
             label="Tax year"
             htmlFor="gen_tax_year"
-            hint="Optional — the period this form covers."
+            hint="Optional: the period this form covers."
           >
             <input
               id="gen_tax_year"
@@ -810,7 +810,7 @@ function GenericFieldsForm({
           <Field
             label="Document title"
             htmlFor="gen_title"
-            hint="Optional — defaults to the form name and tax year."
+            hint="Optional: defaults to the form name and tax year."
           >
             <input
               id="gen_title"
@@ -862,7 +862,7 @@ function GenericFieldsForm({
               <span className="font-normal text-ink-tertiary">(advanced)</span>
             </h3>
             <p className="mt-1 text-xs text-ink-tertiary">
-              For fields not listed above. Use the exact renderer field key — an
+              For fields not listed above. Use the exact renderer field key: an
               unknown key simply won&apos;t appear on the PDF.
             </p>
           </div>
@@ -1027,7 +1027,7 @@ function AntiFabricationNote() {
           Every figure you enter is recorded as &ldquo;entered by the preparer.&rdquo;
         </p>
         <p className="mt-1">
-          We never invent numbers — <strong>blank fields stay blank</strong> on
+          We never invent numbers: <strong>blank fields stay blank</strong> on
           the form. Each value is stored with its provenance so the draft can be
           reviewed and signed with confidence.
         </p>

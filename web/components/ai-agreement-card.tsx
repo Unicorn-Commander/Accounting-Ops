@@ -22,7 +22,7 @@ import {
 
 // One-line explanation of the metric, surfaced as a subtitle + on-hover title.
 const METRIC_TOOLTIP =
-  "How often you agreed with the AI's call — high = review, low = redo.";
+  "How often you agreed with the AI's call: high = review, low = redo.";
 
 // Tone the headline by how good the agreement is. These are deliberately
 // generous: anything <50% means you're redoing more than half the AI's calls.

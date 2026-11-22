@@ -412,7 +412,7 @@ export function DocumentUploader({
           <p className="text-sm font-semibold text-ink-primary">
             {dragging
               ? "Drop to upload"
-              : "Drag in documents or a whole folder — or click to browse"}
+              : "Drag in documents or a whole folder, or click to browse"}
           </p>
           <p className="mt-1 text-xs text-ink-tertiary">
             Receipts, invoices, PDFs, bank CSVs. We read receipts automatically and
@@ -450,7 +450,7 @@ export function DocumentUploader({
 
       {disabled && (
         <p className="rounded-md border border-pending/40 bg-pending/[0.06] px-3 py-2 text-xs text-pending">
-          Pick an entity first — uploaded documents are filed under a specific
+          Pick an entity first: uploaded documents are filed under a specific
           entity&apos;s books.
         </p>
       )}
@@ -465,10 +465,10 @@ export function DocumentUploader({
                 {doneRows.length === 1
                   ? "1 document added"
                   : `${doneRows.length} documents added`}
-              </span>{" "}
+              </span>
               <span className="text-credit/90">
-                — {successLabel} {doneRows.length === 1 ? "is" : "are"} queued for
-                review.
+                : {successLabel} {doneRows.length === 1 ? "is" : "are"} queued
+                for review.
               </span>
               {dupeRows.length > 0 && (
                 <span className="text-credit/70">
@@ -485,7 +485,7 @@ export function DocumentUploader({
               {errorRows.length > 0 && (
                 <span className="text-pending">
                   {" "}
-                  {errorRows.length} couldn&apos;t be read — see below.
+                  {errorRows.length} couldn&apos;t be read: see below.
                 </span>
               )}
             </p>

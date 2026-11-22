@@ -279,7 +279,7 @@ export function SetupClient({
               </h3>
               <p className="mt-1 text-sm text-ink-secondary">
                 Something went wrong while setting up your workspace. This is
-                usually temporary — try again, and if it keeps happening reach
+                usually temporary: try again, and if it keeps happening reach
                 out from{" "}
                 <a href="/help" className="text-brand-400 hover:underline">
                   /help
@@ -313,7 +313,7 @@ export function SetupClient({
               </p>
               <p className="mt-1 text-sm text-ink-secondary">
                 Setting up a private workspace for your books. The Setup
-                Assistant will walk you through the next few minutes — no
+                Assistant will walk you through the next few minutes: no
                 accounting experience needed.
               </p>
             </div>

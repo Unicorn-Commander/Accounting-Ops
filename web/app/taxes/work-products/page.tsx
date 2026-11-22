@@ -21,7 +21,7 @@ export default async function WorkProductsPage() {
         <PageShell>
           <SectionHeader
             title="Work products"
-            subtitle="Every form you've prepared — review, sign, and file"
+            subtitle="Every form you've prepared: review, sign, and file"
           />
           <Card>
             <p className="text-sm text-ink-secondary">
@@ -54,7 +54,7 @@ export default async function WorkProductsPage() {
       <PageShell>
         <SectionHeader
           title="Work products"
-          subtitle="Every form you've prepared — review, sign, and file"
+          subtitle="Every form you've prepared: review, sign, and file"
           action={
             <>
               <Link
@@ -85,9 +85,9 @@ export default async function WorkProductsPage() {
           <Card>
             <p className="text-sm text-ink-secondary">
               Work products are prepared for a single person or entity. Pick a
-              specific entity (use the selector above) to see its prepared forms
-              — the consolidated view can&apos;t hold a single client&apos;s
-              work products.
+              specific entity (use the selector above) to see its prepared forms:
+              the consolidated view can&apos;t hold a single client&apos;s work
+              products.
             </p>
           </Card>
         )}

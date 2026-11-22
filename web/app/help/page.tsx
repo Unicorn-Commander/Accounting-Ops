@@ -64,7 +64,7 @@ export default async function HelpPage() {
                 <div className="min-w-0">
                   <h2 className="text-sm font-semibold text-ink-primary">Ask the Guide</h2>
                   <p className="text-xs text-ink-tertiary">
-                    A real agent that knows how Accounting-Ops works — ask it
+                    A real agent that knows how Accounting-Ops works: ask it
                     anything, like &ldquo;how do I&hellip;?&rdquo;
                   </p>
                 </div>
@@ -80,7 +80,7 @@ export default async function HelpPage() {
                   emptyTitle="How can I help you use Accounting-Ops?"
                   emptyHint="I can show you where things are, walk you through a workflow, or explain what a screen means. Try one of these:"
                   suggestedPrompts={GUIDE_PROMPTS}
-                  footnote="The Guide is read-only — it explains how to use Accounting-Ops and never changes your books."
+                  footnote="The Guide is read-only: it explains how to use Accounting-Ops and never changes your books."
                   className="h-full"
                 />
               </div>
@@ -151,7 +151,7 @@ export default async function HelpPage() {
           <Card>
             <h3 className="mb-2 text-sm font-semibold">Daily 5-minute review</h3>
             <ol className="ml-4 list-decimal space-y-1.5 text-sm text-ink-secondary">
-              <li>Open <Link href="/dashboard" className="text-brand-400 hover:underline">/dashboard</Link> — eyeball YTD numbers + recent activity</li>
+              <li>Open <Link href="/dashboard" className="text-brand-400 hover:underline">/dashboard</Link> and eyeball YTD numbers + recent activity</li>
               <li>Open <Link href="/reconciliation-queue" className="text-brand-400 hover:underline">/reconciliation-queue</Link></li>
               <li>Skim Auto-categorized → click Post on anything you recognize</li>
               <li>Needs Review → read each, Confirm or Reject</li>
@@ -176,7 +176,7 @@ export default async function HelpPage() {
               <li>Post all manual adjustments (depreciation, accruals) via <Link href="/journal/new" className="text-brand-400 hover:underline">/journal/new</Link></li>
               <li><Link href="/reports" className="text-brand-400 hover:underline">/reports</Link> → full-year P&L + as-of Dec 31 Balance Sheet</li>
               <li><Link href="/cpa-export" className="text-brand-400 hover:underline">/cpa-export</Link> → IIF + CSV + PDFs per entity</li>
-              <li>Verify chain on every entity — screenshot the green badges</li>
+              <li>Verify chain on every entity and screenshot the green badges</li>
               <li>Email the bundle to your CPA. They import IIF directly into QuickBooks Desktop.</li>
             </ol>
           </Card>
@@ -205,7 +205,7 @@ export default async function HelpPage() {
                 <h3 className="text-sm font-semibold">Append-only journal with hash chain</h3>
                 <p className="mt-1 text-sm text-ink-secondary">
                   Every posted entry is part of a per-entity SHA-256 hash chain. Reversals create
-                  <em> new</em> entries — we never overwrite. The DB enforces uniqueness on
+                  <em> new</em> entries; we never overwrite. The DB enforces uniqueness on
                   (entity_id, this_hash) so concurrent posts can't fork the chain. Anyone can
                   click "verify chain" on /journal to walk the entire history and confirm
                   integrity.
@@ -223,9 +223,9 @@ export default async function HelpPage() {
                   Three tiers at posting time:
                 </p>
                 <ul className="mt-2 ml-4 list-disc space-y-1 text-sm text-ink-secondary">
-                  <li><StatusChip tone="credit">L</StatusChip> &lt; $75 — auto-post when category is trusted + entity mapped + sign matches</li>
-                  <li><StatusChip tone="pending">M</StatusChip> $75 – $1,000 — queue for human Confirm</li>
-                  <li><StatusChip tone="ink">H</StatusChip> &gt; $1,000 — hard block, requires explicit Confirm</li>
+                  <li><StatusChip tone="credit">L</StatusChip> &lt; $75: auto-post when category is trusted + entity mapped + sign matches</li>
+                  <li><StatusChip tone="pending">M</StatusChip> $75 – $1,000: queue for human Confirm</li>
+                  <li><StatusChip tone="ink">H</StatusChip> &gt; $1,000: hard block, requires explicit Confirm</li>
                 </ul>
                 <p className="mt-2 text-sm text-ink-secondary">
                   IRS §274(d) override: travel/meals always block without a matching receipt,
@@ -260,7 +260,7 @@ export default async function HelpPage() {
                   When a vendor rule expects revenue (e.g. "stripe") but the transaction is
                   negative (or vice versa), the categorization gets flagged
                   <code className="font-mono"> sign_matched=false</code>. The materiality gate
-                  refuses to auto-post these even at tier L — they always go to the queue.
+                  refuses to auto-post these even at tier L: they always go to the queue.
                   Usually means either a refund or that the rule needs an override.
                 </p>
               </div>

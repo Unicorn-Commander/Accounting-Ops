@@ -407,7 +407,7 @@ function CategoryPill({
     return (
       <span
         className="inline-flex items-center rounded-full bg-pending/15 px-2 py-0.5 text-[10px] font-medium text-pending"
-        title="Suggested — needs human review"
+        title="Suggested: needs human review"
       >
         {category}
       </span>

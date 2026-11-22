@@ -350,9 +350,9 @@ export function BankTxnBatchPanel({
           onChange={(v) => { setFilterTier(v); setPage(0); }}
           options={[
             { value: "all", label: "All tiers" },
-            { value: "L", label: "L — Low" },
-            { value: "M", label: "M — Medium" },
-            { value: "H", label: "H — High" }
+            { value: "L", label: "L: Low" },
+            { value: "M", label: "M: Medium" },
+            { value: "H", label: "H: High" }
           ]}
         />
         <FilterSelect
@@ -408,7 +408,7 @@ export function BankTxnBatchPanel({
                 ? "bg-brand-500/15 text-brand-300"
                 : "bg-surface text-ink-secondary hover:bg-elevated"
             )}
-            title="Group by suggested category — bulk approve a whole category"
+            title="Group by suggested category: bulk approve a whole category"
           >
             <Layers size={12} />
             Grouped
@@ -520,7 +520,7 @@ export function BankTxnBatchPanel({
       ) : filteredApprovals.length === 0 ? (
         <div className="rounded-lg border border-default bg-surface px-5 py-8 text-center">
           <p className="text-sm text-ink-secondary">
-            Nothing to review — books are caught up.
+            Nothing to review: books are caught up.
           </p>
         </div>
       ) : (

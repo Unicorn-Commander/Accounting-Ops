@@ -341,8 +341,8 @@ export function W4pClient({
               No W-4P prepared yet
             </p>
             <p className="text-xs leading-relaxed text-ink-tertiary">
-              The Personal 1040 Specialist can fill out a Form W-4P for you —
-              ask for it in Chat (e.g. &ldquo;prepare my W-4P pension
+              The Personal 1040 Specialist can fill out a Form W-4P for you.
+              Ask for it in Chat (e.g. &ldquo;prepare my W-4P pension
               withholding&rdquo;). Once it&apos;s ready it will show up here to
               review, self-certify, and download.
             </p>
@@ -422,7 +422,7 @@ export function W4pClient({
                   </h3>
                   <p className="mt-0.5 text-[11px] text-ink-tertiary">
                     {selected.status === "draft"
-                      ? "Draft — carries a DRAFT watermark until certified."
+                      ? "Draft: carries a DRAFT watermark until certified."
                       : selected.status === "self_approved"
                         ? "Self-certified by you."
                         : selected.status === "pro_reviewed"
@@ -470,7 +470,7 @@ export function W4pClient({
                     <p className="mt-1 text-xs leading-relaxed text-ink-secondary">
                       No licensed professional is required for your workspace,
                       so you can certify this form yourself. Certifying removes
-                      the DRAFT watermark — it does <strong>not</strong> file
+                      the DRAFT watermark; it does <strong>not</strong> file
                       anything. You still need to sign page 1 and give it to your
                       pension payer.
                     </p>
@@ -522,7 +522,7 @@ export function W4pClient({
                 <Check size={14} className="mt-0.5 shrink-0 text-credit" />
                 <p className="text-[11px] leading-relaxed text-credit">
                   {selected.status === "self_approved"
-                    ? "You self-certified this W-4P — the DRAFT watermark is removed. Print page 1, sign Step 5, and give it to your pension payer."
+                    ? "You self-certified this W-4P: the DRAFT watermark is removed. Print page 1, sign Step 5, and give it to your pension payer."
                     : "This W-4P has been reviewed. Print page 1, sign Step 5, and give it to your pension payer."}
                 </p>
               </div>
@@ -556,7 +556,7 @@ function LastMileGuidance() {
       <Info size={16} className="mt-0.5 shrink-0 text-brand-400" />
       <div className="min-w-0 text-xs leading-relaxed text-ink-secondary">
         <p className="font-semibold text-ink-primary">
-          This form goes to your pension payer — never to the IRS.
+          This form goes to your pension payer, never to the IRS.
         </p>
         <p className="mt-1">
           Review every line, enter your Social Security number, then{" "}

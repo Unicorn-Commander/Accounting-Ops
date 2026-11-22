@@ -43,14 +43,14 @@ const ONBOARDING_STEPS: {
     Icon: Landmark,
     href: "/connectors",
     title: "Connect your bank",
-    desc: "The fastest way to live books — every transaction flows in and gets categorized for you.",
+    desc: "The fastest way to live books: every transaction flows in and gets categorized for you.",
     cta: "Connect"
   },
   {
     Icon: Upload,
     href: "/documents",
     title: "Or drop in receipts & statements",
-    desc: "Drag files in and the on-prem AI reads the vendor, date, and amount — nothing leaves your server.",
+    desc: "Drag files in and the on-prem AI reads the vendor, date, and amount; nothing leaves your server.",
     cta: "Upload"
   },
   {
@@ -160,7 +160,7 @@ export function CfoBriefCard({ brief }: { brief: CfoBriefResponse }) {
         <div className="lg:col-span-2 lg:border-r lg:border-subtle/70">
           <div className="flex items-center justify-between px-5 pb-2 pt-4 md:px-6">
             <p className="text-[10px] font-medium uppercase tracking-wider text-ink-tertiary">
-              {brief.onboarding ? "Get started — a couple of quick steps" : "What needs you now"}
+              {brief.onboarding ? "Get started: a couple of quick steps" : "What needs you now"}
             </p>
             {!allClear && !brief.onboarding ? (
               <Link

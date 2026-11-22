@@ -141,7 +141,7 @@ export function InvoiceActions({
 
       {status === "paid" && (
         <p className="rounded-md border border-credit/30 bg-credit/[0.06] px-3 py-2 text-xs text-credit">
-          Fully paid — balance is zero.
+          Fully paid: balance is zero.
         </p>
       )}
       {status === "void" && (

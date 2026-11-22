@@ -205,7 +205,7 @@ export function InvoiceCreateForm({
             className="w-full rounded-md border border-default bg-canvas py-1.5 px-3 text-sm"
           />
         </Field>
-        <Field label="Customer email" hint="Optional — shown on the invoice.">
+        <Field label="Customer email" hint="Optional: shown on the invoice.">
           <input
             type="email"
             value={customerEmail}

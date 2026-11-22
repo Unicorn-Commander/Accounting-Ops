@@ -273,7 +273,7 @@ function ChallengeDialog({
   const submit = async () => {
     const r = reason.trim();
     if (!r) {
-      setError("Add a reason — 1-3 sentences is fine.");
+      setError("Add a reason: 1-3 sentences is fine.");
       return;
     }
     setSubmitting(true);
@@ -614,7 +614,7 @@ function TimelineRow({
                       ? "yes"
                       : row.reverse_kind
                         ? "window expired"
-                        : "no — challenge only"}
+                        : "no (challenge only)"}
                   </span>
                 </div>
                 <div className="col-span-full">
@@ -684,7 +684,7 @@ function TimelineRow({
                 Challenge filed
                 {localStatus.memoId ? (
                   <>
-                    {" — "}
+                    {": "}
                     <Link
                       href={`/taxes/${row.target.tax_year ?? ""}`}
                       className="underline-offset-2 hover:underline"
@@ -944,7 +944,7 @@ export function AIActivityTimeline({
       {filters.live ? (
         <div className="flex items-center gap-2 border-b border-subtle bg-agent-500/[0.05] px-3 py-1.5 text-[10px] text-agent-500">
           <Radio size={11} className="animate-pulse-soft" />
-          Live — polling every 5s
+          Live (polling every 5s)
           <span className="ml-auto text-ink-tertiary">
             {busy ? "fetching…" : `last update ${relativeTime(new Date(lastTickRef.current).toISOString())}`}
           </span>

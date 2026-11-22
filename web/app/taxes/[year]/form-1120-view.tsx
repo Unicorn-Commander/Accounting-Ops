@@ -633,7 +633,7 @@ async function downloadPdf(
   // Title block
   doc.setFontSize(14);
   doc.setFont("helvetica", "bold");
-  doc.text("Form 1120 — U.S. Corporation Income Tax Return", 14, 18);
+  doc.text("Form 1120: U.S. Corporation Income Tax Return", 14, 18);
   doc.setFontSize(9);
   doc.setFont("helvetica", "normal");
   doc.text(
@@ -648,7 +648,7 @@ async function downloadPdf(
   doc.setTextColor(80, 50, 0);
   doc.setFontSize(8);
   doc.setFont("helvetica", "bold");
-  doc.text("DRAFT — FOR CPA REVIEW ONLY. NOT A FILED RETURN.", pageWidth / 2, 37, {
+  doc.text("DRAFT: FOR CPA REVIEW ONLY. NOT A FILED RETURN.", pageWidth / 2, 37, {
     align: "center"
   });
   doc.setTextColor(0, 0, 0);
@@ -710,7 +710,7 @@ async function downloadPdf(
   // Taxable income
   doc.setFont("helvetica", "bold");
   doc.text(
-    `Line 28 — Taxable Income Before NOL: ${dollarsStr(pkg.taxable_income_before_nol_cents)}`,
+    `Line 28: Taxable Income Before NOL: ${dollarsStr(pkg.taxable_income_before_nol_cents)}`,
     14,
     startY
   );
@@ -723,7 +723,7 @@ async function downloadPdf(
   }
 
   doc.setFont("helvetica", "bold");
-  doc.text("SCHEDULE L — BALANCE SHEET (approximate from journal entries)", 14, startY);
+  doc.text("SCHEDULE L: BALANCE SHEET (approximate from journal entries)", 14, startY);
   startY += 2;
 
   autoTable(doc, {
@@ -908,7 +908,7 @@ export function Form1120View({
     <div className="space-y-6 print:space-y-4">
       {/* Draft disclaimer banner */}
       <div className="rounded-lg border border-pending/50 bg-pending/[0.07] px-4 py-3 text-sm font-semibold text-pending print:rounded-none print:border-black print:bg-yellow-50 print:text-black">
-        DRAFT — For CPA review only. Not a filed return.
+        DRAFT: For CPA review only. Not a filed return.
       </div>
 
       {/* Disclaimer fine print */}
@@ -1099,7 +1099,7 @@ export function Form1120View({
           <table className="w-full text-sm">
             <tbody>
               <SectionHeadRow
-                label="Schedule L — Balance Sheet per Books (approximate)"
+                label="Schedule L: Balance Sheet per Books (approximate)"
                 color="ink"
               />
 
@@ -1161,7 +1161,7 @@ export function Form1120View({
       {/* CPA review categories reference */}
       <Card>
         <h3 className="text-xs font-semibold uppercase tracking-wider text-pending mb-3">
-          CPA Review Required — 4 Category Flags
+          CPA Review Required: 4 Category Flags
         </h3>
         <div className="space-y-3">
           {Object.entries(CPA_REVIEW_CATEGORIES).map(([cat, note]) => (

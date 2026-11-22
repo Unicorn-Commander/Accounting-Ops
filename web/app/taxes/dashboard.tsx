@@ -111,7 +111,7 @@ function SpecialistModal({ entity, targetYear, onClose }: SpecialistModalProps) 
         </button>
 
         <h2 className="text-base font-semibold">
-          Run specialists — {entity.display_name} {targetYear}
+          Run specialists: {entity.display_name} {targetYear}
         </h2>
         <p className="mt-1 text-sm text-ink-secondary">
           Brigade agent dispatch is future work. For now, run the 1120 Preparer
@@ -168,7 +168,7 @@ function YearTile({ year, entityId }: YearTileProps) {
         colors.border,
         colors.bg
       )}
-      title={`${year.tax_year} — ${colors.label}`}
+      title={`${year.tax_year} (${colors.label})`}
     >
       <div className="flex items-center justify-between gap-1">
         <span className="font-mono text-xs font-semibold">{year.tax_year}</span>
@@ -334,7 +334,7 @@ function OverdueBanner({
                     href={`/taxes/${year.tax_year}?entity_id=${entity.entity_id}`}
                     className="font-medium underline-offset-2 hover:underline"
                   >
-                    {entity.display_name} — {year.tax_year}
+                    {entity.display_name} · {year.tax_year}
                   </Link>
                   {ann && (
                     <span className="ml-2 text-[11px] text-debit/70">
@@ -448,7 +448,7 @@ export function TaxDashboard({
               >
                 drop in a few documents
               </Link>{" "}
-              to get started — your transactions, reports, and taxes fill in from
+              to get started: your transactions, reports, and taxes fill in from
               there.
             </p>
           </Card>
@@ -489,7 +489,7 @@ export function TaxDashboard({
       </div>
 
       <p className="mt-3 text-[11px] text-ink-tertiary">
-        as of {taxStatus.as_of} — data from posted journal entries only. CPA
+        as of {taxStatus.as_of}: data from posted journal entries only. CPA
         must review all lines before filing.
       </p>
 

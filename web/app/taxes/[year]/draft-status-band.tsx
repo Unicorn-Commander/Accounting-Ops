@@ -85,7 +85,7 @@ export function DraftStatusBand({
           />
           <div className="min-w-0">
             <p className="text-sm font-bold uppercase tracking-wide text-pending print:text-amber-900">
-              Draft — not filed — CPA sign-off required
+              Draft: not filed, CPA sign-off required
             </p>
             <p className="mt-0.5 text-[11px] text-ink-secondary print:text-amber-800">
               {year} narrative draft. Nothing here has been submitted to the

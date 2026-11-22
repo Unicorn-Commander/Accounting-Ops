@@ -172,7 +172,7 @@ export function QueueRowActions({
           onChange={(e) => setRejectCategory(e.target.value)}
           className="rounded border border-default bg-canvas px-2 py-1 text-[11px]"
         >
-          <option value="">— pick category —</option>
+          <option value="">Pick a category…</option>
           {CATEGORY_OPTIONS.map((c) => (
             <option key={c} value={c}>
               {c}
