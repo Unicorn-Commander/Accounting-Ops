@@ -658,7 +658,7 @@ async def authenticate_token(token: str) -> AuthContext:
         if exists is False:
             _log.error(
                 "[acctops.auth] service_token_identity_orphaned: agent_id=%r "
-                "uc_uid=%r matches no public.user_account row — the "
+                "uc_uid=%r matches no public.user_account row - the "
                 "ACCTOPS_SERVICE_TOKENS mapping is stale (identity re-keyed "
                 "by the verified-email bind?) or the user was never "
                 "provisioned. Re-register the token with the identity's "
@@ -672,7 +672,7 @@ async def authenticate_token(token: str) -> AuthContext:
                     "Service token identity is orphaned: its configured "
                     "uc_uid matches no user account. The token's mapping is "
                     "stale (identity re-keyed) or the user was never "
-                    "provisioned — re-register the token with the current "
+                    "provisioned - re-register the token with the current "
                     "uc_uid."
                 ),
             )
