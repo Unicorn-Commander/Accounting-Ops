@@ -186,7 +186,7 @@ export function DashboardV2({
                 </h3>
               </div>
               <p className="text-[12px] text-[var(--ink-3)] leading-relaxed mt-1">
-                Your CFO brief appears here once your books have activity —
+                Your CFO brief appears here once your books have activity:
                 priorities, filings, and decisions the agents surface for you.
               </p>
             </div>

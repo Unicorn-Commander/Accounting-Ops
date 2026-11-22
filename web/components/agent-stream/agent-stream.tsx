@@ -93,7 +93,7 @@ export function AgentStream({
             <Sparkles size={22} className="text-[var(--agent-500)]" style={{ opacity: 0.6, marginBottom: 8 }} />
             <div style={{ fontWeight: 500, color: "var(--ink-2)" }}>No agent activity yet</div>
             <div style={{ marginTop: 4 }}>
-              Connect a bank or drop in documents — as your agents categorize,
+              Connect a bank or drop in documents. As your agents categorize,
               reconcile, and flag, their decisions stream in here.
             </div>
           </div>
