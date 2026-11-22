@@ -127,7 +127,7 @@ async def _list_items(
     if tax_year:
         params["tax_year"] = tax_year
     if status_filter:
-        params["status_filter"] = status_filter
+        params["status"] = status_filter
     if item_type:
         params["item_type"] = item_type
 
@@ -433,15 +433,61 @@ async def test_double_resolve_conflict(
 
 
 @pytest.mark.asyncio
-async def test_cross_workspace_list_denied(seeded_workspace: StackConfig) -> None:
-    """A caller with no membership in workspace B cannot list its items (403)."""
-    base, token = seeded_workspace.base_url, seeded_workspace.token
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(base_url=base, headers=headers, timeout=30) as c:
-        r = await c.get(
-            f"/api/workspaces/{TEST_WORKSPACE_B_ID}/tax-review-queue",
-        )
-    assert r.status_code in (401, 403), r.text
+async def test_cross_workspace_list_denied(
+    db: asyncpg.Pool, seeded_workspace: StackConfig
+) -> None:
+    """A caller with no membership in workspace B cannot list its items (403).
+
+    The H2 service-token tests (test_h2_service_token_scope.py) require the
+    service user to hold an active membership in workspace B so the workspace
+    allow-list gate can be exercised independently of membership resolution.
+    Here we temporarily remove that membership (restoring it on teardown) so
+    the cross-tenant 403 is proven on the membership path.
+    """
+    from tests.conftest import TEST_WORKSPACE_B_ID, TEST_WORKSPACE_ID
+    from tests.integration.conftest import _set_membership
+
+    prev_role, prev_scope = await _set_membership(
+        db, seeded_workspace.uc_uid, "owner", None
+    )
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                DELETE FROM public.workspace_membership m
+                USING public.user_account u
+                WHERE u.id = m.user_id AND u.uc_uid = $1
+                  AND m.workspace_id = $2
+                """,
+                seeded_workspace.uc_uid,
+                str(TEST_WORKSPACE_B_ID),
+            )
+    try:
+        base, token = seeded_workspace.base_url, seeded_workspace.token
+        headers = {"Authorization": f"Bearer {token}"}
+        async with httpx.AsyncClient(base_url=base, headers=headers, timeout=30) as c:
+            r = await c.get(
+                f"/api/workspaces/{TEST_WORKSPACE_B_ID}/tax-review-queue",
+            )
+        assert r.status_code in (401, 403), r.text
+    finally:
+        async with db.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO public.workspace_membership
+                        (id, workspace_id, user_id, role, status, created_at)
+                    SELECT gen_random_uuid(), $1, u.id,
+                           CAST($2 AS public.workspace_role), 'active', now()
+                    FROM public.user_account u
+                    WHERE u.uc_uid = $3
+                    ON CONFLICT (workspace_id, user_id)
+                    DO UPDATE SET role = EXCLUDED.role, status = 'active'
+                    """,
+                    str(TEST_WORKSPACE_B_ID),
+                    prev_role,
+                    seeded_workspace.uc_uid,
+                )
 
 
 # ---------------------------------------------------------------------------
