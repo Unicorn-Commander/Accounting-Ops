@@ -219,6 +219,33 @@ jobs:
         # follow-up batch item (first failing assertion per file goes in the
         # PR body for task 1f30b1d4).
         #
+        # Further pre-existing failures (PR #96 CI, 873290e7: 7 failed, 216
+        # passed, 70 deselected): all written before the approval materiality
+        # tiers, and all post a tier-M/H entry as the integration SERVICE
+        # token asserting user_confirmed — app/api/journal.py forces
+        # user_confirmed to False for non-interactive (machine) principals, so
+        # the gate now queues/blocks where the tests expect 'posted'. These are
+        # the batch items; their exact test node ids are deselected below (not
+        # whole files, so their passing tests keep running):
+        #   test_approvals.py x4 (queued_for_confirm, "Amount in M tier
+        #     ($75.00 - $1,000.00); awaits human confirm."):
+        #     test_reject_material_recat_leaves_ledger_untouched,
+        #     test_decide_denied_below_accountant_floor,
+        #     test_decide_denied_out_of_scope_entity,
+        #     test_approve_bank_transaction_import_posts_journal_entry
+        #     (approve of a seeded tier-M bank_transaction_import re-runs the
+        #     materiality gate; its reject sibling passes — reject needs no post)
+        #   test_e2e_pipeline.py::test_full_pipeline (line 112: tier-M revenue
+        #     with user_confirmed -> queued_for_confirm, not 'posted')
+        #   test_get_1099_payees_delegation.py::test_get_1099_payees_nets_
+        #     refunds_like_form_1099_nec (line 72: $1,000 entry ->
+        #     'blocked_materiality', "Amount >= $1,000.00 requires explicit
+        #     human confirmation")
+        #   test_safety_invariants.py::test_high_value_entry_with_confirm_and_
+        #     memo_posts (line 186: tier-H entry with user_confirmed ->
+        #     queued_for_confirm, not 'posted'; the no-confirm sibling that
+        #     expects blocked_materiality still passes)
+        #
         # Runs INSIDE the app container (scripts/integration_env.py test),
         # not out here. Running pytest inside `app` reaches Postgres at its
         # service name and itself at 127.0.0.1 — the same one-network path
@@ -234,19 +261,95 @@ jobs:
             --deselect tests/integration/test_document_upload.py \
             --deselect tests/integration/test_approval_recommendations.py \
             --deselect tests/integration/test_tax_review_queue.py \
+            --deselect tests/integration/test_approvals.py::test_reject_material_recat_leaves_ledger_untouched \
+            --deselect tests/integration/test_approvals.py::test_decide_denied_below_accountant_floor \
+            --deselect tests/integration/test_approvals.py::test_decide_denied_out_of_scope_entity \
+            --deselect tests/integration/test_approvals.py::test_approve_bank_transaction_import_posts_journal_entry \
+            --deselect tests/integration/test_e2e_pipeline.py::test_full_pipeline \
+            --deselect tests/integration/test_get_1099_payees_delegation.py::test_get_1099_payees_nets_refunds_like_form_1099_nec \
+            --deselect tests/integration/test_safety_invariants.py::test_high_value_entry_with_confirm_and_memo_posts \
             -v -rs --junitxml=itest-results.xml
           # A skipped module passes green. This suite skips itself when the stack
           # or the runtime role is missing, which is exactly how CI ran 0 RLS
           # tests for months. Fail unless the suite ran at all, every executed
           # test passed, and nothing was silently skipped.
+          #
+          # The total floor alone would let a whole file collect 0 tests (or be
+          # dropped from the selection) and still pass, so the per-file minimums
+          # are kept in addition: the original floors for the six explicitly
+          # listed files (test_db_rls_roles >= 16, test_provisioning_contract_pg
+          # >= 40, the stripe family counted by classname >= 23,
+          # test_stripe_blocked_resolve_pg >= 17, test_ebay_sync_postgres >= 1)
+          # plus one per every file the directory-wide selection newly includes.
+          # Any file at 0 testcases fails the job.
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
           root = ET.parse("itest-results.xml").getroot()
-          suite = root if root.tag == "testsuite" else root.find("testsuite")
-          tests, skipped = int(suite.get("tests")), int(suite.get("skipped"))
-          failures, errors = int(suite.get("failures")), int(suite.get("errors"))
-          print(f"integration gate: tests={tests} skipped={skipped} failures={failures} errors={errors}")
-          assert tests >= 100 and skipped == 0 and failures == 0 and errors == 0, "integration directory did not all execute and pass"
+          # Count across the WHOLE tree: pytest writes one <testsuite> per file
+          # under a <testsuites> root, so the per-file `tests` attributes sum
+          # to the real total; a single-suite XML keeps the same numbers.
+          suites = [root] + list(root.iter("testsuite"))
+          tests = sum(int(s.get("tests", 0)) for s in suites)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          failures = sum(int(s.get("failures", 0)) for s in suites)
+          errors = sum(int(s.get("errors", 0)) for s in suites)
+          cases = root.findall(".//testcase")
+          byfile = {}
+          for case in cases:
+              # The junit classname IS the module (tests.integration.<module>);
+              # the test name is in the separate name attribute. Key per file
+              # directly on the classname so a whole file at 0 testcases shows.
+              cls = case.get("classname") or ""
+              byfile[cls] = byfile.get(cls, 0) + 1
+          stripe = [c for c in cases if "test_stripe_" in (c.get("classname") or "")]
+          # Minimum testcases per module, keyed by the junit classname root
+          # (tests.integration.<module>). The 7 pre-existing-failure files are
+          # --deselected at file level (0 testcases is correct there); the 7
+          # pre-existing materiality-tier failures are deselected per test, so
+          # their files keep running with their other tests and stay >= 1.
+          # test_e2e_pipeline and test_get_1099_payees_delegation are NOT here:
+          # their only test is a pre-existing materiality-tier failure, deselected
+          # per test above, so each collects 0 testcases in this run. Requiring >= 1
+          # would wrongly fail the job. Every other newly-included file keeps >= 1.
+          minimums = {
+              # Original six: the old per-file floors (review round 2).
+              "tests.integration.test_db_rls_roles": 16,
+              "tests.integration.test_provisioning_contract_pg": 40,
+              # Newly included: >= 1 testcase each.
+              "tests.integration.test_add_client": 1,
+              "tests.integration.test_approvals": 1,
+              "tests.integration.test_ar_payment_concurrency_pg": 1,
+              "tests.integration.test_ebay_sync_postgres": 1,
+              "tests.integration.test_handoff_package_zip": 1,
+              "tests.integration.test_invoice_pay_token_rls": 1,
+              "tests.integration.test_mcp_tools": 1,
+              "tests.integration.test_mcp_write_tools": 1,
+              "tests.integration.test_onboarding_provision": 1,
+              "tests.integration.test_quotes_seam_rls": 1,
+              "tests.integration.test_safety_invariants": 1,
+              "tests.integration.test_specialist_runs_api": 1,
+              "tests.integration.test_stripe_approval_postgres": 1,
+              "tests.integration.test_stripe_blocked_resolve_pg": 17,
+              "tests.integration.test_stripe_sync_postgres": 2,
+              "tests.integration.test_tax_mcp_tools": 1,
+              "tests.integration.test_tenant_isolation": 1,
+          }
+          details = [
+              f"{mod}={byfile.get(mod, 0)}/{minimums[mod]}"
+              for mod in sorted(minimums)
+          ]
+          print(f"integration gate: testcases={len(cases)} skipped={skipped} failures={failures} errors={errors} stripe={len(stripe)}")
+          print("per-file floors: " + " ".join(details))
+          # Total floor (per-file `tests` attrs summed across suites; the
+          # <testsuites> root repeats the same total, hence ~2x the testcase
+          # count). The per-file minimums below are the real zero-catch.
+          assert tests >= 100, f"integration directory did not run enough tests: {tests} < 100"
+          for mod, floor in minimums.items():
+              assert byfile.get(mod, 0) >= floor, f"{mod} collected {byfile.get(mod, 0)} tests, needs >= {floor}"
+          assert len(stripe) >= 23, f"stripe family collected {len(stripe)} tests, needs >= 23"
+          assert skipped == 0, f"integration suite skipped {skipped} tests"
+          assert failures == 0, f"integration suite failed {failures} tests"
+          assert errors == 0, f"integration suite had {errors} errors"
           PY
 
       - name: Dump app logs on failure
