@@ -277,8 +277,8 @@ class PaperPrintAdapter:
             "transmits": False,
             "summary": "Print + mail / hand to recipient",
             "description": (
-                "Print the filled PDF for this work product and mail it to — or "
-                "hand it to — the recipient. Nothing is transmitted electronically."
+                "Print the filled PDF for this work product and mail it to - or "
+                "hand it to - the recipient. Nothing is transmitted electronically."
             ),
             "document_pdf_path": _wp_document_pdf_path(work_product),
             "work_product_id": _wp_id(work_product),
@@ -333,7 +333,7 @@ class _GatedTransmissionAdapter:
         if not irreversibility_ok(self.channel, context):
             raise FeatureDisabled(
                 f"{self.label} ({self.channel}) is blocked by the irreversibility "
-                "threshold — an independent legal/risk gate that is not yet "
+                "threshold - an independent legal/risk gate that is not yet "
                 "satisfied for this channel.",
                 channel=self.channel,
             )
@@ -374,7 +374,7 @@ class _GatedTransmissionAdapter:
         self._assert_all_gates(self._policy)
         # Even if the first two gates somehow passed, the channel is dormant.
         raise FeatureDisabled(
-            f"{self.label} ({self.channel}) is not yet legally enabled — dormant "
+            f"{self.label} ({self.channel}) is not yet legally enabled - dormant "
             "scaffolding only.",
             channel=self.channel,
         )
@@ -382,7 +382,7 @@ class _GatedTransmissionAdapter:
     def propose(self, work_product: Any) -> dict[str, Any]:
         self._assert_all_gates(self._policy)
         raise FeatureDisabled(
-            f"{self.label} ({self.channel}) is not yet legally enabled — dormant "
+            f"{self.label} ({self.channel}) is not yet legally enabled - dormant "
             "scaffolding only.",
             channel=self.channel,
         )
