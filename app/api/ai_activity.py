@@ -3,14 +3,14 @@
 The "AI Activity log" is the owner's view into every action an AI agent took
 on their behalf. It aggregates three append-only sources:
 
-  * ``decision_audit``    — one row per agent-initiated MCP tool call.
+  * ``decision_audit``    - one row per agent-initiated MCP tool call.
                             Carries tool_name, request_payload, response_payload,
                             reasoning_trace, outcome, agent_session_id.
-  * ``activity_event``    — coarser-grained "the agent did X" stream
+  * ``activity_event``    - coarser-grained "the agent did X" stream
                             (verdict + materiality). Older feed, kept for
                             backwards compat with the legacy /agent-activity
                             page mock data.
-  * ``tax_review_queue``  — memos, flagged positions, drafted forms.
+  * ``tax_review_queue``  - memos, flagged positions, drafted forms.
                             Surfaces what an agent WROTE into the human
                             review pile.
 
@@ -24,7 +24,7 @@ list with enough context for the UI to:
   * link back to the underlying artifact (memo body, journal entry,
     specialist run, etc.)
 
-Reversibility classification — CONSERVATIVE BY DEFAULT (when in doubt,
+Reversibility classification - CONSERVATIVE BY DEFAULT (when in doubt,
 mark challenge-only):
 
   +----------------------------+-----------+-------------------------------+
@@ -52,29 +52,29 @@ Routes
 
   GET   /api/workspaces/{wid}/ai-activity
         ?entity_id=&since=&until=&limit=&agent=&action=
-        — chronologically-ordered AI-initiated actions.
+        - chronologically-ordered AI-initiated actions.
 
   GET   /api/workspaces/{wid}/ai-activity/stream
-        — server-sent events of new activity rows. Long-poll; sends a
+        - server-sent events of new activity rows. Long-poll; sends a
           ``heartbeat`` comment every 15s.
 
   POST  /api/workspaces/{wid}/ai-activity/{audit_id}/undo
-        — reverse a reversible AI action.
+        - reverse a reversible AI action.
         Body: {note?: str}.
         Returns 409 if the audit row isn't reversible or the 24h window
         has passed; 422 if a closed_period blocks the reversal.
 
   POST  /api/workspaces/{wid}/ai-activity/{audit_id}/challenge
-        — file a tax_review_queue memo with topic='ai_output_challenged'
+        - file a tax_review_queue memo with topic='ai_output_challenged'
           linking back to the original audit row.
         Body: {reason: str}.
 
 Role floors
 -----------
 
-  * List / stream:  viewer  — read-only audit feed.
-  * Undo:           accountant — same floor as the original write surface.
-  * Challenge:      viewer    — anyone can flag a concern for the CPA.
+  * List / stream:  viewer  - read-only audit feed.
+  * Undo:           accountant - same floor as the original write surface.
+  * Challenge:      viewer    - anyone can flag a concern for the CPA.
 
 Audit trail
 -----------
@@ -82,7 +82,7 @@ Audit trail
 Every undo + challenge writes ITS OWN decision_audit row with
 ``actor_role='human'`` and ``tool_name='undo'`` / ``'challenge'``,
 referencing the original audit row via ``request_payload.parent_audit_id``.
-decision_audit is append-only — the original row is never modified.
+decision_audit is append-only - the original row is never modified.
 """
 from __future__ import annotations
 
@@ -271,7 +271,7 @@ def _target_from(
     if ty:
         target["tax_year"] = ty
 
-    # queue item ids — different tools name them differently
+    # queue item ids - different tools name them differently
     for key in ("queue_item_id", "memo_id", "id", "approval_id", "journal_entry_id",
                 "rule_id", "run_id"):
         v = src.get(key) or src_req.get(key)
@@ -338,7 +338,7 @@ def _auto_applied(tool_name: str, response: dict[str, Any] | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# GET /ai-activity — timeline
+# GET /ai-activity - timeline
 # ---------------------------------------------------------------------------
 
 
@@ -363,7 +363,7 @@ async def get_ai_activity(
     do simple substring matching for the UI's filter chips.
 
     Adds:
-      * undo/challenge state — by selecting any decision_audit row whose
+      * undo/challenge state - by selecting any decision_audit row whose
         request_payload.parent_audit_id == this row's id with tool_name in
         ('undo', 'challenge').
       * reversibility classification.
@@ -403,7 +403,7 @@ async def get_ai_activity(
 
         # AI activity == decision_audit rows that came from an AGENT, not a human.
         # Human-initiated undos/challenges ALSO live in decision_audit (we want
-        # that — it's all the same audit trail), but they have tool_name in
+        # that - it's all the same audit trail), but they have tool_name in
         # ('undo','challenge') and are excluded from the AI timeline.
         where.append("da.tool_name NOT IN ('undo', 'challenge')")
 
@@ -572,7 +572,7 @@ async def get_ai_activity(
         rev_kind, rev_window = reversibility_for(tool_name)
         created_at = r["created_at"]
         if not isinstance(created_at, dt.datetime):
-            # Defensive — SA should always yield datetime here.
+            # Defensive - SA should always yield datetime here.
             created_at = dt.datetime.fromisoformat(str(created_at))
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=dt.timezone.utc)
@@ -661,7 +661,7 @@ async def get_ai_activity(
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=dt.timezone.utc)
         # Treat queue rows that have moved out of 'pending' as effectively
-        # undone (the CPA / human acted on them) — we mirror this in the
+        # undone (the CPA / human acted on them) - we mirror this in the
         # AIActivityRow so the UI shows them grayed out.
         status = (r["status"] or "pending").lower()
         if status in ("rejected", "resolved"):
@@ -760,7 +760,7 @@ def _parse_iso_or_none(value: str | None) -> dt.datetime | None:
 
 
 # ---------------------------------------------------------------------------
-# GET /ai-activity/stream — SSE live updates
+# GET /ai-activity/stream - SSE live updates
 # ---------------------------------------------------------------------------
 
 
@@ -973,7 +973,7 @@ async def _undo_queue_item(
         # Audit the undo. parent_audit_id is the synthetic timeline id so
         # the GET endpoint can match it back via the existing followup
         # join (it also LIKE-matches plain UUIDs because the join is
-        # 'parent_audit_id = ANY(:ids)' — synthetic ids 'trq:<uuid>' won't
+        # 'parent_audit_id = ANY(:ids)' - synthetic ids 'trq:<uuid>' won't
         # match plain uuid rows there, but the GET endpoint's trq path
         # already reads status from the queue row itself, so the undo
         # state is reflected without a parent_audit_id match).
@@ -1045,10 +1045,10 @@ async def undo_ai_action(
 
     Mechanisms:
 
-      * ``memo_status_reject`` — flip the tax_review_queue row identified
+      * ``memo_status_reject`` - flip the tax_review_queue row identified
         in response.queue_item_id / memo_id to status='rejected'.
 
-      * ``journal_post_contra`` — return 409 for now (a full contra-JE
+      * ``journal_post_contra`` - return 409 for now (a full contra-JE
         post requires the recategorization pipeline which lives outside
         this endpoint; we surface a clear "not yet implemented" message
         rather than silently no-op). The challenge path is always
@@ -1062,7 +1062,7 @@ async def undo_ai_action(
 
     ``audit_id`` accepts either a raw UUID (decision_audit.id) OR the
     synthetic ``trq:<uuid>`` form the timeline emits for queue-only
-    agent writes — in that case we look up the queue row directly.
+    agent writes - in that case we look up the queue row directly.
 
     Role floor: accountant. (Undo is a write; mirrors the write surface
     that produced the original action.)
@@ -1152,7 +1152,7 @@ async def undo_ai_action(
                 },
             )
 
-        # Already undone? — refuse to double-undo. The list endpoint also
+        # Already undone? - refuse to double-undo. The list endpoint also
         # surfaces undone_at so the UI shouldn't even show the button.
         existing = (
             await session.execute(
@@ -1262,7 +1262,7 @@ async def undo_ai_action(
                 },
             )
         elif kind == "categorization_pending":
-            # Same story — we'd need a Catalog<->approval flip path.
+            # Same story - we'd need a Catalog<->approval flip path.
             raise HTTPException(
                 status_code=409,
                 detail={
