@@ -512,7 +512,7 @@ def _validate_post_arguments(
         raise ValueError(
             f"amount_cents magnitude {amount_cents} exceeds the sanity bound "
             f"{MAX_ABS_AMOUNT_CENTS} (${MAX_ABS_AMOUNT_CENTS / 100:,.0f}). "
-            "Re-check the units — this field is CENTS, not dollars."
+            "Re-check the units - this field is CENTS, not dollars."
         )
 
 
