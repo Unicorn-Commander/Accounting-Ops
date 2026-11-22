@@ -307,7 +307,7 @@ def _rank_priorities(
                 kind="time_sensitive",
                 severity="critical",
                 headline=summary or "A time-sensitive item needs your attention",
-                detail="This is flagged urgent — handle it soon.",
+                detail="This is flagged urgent - handle it soon.",
                 action_href="/open-items",
                 action_label="See what's urgent",
                 score=_SCORE_TIME_SENSITIVE,
@@ -328,9 +328,9 @@ def _rank_priorities(
                 severity="high",
                 headline=f"Follow up on {title}",
                 detail=_truncate(
-                    f"{juris} hasn't responded — you may need to call them."
+                    f"{juris} hasn't responded - you may need to call them."
                     if juris
-                    else "The taxing authority hasn't responded — you may need to call."
+                    else "The taxing authority hasn't responded - you may need to call."
                 ),
                 action_href="/open-items",
                 action_label="Open the filing",
@@ -453,7 +453,7 @@ def _summary_line(
         )
 
     if not parts:
-        head = "You're all caught up — nothing needs you right now."
+        head = "You're all caught up - nothing needs you right now."
     else:
         # Sentence-case the joined clauses.
         joined = "; ".join(parts)
@@ -631,7 +631,7 @@ async def get_cfo_brief(
 
     if onboarding:
         summary = (
-            "Welcome — let's get your books started. Connect your bank to see "
+            "Welcome - let's get your books started. Connect your bank to see "
             "live transactions, or drop in a receipt or statement to begin."
         )
     else:
