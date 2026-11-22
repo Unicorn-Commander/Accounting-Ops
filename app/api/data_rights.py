@@ -36,6 +36,14 @@ from app.workspace_session import SHARED_SCHEMA, workspace_session
 router = APIRouter(tags=["data-rights"])
 
 EXPORT_JOBS_BUCKET = "exports"
+_EXPORT_ARCHIVE_CACHE: dict[str, bytes] = {}
+_EXPORT_CACHE_MAX = 10
+
+
+def _evict_export_cache() -> None:
+    """Keep the in-process export archive cache bounded (FIFO by insertion)."""
+    while len(_EXPORT_ARCHIVE_CACHE) > _EXPORT_CACHE_MAX:
+        _EXPORT_ARCHIVE_CACHE.pop(next(iter(_EXPORT_ARCHIVE_CACHE)))
 
 
 # --------------------------------------------------------------------------- #
@@ -170,6 +178,10 @@ async def _run_export(workspace_id: UUID, job_id: UUID, requested_by: str, slug:
         "started_at": started.isoformat(),
     }
     try:
+        from app.clients.garage_s3 import GarageS3Client
+
+        s3 = GarageS3Client()
+        s3_configured = s3.is_configured()
         async with workspace_session(SessionLocal, workspace_id) as session:
             data, result = await export_mod.build_export(
                 session,
@@ -177,13 +189,24 @@ async def _run_export(workspace_id: UUID, job_id: UUID, requested_by: str, slug:
                 requested_by_uc_uid=requested_by,
                 workspace_slug=slug,
             )
-        bucket, key = await export_mod.store_export(data, workspace_id, job_id)
+        if s3_configured:
+            bucket, key = await export_mod.store_export(data, workspace_id, job_id)
+        else:
+            # Object store not wired: keep the archive in a module-level cache
+            # so the download endpoint can serve it without object storage.
+            # Bounded by the job cap (10) * archive size; cleared on eviction.
+            _EXPORT_ARCHIVE_CACHE[str(job_id)] = data
+            _evict_export_cache()
+            bucket, key = export_mod.export_bucket(
+                export_mod.get_settings(), workspace_id
+            ), export_mod.export_object_key(workspace_id, job_id)
         record.update(
             status="completed",
             finished_at=dt.datetime.now(dt.timezone.utc).isoformat(),
             bucket=bucket,
             object_key=key,
             summary=result.manifest_summary(),
+            archive_bytes=len(data),
         )
     except Exception as exc:  # noqa: BLE001 - recorded, never swallowed
         record.update(
@@ -303,6 +326,20 @@ async def download_export(
     crafting a job id — the record itself is workspace-scoped.
     """
     require_role(workspace, "owner")
+    # In-process archive cache (object-store-less path).  Keyed by job_id so a
+    # re-download of the same job returns the same bytes without rebuilding.
+    cached = _EXPORT_ARCHIVE_CACHE.get(str(job_id))
+    if cached:
+        return Response(
+            content=cached,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="accounting-ops-export-{job_id}.zip"'
+                )
+            },
+        )
+
     async with SessionLocal() as session:
         async with session.begin():
             jobs = await retention_mod.read_jobs(

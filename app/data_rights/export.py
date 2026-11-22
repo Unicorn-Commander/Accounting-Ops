@@ -373,6 +373,11 @@ async def store_export(
     return bucket, key
 
 
+def get_settings():
+    from app.config import get_settings as _gs
+    return _gs()
+
+
 __all__ = (
     "EXPORT_FORMAT_VERSION",
     "MAX_EXPORT_FILE_BYTES",
@@ -385,5 +390,6 @@ __all__ = (
     "discover_tenant_tables",
     "export_bucket",
     "export_object_key",
+    "get_settings",
     "store_export",
 )
