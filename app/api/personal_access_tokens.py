@@ -336,7 +336,7 @@ async def mint_pat(
     if not owner_allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="No workspace memberships — cannot mint a PAT.",
+            detail="No workspace memberships - cannot mint a PAT.",
         )
     try:
         scopes = validate_scopes(body.scopes, owner_allowed)
