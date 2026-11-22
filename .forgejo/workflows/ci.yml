@@ -264,6 +264,9 @@ jobs:
         #     same product bug, batch b5531251 item 9
         #   tests/integration/test_data_rights.py::test_export_produces_an_archive_scoped_to_this_workspace_only
         #     needs Garage S3 in the integration stack (GarageNotConfigured)
+        #   tests/integration/test_document_upload.py::test_upload_creates_receipt_and_approval_never_posts
+        #   tests/integration/test_document_upload.py::test_reupload_same_bytes_dedups
+        #     need Garage S3 on the app (skip themselves: 'Garage S3 not configured'); Accounting-Ops batch b5531251 item 11
         #   tests/integration/test_e2e_pipeline.py::test_full_pipeline
         #     httpx connection error in the CI stack, needs a service the stack does not run
         #   tests/integration/test_get_1099_payees_delegation.py::test_get_1099_payees_nets_refunds_like_form_1099_nec
@@ -280,6 +283,8 @@ jobs:
             --deselect tests/integration/test_coa_entity_scope.py::test_unscoped_owner_can_touch_any_entity_coa \
             --deselect tests/integration/test_data_rights.py::test_export_produces_an_archive_scoped_to_this_workspace_only \
             --deselect tests/integration/test_data_rights.py::test_purging_a_disposable_workspace_leaves_other_chains_verifiable \
+            --deselect tests/integration/test_document_upload.py::test_upload_creates_receipt_and_approval_never_posts \
+            --deselect tests/integration/test_document_upload.py::test_reupload_same_bytes_dedups \
             --deselect tests/integration/test_e2e_pipeline.py::test_full_pipeline \
             --deselect tests/integration/test_get_1099_payees_delegation.py::test_get_1099_payees_nets_refunds_like_form_1099_nec \
             --deselect tests/integration/test_safety_invariants.py::test_high_value_entry_with_confirm_and_memo_posts \
