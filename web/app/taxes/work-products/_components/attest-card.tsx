@@ -64,8 +64,8 @@ export function AttestCard({
             <h3 className="text-sm font-semibold">Self-certify this form</h3>
             <p className="mt-1 text-xs leading-relaxed text-ink-secondary">
               No licensed professional is required for your workspace, so you can
-              certify this form yourself. Certifying removes the DRAFT watermark
-              — it does <strong>not</strong> file anything. You still complete
+              certify this form yourself. Certifying removes the DRAFT watermark;
+              it does <strong>not</strong> file anything. You still complete
               the last-mile steps (sign and submit) below.
             </p>
 
@@ -117,7 +117,7 @@ export function AttestCard({
         <Check size={14} className="mt-0.5 shrink-0 text-credit" />
         <p className="text-[11px] leading-relaxed text-credit">
           {status === "self_approved"
-            ? "You self-certified this form — the DRAFT watermark is removed. Complete the sign and submit steps below."
+            ? "You self-certified this form: the DRAFT watermark is removed. Complete the sign and submit steps below."
             : status === "pro_reviewed"
               ? "This form has been reviewed by a licensed professional. Complete the sign and submit steps below."
               : "This form is finalized. Complete the sign and submit steps below."}
