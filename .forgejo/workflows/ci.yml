@@ -343,7 +343,7 @@ jobs:
               "tests.integration.test_approvals": 1,
               "tests.integration.test_ar_payment_concurrency_pg": 1,
               "tests.integration.test_data_rights": 6,
-              "tests.integration.test_document_upload": 4,
+              "tests.integration.test_document_upload": 2,  # 4 minus the 2 Garage nodes deselected above (batch b5531251 item 11 restores 4)
               "tests.integration.test_ebay_sync_postgres": 1,
               "tests.integration.test_h2_service_token_scope": 9,
               "tests.integration.test_handoff_package_zip": 1,
