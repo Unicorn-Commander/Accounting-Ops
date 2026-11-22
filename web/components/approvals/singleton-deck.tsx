@@ -241,7 +241,7 @@ export function SingletonDeck({
         <p className="mt-1 text-sm text-ink-tertiary">
           {totalDecided} decisions made
           {totalAll - totalDecided > 0
-            ? ` (${totalAll - totalDecided} skipped — pull back into the deck above)`
+            ? ` (${totalAll - totalDecided} skipped; pull back into the deck above)`
             : ""}
         </p>
       </div>
