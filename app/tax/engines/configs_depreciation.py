@@ -114,7 +114,7 @@ _SECTION_179: dict[int, tuple[int, int, str]] = {
 _BONUS: dict[int, BonusRule] = {
     2022: BonusRule(
         percentage=Decimal("1.00"),
-        source="IRC §168(k)(6)(A)(i) — 100% for property placed in service before 2023-01-01",
+        source="IRC §168(k)(6)(A)(i) - 100% for property placed in service before 2023-01-01",
     ),
     2023: BonusRule(
         percentage=Decimal("0.80"),
@@ -129,7 +129,7 @@ _BONUS: dict[int, BonusRule] = {
         acquisition_cutoff=OBBBA_ACQUISITION_CUTOFF,
         percentage_if_acquired_after_cutoff=Decimal("1.00"),
         source=(
-            "IRS Pub 946 (2025), What's New for 2025 — 40% for property placed "
+            "IRS Pub 946 (2025), What's New for 2025 - 40% for property placed "
             "in service in 2025; 100% for property ACQUIRED and placed in "
             "service after 2025-01-19 (OBBBA, P.L. 119-21)"
         ),
@@ -139,7 +139,7 @@ _BONUS: dict[int, BonusRule] = {
         acquisition_cutoff=OBBBA_ACQUISITION_CUTOFF,
         percentage_if_acquired_after_cutoff=Decimal("1.00"),
         source=(
-            "IRS Pub 946 (2025) — OBBBA (P.L. 119-21) made the 100% allowance "
+            "IRS Pub 946 (2025) - OBBBA (P.L. 119-21) made the 100% allowance "
             "permanent for property acquired after 2025-01-19. The residual "
             "TCJA phase-down rate for property acquired ON OR BEFORE that date "
             "but placed in service in 2026 was NOT verified from a primary "
@@ -224,7 +224,7 @@ def config_for_year(year: int) -> DepreciationConfig:
         raise ValueError(
             f"No depreciation constants on file for TY{year} (supported: "
             f"{SUPPORTED_TAX_YEARS_DEPRECIATION}). Add verified, cited §179 "
-            "limits and a §168(k) rule before preparing this return — do not "
+            "limits and a §168(k) rule before preparing this return - do not "
             "reuse another year's figures."
         )
     limit, threshold, source_179 = _SECTION_179[year]
