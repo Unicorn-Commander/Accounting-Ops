@@ -191,7 +191,7 @@ export function WorkProductsClient({
         <EmptyState
           icon={<FileStack size={28} className="text-ink-disabled" aria-hidden="true" />}
           title="No forms prepared yet"
-          description="Prepare a form on behalf of this client — once it's filled it shows up here to review, certify, sign, and file."
+          description="Prepare a form on behalf of this client: once it's filled it shows up here to review, certify, sign, and file."
           primaryAction={
             <Link
               href="/taxes/forms"
@@ -286,7 +286,7 @@ function IntroBanner() {
       <Info size={16} className="mt-0.5 shrink-0 text-brand-400" />
       <div className="min-w-0 text-xs leading-relaxed text-ink-secondary">
         <p className="font-semibold text-ink-primary">
-          This is everything you&apos;ve prepared — nothing is filed until you
+          This is everything you&apos;ve prepared: nothing is filed until you
           say so.
         </p>
         <p className="mt-1">
