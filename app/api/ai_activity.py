@@ -114,12 +114,12 @@ _log = logging.getLogger("acctops.api.ai_activity")
 # Maps decision_audit.tool_name -> ("reverse_kind", reversible_window_hours).
 # ``reverse_kind`` is one of:
 #
-#   * "memo_status_reject"          — flip tax_review_queue row to rejected
-#   * "journal_post_contra"         — post a reversing JE within window
-#   * "categorization_pending"      — flip approval_queue back to pending
-#   * None                          — challenge-only
+#   * "memo_status_reject"          - flip tax_review_queue row to rejected
+#   * "journal_post_contra"         - post a reversing JE within window
+#   * "categorization_pending"      - flip approval_queue back to pending
+#   * None                          - challenge-only
 #
-# IMPORTANT: when in doubt, return None — never make a write reversible
+# IMPORTANT: when in doubt, return None - never make a write reversible
 # unless we have a clear, scoped reversal mechanism.
 
 _REVERSIBILITY: dict[str, tuple[str | None, int]] = {
@@ -129,15 +129,15 @@ _REVERSIBILITY: dict[str, tuple[str | None, int]] = {
     # Auto-categorize / recategorize
     "categorize": ("journal_post_contra", 24),  # 24h grace window
     "post_correction": ("journal_post_contra", 24),
-    # Approval decisions — the underlying JE/rule may already be live;
+    # Approval decisions - the underlying JE/rule may already be live;
     # we treat as challenge-only by design. The owner can post a manual contra.
     "approval_decision": (None, 0),
     "add_specialty_rule": (None, 0),
-    # Specialist runs — they may have written dozens of rows
+    # Specialist runs - they may have written dozens of rows
     "run_specialist": (None, 0),
     # CFO→specialist consultation (silent delegation). Read/draft-only and
     # produces no ledger mutation, but it's an analysis event, not something to
-    # mechanically "undo" — challenge-only.
+    # mechanically "undo" - challenge-only.
     "consult_specialist": (None, 0),
 }
 
