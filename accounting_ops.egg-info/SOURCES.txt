@@ -188,7 +188,6 @@ app/connectors/__init__.py
 app/connectors/regulatory_feeds.py
 app/connectors/ebay/__init__.py
 app/connectors/ebay/client.py
-app/connectors/ebay/decision_state.py
 app/connectors/ebay/mapper.py
 app/connectors/ebay/reconcile.py
 app/connectors/stripe/__init__.py
