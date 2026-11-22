@@ -210,14 +210,11 @@ jobs:
         # keep the non-stack helpers (test_hash_chain_concurrent,
         # test_service_token_scoping) out of the run.
         #
-        # Known pre-existing failures (measured 11-22 against this same
-        # bind-free stack, before this change): 21 failures across 7 files —
-        # test_pat_auth, test_coa_entity_scope, test_h2_service_token_scope,
-        # test_data_rights, test_document_upload, test_approval_recommendations,
-        # test_tax_review_queue. Fixing them is product work, not CI work, so
-        # they are deselected here to keep the gate meaningful; each file is a
-        # follow-up batch item (first failing assertion per file goes in the
-        # PR body for task 1f30b1d4).
+         # The 7 previously-deselected files (test_pat_auth,
+         # test_coa_entity_scope, test_h2_service_token_scope, test_data_rights,
+         # test_document_upload, test_approval_recommendations,
+         # test_tax_review_queue) were fixed on 11-22 (branch
+         # agent/corporal-qwen/be23d19a) and are now enabled in CI.
         #
         # Further pre-existing failures (PR #96 CI, 873290e7: 7 failed, 216
         # passed, 70 deselected): all written before the approval materiality
@@ -258,13 +255,7 @@ jobs:
         run: |
           python3 scripts/integration_env.py test -- \
             -m integration tests/integration \
-            --deselect tests/integration/test_pat_auth.py \
-            --deselect tests/integration/test_coa_entity_scope.py \
-            --deselect tests/integration/test_h2_service_token_scope.py \
-            --deselect tests/integration/test_data_rights.py \
-            --deselect tests/integration/test_document_upload.py \
-            --deselect tests/integration/test_approval_recommendations.py \
-            --deselect tests/integration/test_tax_review_queue.py \
+
             --deselect tests/integration/test_approvals.py::test_reject_material_recat_leaves_ledger_untouched \
             --deselect tests/integration/test_approvals.py::test_decide_denied_below_accountant_floor \
             --deselect tests/integration/test_approvals.py::test_decide_denied_out_of_scope_entity \
@@ -307,17 +298,20 @@ jobs:
               cls = case.get("classname") or ""
               byfile[cls] = byfile.get(cls, 0) + 1
           stripe = [c for c in cases if "test_stripe_" in (c.get("classname") or "")]
-          # Minimum testcases per module, keyed by the junit classname root
-          # (tests.integration.<module>). The 7 pre-existing-failure files are
-          # --deselected at file level (0 testcases is correct there); the 7
-          # pre-existing materiality-tier failures are deselected per test, so
-          # their files keep running with their other tests and stay >= 1.
-          # test_e2e_pipeline and test_get_1099_payees_delegation are NOT here:
-          # each file's only test is a pre-existing materiality-tier failure,
-          # deselected per node above, so each collects 0 testcases in this run.
-          # Requiring >= 1 would wrongly fail the job. test_approvals keeps its
-          # >= 1 floor: 5 of its 11 tests are deselected per node, 6 still run.
-          # Every other newly-included file keeps >= 1.
+           # Minimum testcases per module, keyed by the junit classname root
+           # (tests.integration.<module>). The 7 previously-deselected files
+           # (test_pat_auth, test_coa_entity_scope, test_h2_service_token_scope,
+           # test_data_rights, test_document_upload, test_approval_recommendations,
+           # test_tax_review_queue) are now enabled and each gets a >= 1 floor.
+           # The 7 pre-existing materiality-tier failures are deselected per
+           # test, so their files keep running with their other tests and stay
+           # >= 1. test_e2e_pipeline and test_get_1099_payees_delegation are NOT
+           # here: each file's only test is a pre-existing materiality-tier
+           # failure, deselected per node above, so each collects 0 testcases
+           # in this run. Requiring >= 1 would wrongly fail the job.
+           # test_approvals keeps its >= 1 floor: 5 of its 11 tests are
+           # deselected per node, 6 still run.
+           # Every other newly-included file keeps >= 1.
           minimums = {
               # Original six: the old per-file floors (review round 2).
               "tests.integration.test_db_rls_roles": 16,
@@ -339,8 +333,16 @@ jobs:
               "tests.integration.test_stripe_blocked_resolve_pg": 17,
               "tests.integration.test_stripe_sync_postgres": 2,
               "tests.integration.test_tax_mcp_tools": 1,
-              "tests.integration.test_tenant_isolation": 1,
-          }
+               "tests.integration.test_tenant_isolation": 1,
+               # Previously-deselected, now fixed and enabled:
+               "tests.integration.test_pat_auth": 1,
+               "tests.integration.test_coa_entity_scope": 1,
+               "tests.integration.test_h2_service_token_scope": 1,
+               "tests.integration.test_data_rights": 1,
+               "tests.integration.test_document_upload": 1,
+               "tests.integration.test_approval_recommendations": 1,
+               "tests.integration.test_tax_review_queue": 1,
+           }
           details = [
               f"{mod}={byfile.get(mod, 0)}/{minimums[mod]}"
               for mod in sorted(minimums)
