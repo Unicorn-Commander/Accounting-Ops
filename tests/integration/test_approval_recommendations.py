@@ -269,17 +269,18 @@ async def test_analyze_pending_approvals_creates_recommendations(
 
         # ---- Verify recommendation rows in DB ----
         async with db.acquire() as conn:
-            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
-            db_rows = await conn.fetch(
-                """
-                SELECT approval_id::text, confidence, recommended_decision,
-                       cluster_id, recommended_category
-                FROM approval_recommendation
-                WHERE approval_id = ANY($1::uuid[])
-                ORDER BY created_at DESC
-                """,
-                approval_ids,
-            )
+            async with conn.transaction():
+                await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+                db_rows = await conn.fetch(
+                    """
+                    SELECT approval_id::text, confidence, recommended_decision,
+                           cluster_id, recommended_category
+                    FROM approval_recommendation
+                    WHERE approval_id = ANY($1::uuid[])
+                    ORDER BY created_at DESC
+                    """,
+                    approval_ids,
+                )
 
         assert len(db_rows) == len(rows), (
             f"Expected {len(rows)} recommendation rows in DB, got {len(db_rows)}"
@@ -407,11 +408,12 @@ async def test_analyze_idempotent_upsert(
 
         # Should be exactly 1 recommendation row for this approval_id (upserted)
         async with db.acquire() as conn:
-            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
-            count = await conn.fetchval(
-                "SELECT count(*) FROM approval_recommendation WHERE approval_id = $1::uuid",
-                approval_id,
-            )
+            async with conn.transaction():
+                await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+                count = await conn.fetchval(
+                    "SELECT count(*) FROM approval_recommendation WHERE approval_id = $1::uuid",
+                    approval_id,
+                )
         assert count == 1, f"Expected 1 recommendation row after 2 runs, got {count}"
 
     finally:
