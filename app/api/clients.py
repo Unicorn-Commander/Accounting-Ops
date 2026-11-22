@@ -700,7 +700,7 @@ def individual_invite_bodies(
         f"This link expires on {expires_str}. If you don't have an "
         f"Accounting-Ops account yet, you'll be prompted to create one when "
         f"you click the link.\n\n"
-        f"Accounting-Ops — Your books. Your machine. Your rules.\n"
+        f"Accounting-Ops: Your books. Your machine. Your rules.\n"
     )
     html_body = (
         f"<p>You've been invited{by} to <strong>{display_name}</strong> "
@@ -709,7 +709,7 @@ def individual_invite_bodies(
         f"<p>This link expires on <code>{expires_str}</code>. If you don't "
         f"have an Accounting-Ops account yet, you'll be prompted to create one "
         f"when you click the link.</p>"
-        f"<hr><p style='color:#888;font-size:12px;'>Accounting-Ops — "
+        f"<hr><p style='color:#888;font-size:12px;'>Accounting-Ops: "
         f"Your books. Your machine. Your rules.</p>"
     )
     return text_body, html_body
