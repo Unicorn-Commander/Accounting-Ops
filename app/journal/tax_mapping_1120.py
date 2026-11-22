@@ -527,7 +527,7 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
 
     "Owner's Contribution": F1120Mapping(
         section="excluded",
-        line="—",
+        line="-",
         label="Not on Form 1120 page 1 (balance-sheet equity)",
         confidence="high",
         notes=(
@@ -540,7 +540,7 @@ CATEGORY_TO_1120: dict[str, F1120Mapping] = {
 
     "Owner's Draw": F1120Mapping(
         section="excluded",
-        line="—",
+        line="-",
         label="Not on Form 1120 page 1 (balance-sheet equity)",
         confidence="high",
         notes=(
