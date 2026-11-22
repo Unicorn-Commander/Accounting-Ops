@@ -55,7 +55,7 @@ export default async function LoginPage({
 
           {reason === "session_expired" && (
             <div className="mt-5 rounded-md border border-pending/40 bg-pending/[0.06] px-3 py-2 text-sm text-pending">
-              Your session expired. Sign in again to continue — your data is
+              Your session expired. Sign in again to continue; your data is
               waiting.
             </div>
           )}
