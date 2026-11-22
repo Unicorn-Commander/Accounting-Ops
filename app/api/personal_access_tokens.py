@@ -252,7 +252,7 @@ class CreatePATRequest(BaseModel):
     scopes: list[str] | None = Field(
         default=None,
         description=(
-            "REQUIRED. The explicit scopes this token may use — a subset of "
+            "REQUIRED. The explicit scopes this token may use - a subset of "
             "the owner's allowed scopes. Omitting it, sending null, an empty "
             "list, or only blank strings is refused with 400; it does NOT "
             "fall back to the owner's full set. Requesting the owner's full "
@@ -273,7 +273,7 @@ class CreatePATRequest(BaseModel):
         description=(
             f"Lifetime in days, 1..{MAX_TTL_DAYS}. Default = "
             f"{DEFAULT_TTL_DAYS} when omitted. 0 (the old 'never expires' "
-            "sentinel) and null are refused with 400 — every newly minted "
+            "sentinel) and null are refused with 400 - every newly minted "
             "token expires."
         ),
     )
