@@ -321,7 +321,7 @@ export const SetupChecklist = forwardRef<
           <span className="font-semibold text-brand-300">
             Step {currentStepNumber} of {STEP_ORDER.length}
           </span>
-          <span className="truncate text-ink-secondary">— {currentStepLabel}</span>
+          <span className="truncate text-ink-secondary">· {currentStepLabel}</span>
         </div>
       )}
 
