@@ -398,7 +398,7 @@ def revision_for_tax_year(tax_year: int | None) -> F4562Revision:
     """
     if tax_year is None:
         raise ValueError(
-            "Form 4562 requires a tax year — the Part III Section B class rows "
+            "Form 4562 requires a tax year - the Part III Section B class rows "
             f"differ between revisions. Supported: {SUPPORTED_FORM_YEARS}."
         )
     key = _YEAR_TO_REVISION.get(tax_year)
@@ -406,7 +406,7 @@ def revision_for_tax_year(tax_year: int | None) -> F4562Revision:
         raise ValueError(
             f"No verified Form 4562 field map for TY{tax_year} "
             f"(supported: {SUPPORTED_FORM_YEARS}). Download the revision, re-run "
-            "the positional field dump, and add a revision entry — do NOT reuse "
+            "the positional field dump, and add a revision entry - do NOT reuse "
             "another year's rows: the Section B class rows shifted in 2025."
         )
     return F4562_REVISIONS[key]
