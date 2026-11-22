@@ -354,7 +354,7 @@ function EmbeddedEmptyState({
       </p>
       <p className="mt-1 text-xs text-ink-tertiary">
         {hint ??
-          "Ask about your books or this entity's tax year. DRAFT memos route to the CPA queue — nothing changes without an explicit approval."}
+          "Ask about your books or this entity's tax year. DRAFT memos route to the CPA queue; nothing changes without an explicit approval."}
       </p>
       {suggestedPrompts && suggestedPrompts.length > 0 && (
         <div className="mt-4 flex flex-col gap-1.5 text-left">
