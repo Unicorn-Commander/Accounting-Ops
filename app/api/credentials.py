@@ -118,7 +118,7 @@ async def http_claim_simplefin(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=(
                 f"SimpleFIN rejected the claim (HTTP {resp.status_code}). "
-                "Likely already claimed or expired — generate a new setup "
+                "Likely already claimed or expired - generate a new setup "
                 "token at beta-bridge.simplefin.org."
             ),
         )
