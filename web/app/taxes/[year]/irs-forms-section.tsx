@@ -37,19 +37,19 @@ const FORMS: IrsFormsDef[] = [
   {
     key: "1120",
     label: "Form 1120",
-    description: "U.S. Corporation Income Tax Return — income & deductions pre-filled",
+    description: "U.S. Corporation Income Tax Return: income & deductions pre-filled",
     icon: <FileText size={14} />,
   },
   {
     key: "1120-schedule-l",
     label: "Schedule L",
-    description: "Balance Sheet per Books — balance sheet lines pre-filled",
+    description: "Balance Sheet per Books: balance sheet lines pre-filled",
     icon: <FileText size={14} />,
   },
   {
     key: "1125-e",
     label: "Form 1125-E",
-    description: "Compensation of Officers — officer rows pre-filled from queue",
+    description: "Compensation of Officers: officer rows pre-filled from queue",
     icon: <FileText size={14} />,
   },
   {
@@ -244,7 +244,7 @@ export function IrsFormsSection({ workspaceId, entityId, year }: Props) {
       <p className="text-[10px] text-ink-tertiary leading-relaxed">
         Fields pre-filled from the tax review queue (agent-proposed amounts) and
         the CPA export package. Lines without data are left blank for the CPA.
-        EIN and officer SSNs must be entered manually — encrypted fields are never
+        EIN and officer SSNs must be entered manually: encrypted fields are never
         transmitted to PDFs. The CPA completes Lines 29–38 (tax computation,
         NOL, and payments) before filing. Use "View" to open a PDF in-browser;
         use "PDF" / "Download" to save locally.
