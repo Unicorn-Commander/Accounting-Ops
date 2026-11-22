@@ -116,7 +116,7 @@ async def tax_compute_1040(
         "computed": c,
         "assumptions": built["assumptions"],
         "_draft_notice": (
-            f"DRAFT — computed Form 1040 for {tax_year}: AGI ${c['agi']}, taxable "
+            f"DRAFT - computed Form 1040 for {tax_year}: AGI ${c['agi']}, taxable "
             f"income ${c['taxable_income']}, total tax ${c['total_tax']}, "
             f"balance due ${c['balance_due']}. Figures computed by the deterministic "
             "engine; review, enter SSN(s), and sign before filing. Carries a DRAFT "
