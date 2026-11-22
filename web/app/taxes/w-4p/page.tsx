@@ -19,7 +19,7 @@ export default async function W4pPage() {
       <AppShell>
         <PageShell>
           <SectionHeader
-            title="Form W-4P — Pension Withholding"
+            title="Form W-4P: Pension Withholding"
             subtitle="Review, self-certify, and download your filled W-4P"
           />
           <Card>
@@ -51,7 +51,7 @@ export default async function W4pPage() {
     <AppShell>
       <PageShell>
         <SectionHeader
-          title="Form W-4P — Pension Withholding"
+          title="Form W-4P: Pension Withholding"
           subtitle="Review, self-certify, and download your filled W-4P"
           action={
             <EntitySelector
@@ -75,7 +75,7 @@ export default async function W4pPage() {
           <Card>
             <p className="text-sm text-ink-secondary">
               A W-4P is prepared for a single person or entity. Pick a specific
-              entity (use the selector above) to review its Form W-4P — the
+              entity (use the selector above) to review its Form W-4P: the
               consolidated view can&apos;t hold a personal withholding form.
             </p>
           </Card>
