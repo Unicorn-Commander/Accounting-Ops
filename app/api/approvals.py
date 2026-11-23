@@ -220,6 +220,40 @@ def _require_stripe_decision_human(auth: AuthContext, workspace: WorkspaceContex
         )
 
 
+# Subject types whose APPROVE path applies a ledger change with
+# user_confirmed=True or stamps approving_human (a human attestation). An
+# agent or PAT is never the approver, so the decide endpoint requires a
+# verified interactive human for these. (ebay_post_transaction only queues a
+# worker replay and stamps no ledger entry, so it stays outside the set.)
+_LEDGER_APPROVAL_SUBJECT_TYPES = frozenset(
+    {
+        "journal_entry_post",
+        "journal_recategorization",
+        "bank_transaction_import",
+        "manual_journal_entry_proposal",
+        "stripe_post_balance_transaction",
+    }
+)
+
+
+def _require_interactive_human(auth: AuthContext, workspace: WorkspaceContext) -> None:
+    """Reject an agent or PAT caller approving a material ledger change.
+
+    Reuses the journal_entry_post rule (workspace.agent_id / pat_scopes check)
+    and the full interactive-human proof, so no non-interactive principal can
+    stamp its own recat or bank import as human-approved.
+    """
+    if (
+        workspace.agent_id is not None
+        or workspace.pat_scopes is not None
+        or not _is_interactive_human(auth, workspace)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Approval of this ledger change requires a human session",
+        )
+
+
 @router.post("/api/workspaces/{workspace_id}/approvals/{approval_id}/decide")
 async def decide_approval(
     workspace_id: UUID,
@@ -425,6 +459,13 @@ async def decide_approval(
 
         else:
             # ---------------- APPROVE ----------------
+            # House rule: an agent is never the approver. Every subject type
+            # that applies a ledger change with user_confirmed=True or stamps
+            # approving_human requires a verified interactive human; agents and
+            # PATs are rejected BEFORE the apply helper runs (nothing applied).
+            if subject_type in _LEDGER_APPROVAL_SUBJECT_TYPES:
+                _require_interactive_human(auth, workspace)
+
             if subject_type == "journal_recategorization":
                 applied = await _approve_recategorization(
                     session,
