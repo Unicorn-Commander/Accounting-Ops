@@ -14,12 +14,16 @@ from __future__ import annotations
 from urllib.parse import urlsplit
 from uuid import UUID
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
 from app.security.credentials import get_credential_plaintext
+from app.security.outbound import (
+    OutboundURLRefused,
+    assert_public_https_url,
+    guarded_async_client,
+)
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 
 router = APIRouter(tags=["cash-position"])
@@ -63,14 +67,24 @@ async def _fetch_simplefin_accounts(access_url: str) -> dict:
     if not path.endswith("/accounts"):
         path = f"{path}/accounts"
     target = f"{parts.scheme}://{host}{path}?balances-only=1"
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(target, auth=(username, password))
-        if resp.status_code >= 400:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"SimpleFIN returned HTTP {resp.status_code}",
-            )
-        return resp.json()
+    # Outbound guard at USE time too: the stored URL may predate the write-time
+    # check, and the host's DNS may have changed since (app.security.outbound).
+    # The guarded client re-checks at connect time and dials the checked IP.
+    try:
+        await assert_public_https_url(target)
+        async with guarded_async_client(timeout=10.0) as client:
+            resp = await client.get(target, auth=(username, password))
+    except OutboundURLRefused as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"SimpleFIN access URL refused: {exc}",
+        ) from exc
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"SimpleFIN returned HTTP {resp.status_code}",
+        )
+    return resp.json()
 
 
 @router.get("/api/workspaces/{workspace_id}/cash-position")

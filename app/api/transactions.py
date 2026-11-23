@@ -18,7 +18,6 @@ from uuid import UUID
 
 import logging
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.category_overrides import load_overrides_for_workspace
@@ -27,6 +26,11 @@ from app.categorization import apply_learned_pattern, categorize_transaction
 from app.clients import ebay_finances
 from app.db import SessionLocal
 from app.security.credentials import get_credential_plaintext
+from app.security.outbound import (
+    OutboundURLRefused,
+    assert_public_https_url,
+    guarded_async_client,
+)
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 
 _log = logging.getLogger(__name__)
@@ -76,14 +80,24 @@ async def _fetch_simplefin_window(
         f"{parts.scheme}://{host}{path}"
         f"?start-date={start_ts}&pending={'1' if include_pending else '0'}"
     )
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(target, auth=(username, password))
-        if resp.status_code >= 400:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"SimpleFIN returned HTTP {resp.status_code}",
-            )
-        return resp.json()
+    # Outbound guard at USE time too: the stored URL may predate the write-time
+    # check, and the host's DNS may have changed since (app.security.outbound).
+    # The guarded client re-checks at connect time and dials the checked IP.
+    try:
+        await assert_public_https_url(target)
+        async with guarded_async_client(timeout=15.0) as client:
+            resp = await client.get(target, auth=(username, password))
+    except OutboundURLRefused as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"SimpleFIN access URL refused: {exc}",
+        ) from exc
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"SimpleFIN returned HTTP {resp.status_code}",
+        )
+    return resp.json()
 
 
 def _money(value: str | int | float | None) -> str:
