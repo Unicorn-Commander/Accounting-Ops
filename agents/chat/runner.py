@@ -210,6 +210,7 @@ async def stream_assistant_turn(
     cancel_check: Any = None,  # callable[[], bool] | None — polled between deltas
     delegation: Any = None,  # DelegationContext | None — enables consult_specialist
     llm_user: str | None = None,  # workspace_id for gateway end-user attribution
+    untrusted_base_url: bool = False,  # tenant-chosen (BYOK) endpoint → guarded client
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream chat events for one assistant turn.
 
@@ -236,6 +237,10 @@ async def stream_assistant_turn(
         cancel_check:       Optional callable; when it returns True, the loop
                             stops cleanly and emits a {"type": "stop",
                             "stop_reason": "cancelled"} event.
+        untrusted_base_url: True when ``openrouter_base_url`` was chosen by the
+                            tenant (a BYOK endpoint). The URL is then checked by
+                            app.security.outbound before the turn and dialled
+                            only through the guarded HTTP client.
         llm_user:           Workspace UUID stamped as OpenAI ``user=`` on every
                             outbound LLM request (LiteLLM/Lago end-user
                             attribution). Prefer the workspace id, not the SSO
@@ -253,11 +258,34 @@ async def stream_assistant_turn(
     Yields:
         Chat events (dicts). Always ends with one ``{"type": "stop"|"error"}``.
     """
+    # The server's OPENROUTER_API_KEY must never be sent to a tenant-chosen
+    # (BYOK) base_url: on that path the only key is the workspace's own.
+    if untrusted_base_url:
+        api_key = openrouter_api_key or ""
+    else:
+        api_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
+    # The outbound guard for tenant-chosen (BYOK) endpoints runs BEFORE the
+    # openai SDK is imported or any client is built, so a refused endpoint is
+    # refused even in a container where the SDK is not installed.
+    if untrusted_base_url:
+        if not api_key:
+            yield {"type": "error", "message": "No key is configured for this workspace's endpoint."}
+            return
+        try:
+            from app.security.outbound import assert_public_https_url
+
+            await assert_public_https_url(openrouter_base_url)
+        except ValueError as exc:
+            yield {
+                "type": "error",
+                "message": f"This workspace's inference endpoint was refused: {exc}",
+            }
+            return
+
     if openai is None:
         yield {"type": "error", "message": "openai SDK not installed in this container"}
         return
 
-    api_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key and backend == "openrouter":
         yield {
             "type": "error",
@@ -360,10 +388,19 @@ async def stream_assistant_turn(
                 # The User-Agent lives in app.llm_client (the UC gateway sits
                 # behind Cloudflare, which 403s the openai SDK's default UA with
                 # "error code: 1010"); do NOT re-add a UA literal here.
+                _primary_http = None
+                if untrusted_base_url:
+                    from app.security.outbound import (
+                        LLM_CLIENT_TIMEOUT,
+                        guarded_async_client,
+                    )
+
+                    _primary_http = guarded_async_client(timeout=LLM_CLIENT_TIMEOUT)
                 client = FailoverAsyncClient(
                     base_url=openrouter_base_url,
                     api_key=api_key,
                     model=model,
+                    primary_http_client=_primary_http,
                     op="chat.completions.stream",
                     # Workspace id → OpenAI ``user`` for gateway/Lago attribution.
                     user=llm_user,

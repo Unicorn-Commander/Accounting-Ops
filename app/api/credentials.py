@@ -21,6 +21,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.db import SessionLocal
+from app.security.outbound import (
+    OutboundURLRefused,
+    assert_public_https_url,
+    guarded_async_client,
+)
 from app.security.credentials import (
     delete_credential,
     list_credentials,
@@ -55,6 +60,14 @@ def _is_valid_simplefin_access_url(url: str) -> bool:
         return False
 
 
+async def _require_safe_simplefin_url(url: str, what: str, *, code: int) -> None:
+    """Outbound guard (app.security.outbound) for a SimpleFIN URL; HTTP error on refusal."""
+    try:
+        await assert_public_https_url(url)
+    except OutboundURLRefused as exc:
+        raise HTTPException(status_code=code, detail=f"{what} refused: {exc}") from exc
+
+
 @router.post("/api/workspaces/{workspace_id}/credentials")
 async def http_store_credential(
     workspace_id: UUID,
@@ -62,6 +75,19 @@ async def http_store_credential(
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
     require_role(workspace, "admin")
+    if body.connector.strip().lower() == "simplefin":
+        # The stored access URL is fetched server-side on every transactions /
+        # cash-position / account-mappings read: guard it at WRITE time too.
+        if not _is_valid_simplefin_access_url(body.plaintext_value.strip()):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="SimpleFIN credential must be an https access URL with credentials",
+            )
+        await _require_safe_simplefin_url(
+            body.plaintext_value.strip(),
+            "SimpleFIN access URL",
+            code=status.HTTP_400_BAD_REQUEST,
+        )
     async with SessionLocal() as session:
         async with session.begin():
             cred_id = await store_credential(
@@ -102,11 +128,20 @@ async def http_claim_simplefin(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Decoded setup token does not look like a SimpleFIN claim URL",
         )
+    # The claim URL comes from the user-supplied token: guard it before any request.
+    await _require_safe_simplefin_url(
+        claim_url, "SimpleFIN claim URL", code=status.HTTP_400_BAD_REQUEST
+    )
 
     # Claim the URL. Single-use; SimpleFIN responds with the permanent access URL.
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with guarded_async_client(timeout=15.0) as client:
             resp = await client.post(claim_url, headers={"Content-Length": "0"})
+    except OutboundURLRefused as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"SimpleFIN claim URL refused: {exc}",
+        ) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -129,6 +164,9 @@ async def http_claim_simplefin(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="SimpleFIN response did not look like an access URL",
         )
+    await _require_safe_simplefin_url(
+        access_url, "SimpleFIN access URL", code=status.HTTP_502_BAD_GATEWAY
+    )
 
     # Store encrypted.
     async with SessionLocal() as session:
@@ -152,7 +190,7 @@ async def http_claim_simplefin(
         path = f"{path}/accounts"
     accounts_count = 0
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with guarded_async_client(timeout=10.0) as client:
             verify_resp = await client.get(
                 f"{parts.scheme}://{host}{path}?balances-only=1",
                 auth=(user, pw),

@@ -140,6 +140,8 @@ class DelegationContext:
     backend: str | None = None
     openrouter_base_url: str | None = None
     openrouter_api_key: str | None = None
+    # Tenant-chosen base_url (BYOK endpoint) → the consult uses the guarded client.
+    untrusted_base_url: bool = False
     mcp_url: str | None = None
     # Model used for the inner consult. None → the specialist persona's
     # default_model, else the chat runner default. Kept separate from the CFO's
@@ -325,6 +327,8 @@ async def _collect_consult_turn(
         runner_kwargs["openrouter_base_url"] = ctx.openrouter_base_url
     if ctx.openrouter_api_key:
         runner_kwargs["openrouter_api_key"] = ctx.openrouter_api_key
+    if ctx.untrusted_base_url:
+        runner_kwargs["untrusted_base_url"] = True
     if ctx.mcp_url:
         runner_kwargs["mcp_url"] = ctx.mcp_url
 
@@ -624,6 +628,7 @@ def build_cfo_delegation(
     backend: str | None = None,
     openrouter_base_url: str | None = None,
     openrouter_api_key: str | None = None,
+    untrusted_base_url: bool = False,
     mcp_url: str | None = None,
     consult_model: str | None = None,
 ) -> DelegationContext:
@@ -655,6 +660,7 @@ def build_cfo_delegation(
         backend=backend,
         openrouter_base_url=openrouter_base_url,
         openrouter_api_key=openrouter_api_key,
+        untrusted_base_url=untrusted_base_url,
         mcp_url=mcp_url,
         consult_model=consult_model,
         cfo_agent_id=cfo_agent_id,

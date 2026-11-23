@@ -43,6 +43,7 @@ from app.security.credentials import (
     list_credentials,
     store_credential,
 )
+from app.security.outbound import OutboundURLRefused, assert_public_https_url
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 
 _log = logging.getLogger("acctops.inference_settings")
@@ -189,6 +190,16 @@ async def set_byok(
             status_code=status.HTTP_400_BAD_REQUEST, detail="api_key is required"
         )
     base_url = (body.base_url or "").strip() or None
+    if base_url is not None:
+        # The chat runner sends this workspace's key + every chat turn to
+        # base_url server-side: refuse internal / non-https targets (SSRF).
+        try:
+            await assert_public_https_url(base_url)
+        except OutboundURLRefused as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"base_url refused: {exc}",
+            ) from exc
 
     # The EXACT shape workspace_llm_keys.get_byok parses.
     value = json.dumps({"key": api_key, "provider": provider, "base_url": base_url})

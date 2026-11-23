@@ -16,13 +16,17 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app.db import SessionLocal
 from app.security.credentials import get_credential_plaintext
+from app.security.outbound import (
+    OutboundURLRefused,
+    assert_public_https_url,
+    guarded_async_client,
+)
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
 
@@ -71,13 +75,18 @@ async def _discover_simplefin_accounts(access_url: str) -> list[dict[str, Any]]:
     path = parts.path.rstrip("/")
     if not path.endswith("/accounts"):
         path = f"{path}/accounts"
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(
-            f"{parts.scheme}://{host}{path}?balances-only=1", auth=(user, pw)
-        )
-        if resp.status_code >= 400:
-            return []
-        payload = resp.json()
+    target = f"{parts.scheme}://{host}{path}?balances-only=1"
+    # Outbound guard at USE time (app.security.outbound). Discovery already
+    # degrades to "no accounts" on an upstream error; a refused URL does too.
+    try:
+        await assert_public_https_url(target)
+        async with guarded_async_client(timeout=10.0) as client:
+            resp = await client.get(target, auth=(user, pw))
+    except OutboundURLRefused:
+        return []
+    if resp.status_code >= 400:
+        return []
+    payload = resp.json()
     accounts: list[dict[str, Any]] = []
     for a in payload.get("accounts", []):
         org = a.get("org") or {}

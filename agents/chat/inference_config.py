@@ -54,6 +54,9 @@ class ResolvedInference:
     # "byok" | "platform_virtual" | "openrouter_default" — for logging/tests.
     # NEVER carries key material.
     source: str
+    # True when base_url is tenant-chosen (a BYOK endpoint): the runner must then
+    # use the outbound-guarded HTTP client (app.security.outbound).
+    untrusted_base_url: bool = False
 
 
 def _openrouter_base() -> str:
@@ -139,9 +142,25 @@ async def resolve_chat_inference(
     if byok:
         key, _provider, byok_base = byok
         if byok_base:
+            # A stored base_url may predate the write-time guard: re-check it.
+            # Refused → ignore the endpoint and route the CUSTOMER's key the
+            # normal way below (never a server key, never the internal target).
+            try:
+                from app.security.outbound import check_url_static
+
+                check_url_static(byok_base)
+            except ValueError:
+                _log.warning("BYOK base_url refused by outbound guard (ws=%s)", workspace_id)
+                byok_base = None
+        if byok_base:
             # Customer pinned their own endpoint → direct; can't assume the
             # gateway aliases exist there, so use requested/today's model.
-            return ResolvedInference(byok_base, key, requested_model or default_model, "byok")
+            # The key is ALWAYS the customer's own (get_byok never returns an
+            # empty key), and the runner dials it through the guarded client.
+            return ResolvedInference(
+                byok_base, key, requested_model or default_model, "byok",
+                untrusted_base_url=True,
+            )
         if settings.route_chat_through_gateway:
             # No explicit endpoint → route their key through the gateway so it's
             # still metered/observable; use the gateway alias.

@@ -581,10 +581,16 @@ class FailoverAsyncClient(_FailoverClientBase):
     request on another provider without duplicating output.
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, *, primary_http_client: Any = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        # ``primary_http_client`` applies to the PRIMARY rung only: a tenant-chosen
+        # BYOK endpoint gets the outbound-guarded client (app.security.outbound),
+        # while the operator's fallback rung keeps the SDK default.
+        primary_kwargs = dict(self._client_kwargs)
+        if primary_http_client is not None:
+            primary_kwargs["http_client"] = primary_http_client
         self._primary_client = build_async_openai(
-            self.primary, extra_headers=self._extra_headers, **self._client_kwargs
+            self.primary, extra_headers=self._extra_headers, **primary_kwargs
         )
         self._fallback_client = (
             build_async_openai(self.fallback, extra_headers=self._extra_headers, **self._client_kwargs)
