@@ -151,6 +151,14 @@ def store(monkeypatch) -> _FakeStore:
         yield _S()
 
     monkeypatch.setattr(mod, "SessionLocal", _fake_session_local)
+
+    # base_url now passes the outbound guard (DNS): keep it offline.
+    import app.security.outbound as outbound
+
+    async def _public_dns(host, port):
+        return ["93.184.215.14"]
+
+    monkeypatch.setattr(outbound, "_resolve", _public_dns)
     return fake
 
 

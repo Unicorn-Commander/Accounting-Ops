@@ -726,10 +726,12 @@ async def send_chat_message(
         _runner_route = {
             "openrouter_base_url": _resolved.base_url,
             "openrouter_api_key": _resolved.api_key,
+            "untrusted_base_url": _resolved.untrusted_base_url,
         }
         _deleg_route = {
             "openrouter_base_url": _resolved.base_url,
             "openrouter_api_key": _resolved.api_key,
+            "untrusted_base_url": _resolved.untrusted_base_url,
             "consult_model": (
                 GATEWAY_MODEL_SONNET
                 # Gateway-routed sources use the cheap Sonnet alias for consults.

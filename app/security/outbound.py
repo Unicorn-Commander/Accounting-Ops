@@ -234,6 +234,10 @@ class GuardedAsyncTransport(httpx.AsyncHTTPTransport):
         return await super().handle_async_request(request)
 
 
+# Same shape as the openai SDK default (connect 5s, else 600s) for LLM streams.
+LLM_CLIENT_TIMEOUT = httpx.Timeout(600.0, connect=5.0)
+
+
 def guarded_async_client(**kwargs: Any) -> httpx.AsyncClient:
     """An ``httpx.AsyncClient`` for tenant-chosen URLs: guarded, no redirects,
     no environment proxies. Extra kwargs (``timeout``...) pass through."""
