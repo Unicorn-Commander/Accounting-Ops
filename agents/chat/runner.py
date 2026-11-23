@@ -258,16 +258,15 @@ async def stream_assistant_turn(
     Yields:
         Chat events (dicts). Always ends with one ``{"type": "stop"|"error"}``.
     """
-    if openai is None:
-        yield {"type": "error", "message": "openai SDK not installed in this container"}
-        return
-
     # The server's OPENROUTER_API_KEY must never be sent to a tenant-chosen
     # (BYOK) base_url: on that path the only key is the workspace's own.
     if untrusted_base_url:
         api_key = openrouter_api_key or ""
     else:
         api_key = openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
+    # The outbound guard for tenant-chosen (BYOK) endpoints runs BEFORE the
+    # openai SDK is imported or any client is built, so a refused endpoint is
+    # refused even in a container where the SDK is not installed.
     if untrusted_base_url:
         if not api_key:
             yield {"type": "error", "message": "No key is configured for this workspace's endpoint."}
@@ -282,6 +281,11 @@ async def stream_assistant_turn(
                 "message": f"This workspace's inference endpoint was refused: {exc}",
             }
             return
+
+    if openai is None:
+        yield {"type": "error", "message": "openai SDK not installed in this container"}
+        return
+
     if not api_key and backend == "openrouter":
         yield {
             "type": "error",
