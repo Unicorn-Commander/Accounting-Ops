@@ -260,6 +260,66 @@ def fake_mcp(monkeypatch):
     monkeypatch.setitem(sys.modules, "mcp.client.streamable_http", shttp)
 
 
+@pytest.fixture()
+def fake_openai(monkeypatch):
+    """Minimal stand-in for the openai SDK so the 3 client-building tests RUN in
+    CI, where the SDK is not installed (it lives in the ``tax-agents`` extra,
+    not ``dev``). ``AsyncOpenAI`` keeps the injected ``http_client`` as
+    ``._client`` (what the leak test inspects) and ``chat.completions.create``
+    issues a real request through it, so the guarded transport still re-checks
+    DNS and records the dial — exactly what these tests assert. The recording
+    backend answers with a non-SSE body, so the stream yields no chunks and the
+    runner ends on a clean ``stop`` (same as the real SDK on this fixture)."""
+
+    class _Stream:
+        def __init__(self, response) -> None:
+            self._response = response
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class _Completions:
+        def __init__(self, owner) -> None:
+            self._owner = owner
+
+        async def create(self, **kwargs):
+            owner = self._owner
+            headers = {
+                "authorization": f"Bearer {owner._api_key}",
+                "content-type": "application/json",
+            }
+            headers.update(owner._default_headers)
+            resp = await owner._client.post(
+                f"{owner._base_url}/chat/completions",
+                headers=headers,
+                content=json.dumps(kwargs).encode(),
+            )
+            resp.raise_for_status()
+            return _Stream(resp)
+
+    class _Chat:
+        def __init__(self, owner) -> None:
+            self.completions = _Completions(owner)
+
+    class AsyncOpenAI:
+        def __init__(self, *, base_url, api_key, default_headers=None, http_client=None, **kw):
+            self._base_url = base_url.rstrip("/")
+            self._api_key = api_key
+            self._default_headers = dict(default_headers or {})
+            self._client = http_client
+            self.chat = _Chat(self)
+
+    fake = types.ModuleType("openai")
+    fake.AsyncOpenAI = AsyncOpenAI
+    fake.OpenAI = AsyncOpenAI
+    monkeypatch.setitem(sys.modules, "openai", fake)
+    monkeypatch.setattr(runner_mod, "openai", fake)
+    return fake
+
+
 async def _run(**kw) -> list[dict]:
     events = []
     async for ev in runner_mod.stream_assistant_turn(
@@ -302,7 +362,7 @@ async def test_runner_never_sends_server_key_to_byok_endpoint(net, fake_mcp, mon
     assert _SERVER_KEY.encode() not in net.sent
 
 
-async def test_runner_byok_turn_uses_guarded_client_end_to_end(net, fake_mcp):
+async def test_runner_byok_turn_uses_guarded_client_end_to_end(net, fake_mcp, fake_openai):
     """Public BYOK endpoint: dialled at the checked IP, with the CUSTOMER key."""
     events = await _run(
         openrouter_base_url="https://llm.example.com/v1",
@@ -316,7 +376,7 @@ async def test_runner_byok_turn_uses_guarded_client_end_to_end(net, fake_mcp):
     assert events[-1]["type"] == "stop"
 
 
-async def test_guarded_primary_refuses_rebound_endpoint(net):
+async def test_guarded_primary_refuses_rebound_endpoint(net, fake_openai):
     """The runner's primary client re-checks DNS at connect: a host that now
     resolves inside is refused and nothing is dialled."""
     client = FailoverAsyncClient(
@@ -333,7 +393,7 @@ async def test_guarded_primary_refuses_rebound_endpoint(net):
     assert net.dialled == []
 
 
-def test_primary_http_client_does_not_leak_to_fallback(net, monkeypatch):
+def test_primary_http_client_does_not_leak_to_fallback(net, monkeypatch, fake_openai):
     monkeypatch.setenv("LLM_FALLBACK_BASE_URL", "https://fallback.example.org/v1")
     monkeypatch.setenv("LLM_FALLBACK_MODEL", "m")
     monkeypatch.setenv("LLM_FALLBACK_API_KEY", "sk-fallback-test")
