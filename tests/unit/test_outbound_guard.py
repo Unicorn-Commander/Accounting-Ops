@@ -6,6 +6,7 @@ recording httpcore mock backend, so every test proves WHICH address was dialled
 """
 from __future__ import annotations
 
+import base64
 import uuid
 from contextlib import asynccontextmanager
 
@@ -265,3 +266,58 @@ async def test_use_time_fetchers_accept_public(net):
     assert [a["external_account_id"] for a in accounts] == ["ACT-1"]
     assert net.dialled == [("93.184.215.14", 443)] * 3
 
+
+
+# ---------------------------------------------------------------------------
+# A3 — SimpleFIN claim: the claim URL decoded from the setup token
+# ---------------------------------------------------------------------------
+
+
+def _token(url: str) -> str:
+    return base64.b64encode(url.encode()).decode()
+
+
+@pytest.mark.parametrize(
+    "claim_url",
+    [
+        "https://169.254.169.254/latest/meta-data/iam",
+        "https://127.0.0.1:8000/api/admin",
+        "https://[::1]/claim",
+        "https://intranet.example.com/claim/abc",
+        "https://cgnat.example.com/claim/abc",
+        "https://mixed.example.com/claim/abc",
+    ],
+)
+def test_claim_refuses_internal_claim_url(net, stored, claim_url):
+    resp = _creds_client().post(
+        f"/api/workspaces/{_WID}/credentials/simplefin/claim",
+        json={"setup_token": _token(claim_url)},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "refused" in resp.json()["detail"]
+    assert net.dialled == []
+    assert stored == []
+
+
+def test_claim_refuses_internal_access_url_in_response(net, stored):
+    """A public claim host that hands back an internal access URL is refused."""
+    net.body = b"https://u:p@169.254.169.254/latest"
+    resp = _creds_client().post(
+        f"/api/workspaces/{_WID}/credentials/simplefin/claim",
+        json={"setup_token": _token("https://bridge.example.com/simplefin/claim/abc")},
+    )
+    assert resp.status_code == 502, resp.text
+    assert stored == []
+    assert net.dialled == [("93.184.215.14", 443)]  # the claim POST only
+
+
+def test_claim_accepts_public_simplefin_shaped_url(net, stored):
+    net.body = _PUBLIC_ACCESS_URL.encode()
+    resp = _creds_client().post(
+        f"/api/workspaces/{_WID}/credentials/simplefin/claim",
+        json={"setup_token": _token("https://bridge.example.com/simplefin/claim/abc")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert stored == [("simplefin", "SimpleFIN", _PUBLIC_ACCESS_URL)]
+    # Claim POST + verify GET, both to the checked public IP.
+    assert net.dialled == [("93.184.215.14", 443), ("93.184.215.14", 443)]

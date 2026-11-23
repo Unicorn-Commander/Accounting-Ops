@@ -128,11 +128,20 @@ async def http_claim_simplefin(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Decoded setup token does not look like a SimpleFIN claim URL",
         )
+    # The claim URL comes from the user-supplied token: guard it before any request.
+    await _require_safe_simplefin_url(
+        claim_url, "SimpleFIN claim URL", code=status.HTTP_400_BAD_REQUEST
+    )
 
     # Claim the URL. Single-use; SimpleFIN responds with the permanent access URL.
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with guarded_async_client(timeout=15.0) as client:
             resp = await client.post(claim_url, headers={"Content-Length": "0"})
+    except OutboundURLRefused as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"SimpleFIN claim URL refused: {exc}",
+        ) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
