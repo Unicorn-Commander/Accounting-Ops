@@ -345,7 +345,7 @@ async def _regenerate_as(ws: dict, invoice_id: str, role: str) -> httpx.Response
         )
 
 
-async def test_regenerate_route_is_owner_admin_only(app_sessions, workspace) -> None:
+async def test_regenerate_route_is_owner_admin_only(app_sessions, owner, workspace) -> None:
     """AO110-R3-P2-A: accountant and viewer get 403 and the link is untouched;
     owner gets a new link once and the old token stops working."""
     ws = workspace[0]
@@ -365,6 +365,21 @@ async def test_regenerate_route_is_owner_admin_only(app_sessions, workspace) -> 
     assert isinstance(await invoices_api._invoice_for_token(new), dict)
     status, _ = await _public_get(f"/pay/{old}")
     assert status == 404
+
+    # AO110-R3-P3-C: one audit row per successful regenerate, none for a 403.
+    rows = await owner.fetch(
+        "SELECT workspace_id::text AS wid, request_payload::text AS req, "
+        "response_payload::text AS resp, outcome FROM books.decision_audit "
+        "WHERE tool_name = 'regenerate_pay_link' "
+        "AND request_payload->>'invoice_id' = $1",
+        view["id"],
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["wid"] == ws["workspace_id"] and row["outcome"] == "regenerated"
+    assert "regen-owner" in row["req"]
+    for token in (old, new):
+        assert token not in row["req"] and token not in row["resp"]
 
 
 async def test_link_sent_before_0021_keeps_working_until_its_expiry(app_sessions, owner, workspace) -> None:

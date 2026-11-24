@@ -59,6 +59,7 @@ from app.authz import assert_entity_in_scope
 from app.core.business_time import business_today
 from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
+from app.tools._audit import write_decision_audit
 from app.workspace_session import workspace_session
 
 router = APIRouter(tags=["invoices"])
@@ -398,6 +399,20 @@ async def regenerate_pay_link_route(
                 session,
                 workspace_id=str(workspace.workspace_id),
                 invoice_id=str(invoice_id),
+            )
+            # Same transaction as the rotation: no audit row, no new link.
+            # Records who rotated which invoice's link, never the token.
+            await write_decision_audit(
+                session,
+                workspace_id=workspace.workspace_id,
+                entity_id=UUID(view["entity_id"]),
+                ctx=workspace,
+                tool_name="regenerate_pay_link",
+                request_payload={"invoice_id": str(invoice_id)},
+                response_payload={"earlier_links_revoked": True},
+                reasoning="owner/admin regenerated the customer pay link",
+                outcome="regenerated",
+                metadata={"actor_uc_uid": workspace.user_uc_uid},
             )
     except InvoiceError as exc:
         raise _invoice_error(exc) from exc
