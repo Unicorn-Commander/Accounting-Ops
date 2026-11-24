@@ -82,6 +82,82 @@ def test_invoice_html_hides_the_contact_column_without_a_name():
     assert "Your contact" not in html
 
 
+def test_logo_url_data_uri_is_used_as_stored(caplog):
+    """A data: logo_url is used as-is, no warning, no fallback."""
+    import logging
+
+    from app.ar.invoice_brand.template import render_invoice_html
+
+    uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+    with caplog.at_level(logging.WARNING, logger="app.ar.invoice_brand.template"):
+        html = render_invoice_html(
+            {
+                "invoice_number": "MU-2",
+                "total": "10.00",
+                "balance_due": "10.00",
+                "customer_name": "River Green",
+                "logo_url": uri,
+                "lines": [{"description": "Work", "quantity": 1, "amount": "10.00"}],
+            }
+        )
+    assert uri in html, "the data: logo was not used as stored"
+    assert not any("logo_url" in rec.message for rec in caplog.records), (
+        "a data: logo_url must not trigger a drop warning"
+    )
+
+
+def test_logo_url_http_is_dropped_with_a_warning(caplog):
+    """An http(s) logo_url is dropped (the safe renderer refuses it) and the
+    drop is logged so the operator knows.  The invoice falls back to the
+    default logo.
+    """
+    import logging
+
+    from app.ar.invoice_brand.template import render_invoice_html
+
+    with caplog.at_level(logging.WARNING, logger="app.ar.invoice_brand.template"):
+        html = render_invoice_html(
+            {
+                "invoice_number": "MU-3",
+                "total": "10.00",
+                "balance_due": "10.00",
+                "customer_name": "River Green",
+                "logo_url": "https://example.com/logo.png",
+                "lines": [{"description": "Work", "quantity": 1, "amount": "10.00"}],
+            }
+        )
+    assert any("logo_url" in rec.message for rec in caplog.records), (
+        "the dropped logo_url was not logged"
+    )
+    assert "https://example.com/logo.png" not in html, (
+        "the http logo_url was passed into the renderer input"
+    )
+    assert "data:image/png;base64," in html, "the default logo fallback was not used"
+
+
+def test_logo_url_file_is_dropped_with_a_warning(caplog):
+    """A file: logo_url is dropped and logged, like an http: one."""
+    import logging
+
+    from app.ar.invoice_brand.template import render_invoice_html
+
+    with caplog.at_level(logging.WARNING, logger="app.ar.invoice_brand.template"):
+        html = render_invoice_html(
+            {
+                "invoice_number": "MU-4",
+                "total": "10.00",
+                "balance_due": "10.00",
+                "customer_name": "River Green",
+                "logo_url": "file:///etc/hostname",
+                "lines": [{"description": "Work", "quantity": 1, "amount": "10.00"}],
+            }
+        )
+    assert any("logo_url" in rec.message for rec in caplog.records), (
+        "the dropped logo_url was not logged"
+    )
+    assert "file:///etc/hostname" not in html
+
+
 def test_stripe_signature_accepts_a_known_secret_and_rejects_the_rest():
     secret = "whsec_unit_test_only"
     payload = b'{"id":"evt_1","type":"checkout.session.completed"}'
