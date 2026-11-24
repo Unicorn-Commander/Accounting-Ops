@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
@@ -43,18 +44,31 @@ async def list_overrides(
     workspace_id: UUID,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
+    # AO-CLIENT-2: bookkeeper floor (the role that proposes categorizations)
+    # and the membership's entity_scope. A scoped member sees its own
+    # entities' rules plus the workspace-wide ones (entity_id IS NULL, which
+    # apply to every entity), never another entity's rules or their authors.
+    require_role(workspace, "bookkeeper")
+    scope_restriction = assert_entity_in_scope(workspace, None)
+    where = "1=1"
+    params: dict[str, Any] = {}
+    if scope_restriction is not None:
+        where = "(entity_id IS NULL OR entity_id = ANY(:entity_scope))"
+        params["entity_scope"] = [str(e) for e in scope_restriction]
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         rows = (
             await session.execute(
                 text(
-                    """
+                    f"""
                     SELECT id::text, entity_id::text, pattern, category,
                            debit_account, credit_account, created_by_uc_uid,
                            created_at, match_count
                     FROM category_override
+                    WHERE {where}
                     ORDER BY created_at DESC
                     """
-                )
+                ),
+                params,
             )
         ).mappings().all()
     return {"overrides": [dict(r) for r in rows]}
