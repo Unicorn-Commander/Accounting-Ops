@@ -808,15 +808,28 @@ async def get_decision_history(
     Read floor: viewer (every workspace member can see decision history).
     """
     require_role(workspace, "viewer")
+    # AO-CLIENT-3: same entity_scope restriction as get_open_items. A scoped
+    # member (e.g. a client_user on entity A) sees only decision rows filed
+    # under its own entities, never another entity's reviewer ids or notes.
+    scope_restriction = assert_entity_in_scope(workspace, None)
     key_clean = (key or "").strip()
     if not key_clean:
         return {"key": "", "history": []}
+
+    scope_sql = ""
+    params: dict[str, Any] = {
+        "exact_ref_accept": f"DECISION_RESOLVED: {key_clean}|accept",
+        "exact_ref_other": f"DECISION_RESOLVED: {key_clean}|other",
+    }
+    if scope_restriction is not None:
+        scope_sql = " AND entity_id = ANY(:entity_scope)"
+        params["entity_scope"] = [str(e) for e in scope_restriction]
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         rows = (
             await session.execute(
                 text(
-                    """
+                    f"""
                     SELECT
                         id::text                AS id,
                         form_reference          AS form_reference,
@@ -825,15 +838,12 @@ async def get_decision_history(
                         created_at              AS decided_at,
                         content                 AS content
                     FROM tax_review_queue
-                    WHERE form_reference = :exact_ref_accept
-                       OR form_reference = :exact_ref_other
+                    WHERE (form_reference = :exact_ref_accept
+                           OR form_reference = :exact_ref_other){scope_sql}
                     ORDER BY created_at ASC
                     """
                 ),
-                {
-                    "exact_ref_accept": f"DECISION_RESOLVED: {key_clean}|accept",
-                    "exact_ref_other": f"DECISION_RESOLVED: {key_clean}|other",
-                },
+                params,
             )
         ).mappings().all()
 
