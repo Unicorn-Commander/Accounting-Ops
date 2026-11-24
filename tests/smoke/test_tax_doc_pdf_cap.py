@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any
 
 import fitz  # pymupdf
@@ -125,3 +126,70 @@ def test_render_returns_pngs_for_good_pages() -> None:
     assert error is None
     assert len(out) == 1
     assert out[0].startswith(b"\x89PNG")
+
+
+def test_worker_owns_doc_close_and_slot_on_timeout(monkeypatch) -> None:
+    """R3-4: on a per-page timeout the WORKER thread owns the document handle
+    and the slot. The caller must NOT close the doc or release the slot while
+    the daemon thread is still inside get_pixmap (use-after-close / double
+    release). So:
+      * after the timeout, close() has NOT been called and the slot is held;
+      * after the blocked page unblocks, close() is called exactly once and
+        the slot is released.
+    A fake page blocks get_pixmap on an Event; the per-page budget is shrunk
+    to 0.2s so the timeout fires fast.
+    """
+    data = _one_page_pdf()
+    # The join deadline must fire BEFORE the worker's event wait ends, so the
+    # worker is still blocked (alive) when _render_pdf checks is_alive().
+    monkeypatch.setattr(mod, "_RENDER_PAGE_BUDGET_S", 0.5)
+
+    release = threading.Event()
+    closed = {"count": 0}
+    doc = fitz.open(stream=data, filetype="pdf")
+
+    class _FakePage:
+        def get_pixmap(self, matrix: Any, alpha: bool) -> Any:
+            # Block in the worker thread until the test releases us.
+            release.wait(60)
+            pix = doc[0].get_pixmap(matrix=matrix, alpha=alpha)
+            return pix
+
+    class _FakeDoc:
+        def __getitem__(self, i: int) -> _FakePage:
+            return _FakePage()
+
+        def close(self) -> None:
+            closed["count"] += 1
+            doc.close()
+
+    monkeypatch.setattr(fitz, "open", lambda *a, **kw: _FakeDoc())
+
+    out, error = mod._render_pdf(data, max_pages=1, dpi=150)
+
+    # The page overran the (0.2s) budget: the render returned early, marked
+    # partial, and produced no page.
+    assert out == []
+    assert error == "render timeout (partial)"
+
+    # The caller must NOT have closed the doc or released the slot: the worker
+    # still owns both (it is blocked in get_pixmap). The semaphore's value is
+    # 1 (one of two slots held) rather than 2 (both free).
+    assert closed["count"] == 0, "caller must not close the doc while the worker holds it"
+    assert mod._render_slot._value == mod._RENDER_CONCURRENCY - 1, (
+        f"the slot must still be held by the worker (value={mod._render_slot._value})"
+    )
+
+    # Unblock the worker: it finishes get_pixmap, then its own finally closes
+    # the doc (once) and releases the slot. Wait until the worker has closed the
+    # doc (its finally runs close() before release(), so close count 1 implies
+    # the slot is released too).
+    release.set()
+    deadline = time.monotonic() + 10
+    while closed["count"] < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert closed["count"] == 1, "the worker must close the doc exactly once"
+    # The worker's finally released the slot after close(): all slots are free.
+    assert mod._render_slot._value == mod._RENDER_CONCURRENCY, (
+        f"the worker must have released the slot (value={mod._render_slot._value})"
+    )

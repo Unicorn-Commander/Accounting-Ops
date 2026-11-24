@@ -67,6 +67,11 @@ _RENDER_DPI = 150
 # instead of queuing behind a pathological page forever.
 _RENDER_CONCURRENCY = 2
 _RENDER_SLOT_TIMEOUT_S = 30.0
+# A single page that takes longer than this is pathological for a tax doc (a
+# real W-2 / 1099 page rasterizes in well under a second at 150 DPI). Module
+# constant so tests can shrink it; the worker join deadline is enforced around
+# this, not inside the C rasterizer.
+_RENDER_PAGE_BUDGET_S = 10.0
 
 _SYSTEM_PROMPT = (
     "You are a meticulous U.S. tax-document analyzer. You are shown the page "
@@ -259,62 +264,73 @@ def _render_pdf(
     """
     import fitz  # pymupdf — imported lazily so a missing dep can't break import
 
-    # A single page that takes longer than this is pathological for a tax doc
-    # (a real W-2 / 1099 page rasterizes in well under a second at 150 DPI).
-    per_page_budget_s = 10.0
+    per_page_budget_s = _RENDER_PAGE_BUDGET_S
     out: list[bytes] = []
     error: str | None = None
     zoom = dpi / 72.0
     matrix = fitz.Matrix(zoom, zoom)
-    # The document handle is owned by the worker thread that rasterizes from it
-    # (fitz page objects are not thread-safe to share). We open it here and keep
-    # it open until the worker has finished or been abandoned, then close it in
-    # the finally — no use-after-close.
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    try:
-        for page in doc[:max_pages]:
-            # Bound concurrency: a page render that cannot get a slot within the
-            # timeout fails loudly rather than queuing behind a pathological one.
-            if not _render_slot.acquire(timeout=_RENDER_SLOT_TIMEOUT_S):
-                error = "render timeout (partial)"
-                _log.warning(
-                    "tax_doc_vlm render: no slot within %.0fs, stopping after %d page(s)",
-                    _RENDER_SLOT_TIMEOUT_S,
-                    len(out),
-                )
-                break
+    # fitz document + page objects are not thread-safe to share, and a page
+    # needs its document alive to rasterize. So each worker opens its OWN
+    # document from the (already-capped) bytes and owns the whole lifecycle:
+    # it closes its doc and releases its render slot in ITS OWN finally,
+    # whether the render succeeded, failed, or the caller abandoned the thread
+    # on a timeout. That ownership split is the point of this fix: on a
+    # per-page timeout the caller abandons the thread and returns, and must
+    # NOT close the document or release the slot while the daemon thread is
+    # still inside page.get_pixmap (use-after-close + a leaked or
+    # double-released slot). Reopening the bytes per page is cheap (a 20-page
+    # scan is a few KB and opens in ~ms) and is the only fitz-safe way to let
+    # each worker own its handle.
+    for page_index in range(max_pages):
+        # Bound concurrency: a page render that cannot get a slot within the
+        # timeout fails loudly rather than queuing behind a pathological one.
+        if not _render_slot.acquire(timeout=_RENDER_SLOT_TIMEOUT_S):
+            error = "render timeout (partial)"
+            _log.warning(
+                "tax_doc_vlm render: no slot within %.0fs, stopping after %d page(s)",
+                _RENDER_SLOT_TIMEOUT_S,
+                len(out),
+            )
+            break
+        exc: list[BaseException | None] = []
+
+        def _work() -> None:
+            # The worker owns its document + the slot: close the doc and
+            # release the slot in its own finally -- whether the render
+            # succeeded, failed, or the caller abandoned this thread on a
+            # timeout.
             try:
-                result: list[bytes] = []
-                exc: list[BaseException | None] = []
-
-                def _work() -> None:
-                    try:
-                        result.append(_rasterize(page, matrix))
-                    except BaseException as exc_:  # noqa: BLE001 - report to joiner
-                        exc.append(exc_)
-
-                thread = threading.Thread(target=_work, daemon=True)
-                thread.start()
-                thread.join(per_page_budget_s)
-                if thread.is_alive():
-                    # Still running after the budget: give up on this page and
-                    # stop the render. The daemon thread will finish (or not) in
-                    # the background; the result carries the partial-timeout
-                    # error so the truncated document is visible.
-                    error = "render timeout (partial)"
-                    _log.warning(
-                        "tax_doc_vlm render: page overran %.0fs budget, partial after %d page(s)",
-                        per_page_budget_s,
-                        len(out),
-                    )
-                    break
-                if exc:
-                    raise exc[0]
-                out.append(result[0])
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                out.append(_rasterize(doc[page_index], matrix))
+            except BaseException as exc_:  # noqa: BLE001 - report to joiner
+                exc.append(exc_)
             finally:
+                try:
+                    doc.close()
+                except (NameError, ValueError):
+                    # doc was never opened (open raised) or is already closed.
+                    pass
                 _render_slot.release()
-    finally:
-        doc.close()
+
+        thread = threading.Thread(target=_work, daemon=True)
+        thread.start()
+        thread.join(per_page_budget_s)
+        if thread.is_alive():
+            # Still running after the budget: give up on this page and stop the
+            # render. Do NOT close the document or release the slot here: the
+            # worker thread still holds its doc, its page, and the slot, and it
+            # closes the doc + releases the slot in its own finally when it
+            # finishes. Marking the result partial keeps the truncated document
+            # visible.
+            error = "render timeout (partial)"
+            _log.warning(
+                "tax_doc_vlm render: page overran %.0fs budget, partial after %d page(s)",
+                per_page_budget_s,
+                len(out),
+            )
+            break
+        if exc:
+            raise exc[0]
     return out, error
 
 
