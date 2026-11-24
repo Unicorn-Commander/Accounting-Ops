@@ -205,16 +205,13 @@ async def exchange_token(subject_token: str) -> str:
     async with httpx.AsyncClient(timeout=_TIMEOUT, headers={"User-Agent": _UA}) as client:
         resp = await client.post(token_url, data=data)
     if resp.status_code != 200:
-        # Log status + error code only, NOT resp.text: the token-endpoint body
-        # can echo grant details and must stay out of the logs.
-        try:
-            err_code = resp.json().get("error")
-        except Exception:  # noqa: BLE001 - body may not be JSON
-            err_code = None
+        # AO111-R2-F13: the token endpoint's body can echo the request (it
+        # carries client_secret + subject_token); log status + length only,
+        # never resp.text, at WARNING so the failure stays visible.
         _log.warning(
-            "[contact-ops] token exchange failed: status=%s error_code=%s",
+            "[contact-ops] token exchange failed: HTTP %s (body %d bytes)",
             resp.status_code,
-            err_code,
+            len(resp.content or b""),
         )
         raise ContactOpsError(
             "Could not obtain a Contact-Ops access token (token-exchange "

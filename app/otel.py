@@ -9,6 +9,8 @@ try:
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.trace import Span
+    from opentelemetry.trace.status import Status
 except ImportError:  # pragma: no cover - permits local import checks before dependency install
     propagate = None
     trace = None
@@ -17,8 +19,91 @@ except ImportError:  # pragma: no cover - permits local import checks before dep
     Resource = None
     TracerProvider = None
     BatchSpanProcessor = None
+    Span = None
+    Status = None
 
 from app.config import get_settings
+
+REDACTED = "redacted"
+
+
+def _scrub_exception_text(value: object) -> str:
+    """Return the constant exported in place of any exception text.
+
+    A recorded exception's status description and `exception.message` carry
+    the raw exception text (SQL with amounts and names, connector payloads,
+    one-word surnames). The exported value is NEVER derived from the input:
+    no regex guess, no pass-through. The real class name travels separately
+    in the event's own `exception.type`.
+    """
+    return REDACTED
+
+
+def _scrub_span_exception_text(span) -> None:
+    """Scrub exception text out of a span's status + `exception` events.
+
+    The SDK's `Span.record_exception` and FastAPI's exception middleware put
+    the raw exception text in the span status description and in the
+    `exception.message` event attribute (SQL with amounts and names, connector
+    payloads). The message is replaced with the constant 'redacted'; the real
+    type stays in `exception.type`. `exception.type` is NOT
+    scrubbed (N4): it carries the real class name, which is safe. The
+    `exception.stacktrace` is dropped entirely because the frames repeat the
+    raw message.
+    """
+    try:
+        # ReadableSpan exposes `status` as a read-only property; mutate the
+        # backing field directly (the exporter serializes whatever is there).
+        if span.status is not None and span.status.description:
+            object.__setattr__(
+                span,
+                "_status",
+                Status(
+                    status_code=span.status.status_code,
+                    description=_scrub_exception_text(span.status.description),
+                ),
+            )
+        for event in span.events:
+            if event.name != "exception":
+                continue
+            scrubbed = dict(event.attributes or {})
+            if "exception.message" in scrubbed:
+                scrubbed["exception.message"] = _scrub_exception_text(
+                    scrubbed["exception.message"]
+                )
+            # `exception.type` is NOT scrubbed: it carries the real class name
+            # (e.g. 'socket.gaierror'), which is safe and useful for triage.
+            # The traceback frames repeat the raw message (SQL, amounts,
+            # names). Drop it entirely: the type is already kept.
+            scrubbed.pop("exception.stacktrace", None)
+            # `Event.attributes` is a read-only property over `_attributes`;
+            # the OTLP encoder calls `.items()` on it, so store a mapping.
+            event._attributes = dict(scrubbed)
+    except Exception:  # noqa: BLE001 - scrubbing must never break a request
+        pass
+
+
+class _RedactingSpanExporter:
+    """Wraps a SpanExporter: scrubs each span's exception text on export.
+
+    Export runs in the BatchSpanProcessor worker thread, after `on_end` has
+    queued the span, so the scrubbed values are what gets serialized to the
+    OTLP endpoint. Delegates everything else (result codes, shutdown, flush).
+    """
+
+    def __init__(self, exporter) -> None:
+        self._exporter = exporter
+
+    def export(self, spans) -> object:
+        for span in spans:
+            _scrub_span_exception_text(span)
+        return self._exporter.export(spans)
+
+    def shutdown(self) -> None:
+        self._exporter.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return self._exporter.force_flush(timeout_millis)
 
 
 def setup_otel(app) -> None:
@@ -27,7 +112,12 @@ def setup_otel(app) -> None:
     settings = get_settings()
     provider = TracerProvider(resource=Resource.create({"service.name": settings.otel_service_name}))
     if settings.otel_exporter_otlp_endpoint:
-        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=settings.otel_exporter_otlp_endpoint)))
+        processor = BatchSpanProcessor(
+            _RedactingSpanExporter(
+                OTLPSpanExporter(endpoint=settings.otel_exporter_otlp_endpoint)
+            )
+        )
+        provider.add_span_processor(processor)
     trace.set_tracer_provider(provider)
     propagate.set_global_textmap(propagate.get_global_textmap())
     FastAPIInstrumentor.instrument_app(app, tracer_provider=provider)

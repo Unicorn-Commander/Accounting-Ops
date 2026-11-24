@@ -612,6 +612,41 @@ async def get_open_items(
 # ---------------------------------------------------------------------------
 
 
+async def _marker_entity(session: Any, workspace: WorkspaceContext) -> str | None:
+    """Entity a DOC_RECEIVED / DECISION_RESOLVED marker row is filed under.
+
+    The marker is not entity-specific, but tax_review_queue.entity_id is NOT
+    NULL, so the first entity by display name is used. AO111-R2-F8: for an
+    entity-scoped member the pick is restricted to its entity_scope (never
+    another entity's books), and the result goes through
+    assert_entity_in_scope as a backstop.
+    """
+    scope = assert_entity_in_scope(workspace, None)
+    where = ""
+    params: dict[str, Any] = {}
+    if scope is not None:
+        where = "WHERE id = ANY(:entity_scope)"
+        params["entity_scope"] = [str(e) for e in scope]
+    ent_row = (
+        await session.execute(
+            text(
+                f"""
+                SELECT id::text
+                FROM entity
+                {where}
+                ORDER BY display_name
+                LIMIT 1
+                """
+            ),
+            params,
+        )
+    ).first()
+    if not ent_row:
+        return None
+    assert_entity_in_scope(workspace, ent_row[0])
+    return ent_row[0]
+
+
 class DocReceivedBody(BaseModel):
     key: str
     received: bool = True
@@ -642,22 +677,9 @@ async def mark_document_received(
     # Use the first entity_id in scope as a placeholder — the marker row
     # isn't entity-specific, but the table requires entity_id NOT NULL.
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
-        # Pick any entity we can see (first alphabetically by display name).
-        ent_row = (
-            await session.execute(
-                text(
-                    """
-                    SELECT id::text
-                    FROM entity
-                    ORDER BY display_name
-                    LIMIT 1
-                    """
-                )
-            )
-        ).first()
-        if not ent_row:
+        ent_id = await _marker_entity(session, workspace)
+        if ent_id is None:
             return {"ok": False, "error": "no entity available"}
-        ent_id = ent_row[0]
 
         # status='resolved' marks the doc as received; status='rejected' un-receives it.
         # The aggregator picks the latest row per doc_key.
@@ -732,21 +754,9 @@ async def record_decision(
         return {"ok": False, "error": "key is required"}
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
-        ent_row = (
-            await session.execute(
-                text(
-                    """
-                    SELECT id::text
-                    FROM entity
-                    ORDER BY display_name
-                    LIMIT 1
-                    """
-                )
-            )
-        ).first()
-        if not ent_row:
+        ent_id = await _marker_entity(session, workspace)
+        if ent_id is None:
             return {"ok": False, "error": "no entity available"}
-        ent_id = ent_row[0]
 
         # Latest INSERT wins (no DELETE needed — runtime role can't DELETE).
         # The aggregator SELECT DISTINCT ON (dec_key) … ORDER BY resolved_at DESC
@@ -808,15 +818,28 @@ async def get_decision_history(
     Read floor: viewer (every workspace member can see decision history).
     """
     require_role(workspace, "viewer")
+    # AO-CLIENT-3: same entity_scope restriction as get_open_items. A scoped
+    # member (e.g. a client_user on entity A) sees only decision rows filed
+    # under its own entities, never another entity's reviewer ids or notes.
+    scope_restriction = assert_entity_in_scope(workspace, None)
     key_clean = (key or "").strip()
     if not key_clean:
         return {"key": "", "history": []}
+
+    scope_sql = ""
+    params: dict[str, Any] = {
+        "exact_ref_accept": f"DECISION_RESOLVED: {key_clean}|accept",
+        "exact_ref_other": f"DECISION_RESOLVED: {key_clean}|other",
+    }
+    if scope_restriction is not None:
+        scope_sql = " AND entity_id = ANY(:entity_scope)"
+        params["entity_scope"] = [str(e) for e in scope_restriction]
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         rows = (
             await session.execute(
                 text(
-                    """
+                    f"""
                     SELECT
                         id::text                AS id,
                         form_reference          AS form_reference,
@@ -825,15 +848,12 @@ async def get_decision_history(
                         created_at              AS decided_at,
                         content                 AS content
                     FROM tax_review_queue
-                    WHERE form_reference = :exact_ref_accept
-                       OR form_reference = :exact_ref_other
+                    WHERE (form_reference = :exact_ref_accept
+                           OR form_reference = :exact_ref_other){scope_sql}
                     ORDER BY created_at ASC
                     """
                 ),
-                {
-                    "exact_ref_accept": f"DECISION_RESOLVED: {key_clean}|accept",
-                    "exact_ref_other": f"DECISION_RESOLVED: {key_clean}|other",
-                },
+                params,
             )
         ).mappings().all()
 

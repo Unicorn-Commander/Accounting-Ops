@@ -142,6 +142,7 @@ async def test_usps_fault_has_no_upstream_xml(monkeypatch, caplog) -> None:
     class _FakeResp:
         status_code = 503
         text = f"<Error>{MARKER}</Error>"
+        content = text.encode()  # a real httpx.Response carries both
 
     class _FakeClient:
         async def __aenter__(self) -> "_FakeClient":

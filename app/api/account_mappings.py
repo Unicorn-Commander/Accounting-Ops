@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
 from app.security.credentials import get_credential_plaintext
 from app.security.outbound import (
@@ -108,7 +109,29 @@ async def list_account_mappings(
     workspace_id: UUID,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict[str, Any]:
-    """Discover live accounts + return current mappings + entities for selection."""
+    """Discover live accounts + return current mappings + entities for selection.
+
+    Accountant floor, same as the PUT (AO-CLIENT-1). The response carries every
+    entity's bank mappings and the full entity list, and the call dials the
+    workspace's SimpleFIN access URL, so a viewer / client_user / bookkeeper
+    (or an entity-scoped member reading another entity) must never reach it.
+    The gate runs BEFORE the credential read and the discovery call.
+
+    AO111-R3-F14: an entity-scoped caller (e.g. an accountant scoped to A)
+    gets only its own entities' mappings and entities, and a live account
+    already mapped to an entity outside its scope is dropped from
+    live_accounts (it is neither shown nor counted as unmapped). Unscoped
+    roles are unchanged.
+    """
+    require_role(workspace, "accountant")
+    scope_restriction = assert_entity_in_scope(workspace, None)
+    mapping_where = ""
+    entity_where = ""
+    params: dict[str, Any] = {}
+    if scope_restriction is not None:
+        mapping_where = "WHERE m.entity_id = ANY(:entity_scope)"
+        entity_where = "AND id = ANY(:entity_scope)"
+        params["entity_scope"] = [str(e) for e in scope_restriction]
     # 1. Discover live accounts from connectors (SimpleFIN for now).
     accounts: list[dict[str, Any]] = []
     access_url = await _simplefin_access_url(workspace)
@@ -120,7 +143,7 @@ async def list_account_mappings(
         mapping_rows = (
             await session.execute(
                 text(
-                    """
+                    f"""
                     SELECT m.id::text, m.entity_id::text, m.source, m.external_account_id,
                            m.external_org, m.external_account_name, m.label, m.notes,
                            m.auto_categorize, m.updated_at,
@@ -128,26 +151,54 @@ async def list_account_mappings(
                            e.kind::text AS entity_kind
                     FROM account_entity_mapping m
                     JOIN entity e ON e.id = m.entity_id
+                    {mapping_where}
                     ORDER BY m.external_org, m.external_account_name
                     """
-                )
+                ),
+                params,
             )
         ).mappings().all()
         entity_rows = (
             await session.execute(
                 text(
-                    """
+                    f"""
                     SELECT id::text, slug, display_name, kind::text AS kind
                     FROM entity
-                    WHERE status = 'active'
+                    WHERE status = 'active' {entity_where}
                     ORDER BY display_name
                     """
-                )
+                ),
+                params,
             )
         ).mappings().all()
+        foreign_keys: set[tuple[str, str]] = set()
+        if scope_restriction is not None:
+            foreign_rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT source, external_account_id
+                        FROM account_entity_mapping
+                        WHERE NOT (entity_id = ANY(:entity_scope))
+                        """
+                    ),
+                    params,
+                )
+            ).mappings().all()
+            foreign_keys = {
+                (r["source"], r["external_account_id"]) for r in foreign_rows
+            }
 
     mappings = [dict(r) for r in mapping_rows]
     entities = [dict(r) for r in entity_rows]
+
+    # A live account mapped to an out-of-scope entity is not this caller's.
+    if foreign_keys:
+        accounts = [
+            a
+            for a in accounts
+            if (a["source"], a["external_account_id"]) not in foreign_keys
+        ]
 
     # 3. Mark which live accounts are unmapped.
     mapped_keys = {(m["source"], m["external_account_id"]) for m in mappings}
@@ -182,6 +233,10 @@ async def upsert_account_mappings(
 ) -> dict[str, Any]:
     """Upsert a bulk set of mappings. Idempotent by (source, external_account_id)."""
     require_role(workspace, "accountant")
+    # AO-MASS-3: every target entity must be inside the membership's
+    # entity_scope, checked before any write (the whole batch is refused).
+    for m in body.mappings:
+        assert_entity_in_scope(workspace, m.entity_id)
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         # Validate that entity_ids exist in this workspace

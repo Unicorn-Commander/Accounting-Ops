@@ -249,8 +249,7 @@ async def lookup_tracking(tracking_number: str) -> TrackingResult:
         # The request carries USERID in the query string, and httpx errors
         # embed the full request URL in str(exc): logging str(exc) would leak
         # that credential into the log. Log ONLY the exception TYPE (never
-        # str(exc), never the URL); the tracking number is already redacted by
-        # the caller where it matters and is safe to log here.
+        # str(exc), never the URL). AO111-R2-F13: return the error class only.
         logger.warning(
             "USPS transport error for %s: %s",
             cleaned,
@@ -259,15 +258,16 @@ async def lookup_tracking(tracking_number: str) -> TrackingResult:
         return TrackingResult(
             tracking_number=cleaned,
             is_delivered=False,
-            summary="USPS transport error",
+            summary=f"USPS HTTP error: {exc.__class__.__name__}",
             delivery_date=None,
             events=[],
-            fault="USPS could not be reached",
+            fault=exc.__class__.__name__,
         )
 
     if resp.status_code != 200:
         # The USPS response body is upstream XML: log ONLY the HTTP status
-        # (never resp.text), fixed fault.
+        # (never resp.text). AO111-R2-F13: fixed text + status (and body
+        # length) only, never the raw upstream body.
         logger.warning(
             "USPS HTTP %s for %s",
             resp.status_code,
@@ -279,7 +279,7 @@ async def lookup_tracking(tracking_number: str) -> TrackingResult:
             summary=f"USPS HTTP {resp.status_code}",
             delivery_date=None,
             events=[],
-            fault=f"USPS returned HTTP {resp.status_code}",
+            fault=f"HTTP {resp.status_code} (body {len(resp.content or b'')} bytes)",
         )
 
     return _parse_track_response(resp.text, cleaned)
