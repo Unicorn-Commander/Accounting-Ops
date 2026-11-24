@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- security(approvals): agents and PATs can no longer approve recats, bank
+  imports, manual journals, Stripe or eBay postings or activate compliance
+  rules; every approve path that stamps a durable human decision now requires a
+  verified interactive human. A non-human decision still records the workspace
+  human's id as `decided_by` (accountability), but the real principal (agent id
+  or PAT id) is now carried in `decision_audit.request_payload.metadata
+  .decided_by_principal`. This is audit-only: no migration, the field lives in
+  the `request_payload` JSONB column the handler already writes, and the Stripe
+  and eBay connector decision records are unchanged (their approve path already
+  requires a human session).
+
 - Licence: Apache-2.0 (was AGPL-3.0-or-later).
 
 - security: exclude the master-key source directory from application image
