@@ -25,7 +25,7 @@ from sqlalchemy import text
 
 from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
-from app.mcp_auth import authorize_workspace
+from app.mcp_auth import authorize_workspace, current_auth
 from app.workspace_session import workspace_session
 
 
@@ -207,12 +207,18 @@ async def decide_approval(
         category_override=category_override,
     )
     # The HTTP handler's signature accepts (workspace_id, approval_id, body,
-    # workspace). We pass our ctx as workspace.
+    # workspace, auth). We pass our ctx as workspace and the MCP caller's REAL
+    # AuthContext as auth (authorize_workspace already consumed it from the
+    # request context, so the same principal that passed role/scope checks is
+    # the one the human-session gate + audit metadata see). Omitting auth would
+    # leave the handler's raw Depends(...) default in place, which the audit
+    # write (_decision_principal) reads attributes off and crashes on.
     return await http_decide_approval(
         workspace_id=workspace_id,
         approval_id=approval_id,
         body=body,
         workspace=ctx,
+        auth=current_auth(),
     )
 
 

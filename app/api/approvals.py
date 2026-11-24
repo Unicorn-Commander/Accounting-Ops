@@ -265,20 +265,27 @@ def _require_interactive_human(auth: AuthContext, workspace: WorkspaceContext) -
         )
 
 
-def _decision_principal(workspace: WorkspaceContext, auth: AuthContext) -> str | None:
+def _decision_principal(workspace: WorkspaceContext, auth: Any) -> str | None:
     """The real non-human principal behind this decision, if there is one.
 
-    decided_by keeps its meaning (the workspace human's id — the person the
+    decided_by keeps its meaning (the workspace human's id, the person the
     record is accountable to), so an agent's or PAT's decision must not be
     recorded AS that human. For an agent caller this is the agent id (the
     AuthContext `act` agent, else the workspace-level agent id); for a PAT
     caller it is the pat_id claim. None for a human interactive session.
     Written into the decision record's audit metadata (no migration).
+
+    ``auth`` may not be an AuthContext: the MCP wrapper historically called the
+    HTTP handler with the raw ``Depends`` default in place of the real token.
+    A non-AuthContext (or a missing principal) is treated as 'no principal', so
+    the audit write never crashes on a stray attribute read.
     """
-    if workspace.agent_id is not None or auth.agent_id is not None:
-        return auth.agent_id or workspace.agent_id
+    if not isinstance(auth, AuthContext):
+        auth = None
+    if workspace.agent_id is not None or (auth is not None and auth.agent_id is not None):
+        return auth.agent_id if auth is not None else workspace.agent_id
     if workspace.pat_scopes is not None:
-        return auth.claims.get("pat_id") or "pat"
+        return auth.claims.get("pat_id") if auth is not None else "pat"
     return None
 
 
@@ -492,12 +499,16 @@ async def decide_approval(
 
         else:
             # ---------------- APPROVE ----------------
-            # House rule: an agent is never the approver. Every subject type
-            # whose approve path stamps the durable decision with the workspace
-            # human's id (decided_by / approving_human / the connector decision
-            # record) requires a verified interactive human; agents and PATs
-            # are rejected BEFORE the apply helper runs (nothing applied, no
-            # decision row, no ebay decision record).
+            # House rule: an agent is never the approver. Every subject type in
+            # _LEDGER_APPROVAL_SUBJECT_TYPES requires a verified interactive
+            # human BEFORE any apply/record helper runs, so an agent or PAT can
+            # never stamp its own material change as human-approved (nothing is
+            # applied, no decision row, no connector decision record). The
+            # earlier per-branch checks (journal_entry_post / stripe / ebay,
+            # above) already deny non-interactive callers on BOTH approve and
+            # reject; this gate is what additionally covers
+            # journal_recategorization, bank_transaction_import,
+            # manual_journal_entry_proposal and compliance_rule on approve.
             if subject_type in _LEDGER_APPROVAL_SUBJECT_TYPES:
                 _require_interactive_human(auth, workspace)
 
