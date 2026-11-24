@@ -27,10 +27,11 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import multiprocessing
 import re
+import threading
 import time
-from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures import TimeoutError as ProcessTimeoutError
+import zlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,13 +64,25 @@ _PDF_MIMES = {"application/pdf"}
 _MAX_PAGES = 2
 _RENDER_DPI = 150
 
-# Rasterizer concurrency bound: fitz rasterization is CPU-heavy and holds the
-# GIL inside the C rasterizer, so more than a couple of concurrent page renders
-# in the same process just thrash the interpreter. Page rasterization is
-# therefore offloaded to a process pool (multiprocessing) so a pathological
-# page cannot block the server's event loop or starve other workers.
+# Rasterizer concurrency bound: each page rasterizes in its own spawned
+# process (see _render_one_page / _render_pdf); the BoundedSemaphore held
+# around each page render bounds how many page render processes are live at
+# once, across ALL concurrent _render_pdf calls (a module-level object, not
+# per call). More than a couple of live MuPDF rasterizers just burns CPUs.
 _RENDER_CONCURRENCY = 2
+# Per-page wall-clock budget. The parent does proc.join(budget): a page still
+# rasterizing when the budget is up is KILLED by the OS (proc.kill), which is
+# the hard guarantee a thread join cannot give (the C rasterizer holds the
+# GIL, so a join deadline cannot interrupt a page already inside it).
 _RENDER_PAGE_BUDGET_S = 10.0
+# Module-level bound on how many page render processes may be live at once
+# (across every concurrent _render_pdf call, not per call). Acquired in the
+# parent around each page render and released in the parent's finally.
+_RENDER_SLOT = threading.BoundedSemaphore(_RENDER_CONCURRENCY)
+# Spawn context: never fork (no inherited secrets/sockets, no
+# fork-from-thread deadlock). A child opened via fork could inherit the
+# server's connections and credentials; spawn starts from a clean interpreter.
+_RENDER_MP_CTX = multiprocessing.get_context("spawn")
 # Pre-check bound: a page whose DECODED content stream (plus the decoded
 # streams of every Form XObject the page references, one nesting level) is
 # larger than this is refused before it is rasterized. A real W-2 / 1099 /
@@ -246,64 +259,48 @@ class TaxDocExtractor:
         return parsed
 
 
-def _to_page_images(body: bytes, mime: str) -> tuple[list[bytes], str | None]:
-    """Return (PNG bytes for the first pages, error or None).
-
-    Images pass through; PDFs rasterize under a page + time cap. ``error`` is
-    set when a page overran its budget (the render is partial) so the caller
-    can mark the extraction result accordingly — a truncated tax document must
-    be visible, never silently "complete".
-    """
-    if mime in _IMAGE_MIMES:
-        return [body], None
-    if mime in _PDF_MIMES:
-        return _render_pdf(body, max_pages=_MAX_PAGES, dpi=_RENDER_DPI)
-    return [], None
-
-
 def _render_pdf(
     pdf_bytes: bytes,
     *,
     max_pages: int,
     dpi: int,
-    rasterize_fn: Any = None,
 ) -> tuple[list[bytes], str | None]:
     """Rasterize the first ``max_pages`` of a PDF to PNG bytes via pymupdf.
 
     Returns ``(pages, error)`` where ``error`` is set when the render was
-    partial (a page overran its per-page budget).
+    partial (a page overran its per-page budget, a page was refused by the
+    pre-check, or a render child died without a result).
 
     The PDF is untrusted (client-uploaded), so the limits are enforced:
-    - PAGE cap: only the first ``max_pages`` are rasterized (a 9,999-page
-      document cannot burn the whole worker).
-    - CONTENT-SIZE pre-check: before a page is handed to the C rasterizer, its
+    - PAGE cap: only the first ``min(max_pages, page_count)`` pages are
+      rendered (a 9,999-page document cannot fan out; a one-page W-2 renders
+      exactly one page, never an IndexError on the missing second page).
+    - CONTENT-SIZE pre-check: before a page is handed to a render process, its
       DECODED content stream (plus the decoded streams of every Form XObject
-      the page references, one nesting level) is measured; a page over
-      ``_PAGE_CONTENT_MAX_BYTES`` is refused and the render stops. Decoded
-      size is the bound because a Flate-compressed content stream can be tiny
-      on disk yet expand to a huge operator list. This is the HARD bound
-      against a pathological page (thousands of drawing ops / a huge XObject):
-      the per-page budget below is best-effort only, because fitz holds the
-      GIL inside the C rasterizer, so a join deadline cannot interrupt a page
-      that is already rasterizing. The pre-check is cheap and runs in the
-      caller's context, so a heavy page is refused fast, before it can burn a
-      worker or block the event loop.
-    - TIME cap: each page is rasterized in a separate process (via a
-      ProcessPoolExecutor) with a hard timeout; a page that overruns it is
-      dropped and the render stops. Unlike a thread join (which cannot
-      interrupt a GIL-holding rasterizer), a process timeout can be enforced
-      by the OS: the worker process is killed if it exceeds the budget.
-    - CONCURRENCY cap: the process pool is sized to _RENDER_CONCURRENCY,
-      bounding how many pages rasterize at once.
-
-    ``rasterize_fn`` is optional and intended for tests: if provided, it is
-    called as ``rasterize_fn(pdf_bytes, page_index, zoom) -> bytes`` in the
-    caller's process (no process pool), bypassing the process-pool path. This
-    lets tests inject a fake/stalling rasterizer without pickling issues.
+      the page references, one nesting level) is measured with a BOUNDED
+      decompression (zlib max_length); a page over ``_PAGE_CONTENT_MAX_BYTES``
+      is refused and the render stops. Decoded size is the bound because a
+      Flate-compressed content stream can be tiny on disk yet expand to a
+      huge operator list. This is the fast, in-process bound against a
+      pathological page (thousands of drawing ops / a huge XObject / a
+      compression bomb): a heavy page is refused in well under a second,
+      before it can burn a render process.
+    - TIME cap: each page that survives the pre-check is rasterized in its
+      own spawned process (``multiprocessing`` spawn context, never fork) and
+      the parent does ``proc.join(budget)``. A page still rasterizing when the
+      budget is up is KILLED by the OS (``proc.kill``) and counted as a
+      visible ``render timeout (partial)``. A process timeout can be enforced
+      by the OS; a thread join cannot interrupt a GIL-holding rasterizer, so
+      this is the hard guarantee, with the pre-check in front of it.
+    - CONCURRENCY cap: a MODULE-level ``threading.BoundedSemaphore`` is held
+      around each page render, bounding how many page render processes are
+      live at once across ALL concurrent ``_render_pdf`` calls (not per call).
+      The semaphore is released in the parent's finally.
 
     The pre-check doc is opened in the caller's process to measure page
-    content sizes; each page is then rasterized in a fresh worker process
-    that opens its own doc from the bytes (fitz docs are not picklable).
+    content sizes; each page is then rasterized in a fresh spawned process
+    that opens its own doc from the bytes (fitz docs are not picklable, and
+    spawn does not inherit the caller's interpreter state).
     """
     import fitz  # pymupdf -- imported lazily so a missing dep can't break import
 
@@ -313,128 +310,126 @@ def _render_pdf(
     zoom = dpi / 72.0
 
     # The pre-check doc is kept open for the whole loop so each page's content
-    # stream can be measured (the workers open their own docs to rasterize); it
-    # is closed in the finally so a refused/errored render still releases it.
+    # stream can be measured (the render children open their own docs to
+    # rasterize); it is closed in the finally so a refused/errored render still
+    # releases it.
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
         page_count = doc.page_count
         pages_to_render = min(max_pages, page_count)
 
-        if rasterize_fn is not None:
-            # Test path: rasterize in the caller's process (no pool). Use a
-            # thread-based timeout so a stalling rasterize_fn does not block
-            # the caller for its full duration.
-            import threading
+        for page_index in range(pages_to_render):
+            content_bytes = _page_content_bytes(doc, page_index)
+            if content_bytes > _PAGE_CONTENT_MAX_BYTES:
+                error = "page too large (partial)"
+                _log.warning(
+                    "tax_doc_vlm render: page %d content stream %d bytes exceeds "
+                    "%d, refusing (partial after %d page(s))",
+                    page_index,
+                    content_bytes,
+                    _PAGE_CONTENT_MAX_BYTES,
+                    len(out),
+                )
+                break
 
-            for page_index in range(pages_to_render):
-                content_bytes = _page_content_bytes(doc, page_index)
-                if content_bytes > _PAGE_CONTENT_MAX_BYTES:
-                    error = "page too large (partial)"
-                    _log.warning(
-                        "tax_doc_vlm render: page %d content stream %d bytes exceeds "
-                        "%d, refusing (partial after %d page(s))",
-                        page_index,
-                        content_bytes,
-                        _PAGE_CONTENT_MAX_BYTES,
-                        len(out),
-                    )
-                    break
-
-                result_box: list[bytes] = []
-                exc_box: list[BaseException] = []
-
-                def _run(fn=rasterize_fn, pi=page_index):
-                    try:
-                        result_box.append(fn(pdf_bytes, pi, zoom))
-                    except BaseException as e:  # noqa: BLE001
-                        exc_box.append(e)
-
-                t = threading.Thread(target=_run, daemon=True)
-                t.start()
-                t.join(per_page_budget_s)
-                if t.is_alive():
-                    error = "render timeout (partial)"
-                    _log.warning(
-                        "tax_doc_vlm render: page %d overran %.0fs budget, partial after %d page(s)",
-                        page_index,
-                        per_page_budget_s,
-                        len(out),
-                    )
-                    break
-                if exc_box:
-                    raise exc_box[0]
-                if result_box:
-                    out.append(result_box[0])
-        else:
-            # Production path: rasterize in a process pool.
-            executor = ProcessPoolExecutor(max_workers=_RENDER_CONCURRENCY)
+            # Bounded concurrency across ALL concurrent _render_pdf calls: the
+            # module-level semaphore is acquired in the parent around the page
+            # render (start + join + kill) and released in the parent's finally.
+            # If start() raises after the slot is held, the finally releases it.
+            _RENDER_SLOT.acquire()
+            proc: multiprocessing.context.SpawnProcess | None = None
             try:
-                futures = []
-                for page_index in range(pages_to_render):
-                    content_bytes = _page_content_bytes(doc, page_index)
-                    if content_bytes > _PAGE_CONTENT_MAX_BYTES:
-                        error = "page too large (partial)"
-                        _log.warning(
-                            "tax_doc_vlm render: page %d content stream %d bytes exceeds "
-                            "%d, refusing (partial after %d page(s))",
-                            page_index,
-                            content_bytes,
-                            _PAGE_CONTENT_MAX_BYTES,
-                            len(out),
-                        )
-                        break
-                    futures.append(
-                        (
-                            page_index,
-                            executor.submit(
-                                _rasterize_page_in_process,
-                                pdf_bytes,
-                                page_index,
-                                zoom,
-                            ),
-                        )
-                    )
-                for page_index, future in futures:
+                parent_conn, child_conn = _RENDER_MP_CTX.Pipe(duplex=False)
+                proc = _RENDER_MP_CTX.Process(
+                    target=_render_one_page,
+                    args=(pdf_bytes, page_index, zoom, child_conn),
+                )
+                proc.start()
+                child_conn.close()
+                # Wait up to the budget for the child to exit. is_alive() is
+                # the reliable liveness check (join's return value is not
+                # always 0 on a clean exit, depending on the platform), so a
+                # child that has finished is the one that is no longer alive.
+                proc.join(per_page_budget_s)
+                if not proc.is_alive():
+                    # The child finished within the budget. Take its result:
+                    # the child is dead, so the pipe holds at most one item.
+                    # A child that died without sending (os._exit, a hard
+                    # crash) leaves the pipe closed: recv() raises EOFError,
+                    # which is a visible "render failed", not a timeout.
+                    # (poll() alone cannot tell "sent" from "died without
+                    # sending": a fast exit can leave a half-closed pipe that
+                    # poll() still reports, so recv's EOF is the real signal.)
                     try:
-                        png = future.result(timeout=per_page_budget_s)
+                        png = parent_conn.recv()
                         out.append(png)
-                    except ProcessTimeoutError:
-                        error = "render timeout (partial)"
+                        continue
+                    except EOFError:
+                        error = "render failed"
                         _log.warning(
-                            "tax_doc_vlm render: page %d overran %.0fs budget, partial after %d page(s)",
+                            "tax_doc_vlm render: page %d render child exited without "
+                            "a result (partial after %d page(s))",
                             page_index,
-                            per_page_budget_s,
                             len(out),
                         )
-                        for _, f in futures:
-                            f.cancel()
                         break
-                    except Exception as exc:  # noqa: BLE001 - worker failure
-                        raise exc
+                # The child is still rasterizing after the budget: kill it by
+                # the OS (a thread join cannot interrupt the GIL-holding C
+                # rasterizer) and count it as a visible timeout.
+                proc.kill()
+                proc.join(1)
+                error = "render timeout (partial)"
+                _log.warning(
+                    "tax_doc_vlm render: page %d overran %.0fs budget, killed "
+                    "(partial after %d page(s))",
+                    page_index,
+                    per_page_budget_s,
+                    len(out),
+                )
+                break
             finally:
-                executor.shutdown(wait=False, cancel_futures=True)
+                parent_conn.close()
+                _RENDER_SLOT.release()
     finally:
         doc.close()
     return out, error
 
 
-def _rasterize_page_in_process(
-    pdf_bytes: bytes, page_index: int, zoom: float
-) -> bytes:
-    """Rasterize one PDF page to PNG bytes. Runs in a worker process.
+def _render_one_page(
+    pdf_bytes: bytes, page_index: int, zoom: float, conn: multiprocessing.connection.PipeConnection
+) -> None:
+    """Rasterize one PDF page to PNG bytes in a spawned child process.
 
-    This function must be top-level (picklable) and self-contained: it opens
-    its own fitz doc from the bytes, rasterizes the page, and closes the doc.
+    Top-level and self-contained (spawn re-imports the module in a fresh
+    interpreter): it opens its own fitz doc from the bytes, rasterizes the
+    page, sends the PNG bytes through the pipe, and closes the doc. The
+    parent owns the timeout and the kill (see _render_pdf); the child does
+    no timeout bookkeeping of its own. If anything here fails (a MuPDF error,
+    a page the doc cannot open), the child exits without sending a result,
+    which the parent counts as a visible ``render failed``.
     """
-    import fitz  # pymupdf -- imported in the worker process
+    # Import the real package, not the deprecated ``fitz`` shim: the shim is a
+    # thin re-export layer that does not survive a spawn re-import (the child
+    # re-runs the import in a fresh interpreter and the shim's lazy bindings
+    # are gone), so it raises in the child and the render would time out.
+    # ``pymupdf`` is the same library (``fitz`` is its deprecated alias) and
+    # imports cleanly in the child.
+    import pymupdf  # the real package (fitz is its deprecated alias)
 
-    matrix = fitz.Matrix(zoom, zoom)
-    wdoc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
-        pix = wdoc[page_index].get_pixmap(matrix=matrix, alpha=False)
-        return pix.tobytes("png")
+        matrix = pymupdf.Matrix(zoom, zoom)
+        wdoc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            pix = wdoc[page_index].get_pixmap(matrix=matrix, alpha=False)
+            conn.send(pix.tobytes("png"))
+        finally:
+            wdoc.close()
+    except Exception:  # noqa: BLE001 - a child that fails dies with no result
+        # The parent sees a non-zero exit and no pipe item: a visible
+        # "render failed". Nothing to send; the process ends here.
+        return
     finally:
-        wdoc.close()
+        conn.close()
 
 
 def _xobject_xrefs(doc: Any, xobj_xref: int) -> set[int]:
