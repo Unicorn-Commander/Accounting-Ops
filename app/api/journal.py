@@ -98,10 +98,22 @@ async def seed_coa(
     workspace. Idempotent — re-running on a seeded entity is a no-op.
     """
     require_role(workspace, "accountant")
+    # AO111-R2-F8: a member with a restricted entity_scope seeds only its own
+    # entities, never every active entity of the workspace.
+    scope = assert_entity_in_scope(workspace, None)
+    scope_sql = ""
+    params: dict[str, Any] = {}
+    if scope is not None:
+        scope_sql = " AND id = ANY(:entity_scope)"
+        params["entity_scope"] = [str(e) for e in scope]
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         entities = (
             await session.execute(
-                text("SELECT id::text, display_name FROM entity WHERE status = 'active'")
+                text(
+                    "SELECT id::text, display_name FROM entity WHERE status = 'active'"
+                    + scope_sql
+                ),
+                params,
             )
         ).mappings().all()
         results = []
