@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 from typing import Any, Optional
 from uuid import UUID
 
@@ -497,6 +498,31 @@ async def post_entry(
                 )
             ).first()
             entity_mapped = row is not None
+
+        # AO111-R2-F4: has_receipt_link lifts the IRS 274(d) block, so a body
+        # receipt_link_id is evidence only once the server has checked it,
+        # with the same validate_receipt the MCP twin and the pending-post
+        # path use (same workspace, entity, source transaction and amount).
+        # An unknown or other-workspace id is refused; nothing is posted.
+        if body.receipt_link_id is not None:
+            from app.journal.pending_post import validate_receipt
+
+            try:
+                await validate_receipt(
+                    session,
+                    workspace_id=workspace.workspace_id,
+                    entity_id=body.entity_id,
+                    request=SimpleNamespace(
+                        receipt_link_id=str(body.receipt_link_id),
+                        source=body.source,
+                        source_external_id=body.source_external_id,
+                        amount_cents=int(body.amount_cents),
+                    ),
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    422, str(exc)
+                ) from exc
 
         # AO-MASS-1: sign_matched feeds the tier-L auto-post trust check, so
         # the server derives it from the category's COA account type, exactly
