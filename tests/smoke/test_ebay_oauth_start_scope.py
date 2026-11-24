@@ -103,3 +103,35 @@ async def test_admin_scoped_token_in_its_workspace_still_redirects():
 async def test_human_admin_unchanged():
     resp = await _start(_auth(None), WS_B)
     assert resp.status_code == 302
+
+
+# ---------------------------------------------------------------------------
+# AO114-R2-7: the start gates on require_role, so a PAT's scopes apply.
+# ---------------------------------------------------------------------------
+
+
+def _pat(*scopes: str) -> AuthContext:
+    return AuthContext(
+        uc_uid="owner-user",
+        agent_id=None,
+        scopes=scopes,
+        claims={"pat_id": "pat-fixture"},
+    )
+
+
+async def test_read_only_pat_of_admin_cannot_start():
+    with pytest.raises(HTTPException) as exc:
+        await _start(_pat("accounting:read"), WS_A)
+    assert exc.value.status_code == 403
+    assert "token scope" in exc.value.detail
+
+
+async def test_write_pat_of_admin_cannot_start():
+    with pytest.raises(HTTPException) as exc:
+        await _start(_pat("accounting:read", "accounting:write"), WS_A)
+    assert exc.value.status_code == 403
+
+
+async def test_admin_pat_of_admin_still_redirects():
+    resp = await _start(_pat("accounting:admin"), WS_A)
+    assert resp.status_code in (302, 307)
