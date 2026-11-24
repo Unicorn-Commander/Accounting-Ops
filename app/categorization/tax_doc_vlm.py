@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -42,15 +43,42 @@ _log = logging.getLogger("accounting_ops.tax_doc_vlm")
 # Canonical tax-document types the classifier maps to. "other" = not a tax doc
 # (or unrecognized) — still stored, just not typed.
 TAX_DOC_TYPES = (
-    "1099-R", "1099-NEC", "1099-MISC", "1099-INT", "1099-DIV", "1099-K", "1099-G",
-    "W-2", "W-2G", "SSA-1099", "RRB-1099",
-    "1095-A", "1095-B", "1095-C", "1098", "1098-E", "1098-T",
-    "K-1", "5498", "1040", "1040-ES",
-    "irs-notice", "state-tax-notice", "other",
+    "1099-R",
+    "1099-NEC",
+    "1099-MISC",
+    "1099-INT",
+    "1099-DIV",
+    "1099-K",
+    "1099-G",
+    "W-2",
+    "W-2G",
+    "SSA-1099",
+    "RRB-1099",
+    "1095-A",
+    "1095-B",
+    "1095-C",
+    "1098",
+    "1098-E",
+    "1098-T",
+    "K-1",
+    "5498",
+    "1040",
+    "1040-ES",
+    "irs-notice",
+    "state-tax-notice",
+    "other",
 )
 
 # Images we can feed straight to the VLM; PDFs are rasterized first.
-_IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp", "image/tiff", "image/gif", "image/heic", "image/heif"}
+_IMAGE_MIMES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/tiff",
+    "image/gif",
+    "image/heic",
+    "image/heif",
+}
 _PDF_MIMES = {"application/pdf"}
 
 # Rasterization bounds — tax forms put their substance on the first page or two;
@@ -71,7 +99,7 @@ _SYSTEM_PROMPT = (
 class TaxDocExtraction:
     """Result of a tax-document extraction. Always returned (never raises)."""
 
-    doc_type: str = "other"            # one of TAX_DOC_TYPES
+    doc_type: str = "other"  # one of TAX_DOC_TYPES
     tax_year: int | None = None
     payer_name: str | None = None
     recipient_name: str | None = None
@@ -175,26 +203,28 @@ class TaxDocExtractor:
                 resp.raise_for_status()
         except httpx.TimeoutException:
             return TaxDocExtraction(
-                model=model, duration_ms=int((time.monotonic() - t0) * 1000),
+                model=model,
+                duration_ms=int((time.monotonic() - t0) * 1000),
                 error="vlm timeout",
             )
         except httpx.HTTPError as exc:
             return TaxDocExtraction(
-                model=model, duration_ms=int((time.monotonic() - t0) * 1000),
+                model=model,
+                duration_ms=int((time.monotonic() - t0) * 1000),
                 error=f"vlm transport: {type(exc).__name__}",
             )
 
         duration_ms = int((time.monotonic() - t0) * 1000)
         raw = _extract_completion(resp.json())
         if not raw:
-            return TaxDocExtraction(
-                model=model, duration_ms=duration_ms, error="empty completion"
-            )
+            return TaxDocExtraction(model=model, duration_ms=duration_ms, error="empty completion")
         parsed = _parse_tax_json(raw)
         if parsed is None:
             return TaxDocExtraction(
-                model=model, duration_ms=duration_ms,
-                raw_response=raw[:4000], error="unparseable json",
+                model=model,
+                duration_ms=duration_ms,
+                raw_response=raw[:4000],
+                error="unparseable json",
             )
         parsed.model = model
         parsed.duration_ms = duration_ms
@@ -212,17 +242,57 @@ def _to_page_images(body: bytes, mime: str) -> list[bytes]:
 
 
 def _render_pdf(pdf_bytes: bytes, *, max_pages: int, dpi: int) -> list[bytes]:
-    """Rasterize the first ``max_pages`` of a PDF to PNG bytes via pymupdf."""
+    """Rasterize the first ``max_pages`` of a PDF to PNG bytes via pymupdf.
+
+    The PDF is untrusted (client-uploaded), so BOTH limits are enforced:
+    - PAGE cap: only the first ``max_pages`` are rasterized (a 9,999-page
+      document cannot burn the whole worker).
+    - TIME cap: each rasterization runs under a wall-clock deadline; a page
+      that overruns it (an extreme XObject / a crafted content stream) aborts
+      the render instead of hanging the extraction worker.
+    """
     import fitz  # pymupdf — imported lazily so a missing dep can't break import
 
+    # A single page that takes longer than this is pathological for a tax doc
+    # (a real W-2 / 1099 page rasterizes in well under a second at 150 DPI).
+    per_page_budget_s = 10.0
     out: list[bytes] = []
     zoom = dpi / 72.0
     matrix = fitz.Matrix(zoom, zoom)
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-        for page in doc[: max_pages]:
-            pix = page.get_pixmap(matrix=matrix, alpha=False)
-            out.append(pix.tobytes("png"))
+        for page in doc[:max_pages]:
+            # fitz rasterization is blocking C code that a signal cannot
+            # preempt mid-call (it holds the GIL inside the library), so the
+            # deadline is enforced AROUND the call: the page is handed to a
+            # worker thread and we join it with a timeout. If the worker does
+            # not finish in budget we drop it (the page stays unrendered) and
+            # move on — a pathological page cannot hang the extraction worker.
+            result: list[bytes] = []
+            error: list[BaseException | None] = []
+
+            def _work() -> None:
+                try:
+                    result.append(_rasterize(page, matrix))
+                except BaseException as exc:  # noqa: BLE001 - report to joiner
+                    error.append(exc)
+
+            thread = threading.Thread(target=_work, daemon=True)
+            thread.start()
+            thread.join(per_page_budget_s)
+            if thread.is_alive():
+                # Still running after the budget: give up on this page. The
+                # daemon thread will finish (or not) in the background; the
+                # extraction proceeds with the pages we did get.
+                return out
+            if error:
+                raise error[0]
+            out.append(result[0])
     return out
+
+
+def _rasterize(page: Any, matrix: Any) -> bytes:
+    pix = page.get_pixmap(matrix=matrix, alpha=False)
+    return pix.tobytes("png")
 
 
 def _parse_tax_json(raw: str) -> TaxDocExtraction | None:
@@ -250,8 +320,7 @@ def _parse_tax_json(raw: str) -> TaxDocExtraction | None:
         # Normalize common variants (e.g. "1099R", "w2", "ssa1099").
         norm = doc_type.upper().replace(" ", "").replace("_", "").replace("-", "")
         match = next(
-            (t for t in TAX_DOC_TYPES
-             if t.upper().replace("-", "") == norm),
+            (t for t in TAX_DOC_TYPES if t.upper().replace("-", "") == norm),
             None,
         )
         doc_type = match or "other"
