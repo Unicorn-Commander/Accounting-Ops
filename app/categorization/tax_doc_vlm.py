@@ -76,14 +76,14 @@ _RENDER_SLOT_TIMEOUT_S = 30.0
 # free). It bounds how long the caller WAITS, not the page itself; the hard
 # refusal for a pathological page is the content-stream pre-check below.
 _RENDER_PAGE_BUDGET_S = 10.0
-# Pre-check bound: a page whose (uncompressed) content stream is larger than
-# this is refused before it is rasterized. A real W-2 / 1099 / 1099-R page
-# carries a few KB of operators (measured: a text-only page is ~200 bytes);
-# a page over 128 KB of content stream is pathological (thousands of drawing
-# ops / a huge inline XObject). The refusal must happen BEFORE the page is
-# ever handed to the C rasterizer, because that raster -- not the pre-check --
-# is the thing that would hold a worker thread and (while it holds the GIL)
-# block the server's event loop.
+# Pre-check bound: a page whose decoded content stream (plus referenced Form
+# XObjects) is larger than this is refused before it is rasterized. A real
+# W-2 / 1099 / 1099-R page carries a few KB of operators (measured: a
+# text-only page is ~200 bytes); a page over 128 KB of decoded content is
+# pathological (thousands of drawing ops / a huge XObject). The refusal must
+# happen BEFORE the page is ever handed to the C rasterizer, because that
+# raster is the thing that would hold a worker thread and (while it holds the
+# GIL) block the server's event loop.
 _PAGE_CONTENT_MAX_BYTES = 128 * 1024
 
 _SYSTEM_PROMPT = (
@@ -145,7 +145,7 @@ class TaxDocExtractor:
         try:
             if mime in _PDF_MIMES:
                 images, render_error = await run_in_threadpool(
-                    _render_pdf, body, _MAX_PAGES, _RENDER_DPI
+                    _render_pdf, body, max_pages=_MAX_PAGES, dpi=_RENDER_DPI
                 )
             else:
                 images, render_error = _to_page_images(body, mime)
@@ -275,15 +275,16 @@ def _render_pdf(
     - PAGE cap: only the first ``max_pages`` are rasterized (a 9,999-page
       document cannot burn the whole worker).
     - CONTENT-SIZE pre-check: before a page is handed to the C rasterizer, its
-      (uncompressed) content stream is measured; a page over
-      ``_PAGE_CONTENT_MAX_BYTES`` is refused and the render stops. This is the
-      HARD bound against a pathological page (thousands of drawing ops / a
-      huge inline XObject): the join budget below is best-effort only, because
-      fitz holds the GIL inside the C rasterizer, so a join deadline cannot
-      interrupt a page that is already rasterizing. The pre-check is cheap
-      (read the page's content-stream xrefs and sum their lengths, no
-      rasterization) and runs in the caller's context, so a heavy page is
-      refused fast, before it can burn a worker or block the event loop.
+      decoded content stream (plus referenced Form XObjects) is measured; a
+      page over ``_PAGE_CONTENT_MAX_BYTES`` is refused and the render stops.
+      This is the HARD bound against a pathological page (thousands of drawing
+      ops / a huge XObject): the join budget below is best-effort only,
+      because fitz holds the GIL inside the C rasterizer, so a join deadline
+      cannot interrupt a page that is already rasterizing. The pre-check is
+      cheap (read the page's content-stream xrefs and sum their decoded
+      lengths, no rasterization) and runs in the caller's context, so a heavy
+      page is refused fast, before it can burn a worker or block the event
+      loop.
     - TIME cap (BEST-EFFORT): each page is rasterized in a worker thread
       joined with a deadline; a page that overruns it is dropped and the
       render stops. Because fitz rasterization holds the GIL inside the C
@@ -326,12 +327,13 @@ def _render_pdf(
         page_count = doc.page_count
         for page_index in range(min(max_pages, page_count)):
             # Cheap pre-check BEFORE the page is rasterized: measure this
-            # page's (uncompressed) content stream and refuse it if it is over
-            # the bound. This is the hard refusal for a pathological page --
-            # the per-page join budget below is best-effort only (the GIL
-            # means it cannot interrupt a page already inside the C rasterizer),
-            # so a page that would burn the worker is stopped here, fast, with
-            # no rasterization and no render slot consumed.
+            # page's decoded content stream (plus Form XObjects) and refuse it
+            # if it is over the bound. This is the hard refusal for a
+            # pathological page -- the per-page join budget below is
+            # best-effort only (the GIL means it cannot interrupt a page
+            # already inside the C rasterizer), so a page that would burn the
+            # worker is stopped here, fast, with no rasterization and no render
+            # slot consumed.
             content_bytes = _page_content_bytes(doc, page_index)
             if content_bytes > _PAGE_CONTENT_MAX_BYTES:
                 error = "page too large (partial)"
@@ -428,22 +430,36 @@ _render_slot = threading.BoundedSemaphore(_RENDER_CONCURRENCY)
 
 
 def _page_content_bytes(doc: Any, page_index: int) -> int:
-    """Total (uncompressed) bytes of a page's content stream, or 0 on error.
+    """Total decoded bytes of a page's content stream plus its Form XObjects,
+    or 0 on error.
 
-    Cheap by design: it reads the page's content-stream xrefs and sums their
-    lengths without rasterizing anything, so it runs in the caller's context in
-    microseconds for a normal page. This is the pre-check that refuses a
-    pathological page before it can burn a render worker; 0 is treated as
-    "no measurable content" (an empty page), never as "too large".
+    Cheap by design: it reads the page's content-stream xrefs and the XObjects
+    referenced by the page, then sums their decoded lengths without
+    rasterizing anything, so it runs in the caller's context in microseconds
+    for a normal page. This is the pre-check that refuses a pathological page
+    before it can burn a render worker; 0 is treated as "no measurable
+    content" (an empty page), never as "too large".
+
+    Decoded size is used (not raw/compressed) because a Flate-compressed
+    stream can be small on disk yet expand to a huge operator list that the
+    C rasterizer must walk. Form XObjects are included because their
+    operators are executed by the rasterizer when the page invokes them.
     """
     page = doc[page_index]
     total = 0
     for xref in page.get_contents():
         try:
             if doc.xref_is_stream(xref):
-                total += len(doc.xref_stream_raw(xref))
+                total += len(doc.xref_stream(xref))
         except Exception:  # noqa: BLE001 - a corrupt stream is not "too large"
             continue
+    try:
+        for xobj in page.get_xobjects():
+            xobj_xref = xobj[0]
+            if doc.xref_is_stream(xobj_xref):
+                total += len(doc.xref_stream(xobj_xref))
+    except Exception:  # noqa: BLE001 - a corrupt xobject is not "too large"
+        pass
     return total
 
 

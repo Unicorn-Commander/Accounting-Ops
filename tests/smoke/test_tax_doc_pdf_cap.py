@@ -295,6 +295,9 @@ def test_worker_owns_doc_close_and_slot_on_timeout(monkeypatch) -> None:
             # pre-check).
             return []
 
+        def get_xobjects(self) -> list:
+            return []
+
     class _FakeDoc:
         # The caller opens the doc to read page_count for the loop bound
         # (R4-1) before the workers open their own docs; the fake stands in
@@ -303,6 +306,9 @@ def test_worker_owns_doc_close_and_slot_on_timeout(monkeypatch) -> None:
 
         def __getitem__(self, i: int) -> _FakePage:
             return _FakePage()
+
+        def xref_is_stream(self, xref: int) -> bool:
+            return False
 
         def close(self) -> None:
             # The test shares one real doc between the caller's page_count open
@@ -354,3 +360,106 @@ def test_worker_owns_doc_close_and_slot_on_timeout(monkeypatch) -> None:
     assert mod._render_slot._value == mod._RENDER_CONCURRENCY, (
         f"the worker must have released the slot (value={mod._render_slot._value})"
     )
+
+
+def test_extract_passes_keywords_to_render_pdf(monkeypatch) -> None:
+    """R8-P1-1: TaxDocExtractor.extract() must call _render_pdf with keyword
+    arguments (max_pages=, dpi=) because _render_pdf has a keyword-only
+    signature. A positional call would raise TypeError. This test drives
+    extract() end-to-end with a real 1-page PDF and a stubbed HTTP call to
+    verify no TypeError occurs."""
+    import httpx
+    import pytest
+
+    data = _one_page_pdf()
+
+    captured_kwargs: dict[str, Any] = {}
+
+    def _fake_render_pdf(pdf_bytes: bytes, *, max_pages: int, dpi: int) -> tuple[list[bytes], str | None]:
+        captured_kwargs["max_pages"] = max_pages
+        captured_kwargs["dpi"] = dpi
+        # Return a fake PNG so we don't actually rasterize
+        return [b"\x89PNG-fake"], None
+
+    monkeypatch.setattr(mod, "_render_pdf", _fake_render_pdf)
+
+    # Stub the HTTP call to avoid network
+    async def _fake_post(self: Any, url: Any, **kwargs: Any) -> Any:
+        class _Resp:
+            def raise_for_status(self) -> None:
+                pass
+            def json(self) -> dict:
+                return {
+                    "choices": [{"message": {"content": '{"doc_type": "W-2", "tax_year": 2024, "payer_name": "Acme", "recipient_name": "Bob", "fields": {}, "confidence": 0.9}'}}]
+                }
+        return _Resp()
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+
+    import asyncio
+    from app.categorization.tax_doc_vlm import TaxDocExtractor
+    from app.config import Settings
+
+    settings = Settings(llm_model="test-model", llm_endpoint_url="http://localhost:9999", llm_api_key="k")
+    ext = TaxDocExtractor(settings=settings)
+    result = asyncio.get_event_loop().run_until_complete(
+        ext.extract(body=data, mime_type="application/pdf")
+    )
+    # No TypeError: extract() completed (error is None or a VLM-level error,
+    # not a render TypeError).
+    assert captured_kwargs["max_pages"] == mod._MAX_PAGES
+    assert captured_kwargs["dpi"] == mod._RENDER_DPI
+    assert result.error is None or "TypeError" not in (result.error or "")
+
+
+def test_xobject_heavy_page_refused_by_precheck() -> None:
+    """R8-P2-1: a page whose content stream is small but references a large
+    Form XObject must be refused by the decoded-size pre-check. The raw
+    (compressed) content stream is tiny; the decoded XObject stream is large.
+    This verifies that _page_content_bytes includes XObject sizes."""
+    d = fitz.open()
+    page = d.new_page()
+    page.draw_rect(fitz.Rect(10, 10, 18, 14), color=(1, 0, 0))
+    page_xref = page.get_contents()[0]
+    res_xref = 3  # resources object xref (from PDF structure inspection)
+    # Insert a heavy Form XObject
+    new_xref = d.get_new_xref()
+    heavy = b"\n".join([f"{(i*3)%600} {(i*7)%650} 8 4 re f".encode("latin-1") for i in range(4000)])
+    obj_str = "<< /Type /XObject /Subtype /Form /BBox [0 0 595 842] /Resources << >> /Matrix [1 0 0 1 0 0] >>"
+    d.update_object(new_xref, obj_str)
+    d.update_stream(new_xref, heavy)
+    d.xref_set_key(res_xref, "XObject", f"<</Form1 {new_xref} 0 R>>")
+    # Replace the content stream with a tiny one that just invokes the XObject
+    d.update_stream(page_xref, b"/Form1 Do")
+    data = d.tobytes()
+    d.close()
+
+    # The raw content stream is ~9 bytes; the decoded XObject is ~66 KB.
+    # Total decoded (content + XObject) should be well over 128 KB? No,
+    # ~66 KB is under 128 KB. Let's use more rects to exceed the bound.
+    # Actually 66 KB < 128 KB, so this would PASS the pre-check.
+    # Let's use a larger XObject to exceed 128 KB.
+    d2 = fitz.open()
+    page2 = d2.new_page()
+    page2.draw_rect(fitz.Rect(10, 10, 18, 14), color=(1, 0, 0))
+    page2_xref = page2.get_contents()[0]
+    res2_xref = 3
+    new2_xref = d2.get_new_xref()
+    # 8000 ops: ~133 KB decoded
+    heavy2 = b"\n".join([f"{(i*3)%600} {(i*7)%650} 8 4 re f".encode("latin-1") for i in range(8000)])
+    d2.update_object(new2_xref, obj_str)
+    d2.update_stream(new2_xref, heavy2)
+    d2.xref_set_key(res2_xref, "XObject", f"<</Form1 {new2_xref} 0 R>>")
+    d2.update_stream(page2_xref, b"/Form1 Do")
+    data2 = d2.tobytes()
+    d2.close()
+
+    t0 = time.monotonic()
+    out, error = mod._render_pdf(data2, max_pages=2, dpi=150)
+    elapsed_s = time.monotonic() - t0
+
+    # The XObject-heavy page must be refused by the pre-check (decoded size
+    # ~133 KB > 128 KB bound), even though the raw content stream is tiny.
+    assert out == []
+    assert error == "page too large (partial)"
+    assert elapsed_s < 2.0, f"pre-check refusal took {elapsed_s:.1f}s (not fast)"
