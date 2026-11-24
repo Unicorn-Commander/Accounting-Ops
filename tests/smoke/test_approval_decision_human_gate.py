@@ -481,3 +481,169 @@ def test_human_reject_records_no_principal_metadata():
         assert audit.call_args.kwargs["metadata"] is None
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------
+# AO106-R3-1: the MCP surface (decide_approval / bulk_decide_approvals) must
+# complete and write its audit row for a PAT or human-token caller. The wrapper
+# now passes the MCP caller's real AuthContext to the HTTP handler (and
+# _decision_principal no longer reads attributes off a stray non-AuthContext),
+# so an MCP reject/approve that reaches the audit write no longer raises
+# AttributeError and rolls the decision back. No stack, no network: the DB
+# session is mocked, exactly like the REST tests above.
+# --------------------------------------------------------------------------
+def test_decision_principal_never_crashes_on_a_non_auth_context():
+    """The exact review repro: a Depends(...) default (or any non-AuthContext)
+    as auth must yield 'no principal', not raise AttributeError."""
+    from types import SimpleNamespace
+
+    from fastapi import Depends
+
+    from app.api.approvals import _decision_principal
+
+    ws = SimpleNamespace(agent_id=None, pat_scopes=None)
+    assert _decision_principal(ws, Depends(lambda: 1)) is None
+    assert _decision_principal(ws, None) is None
+    # A workspace-level principal is still recorded when auth is absent.
+    assert _decision_principal(SimpleNamespace(agent_id=AGENT, pat_scopes=None), Depends(lambda: 1)) == AGENT
+    assert _decision_principal(SimpleNamespace(agent_id=None, pat_scopes=("x",)), Depends(lambda: 1)) == "pat"
+
+
+async def _mcp_decide(caller, subject_type: str, decision: str):
+    """Drive the REAL MCP tool (app.tools.approvals.decide_approval) with the
+    caller's real AuthContext bound into the MCP request context, against a
+    mocked DB session. Returns (outcome, audit_mock, mark_mock, row)."""
+    from app.tools import approvals as tools
+
+    ctx, auth = caller()
+    session, row = _session_for(subject_type)
+
+    @asynccontextmanager
+    async def _fake_ws(*args):
+        yield session
+
+    audit = AsyncMock(return_value=uuid4())
+    mark = AsyncMock()
+    from app.mcp_auth import _current_auth
+
+    tok = _current_auth.set(auth)
+    try:
+        with (
+            patch.object(approvals, "workspace_session", _fake_ws),
+            patch.object(tools, "authorize_workspace", AsyncMock(return_value=ctx)),
+            patch.object(approvals, "_approve_recategorization", AsyncMock(
+                return_value={"reversal_entry_id": str(uuid4()), "restated_entry_id": str(uuid4())}
+            )),
+            patch.object(approvals, "_approve_bank_transaction_import", AsyncMock(
+                return_value={"journal_entry_id": str(uuid4())}
+            )),
+            patch.object(approvals, "_mark_decided", mark),
+            patch.object(approvals, "write_decision_audit", audit),
+            patch.object(approvals, "_project_approval_decision"),
+        ):
+            outcome = await tools.decide_approval(WID, UUID(row["id"]), decision)
+    finally:
+        _current_auth.reset(tok)
+    return outcome, audit, mark, row
+
+
+@pytest.mark.parametrize("caller", CALLERS)
+@pytest.mark.parametrize("subject_type", SUBJECTS)
+def test_mcp_pat_and_agent_reject_completes_and_writes_audit(caller, subject_type):
+    """An MCP reject by an agent or PAT principal completes (no AttributeError
+    at the audit write) and records its real principal in the audit metadata;
+    nothing is applied and the row is marked rejected."""
+    async def run():
+        outcome, audit, mark, row = await _mcp_decide(caller, subject_type, "reject")
+        assert outcome["ok"] is True and outcome["decision"] == "rejected"
+        assert outcome["applied"] is False
+        assert mark.await_count == 1
+        assert mark.call_args.kwargs["new_status"] == "rejected"
+        # The audit row was written, naming the real (non-human) principal.
+        assert audit.await_count == 1
+        assert audit.call_args.kwargs["metadata"]["decided_by_principal"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("subject_type", SUBJECTS)
+def test_mcp_human_reject_completes_and_writes_audit(subject_type):
+    """An MCP reject by a human-token caller completes and writes the audit row
+    with no principal metadata (the principal IS the human, stamped decided_by)."""
+    async def run():
+        outcome, audit, mark, row = await _mcp_decide(
+            lambda: (_human_ctx(), _human_auth()), subject_type, "reject"
+        )
+        assert outcome["ok"] is True and outcome["decision"] == "rejected"
+        assert outcome["applied"] is False
+        assert mark.await_count == 1
+        assert mark.call_args.kwargs["new_status"] == "rejected"
+        assert audit.await_count == 1
+        assert audit.call_args.kwargs["metadata"] is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("subject_type", SUBJECTS)
+def test_mcp_human_approve_still_applies_and_writes_audit(subject_type):
+    """A human-token MCP approve is still allowed: the apply helper runs, the
+    attesting human is stamped, and the audit row is written with no principal
+    metadata. (Agent/PAT MCP approve is denied by the gate, covered above.)"""
+    async def run():
+        outcome, audit, mark, _row = await _mcp_decide(
+            lambda: (_human_ctx(), _human_auth()), subject_type, "approve"
+        )
+        assert outcome["ok"] is True and outcome["decision"] == "approved"
+        assert outcome["applied"] is True
+        assert mark.call_args.kwargs["new_status"] == "approved"
+        assert audit.await_count == 1
+        assert audit.call_args.kwargs["metadata"] is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("caller", CALLERS)
+def test_mcp_bulk_decide_reject_completes_and_writes_audit(caller):
+    """The MCP bulk path (bulk_decide_approvals) fan-outs to the same tool; a
+    per-item reject by an agent or PAT principal completes and writes its audit
+    row (no AttributeError), so the bulk call reports it rejected, not failed."""
+    async def run():
+        from app.tools import approvals as tools
+
+        ctx, auth = caller()
+        rows = [_session_for(subject_type)[1] for subject_type in SUBJECTS]
+        session_by_id = {r["id"]: _session_for(subject_type)[0] for subject_type, r in zip(SUBJECTS, rows)}
+
+        @asynccontextmanager
+        async def _fake_ws(*args):
+            yield next(iter(session_by_id.values()))
+
+        audit = AsyncMock(return_value=uuid4())
+        mark = AsyncMock()
+        decisions = [
+            {"approval_id": r["id"], "decision": "reject"} for r in rows
+        ]
+        from app.mcp_auth import _current_auth
+
+        tok = _current_auth.set(auth)
+        try:
+            with (
+                patch.object(approvals, "workspace_session", _fake_ws),
+                patch.object(tools, "authorize_workspace", AsyncMock(return_value=ctx)),
+                patch.object(approvals, "_mark_decided", mark),
+                patch.object(approvals, "write_decision_audit", audit),
+                patch.object(approvals, "_project_approval_decision"),
+            ):
+                summary = await tools.bulk_decide_approvals(WID, decisions)
+        finally:
+            _current_auth.reset(tok)
+        assert summary["total"] == len(rows)
+        assert summary["rejected"] == len(rows)
+        assert summary["failed"] == 0
+        assert all(r["ok"] is True for r in summary["results"])
+        # One audit row per rejected item, each naming the real principal.
+        assert audit.await_count == len(rows)
+        for call in audit.call_args_list:
+            assert call.kwargs["metadata"]["decided_by_principal"]
+
+    asyncio.run(run())
