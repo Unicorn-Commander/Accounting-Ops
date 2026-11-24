@@ -146,6 +146,39 @@ def test_render_1_page_pdf_with_max_pages_2_returns_1_image() -> None:
     assert out[0].startswith(b"\x89PNG")
 
 
+def test_slow_page_finishing_after_timeout_does_not_change_returned(monkeypatch) -> None:
+    """R4-2: a page that overruns its budget but finishes shortly after the
+    caller has timed out appends to its OWN local list; the caller has already
+    returned its partial result and never reads that list, so the late page
+    cannot mutate the returned value."""
+    data = _one_page_pdf()
+    monkeypatch.setattr(mod, "_RENDER_PAGE_BUDGET_S", 0.1)
+
+    release = threading.Event()
+
+    def _slow_rasterize(page: Any, matrix: Any) -> bytes:
+        # Block just past the caller's (0.1s) join, then produce a marker PNG.
+        release.wait(0.5)
+        return b"\x89PNG-LATE"
+
+    monkeypatch.setattr(mod, "_rasterize", _slow_rasterize)
+    returned = mod._render_pdf(data, max_pages=1, dpi=72)
+    assert returned == ([], "render timeout (partial)")
+
+    # The worker is still blocked; unblock it so it finishes and appends to its
+    # own list. Wait for the worker thread to finish (its join budget is 0.1s,
+    # the worker takes ~0.5s, so it outlives the join by ~0.4s).
+    release.set()
+    deadline = time.monotonic() + 10
+    while threading.active_count() > 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    # The returned value is a plain list; the late append went to the worker's
+    # local list, not to it. The returned list must still be empty + partial.
+    assert list(returned[0]) == []
+    assert returned[1] == "render timeout (partial)"
+
+
 def test_worker_owns_doc_close_and_slot_on_timeout(monkeypatch) -> None:
     """R3-4: on a per-page timeout the WORKER thread owns the document handle
     and the slot. The caller must NOT close the doc or release the slot while

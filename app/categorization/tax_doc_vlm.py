@@ -300,18 +300,30 @@ def _render_pdf(
                 len(out),
             )
             break
+        # Each worker keeps its PNG in its OWN local list. The caller takes it
+        # only after a successful join; a page that finishes after the caller
+        # timed out appends to its list, but the caller has already returned
+        # and never reads it, so a late page can't mutate the returned value.
+        worker_out: list[bytes] = []
         exc: list[BaseException | None] = []
 
-        def _work() -> None:
+        # Bind the per-page loop variables as defaults so each worker captures
+        # ITS OWN page_index / worker_out / exc (B023): a late worker for page N
+        # must not see the values rebound for page N+1.
+        def _work(
+            _pi: int = page_index,
+            _out: list[bytes] = worker_out,
+            _exc: list[BaseException | None] = exc,
+        ) -> None:
             # The worker owns its document + the slot: close the doc and
             # release the slot in its own finally -- whether the render
             # succeeded, failed, or the caller abandoned this thread on a
             # timeout.
             try:
                 doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                out.append(_rasterize(doc[page_index], matrix))
+                _out.append(_rasterize(doc[_pi], matrix))
             except BaseException as exc_:  # noqa: BLE001 - report to joiner
-                exc.append(exc_)
+                _exc.append(exc_)
             finally:
                 try:
                     doc.close()
@@ -339,6 +351,9 @@ def _render_pdf(
             break
         if exc:
             raise exc[0]
+        # The worker finished: take its PNG (its own list, read only after a
+        # successful join).
+        out.extend(worker_out)
     return out, error
 
 
