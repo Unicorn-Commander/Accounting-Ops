@@ -109,6 +109,21 @@ def is_tool_allowed(agent_id: str | None, tool_name: str) -> bool:
     return ALLOW_ALL in allowed or tool_name in allowed
 
 
+def is_tool_visible(agent_id: str | None, tool_name: str) -> bool:
+    """Whether ``tools/list`` shows ``tool_name`` to ``agent_id``.
+
+    Same rule as :func:`is_tool_allowed` (an unenrolled agent sees only
+    read-only tools, an enrolled one only its list) but without the
+    observation log, which records calls, not listings.
+    """
+    if not agent_id:
+        return True
+    allowed = _policy().get(agent_id)
+    if allowed is None:
+        return _is_read_only_tool(tool_name)
+    return ALLOW_ALL in allowed or tool_name in allowed
+
+
 def _is_read_only_tool(tool_name: str) -> bool:
     """True only for a tool the discovery metadata marks read-only.
 
