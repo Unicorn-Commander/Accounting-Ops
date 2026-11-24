@@ -247,53 +247,161 @@ def test_extract_passes_keywords_to_render_pdf(monkeypatch) -> None:
     assert result.error is None or "TypeError" not in (result.error or "")
 
 
-def test_xobject_heavy_page_refused_by_precheck() -> None:
-    """R8-P2-1: a page whose content stream is small but references a large
-    Form XObject must be refused by the decoded-size pre-check. The raw
-    (compressed) content stream is tiny; the decoded XObject stream is large.
-    This verifies that _page_content_bytes includes XObject sizes."""
-    d = fitz.open()
-    page = d.new_page()
-    page.draw_rect(fitz.Rect(10, 10, 18, 14), color=(1, 0, 0))
-    page_xref = page.get_contents()[0]
-    res_xref = 3  # resources object xref (from PDF structure inspection)
-    # Insert a heavy Form XObject
-    new_xref = d.get_new_xref()
-    heavy = b"\n".join([f"{(i*3)%600} {(i*7)%650} 8 4 re f".encode("latin-1") for i in range(4000)])
-    obj_str = "<< /Type /XObject /Subtype /Form /BBox [0 0 595 842] /Resources << >> /Matrix [1 0 0 1 0 0] >>"
-    d.update_object(new_xref, obj_str)
-    d.update_stream(new_xref, heavy)
-    d.xref_set_key(res_xref, "XObject", f"<</Form1 {new_xref} 0 R>>")
-    # Replace the content stream with a tiny one that just invokes the XObject
-    d.update_stream(page_xref, b"/Form1 Do")
-    d.close()
+def _heavy_source_pdf() -> bytes:
+    """A one-page PDF whose decoded content stream is ~133 KB (8000 rects),
+    far over the 128 KB pre-check bound. Built once and reused by the
+    compressed-page and XObject-page tests below (drawing is the slow part)."""
+    doc = fitz.open()
+    page = doc.new_page()
+    for i in range(8000):
+        page.draw_rect(
+            fitz.Rect(i % 595, (i * 7) % 840, (i % 595) + 2, (i * 7) % 840 + 1),
+            color=(1, 0, 0),
+            fill=(0, 1, 0),
+        )
+    data = doc.tobytes()
+    doc.close()
+    return data
 
-    # The raw content stream is ~9 bytes; the decoded XObject is ~66 KB.
-    # Total decoded (content + XObject) should be well over 128 KB? No,
-    # ~66 KB is under 128 KB. Let's use more rects to exceed the bound.
-    # Actually 66 KB < 128 KB, so this would PASS the pre-check.
-    # Let's use a larger XObject to exceed 128 KB.
-    d2 = fitz.open()
-    page2 = d2.new_page()
-    page2.draw_rect(fitz.Rect(10, 10, 18, 14), color=(1, 0, 0))
-    page2_xref = page2.get_contents()[0]
-    res2_xref = 3
-    new2_xref = d2.get_new_xref()
-    # 8000 ops: ~133 KB decoded
-    heavy2 = b"\n".join([f"{(i*3)%600} {(i*7)%650} 8 4 re f".encode("latin-1") for i in range(8000)])
-    d2.update_object(new2_xref, obj_str)
-    d2.update_stream(new2_xref, heavy2)
-    d2.xref_set_key(res2_xref, "XObject", f"<</Form1 {new2_xref} 0 R>>")
-    d2.update_stream(page2_xref, b"/Form1 Do")
-    data2 = d2.tobytes()
-    d2.close()
+
+def test_compressed_heavy_page_refused_by_precheck() -> None:
+    """R8-P2-1(a): a page of 8000 rects saved with deflate=True is small on
+    disk (Flate-compressed) but its DECODED content stream is ~133 KB, over
+    the 128 KB bound. The pre-check must measure the decoded size and refuse
+    the page fast, with no page produced and a partial error. A compressed-
+    size (xref_stream_raw) measure would let this page through."""
+    data = _heavy_source_pdf()
+
+    # Sanity: the file IS flate-compressed (raw stream bytes are far below
+    # the decoded size), so this test really exercises the decoded-vs-raw
+    # distinction the fix makes.
+    doc = fitz.open(stream=data, filetype="pdf")
+    xref = doc[0].get_contents()[0]
+    raw_len = len(doc.xref_stream_raw(xref))
+    doc.close()
+    assert raw_len < mod._PAGE_CONTENT_MAX_BYTES
 
     t0 = time.monotonic()
-    out, error = mod._render_pdf(data2, max_pages=2, dpi=150)
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
     elapsed_s = time.monotonic() - t0
 
-    # The XObject-heavy page must be refused by the pre-check (decoded size
-    # ~133 KB > 128 KB bound), even though the raw content stream is tiny.
+    assert out == []
+    assert error == "page too large (partial)"
+    # The refusal comes from the pre-check (a fitz open + a few decoded
+    # stream reads), not the per-page budget: it must be well under the
+    # budget.
+    assert elapsed_s < 2.0, f"pre-check refusal took {elapsed_s:.1f}s (not fast)"
+
+
+def test_xobject_heavy_page_refused_by_precheck() -> None:
+    """R8-P2-1(b): a page whose own content stream is tiny but invokes a heavy
+    Form XObject must be refused by the decoded-size pre-check. The page
+    content stream is ~16 bytes decoded; the XObject stream it invokes is
+    ~341 KB decoded (a Flate-compressed 8000-rect page embedded via
+    show_pdf_page), and the whole file is only ~27 KB compressed. A
+    compressed-size measure (25 KB total) would let it through."""
+    heavy_src = _heavy_source_pdf()
+    d = fitz.open()
+    page = d.new_page()
+    # Invokes the heavy source page as a Form XObject ("/FzFrm0 Do").
+    page.show_pdf_page(
+        page.rect, fitz.open(stream=heavy_src, filetype="pdf"), 0
+    )
+    data = d.tobytes(deflate=True)
+    d.close()
+
+    doc = fitz.open(stream=data, filetype="pdf")
+    xobjs = [x[0] for x in doc[0].get_xobjects()]
+    total_raw = sum(
+        len(doc.xref_stream_raw(x))
+        for x in list(doc[0].get_contents()) + xobjs
+        if doc.xref_is_stream(x)
+    )
+    total_decoded = mod._page_content_bytes(doc, 0)
+    doc.close()
+    # The fix counts decoded XObject bytes: the decoded total is far over the
+    # bound while the compressed total is far under it.
+    assert total_decoded > mod._PAGE_CONTENT_MAX_BYTES
+    assert total_raw < mod._PAGE_CONTENT_MAX_BYTES
+
+    t0 = time.monotonic()
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    elapsed_s = time.monotonic() - t0
+
     assert out == []
     assert error == "page too large (partial)"
     assert elapsed_s < 2.0, f"pre-check refusal took {elapsed_s:.1f}s (not fast)"
+
+
+def test_nested_xobject_bytes_counted_by_precheck() -> None:
+    """R8-P2-1: XObjects an XObject references (its /Resources /XObject
+    dict) are counted too. The page invokes a tiny wrapper Form XObject
+    (~17 bytes compressed); the wrapper invokes the heavy one (xref 1000,
+    ~28 KB compressed / ~200 KB decoded). Only the nested level pushes the
+    page over the bound, so a page-level-only measure would let it through."""
+    import zlib
+
+    def _deflate(data: bytes) -> bytes:
+        c = zlib.compressobj(9, zlib.DEFLATED, 15)
+        return c.compress(data) + c.flush()
+
+    def _form_xobject(stream_raw: bytes, inner: bytes = b"") -> bytes:
+        comp = _deflate(stream_raw)
+        return (
+            b"<< /Type /XObject /Subtype /Form /BBox [0 0 595 842] "
+            b"/Resources <<" + inner + b">> /Matrix [1 0 0 1 0 0] "
+            b"/Filter /FlateDecode /Length "
+            + str(len(comp)).encode() + b" >>\nstream\n" + comp + b"\nendstream\n"
+        )
+
+    def _pdf(objs: list[tuple[int, bytes]]) -> bytes:
+        header = b"%PDF-1.4\n"
+        body = b""
+        offsets: dict[int, int] = {}
+        for xref, obj in objs:
+            offsets[xref] = len(header) + len(body)
+            body += b"%d 0 obj\n" % xref + obj + b"endobj\n"
+        xref_pos = len(header) + len(body)
+        max_xref = max(x for x, _ in objs)
+        xref = b"xref\n0 %d\n0000000000 65535 f \n" % (max_xref + 1)
+        for x in range(1, max_xref + 1):
+            xref += (
+                b"%010d 00000 n \n" % offsets[x]
+                if x in offsets
+                else b"0000000000 65535 f \n"
+            )
+        xref += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n" % (max_xref + 1)
+        return header + body + xref + str(xref_pos).encode() + b"\n%%EOF"
+
+    heavy_stream = b"\n".join(
+        ("%d %d 8 4 re f" % ((i * 3) % 600, (i * 7) % 650)).encode("latin-1")
+        for i in range(12000)
+    )
+    heavy_body = _form_xobject(heavy_stream)
+
+    # page(3) -> wrapper(6) -> heavy(1000)
+    target = _pdf(
+        [
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>\n"),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n"),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+                b"/Resources <</XObject <</Wrap 6 0 R>>>> /Contents 4 0 R >>\n",
+            ),
+            (4, b"<< /Length 9 >>\nstream\n/Wrap Do\nendstream\n"),
+            (6, _form_xobject(b"/Heavy Do", b"/XObject <</Heavy 1000 0 R>>")),
+            (1000, heavy_body),
+        ]
+    )
+
+    doc = fitz.open(stream=target, filetype="pdf")
+    xobjs = doc[0].get_xobjects()
+    assert len(xobjs) >= 2, "expected the wrapper and the heavy xobject"
+    wrapper_raw = len(doc.xref_stream_raw(xobjs[0][0]))
+    # The page-level XObject alone is tiny; the page is only over the bound
+    # once the nested (wrapper-referenced) XObject is counted.
+    assert wrapper_raw < mod._PAGE_CONTENT_MAX_BYTES
+    total = mod._page_content_bytes(doc, 0)
+    doc.close()
+    assert total > mod._PAGE_CONTENT_MAX_BYTES

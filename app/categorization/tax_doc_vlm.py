@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import time
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import TimeoutError as ProcessTimeoutError
@@ -69,14 +70,17 @@ _RENDER_DPI = 150
 # page cannot block the server's event loop or starve other workers.
 _RENDER_CONCURRENCY = 2
 _RENDER_PAGE_BUDGET_S = 10.0
-# Pre-check bound: a page whose decoded content stream (plus referenced Form
-# XObjects) is larger than this is refused before it is rasterized. A real
-# W-2 / 1099 / 1099-R page carries a few KB of operators (measured: a
-# text-only page is ~200 bytes); a page over 128 KB of decoded content is
-# pathological (thousands of drawing ops / a huge XObject). The refusal must
-# happen BEFORE the page is ever handed to the C rasterizer, because that
-# raster is the thing that would hold a worker thread and (while it holds the
-# GIL) block the server's event loop.
+# Pre-check bound: a page whose DECODED content stream (plus the decoded
+# streams of every Form XObject the page references, one nesting level) is
+# larger than this is refused before it is rasterized. A real W-2 / 1099 /
+# 1099-R page carries a few KB of operators (measured: a text-only page is
+# ~200 bytes); a page over 128 KB of decoded content is pathological
+# (thousands of drawing ops / a huge XObject). Decoded size is the bound, not
+# the compressed (raw) stream size: a Flate-compressed content stream can be
+# tiny on disk yet expand to a huge operator list that the C rasterizer must
+# walk. The refusal must happen BEFORE the page is ever handed to the C
+# rasterizer, because that raster is the thing that would hold a worker and
+# block the event loop while it runs.
 _PAGE_CONTENT_MAX_BYTES = 128 * 1024
 
 _SYSTEM_PROMPT = (
@@ -273,11 +277,17 @@ def _render_pdf(
     - PAGE cap: only the first ``max_pages`` are rasterized (a 9,999-page
       document cannot burn the whole worker).
     - CONTENT-SIZE pre-check: before a page is handed to the C rasterizer, its
-      decoded content stream (plus referenced Form XObjects) is measured; a
-      page over ``_PAGE_CONTENT_MAX_BYTES`` is refused and the render stops.
-      This is the HARD bound against a pathological page: the pre-check is
-      cheap and runs in the caller's context, so a heavy page is refused fast,
-      before it can burn a worker or block the event loop.
+      DECODED content stream (plus the decoded streams of every Form XObject
+      the page references, one nesting level) is measured; a page over
+      ``_PAGE_CONTENT_MAX_BYTES`` is refused and the render stops. Decoded
+      size is the bound because a Flate-compressed content stream can be tiny
+      on disk yet expand to a huge operator list. This is the HARD bound
+      against a pathological page (thousands of drawing ops / a huge XObject):
+      the per-page budget below is best-effort only, because fitz holds the
+      GIL inside the C rasterizer, so a join deadline cannot interrupt a page
+      that is already rasterizing. The pre-check is cheap and runs in the
+      caller's context, so a heavy page is refused fast, before it can burn a
+      worker or block the event loop.
     - TIME cap: each page is rasterized in a separate process (via a
       ProcessPoolExecutor) with a hard timeout; a page that overruns it is
       dropped and the render stops. Unlike a thread join (which cannot
@@ -427,9 +437,24 @@ def _rasterize_page_in_process(
         wdoc.close()
 
 
+def _xobject_xrefs(doc: Any, xobj_xref: int) -> set[int]:
+    """XObject xrefs an XObject object references, via its /Resources /XObject
+    dict (one nesting level: the XObjects an XObject itself invokes)."""
+    xrefs: set[int] = set()
+    try:
+        kind, value = doc.xref_get_key(xobj_xref, "Resources/XObject")
+    except Exception:  # noqa: BLE001 - a corrupt xobject has no nested xrefs
+        return xrefs
+    if kind != "dict" or not isinstance(value, str):
+        return xrefs
+    for _name, xref in re.findall(r"(/\S+)\s+(\d+)\s+0\s+R", value):
+        xrefs.add(int(xref))
+    return xrefs
+
+
 def _page_content_bytes(doc: Any, page_index: int) -> int:
-    """Total decoded bytes of a page's content stream plus its Form XObjects,
-    or 0 on error.
+    """Total DECODED bytes of a page's content streams plus its Form
+    XObjects, or 0 on error.
 
     Cheap by design: it reads the page's content-stream xrefs and the XObjects
     referenced by the page, then sums their decoded lengths without
@@ -438,24 +463,42 @@ def _page_content_bytes(doc: Any, page_index: int) -> int:
     before it can burn a render worker; 0 is treated as "no measurable
     content" (an empty page), never as "too large".
 
-    Decoded size is used (not raw/compressed) because a Flate-compressed
-    stream can be small on disk yet expand to a huge operator list that the
-    C rasterizer must walk. Form XObjects are included because their
-    operators are executed by the rasterizer when the page invokes them.
+    Decoded size is the bound (``doc.xref_stream``, not ``xref_stream_raw``):
+    a Flate-compressed stream is small on disk yet expands to the operator
+    list the C rasterizer walks, so the compressed size understates the cost.
+    Form XObjects are included because their operators are executed by the
+    rasterizer when the page invokes them ("/X Do"), including the one
+    nesting level of XObjects an XObject itself references (its /Resources
+    /XObject dict). The sum stops as soon as it passes
+    ``_PAGE_CONTENT_MAX_BYTES``: the caller only needs the verdict, and a page
+    whose content is already over the bound must not burn time decoding every
+    stream.
     """
     page = doc[page_index]
+    limit = _PAGE_CONTENT_MAX_BYTES
     total = 0
     for xref in page.get_contents():
         try:
             if doc.xref_is_stream(xref):
                 total += len(doc.xref_stream(xref))
+                if total > limit:
+                    return total
         except Exception:  # noqa: BLE001 - a corrupt stream is not "too large"
             continue
     try:
+        nested: set[int] = set()
         for xobj in page.get_xobjects():
             xobj_xref = xobj[0]
             if doc.xref_is_stream(xobj_xref):
                 total += len(doc.xref_stream(xobj_xref))
+                if total > limit:
+                    return total
+            nested.update(_xobject_xrefs(doc, xobj_xref))
+        for xref in nested:
+            if doc.xref_is_stream(xref):
+                total += len(doc.xref_stream(xref))
+                if total > limit:
+                    return total
     except Exception:  # noqa: BLE001 - a corrupt xobject is not "too large"
         pass
     return total
