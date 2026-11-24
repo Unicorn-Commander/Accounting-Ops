@@ -143,12 +143,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.middleware("http")(audit_span_middleware)
-# Security response headers (nosniff + CSP + frame-ancestors) on every
-# response. This API serves no HTML pages (the web app is a separate front
-# end), so a restrictive default-src 'self' CSP is safe here and stops a
-# browser MIME-sniffing an inline text/markdown or application/xml download
-# into executable content.
-app.add_middleware(SecurityHeadersMiddleware)
 # AO-UP-5: enforce the upload cap at the ASGI layer, not just after Starlette
 # has spooled the body into memory. The FastAPI max_body_size kwarg does not
 # work on the locked pins (it is swallowed as an extra and nothing is
@@ -157,7 +151,20 @@ app.add_middleware(SecurityHeadersMiddleware)
 # it is fully buffered, and the handler never runs. The cap shares the same
 # env var the web edge reads (client_max_body_size), so edge + app stay in
 # lockstep.
+#
+# Added BEFORE SecurityHeadersMiddleware below: add_middleware inserts at
+# position 0 and the stack is built outermost-first, so the later
+# SecurityHeadersMiddleware ends up OUTERMOST and wraps the 413 the cap
+# middleware emits. That is deliberate: the 413 body is text/plain and must
+# carry nosniff + CSP + frame-ancestors like every other response.
 app.add_middleware(BodySizeCapMiddleware, max_bytes=settings.document_upload_max_bytes)
+# Security response headers (nosniff + CSP + frame-ancestors) on every
+# response, including the 413 the cap middleware sends (it wraps BodySizeCap,
+# see the note above). This API serves no HTML pages (the web app is a
+# separate front end), so a restrictive default-src 'self' CSP is safe here and
+# stops a browser MIME-sniffing an inline text/markdown or application/xml
+# download into executable content.
+app.add_middleware(SecurityHeadersMiddleware)
 # Per-tenant / per-principal rate limiting. Added AFTER audit_span_middleware so
 # Starlette places it OUTERMOST (add_middleware inserts at position 0 and the
 # stack is built outermost-first), meaning a throttled request is rejected

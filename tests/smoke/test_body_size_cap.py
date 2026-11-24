@@ -88,13 +88,15 @@ _PROBE_CLEANUP: list[Any] = []
 _PROBE_STATE: dict[str, Any] = {"ran": False, "bytes": 0}
 
 
-async def _post(body_bytes: int, *, chunked: bool = False, chunk: int = 1024) -> tuple[list[int], bool, int]:
+async def _post(
+    body_bytes: int, *, chunked: bool = False, chunk: int = 1024
+) -> tuple[list[int], bool, int, dict[bytes, bytes]]:
     """POST ``body_bytes`` to the probe on app.main.app.
 
-    Returns (statuses, handler_ran, bytes_buffered). ``statuses`` is the list
-    of every http.response.start seen (there can be two: the handler's 200
-    followed by the cap middleware's 413 when the body crossed the cap
-    mid-stream).
+    Returns (statuses, handler_ran, bytes_buffered, response_headers).
+    ``statuses`` is the list of every http.response.start seen and
+    ``response_headers`` is the header map of the LAST response.start (the one
+    the client ends up seeing).
     """
     import app.main as main
 
@@ -103,10 +105,14 @@ async def _post(body_bytes: int, *, chunked: bool = False, chunk: int = 1024) ->
         headers.append((b"content-length", str(body_bytes).encode("ascii")))
 
     status: list[int] = []
+    last_headers: dict[bytes, bytes] = {}
 
     async def send(message: dict[str, Any]) -> None:
         if message["type"] == "http.response.start":
             status.append(message["status"])
+            last_headers.clear()
+            for name, value in message.get("headers") or []:
+                last_headers[name.lower()] = value
 
     import asyncio
 
@@ -117,7 +123,7 @@ async def _post(body_bytes: int, *, chunked: bool = False, chunk: int = 1024) ->
         )
     except asyncio.TimeoutError:
         raise AssertionError("app call hung: the cap middleware must abort the app, not deadlock it")
-    return status, _PROBE_STATE["ran"], _PROBE_STATE["bytes"]
+    return status, _PROBE_STATE["ran"], _PROBE_STATE["bytes"], last_headers
 
 
 async def test_over_cap_with_content_length_is_413_and_handler_never_runs() -> None:
@@ -128,7 +134,7 @@ async def test_over_cap_with_content_length_is_413_and_handler_never_runs() -> N
     _mount_probe()
     try:
         cap = config.get_settings().document_upload_max_bytes
-        statuses, ran, buffered = await _post(cap + 16, chunked=False)
+        statuses, ran, buffered, _hdrs = await _post(cap + 16, chunked=False)
     finally:
         _unmount_probe()
     assert 413 in statuses
@@ -149,21 +155,24 @@ async def test_over_cap_chunked_body_is_413_and_handler_never_runs() -> None:
         cap = config.get_settings().document_upload_max_bytes
         # Stream well past the cap in small chunks: the cap must fire
         # mid-stream, not after the whole (huge) body was read.
-        statuses, ran, buffered = await _post(cap + 4096, chunked=True, chunk=1024)
+        statuses, ran, buffered, hdrs = await _post(cap + 4096, chunked=True, chunk=1024)
     finally:
         _unmount_probe()
     # Exactly one response start: the 413. The handler's 200 never goes out.
     assert statuses == [413], f"expected only the 413, got {statuses}"
     assert ran is False, "the handler must never run on a truncated body"
     assert buffered == 0, "the handler must not read any of the over-cap body"
+    # R3-3: the 413 carries the global security headers (SecurityHeaders wraps
+    # the cap middleware, so it stamps the 413 like any other response).
+    assert hdrs.get(b"x-content-type-options") == b"nosniff"
+    assert b"frame-ancestors" in (hdrs.get(b"content-security-policy") or b"")
+    assert hdrs.get(b"x-frame-options") == b"SAMEORIGIN"
 
 
 async def test_chunked_5x50_with_cap_100_is_413_and_handler_never_runs() -> None:
     """The exact R3-1 shape: chunked 5 x 50 bytes with a cap of 100. The
     running total crosses 100 on the 3rd chunk (150 > 100); the middleware
     413s and aborts the app, and the handler's ``ran`` flag stays False."""
-    import app.config as config
-
     # A dedicated ASGI app so the cap is exactly 100 bytes regardless of the
     # configured document_upload_max_bytes.
     from app.body_size_cap import BodySizeCapMiddleware
@@ -190,14 +199,13 @@ async def test_chunked_5x50_with_cap_100_is_413_and_handler_never_runs() -> None
     await app(_build_scope(_PROBE_PATH, []), _streaming_body(250, chunk=50), send)
     assert status == [413], f"expected only the 413, got {status}"
     assert ran["flag"] is False, "the handler must never run on a truncated body"
-    assert config is not None  # keep the import (settings cap is irrelevant here)
 
 
 async def test_under_cap_body_passes_to_handler() -> None:
     """A body within the cap reaches the handler and is read in full."""
     _mount_probe()
     try:
-        statuses, ran, buffered = await _post(4096, chunked=False)
+        statuses, ran, buffered, _hdrs = await _post(4096, chunked=False)
     finally:
         _unmount_probe()
     assert statuses == [200]
@@ -220,3 +228,24 @@ async def test_app_wires_body_size_cap_middleware() -> None:
     # The middleware instance on the app must hold the configured cap.
     instance = next(m for m in main.app.user_middleware if m.cls is BodySizeCapMiddleware)
     assert instance.kwargs.get("max_bytes") == cap
+
+
+async def test_413_carries_security_headers() -> None:
+    """R3-3: the 413 the cap middleware emits must carry the global security
+    headers (nosniff + CSP + frame-ancestors). SecurityHeadersMiddleware wraps
+    BodySizeCapMiddleware (registered after it, hence outermost), so it stamps
+    the 413 exactly like any other response."""
+    import app.config as config
+
+    _mount_probe()
+    try:
+        cap = config.get_settings().document_upload_max_bytes
+        statuses, _ran, _buffered, hdrs = await _post(cap + 16, chunked=False)
+    finally:
+        _unmount_probe()
+    assert statuses == [413]
+    assert hdrs.get(b"x-content-type-options") == b"nosniff"
+    csp = hdrs.get(b"content-security-policy") or b""
+    assert b"frame-ancestors" in csp, f"413 CSP missing frame-ancestors: {csp!r}"
+    assert b"default-src 'self'" in csp
+    assert hdrs.get(b"x-frame-options") == b"SAMEORIGIN"
