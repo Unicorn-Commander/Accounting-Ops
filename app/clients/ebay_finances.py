@@ -35,6 +35,21 @@ class EbayFinancesError(Exception):
     """Raised when the MCP returns an error or is unreachable."""
 
 
+def _upstream_error(what: str, resp: httpx.Response) -> EbayFinancesError:
+    """A fixed-text error carrying only the upstream HTTP status (AO-SECRET-1).
+
+    The request that failed carried the client_secret (Basic) and the
+    refresh_token, and an upstream error body can echo either back. The text
+    of this exception reaches API clients (transactions.py errors[]), so it
+    never includes the body; the log gets the body's LENGTH only.
+    """
+    logger.warning(
+        "ebay upstream error: %s status=%s body_len=%d",
+        what, resp.status_code, len(resp.content or b""),
+    )
+    return EbayFinancesError(f"{what} HTTP {resp.status_code}")
+
+
 @dataclass(frozen=True)
 class EbayAuth:
     client_id: str
@@ -130,9 +145,7 @@ async def _call_mcp_tool(tool_name: str, arguments: dict) -> Any:
         }
         init_resp = await client.post(EBAY_MCP_URL, json=init_payload, headers=headers)
         if init_resp.status_code >= 400:
-            raise EbayFinancesError(
-                f"ebay-finances-mcp init HTTP {init_resp.status_code}: {init_resp.text[:300]}"
-            )
+            raise _upstream_error("ebay-finances-mcp init", init_resp)
         session_id = init_resp.headers.get("mcp-session-id")
         if not session_id:
             raise EbayFinancesError("ebay-finances-mcp didn't return mcp-session-id")
@@ -156,13 +169,19 @@ async def _call_mcp_tool(tool_name: str, arguments: dict) -> Any:
         }
         call_resp = await client.post(EBAY_MCP_URL, json=call_payload, headers=session_headers)
         if call_resp.status_code >= 400:
-            raise EbayFinancesError(
-                f"ebay-finances-mcp tools/call HTTP {call_resp.status_code}: {call_resp.text[:300]}"
-            )
+            raise _upstream_error("ebay-finances-mcp tools/call", call_resp)
         data = _parse_sse_or_json(call_resp)
 
     if "error" in data and data["error"]:
-        raise EbayFinancesError(f"MCP error: {data['error']}")
+        # The JSON-RPC error object can quote the upstream eBay body: keep
+        # only its numeric code, never its message or data.
+        err = data["error"]
+        code = err.get("code") if isinstance(err, dict) else None
+        logger.warning("ebay-finances-mcp returned a JSON-RPC error code=%s", code)
+        raise EbayFinancesError(
+            f"ebay-finances-mcp error (code {code})" if isinstance(code, int)
+            else "ebay-finances-mcp error"
+        )
     result = data.get("result") or {}
     contents = result.get("content") or []
     if not contents:
@@ -243,9 +262,7 @@ async def _get_fulfillment_token(auth: EbayAuth) -> str:
             },
         )
         if resp.status_code != 200:
-            raise EbayFinancesError(
-                f"eBay token refresh failed [{resp.status_code}]: {resp.text[:200]}"
-            )
+            raise _upstream_error("eBay token refresh", resp)
         data = resp.json()
     token = data["access_token"]
     expires_in = int(data.get("expires_in", 7200))
@@ -288,9 +305,7 @@ async def fulfillment_orders(
             if resp.status_code == 404:
                 break  # eBay's "no data" or "no permission"
             if resp.status_code >= 400:
-                raise EbayFinancesError(
-                    f"eBay fulfillment HTTP {resp.status_code}: {resp.text[:200]}"
-                )
+                raise _upstream_error("eBay fulfillment", resp)
             payload = resp.json()
             orders = payload.get("orders") or []
             if not orders:
