@@ -137,7 +137,7 @@ _TOOL_METADATA: dict[str, dict[str, Any]] = {
 
     # ----- Connectors / mappings / overrides / credentials -----------------
     "list_credentials":              {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
-    "list_account_mappings":         {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
+    "list_account_mappings":         {"min_role": "accountant", "read_only": True,  "latency_ms": 250},
     "upsert_account_mappings":       {"min_role": "accountant", "read_only": False, "latency_ms": 600},
     "list_category_overrides":       {"min_role": "viewer",     "read_only": True,  "latency_ms": 250},
     "create_category_override":      {"min_role": "accountant", "read_only": False, "latency_ms": 600},
