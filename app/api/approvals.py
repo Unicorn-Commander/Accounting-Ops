@@ -283,7 +283,9 @@ def _decision_principal(workspace: WorkspaceContext, auth: Any) -> str | None:
     if not isinstance(auth, AuthContext):
         auth = None
     if workspace.agent_id is not None or (auth is not None and auth.agent_id is not None):
-        return auth.agent_id if auth is not None else workspace.agent_id
+        if auth is not None and auth.agent_id is not None:
+            return auth.agent_id
+        return workspace.agent_id
     if workspace.pat_scopes is not None:
         return auth.claims.get("pat_id") if auth is not None else "pat"
     return None

@@ -509,6 +509,30 @@ def test_decision_principal_never_crashes_on_a_non_auth_context():
     assert _decision_principal(SimpleNamespace(agent_id=None, pat_scopes=("x",)), Depends(lambda: 1)) == "pat"
 
 
+def test_decision_prefers_workspace_agent_when_auth_agent_missing():
+    """AO-106-P3-1: a workspace agent decision where the token carries no act
+    claim (auth.agent_id is None) must record the workspace-level agent id, not
+    fall back to None. Before the fix, `auth.agent_id if auth else workspace
+    .agent_id` returned None and the audit write dropped the principal."""
+    from types import SimpleNamespace
+
+    from app.api.approvals import _decision_principal
+
+    # The reported case: workspace agent is set, auth is a non-AuthContext
+    # (the MCP wrapper historically passed a Depends default, which the
+    # function coerces to None). The workspace agent id must win.
+    ws = SimpleNamespace(agent_id=AGENT, pat_scopes=None)
+    assert _decision_principal(ws, None) == AGENT
+    # A real AuthContext that carries the act claim takes precedence.
+    auth_with_act = replace(_human_auth(), agent_id="token-agent")
+    assert _decision_principal(ws, auth_with_act) == "token-agent"
+    # A real AuthContext with no act claim falls back to the workspace agent.
+    auth_no_act = replace(_human_auth(), agent_id=None)
+    assert _decision_principal(ws, auth_no_act) == AGENT
+    # No agent id anywhere -> no principal.
+    assert _decision_principal(SimpleNamespace(agent_id=None, pat_scopes=None), None) is None
+
+
 async def _mcp_decide(caller, subject_type: str, decision: str):
     """Drive the REAL MCP tool (app.tools.approvals.decide_approval) with the
     caller's real AuthContext bound into the MCP request context, against a

@@ -716,10 +716,15 @@ async def resend_invitation(
                        SET token_hash = :hash,
                            resent_count = resent_count + 1,
                            last_resent_at = now()
-                     WHERE id = :id
+                      WHERE id = :id
+                        AND workspace_id = :wid
                     """
                 ),
-                {"id": str(invitation_id), "hash": new_hash},
+                {
+                    "id": str(invitation_id),
+                    "hash": new_hash,
+                    "wid": str(workspace.workspace_id),
+                },
             )
 
             inviter_row = (
@@ -1010,9 +1015,10 @@ async def accept_invitation(
                        SET accepted_at = now(),
                            accepted_by_user_id = :uid
                      WHERE id = :id
+                       AND workspace_id = :wid
                     """
                 ),
-                {"id": inv.id, "uid": str(user_id)},
+                {"id": inv.id, "wid": str(inv.workspace_id), "uid": str(user_id)},
             )
             accept_workspace = WorkspaceContext(
                 workspace_id=inv.workspace_id,

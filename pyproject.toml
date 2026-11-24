@@ -64,6 +64,8 @@ dependencies = [
 dev = [
   "pytest>=8.3.3",
   "pytest-asyncio>=0.24.0",
+  # Async sqlite driver for the in-memory test DB (test_idor_update_scoping).
+  "aiosqlite>=0.20.0",
   # PINNED EXACTLY, and a linter is the one dependency where this is not
   # optional: its verdict IS the gate, so an open range means CI's answer
   # depends on when pip last resolved it. Left open, this tree linted clean on

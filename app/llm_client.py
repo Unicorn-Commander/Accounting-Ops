@@ -67,6 +67,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from typing import Any, TypeVar
+from urllib.parse import urlsplit, urlunsplit
 
 _log = logging.getLogger("acctops.llm")
 
@@ -202,8 +203,38 @@ class LlmTarget:
     label: str = "primary"
 
     def redacted(self) -> str:
-        """Safe-to-log identity: endpoint + model, never the key."""
-        return f"{self.label}={self.base_url} model={self.model}"
+        """Safe-to-log identity: redacted endpoint + model, never the key.
+
+        Uses ``redacted_base_url()`` so that even a log line a human reads
+        cannot leak a userinfo-embedded key or a query token.
+        """
+        return f"{self.label}={self.redacted_base_url()} model={self.model}"
+
+    def redacted_base_url(self) -> str:
+        """The endpoint with userinfo and query removed -- safe for spans/logs.
+
+        A base_url can embed an API key as userinfo or a query token, so the
+        endpoint that leaves the process is stripped to scheme://host[:port]/path.
+        IPv6 literal hosts keep their brackets (N7). A malformed port (e.g. a
+        non-numeric value) is dropped rather than raised (N8): the fallback is
+        scheme://host/path.
+        """
+        parts = urlsplit(self.base_url)
+        host = parts.hostname or ""
+        # IPv6 literal hosts carry brackets in the netloc but not in hostname.
+        if host and ":" in host and host.count(":") > 1:
+            host = f"[{host}]"
+        port = None
+        if parts.port is not None:
+            try:
+                port = int(parts.port)
+            except (ValueError, TypeError):
+                port = None
+        if port is not None:
+            netloc = f"{host}:{port}"
+        else:
+            netloc = host
+        return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def resolve_fallback_target(primary_model: str | None = None) -> LlmTarget | None:
@@ -359,26 +390,31 @@ def _annotate_span(reason: str, primary: LlmTarget, fallback: LlmTarget, op: str
         span.set_attribute("llm.failover", True)
         span.set_attribute("llm.failover.reason", reason)
         span.set_attribute("llm.failover.op", op)
-        span.set_attribute("llm.primary.base_url", primary.base_url)
+        span.set_attribute("llm.primary.base_url", primary.redacted_base_url())
         span.set_attribute("llm.primary.model", primary.model)
-        span.set_attribute("llm.fallback.base_url", fallback.base_url)
+        span.set_attribute("llm.fallback.base_url", fallback.redacted_base_url())
         span.set_attribute("llm.fallback.model", fallback.model)
         span.add_event(
             "llm.failover",
-            {"reason": reason, "op": op, "fallback.base_url": fallback.base_url},
+            {"reason": reason, "op": op, "fallback.base_url": fallback.redacted_base_url()},
         )
     except Exception:  # noqa: BLE001 - telemetry must never break a request
         return
 
 
 def _log_failover(reason: str, exc: BaseException, primary: LlmTarget, fallback: LlmTarget, op: str) -> None:
-    """LOUD warning. A silent fallback that bills cloud tokens is the worse bug."""
+    """LOUD warning. A silent fallback that bills cloud tokens is the worse bug.
+
+    Logs the exception TYPE only (not the message, which can carry SQL or
+    connector payloads) and the redacted endpoints (not the full base_url,
+    which can embed userinfo or a query token).
+    """
     _log.warning(
         "LLM FAILOVER [%s]: primary FAILED (%s: %s) -> retrying ONCE on fallback. "
         "primary=%s fallback=%s. This request will be billed to the fallback provider.",
         op,
         reason,
-        exc,
+        type(exc).__name__,
         primary.redacted(),
         fallback.redacted(),
     )
