@@ -824,9 +824,6 @@ async def accept_invitation(
             if inv is None:
                 # Constant response on miss — no enumeration.
                 raise HTTPException(status_code=404, detail="invitation not found or expired")
-            # From here on the transaction acts inside the invitation's own
-            # workspace (the accepted_at UPDATE is under the workspace policy).
-            await _bind_invitation_workspace(session, inv.workspace_id)
             if inv.cancelled_at is not None or inv.accepted_at is not None:
                 raise HTTPException(status_code=410, detail="invitation already resolved")
             if inv.expires_at is not None and inv.expires_at < datetime.now(timezone.utc):
@@ -906,6 +903,11 @@ async def accept_invitation(
                     status_code=403,
                     detail="This invitation is for a different email address.",
                 )
+
+            # Every refusal is above. From here on the transaction acts inside
+            # the invitation's own workspace (the accepted_at UPDATE is under
+            # the workspace policy, AO-RLS-1).
+            await _bind_invitation_workspace(session, inv.workspace_id)
 
             # Upsert membership. If one exists (same workspace+user), only
             # PROMOTE — never demote. Accepting a cpa-role invite when you're
