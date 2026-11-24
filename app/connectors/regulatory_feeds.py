@@ -57,7 +57,6 @@ Design:
   - INSERT … ON CONFLICT (source, external_id) DO NOTHING — idempotent.
   - Returns a per-source ingest count for observability.
 """
-
 from __future__ import annotations
 
 import datetime as dt
@@ -95,7 +94,9 @@ IRS_NEWSROOM_PAGE = os.getenv(
     "https://www.irs.gov/newsroom/news-releases-for-current-month",
 )
 
-SCDOR_NOTICES_PAGE = os.getenv("REGULATORY_SCDOR_URL", "https://dor.sc.gov/communications")
+SCDOR_NOTICES_PAGE = os.getenv(
+    "REGULATORY_SCDOR_URL", "https://dor.sc.gov/communications"
+)
 
 # A feed is "stale" (-> Sentinel finding) once BOTH the failure count and the
 # time-since-success thresholds are meaningful. See feed_health_report().
@@ -159,23 +160,23 @@ async def fetch_irs_federal_register() -> list[dict[str, Any]]:
         pub_raw = str(item.get("publication_date") or "").strip()
         if pub_raw:
             try:
-                pub_at = dt.datetime.strptime(pub_raw, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc)
+                pub_at = dt.datetime.strptime(pub_raw, "%Y-%m-%d").replace(
+                    tzinfo=dt.timezone.utc
+                )
             except ValueError:
                 pub_at = None
         doc_type = str(item.get("type") or "").strip()
         abstract = str(item.get("abstract") or "").strip()
         summary = f"{doc_type}: {abstract}" if doc_type and abstract else (abstract or doc_type)
-        out.append(
-            {
-                "source": "irs_federal_register",
-                "external_id": doc_no or url,
-                "title": title[:1000],
-                "summary": summary[:2000],
-                "url": url,
-                "jurisdiction": "US",
-                "published_at": pub_at,
-            }
-        )
+        out.append({
+            "source": "irs_federal_register",
+            "external_id": doc_no or url,
+            "title": title[:1000],
+            "summary": summary[:2000],
+            "url": url,
+            "jurisdiction": "US",
+            "published_at": pub_at,
+        })
     return out
 
 
@@ -195,20 +196,12 @@ async def fetch_irs_newsroom() -> list[dict[str, Any]]:
 
     # Section/navigation pages under /newsroom/ that are NOT news releases.
     nav_slugs = {
-        "fact-sheets",
-        "irs-guidance",
-        "irs-statements-and-announcements",
-        "irs-tax-tips",
-        "multimedia-center",
-        "news-releases-for-current-month",
-        "news-releases-for-frequently-asked-questions",
-        "posters-to-share",
-        "tax-articles-to-share",
-        "tax-relief-in-disaster-situations",
-        "topics-in-the-news",
-        "news-release-and-fact-sheet-archive",
-        "working-families-tax-cuts",
-        "e-news-subscriptions",
+        "fact-sheets", "irs-guidance", "irs-statements-and-announcements",
+        "irs-tax-tips", "multimedia-center", "news-releases-for-current-month",
+        "news-releases-for-frequently-asked-questions", "posters-to-share",
+        "tax-articles-to-share", "tax-relief-in-disaster-situations",
+        "topics-in-the-news", "news-release-and-fact-sheet-archive",
+        "working-families-tax-cuts", "e-news-subscriptions",
         "general-overview-of-taxpayer-reliance-on-guidance-published-in-the-"
         "internal-revenue-bulletin-and-faqs",
     }
@@ -233,17 +226,15 @@ async def fetch_irs_newsroom() -> list[dict[str, Any]]:
         if full in seen:
             continue
         seen.add(full)
-        out.append(
-            {
-                "source": "irs_newsroom",
-                "external_id": full,
-                "title": title[:1000],
-                "summary": "",  # we don't crawl into each release
-                "url": full,
-                "jurisdiction": "US",
-                "published_at": None,
-            }
-        )
+        out.append({
+            "source": "irs_newsroom",
+            "external_id": full,
+            "title": title[:1000],
+            "summary": "",  # we don't crawl into each release
+            "url": full,
+            "jurisdiction": "US",
+            "published_at": None,
+        })
     return out[:50]
 
 
@@ -275,29 +266,20 @@ async def fetch_scdor_notices() -> list[dict[str, Any]]:
         if "dor.sc.gov" not in href.lower() and not href.startswith("/"):
             continue
         # Filter for tax-notice / advisory / ruling keywords
-        if not any(
-            k in text_.lower()
-            for k in (
-                "notice",
-                "ruling",
-                "advisory",
-                "regulation",
-                "bulletin",
-            )
-        ):
+        if not any(k in text_.lower() for k in (
+            "notice", "ruling", "advisory", "regulation", "bulletin",
+        )):
             continue
         full = href if href.startswith("http") else f"https://dor.sc.gov{href}"
-        out.append(
-            {
-                "source": "scdor_notices",
-                "external_id": full,
-                "title": text_[:300],
-                "summary": "",  # we don't crawl deeper
-                "url": full,
-                "jurisdiction": "SC",
-                "published_at": None,
-            }
-        )
+        out.append({
+            "source": "scdor_notices",
+            "external_id": full,
+            "title": text_[:300],
+            "summary": "",  # we don't crawl deeper
+            "url": full,
+            "jurisdiction": "SC",
+            "published_at": None,
+        })
     # De-dup by external_id
     seen: set[str] = set()
     unique: list[dict[str, Any]] = []
@@ -336,17 +318,15 @@ def parse_rss(body: str, source: str, jurisdiction: str = "US") -> list[dict[str
             pub_at = None
         if not title or not guid:
             continue
-        out.append(
-            {
-                "source": source,
-                "external_id": guid,
-                "title": title[:1000],
-                "summary": re.sub(r"<[^>]+>", "", desc)[:2000],
-                "url": link,
-                "jurisdiction": jurisdiction,
-                "published_at": pub_at,
-            }
-        )
+        out.append({
+            "source": source,
+            "external_id": guid,
+            "title": title[:1000],
+            "summary": re.sub(r"<[^>]+>", "", desc)[:2000],
+            "url": link,
+            "jurisdiction": jurisdiction,
+            "published_at": pub_at,
+        })
     return out
 
 
@@ -355,7 +335,9 @@ def parse_rss(body: str, source: str, jurisdiction: str = "US") -> list[dict[str
 # ---------------------------------------------------------------------------
 
 
-async def upsert_entries(session: AsyncSession, entries: list[dict[str, Any]]) -> dict[str, int]:
+async def upsert_entries(
+    session: AsyncSession, entries: list[dict[str, Any]]
+) -> dict[str, int]:
     """Insert new entries; skip on conflict (source, external_id)."""
     if not entries:
         return {"new": 0, "seen": 0}
@@ -460,13 +442,16 @@ async def feed_health_report(
     network blip while still catching a URL that has rotted away.
     """
     hours = FEED_STALE_AFTER_HOURS if stale_after_hours is None else stale_after_hours
-    fails = FEED_STALE_AFTER_FAILURES if stale_after_failures is None else stale_after_failures
+    fails = (
+        FEED_STALE_AFTER_FAILURES
+        if stale_after_failures is None
+        else stale_after_failures
+    )
     try:
         rows = (
-            (
-                await session.execute(
-                    text(
-                        """
+            await session.execute(
+                text(
+                    """
                     SELECT source, last_attempt_at, last_success_at,
                            consecutive_failures, last_error, last_entry_count,
                            EXTRACT(EPOCH FROM (now() - last_success_at)) / 3600.0
@@ -474,12 +459,9 @@ async def feed_health_report(
                     FROM public.regulatory_feed_health
                     ORDER BY source
                     """
-                    )
                 )
             )
-            .mappings()
-            .all()
-        )
+        ).mappings().all()
     except Exception as e:  # noqa: BLE001
         _log.warning("feed health read failed: %s", e)
         return []
@@ -488,23 +470,23 @@ async def feed_health_report(
     for r in rows:
         hours_since = r["hours_since_success"]
         never_succeeded = r["last_success_at"] is None
-        overdue = never_succeeded or (hours_since is not None and float(hours_since) >= hours)
-        stale = bool(int(r["consecutive_failures"] or 0) >= fails and overdue)
-        out.append(
-            {
-                "source": r["source"],
-                "last_attempt_at": r["last_attempt_at"],
-                "last_success_at": r["last_success_at"],
-                "consecutive_failures": int(r["consecutive_failures"] or 0),
-                "last_error": r["last_error"],
-                "last_entry_count": int(r["last_entry_count"] or 0),
-                "hours_since_success": (
-                    None if hours_since is None else round(float(hours_since), 1)
-                ),
-                "never_succeeded": never_succeeded,
-                "stale": stale,
-            }
+        overdue = never_succeeded or (
+            hours_since is not None and float(hours_since) >= hours
         )
+        stale = bool(int(r["consecutive_failures"] or 0) >= fails and overdue)
+        out.append({
+            "source": r["source"],
+            "last_attempt_at": r["last_attempt_at"],
+            "last_success_at": r["last_success_at"],
+            "consecutive_failures": int(r["consecutive_failures"] or 0),
+            "last_error": r["last_error"],
+            "last_entry_count": int(r["last_entry_count"] or 0),
+            "hours_since_success": (
+                None if hours_since is None else round(float(hours_since), 1)
+            ),
+            "never_succeeded": never_succeeded,
+            "stale": stale,
+        })
     return out
 
 
@@ -533,17 +515,16 @@ async def poll_all(session: AsyncSession) -> dict[str, Any]:
         try:
             entries = await fetcher()
         except FeedFetchError as e:
-            # str(e) is the feed's own error text (URL + upstream snippet):
-            # keep it in the health row + logs (internal surfaces), but the
-            # returned result carries only the failure class name.
             _log.warning("regulatory_feeds: %s FAILED: %s", source, e)
             await record_feed_health(session, source, ok=False, error=str(e))
-            results[source] = {"error": type(e).__name__, "ok": False}
+            results[source] = {"error": str(e)[:200], "ok": False}
             continue
         except Exception as e:  # noqa: BLE001
             _log.exception("regulatory_feeds: %s crashed: %s", source, e)
-            await record_feed_health(session, source, ok=False, error=f"{type(e).__name__}: {e}")
-            results[source] = {"error": type(e).__name__, "ok": False}
+            await record_feed_health(
+                session, source, ok=False, error=f"{type(e).__name__}: {e}"
+            )
+            results[source] = {"error": str(e)[:200], "ok": False}
             continue
 
         try:
@@ -553,7 +534,7 @@ async def poll_all(session: AsyncSession) -> dict[str, Any]:
             await record_feed_health(
                 session, source, ok=False, error=f"upsert: {type(e).__name__}: {e}"
             )
-            results[source] = {"error": f"upsert: {type(e).__name__}", "ok": False}
+            results[source] = {"error": str(e)[:200], "ok": False}
             continue
 
         # A 200 that yields zero parseable entries is treated as a FAILURE, not
@@ -566,17 +547,19 @@ async def poll_all(session: AsyncSession) -> dict[str, Any]:
                 "regulatory_feeds: %s returned 0 entries (reachable but empty)",
                 source,
             )
-            await record_feed_health(session, source, ok=False, error="fetch returned 0 entries")
+            await record_feed_health(
+                session, source, ok=False, error="fetch returned 0 entries"
+            )
             results[source] = {**stats, "ok": False, "warning": "0 entries"}
             continue
 
-        await record_feed_health(session, source, ok=True, entry_count=len(entries))
+        await record_feed_health(
+            session, source, ok=True, entry_count=len(entries)
+        )
         results[source] = {**stats, "ok": True}
         _log.info(
             "regulatory_feeds: %s — %d new / %d seen",
-            source,
-            stats["new"],
-            stats["seen"],
+            source, stats["new"], stats["seen"],
         )
 
     return results

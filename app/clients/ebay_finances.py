@@ -42,14 +42,15 @@ class EbayFinancesError(Exception):
     """
 
     def __init__(
-        self, message: str, *, upstream_status: int | None = None, upstream_body: str | None = None
+        self,
+        message: str,
+        *,
+        upstream_status: int | None = None,
+        upstream_body: str | None = None,
     ) -> None:
         super().__init__(message)
         self.upstream_status = upstream_status
         self.upstream_body = upstream_body
-
-    def __str__(self) -> str:
-        return super().__str__()
 
 
 def _ebay_upstream_error(
@@ -63,6 +64,25 @@ def _ebay_upstream_error(
     if extra:
         detail = f"{detail} ({extra})"
     return EbayFinancesError(detail, upstream_status=status_code, upstream_body=body[:300])
+
+
+def _parse_jsonrpc_error(payload: dict) -> None:
+    """Raise a SAFE EbayFinancesError for a JSON-RPC error envelope.
+
+    The MCP error object is internal (the sidecar's own text): it is logged,
+    never returned. The raised message is fixed.
+    """
+    if "error" in payload and payload["error"]:
+        err = payload["error"]
+        logger.warning(
+            "ebay-finances-mcp JSON-RPC error code=%s message=%r",
+            err.get("code"),
+            str(err.get("message"))[:300],
+        )
+        raise EbayFinancesError(
+            f"ebay-finances-mcp returned an error (code {err.get('code')})",
+            upstream_body=str(err.get("message"))[:300],
+        )
 
 
 @dataclass(frozen=True)
@@ -129,25 +149,6 @@ def _parse_sse_or_json(resp: httpx.Response) -> dict:
                 return json.loads(line[len("data:") :].strip())
         raise EbayFinancesError("Empty SSE response from ebay-finances-mcp")
     return resp.json()
-
-
-def _parse_jsonrpc_error(payload: dict) -> None:
-    """Raise a SAFE EbayFinancesError for a JSON-RPC error envelope.
-
-    The MCP error object is internal (the sidecar's own text): it is logged,
-    never returned. The raised message is fixed.
-    """
-    if "error" in payload and payload["error"]:
-        err = payload["error"]
-        logger.warning(
-            "ebay-finances-mcp JSON-RPC error code=%s message=%r",
-            err.get("code"),
-            str(err.get("message"))[:300],
-        )
-        raise EbayFinancesError(
-            f"ebay-finances-mcp returned an error (code {err.get('code')})",
-            upstream_body=str(err.get("message"))[:300],
-        )
 
 
 async def _call_mcp_tool(tool_name: str, arguments: dict) -> Any:
@@ -234,7 +235,9 @@ async def list_accounts(auth: EbayAuth) -> list[dict]:
     return []
 
 
-async def recent_transactions(auth: EbayAuth, *, days: int = 30, limit: int = 500) -> list[dict]:
+async def recent_transactions(
+    auth: EbayAuth, *, days: int = 30, limit: int = 500
+) -> list[dict]:
     """Return canonical transactions sorted newest-first by the MCP."""
     out = await _call_mcp_tool(
         "recent_transactions",
@@ -299,7 +302,9 @@ async def _get_fulfillment_token(auth: EbayAuth) -> str:
     return token
 
 
-async def fulfillment_orders(auth: EbayAuth, *, days: int = 30, limit: int = 200) -> list[dict]:
+async def fulfillment_orders(
+    auth: EbayAuth, *, days: int = 30, limit: int = 200
+) -> list[dict]:
     """Fetch recent eBay orders via /sell/fulfillment/v1/order, normalized
     to canonical-transaction shape.
 

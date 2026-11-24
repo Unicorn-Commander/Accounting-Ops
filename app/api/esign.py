@@ -39,7 +39,6 @@ Routes (all nested under a work product; entity-scoped + workspace-isolated):
   POST .../work-products/{wp_id}/signature-requests/{id}/cancel
        Cancel a non-terminal request. Role floor: accountant.
 """
-
 from __future__ import annotations
 
 import logging
@@ -107,10 +106,9 @@ async def _fetch_signature_request(
     session, entity_id: UUID, wp_id: UUID, sr_id: UUID
 ) -> dict | None:
     return (
-        (
-            await session.execute(
-                text(
-                    """
+        await session.execute(
+            text(
+                """
                 SELECT id::text, entity_id::text, work_product_id::text,
                        provider, external_id, status, signer_name, signer_email,
                        signing_url, signed_garage_key, signed_path,
@@ -118,13 +116,10 @@ async def _fetch_signature_request(
                 FROM signature_request
                 WHERE id = :id AND entity_id = :eid AND work_product_id = :wpid
                 """
-                ),
-                {"id": str(sr_id), "eid": str(entity_id), "wpid": str(wp_id)},
-            )
+            ),
+            {"id": str(sr_id), "eid": str(entity_id), "wpid": str(wp_id)},
         )
-        .mappings()
-        .first()
-    )
+    ).mappings().first()
 
 
 # ---------------------------------------------------------------------------
@@ -195,17 +190,14 @@ async def create_signature_request(
             )
     except ProviderUnavailable as exc:
         # The insert was rolled back with the transaction — no orphan row.
-        raise HTTPException(status_code=502, detail=f"E-signature provider unavailable: {exc}")
+        raise HTTPException(
+            status_code=502, detail=f"E-signature provider unavailable: {exc}"
+        )
 
     _log.info(
         "esign.request created sr=%s wp=%s ws=%s entity=%s by=%s provider=%s status=%s",
-        result["id"],
-        wp_id,
-        workspace.workspace_id,
-        entity_id,
-        workspace.user_uc_uid,
-        result["provider"],
-        result["status"],
+        result["id"], wp_id, workspace.workspace_id, entity_id,
+        workspace.user_uc_uid, result["provider"], result["status"],
     )
     return result
 
@@ -229,30 +221,28 @@ async def list_signature_requests(
     limit = max(1, min(limit, 500))
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         where = ["entity_id = :eid", "work_product_id = :wpid"]
-        params: dict[str, Any] = {"eid": str(entity_id), "wpid": str(wp_id), "limit": limit}
+        params: dict[str, Any] = {
+            "eid": str(entity_id), "wpid": str(wp_id), "limit": limit
+        }
         if status_filter:
             where.append("status = :st")
             params["st"] = status_filter.strip().lower()
         rows = (
-            (
-                await session.execute(
-                    text(
-                        f"""
+            await session.execute(
+                text(
+                    f"""
                     SELECT id::text, work_product_id::text, provider, external_id,
                            status, signer_name, signer_email, signing_url,
                            signed_garage_key, signed_path, created_at, updated_at
                     FROM signature_request
-                    WHERE {" AND ".join(where)}
+                    WHERE {' AND '.join(where)}
                     ORDER BY created_at DESC
                     LIMIT :limit
                     """
-                    ),
-                    params,
-                )
+                ),
+                params,
             )
-            .mappings()
-            .all()
-        )
+        ).mappings().all()
     return {"items": [dict(r) for r in rows]}
 
 
@@ -278,7 +268,9 @@ async def get_signature_request(
                 # sync_status returns None ONLY when the request doesn't exist
                 # (the existence check precedes any provider call).
                 if synced is None:
-                    raise HTTPException(status_code=404, detail="Signature request not found")
+                    raise HTTPException(
+                        status_code=404, detail="Signature request not found"
+                    )
             except ProviderUnavailable as exc:
                 # Best-effort: fall back to the stored status rather than 502.
                 _log.warning("esign.sync provider unavailable sr=%s: %s", sr_id, exc)
@@ -336,10 +328,7 @@ async def mark_signed(
             raise HTTPException(status_code=404, detail="Signature request not found")
     _log.info(
         "esign.mark_signed sr=%s wp=%s ws=%s by=%s stored=%s",
-        sr_id,
-        wp_id,
-        workspace.workspace_id,
-        workspace.user_uc_uid,
+        sr_id, wp_id, workspace.workspace_id, workspace.user_uc_uid,
         bool(signed_bytes),
     )
     return result
@@ -357,16 +346,15 @@ async def cancel_signature_request(
     assert_entity_in_scope(workspace, entity_id)
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         try:
-            result = await cancel(session, entity_id=entity_id, work_product_id=wp_id, sr_id=sr_id)
+            result = await cancel(
+                session, entity_id=entity_id, work_product_id=wp_id, sr_id=sr_id
+            )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         if result is None:
             raise HTTPException(status_code=404, detail="Signature request not found")
     _log.info(
         "esign.cancel sr=%s wp=%s ws=%s by=%s",
-        sr_id,
-        wp_id,
-        workspace.workspace_id,
-        workspace.user_uc_uid,
+        sr_id, wp_id, workspace.workspace_id, workspace.user_uc_uid,
     )
     return result

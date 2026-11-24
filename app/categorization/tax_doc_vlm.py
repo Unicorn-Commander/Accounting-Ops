@@ -43,42 +43,15 @@ _log = logging.getLogger("accounting_ops.tax_doc_vlm")
 # Canonical tax-document types the classifier maps to. "other" = not a tax doc
 # (or unrecognized) — still stored, just not typed.
 TAX_DOC_TYPES = (
-    "1099-R",
-    "1099-NEC",
-    "1099-MISC",
-    "1099-INT",
-    "1099-DIV",
-    "1099-K",
-    "1099-G",
-    "W-2",
-    "W-2G",
-    "SSA-1099",
-    "RRB-1099",
-    "1095-A",
-    "1095-B",
-    "1095-C",
-    "1098",
-    "1098-E",
-    "1098-T",
-    "K-1",
-    "5498",
-    "1040",
-    "1040-ES",
-    "irs-notice",
-    "state-tax-notice",
-    "other",
+    "1099-R", "1099-NEC", "1099-MISC", "1099-INT", "1099-DIV", "1099-K", "1099-G",
+    "W-2", "W-2G", "SSA-1099", "RRB-1099",
+    "1095-A", "1095-B", "1095-C", "1098", "1098-E", "1098-T",
+    "K-1", "5498", "1040", "1040-ES",
+    "irs-notice", "state-tax-notice", "other",
 )
 
 # Images we can feed straight to the VLM; PDFs are rasterized first.
-_IMAGE_MIMES = {
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-    "image/tiff",
-    "image/gif",
-    "image/heic",
-    "image/heif",
-}
+_IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp", "image/tiff", "image/gif", "image/heic", "image/heif"}
 _PDF_MIMES = {"application/pdf"}
 
 # Rasterization bounds — tax forms put their substance on the first page or two;
@@ -107,7 +80,7 @@ _SYSTEM_PROMPT = (
 class TaxDocExtraction:
     """Result of a tax-document extraction. Always returned (never raises)."""
 
-    doc_type: str = "other"  # one of TAX_DOC_TYPES
+    doc_type: str = "other"            # one of TAX_DOC_TYPES
     tax_year: int | None = None
     payer_name: str | None = None
     recipient_name: str | None = None
@@ -215,28 +188,26 @@ class TaxDocExtractor:
                 resp.raise_for_status()
         except httpx.TimeoutException:
             return TaxDocExtraction(
-                model=model,
-                duration_ms=int((time.monotonic() - t0) * 1000),
+                model=model, duration_ms=int((time.monotonic() - t0) * 1000),
                 error="vlm timeout",
             )
         except httpx.HTTPError as exc:
             return TaxDocExtraction(
-                model=model,
-                duration_ms=int((time.monotonic() - t0) * 1000),
+                model=model, duration_ms=int((time.monotonic() - t0) * 1000),
                 error=f"vlm transport: {type(exc).__name__}",
             )
 
         duration_ms = int((time.monotonic() - t0) * 1000)
         raw = _extract_completion(resp.json())
         if not raw:
-            return TaxDocExtraction(model=model, duration_ms=duration_ms, error="empty completion")
+            return TaxDocExtraction(
+                model=model, duration_ms=duration_ms, error="empty completion"
+            )
         parsed = _parse_tax_json(raw)
         if parsed is None:
             return TaxDocExtraction(
-                model=model,
-                duration_ms=duration_ms,
-                raw_response=raw[:4000],
-                error="unparseable json",
+                model=model, duration_ms=duration_ms,
+                raw_response=raw[:4000], error="unparseable json",
             )
         parsed.model = model
         parsed.duration_ms = duration_ms
@@ -382,7 +353,8 @@ def _parse_tax_json(raw: str) -> TaxDocExtraction | None:
         # Normalize common variants (e.g. "1099R", "w2", "ssa1099").
         norm = doc_type.upper().replace(" ", "").replace("_", "").replace("-", "")
         match = next(
-            (t for t in TAX_DOC_TYPES if t.upper().replace("-", "") == norm),
+            (t for t in TAX_DOC_TYPES
+             if t.upper().replace("-", "") == norm),
             None,
         )
         doc_type = match or "other"

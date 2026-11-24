@@ -24,7 +24,6 @@ and the API surfaces a clean "not connected yet" message.
 The pure functions (``parse_jsonrpc_result``, ``map_person_to_row``) are unit-
 tested without any network; the I/O functions are thin wrappers over httpx.
 """
-
 from __future__ import annotations
 
 import json
@@ -66,7 +65,11 @@ def is_configured() -> bool:
     until the federation is really wired — no button that 502s on click.
     """
     s = get_settings()
-    return bool(s.contact_ops_mcp_url and s.contact_ops_audience and s.contact_ops_client_secret)
+    return bool(
+        s.contact_ops_mcp_url
+        and s.contact_ops_audience
+        and s.contact_ops_client_secret
+    )
 
 
 def _exchange_client_creds() -> tuple[str, str]:
@@ -162,8 +165,9 @@ def map_person_to_row(person: dict[str, Any]) -> dict[str, Any] | None:
     employments = person.get("current_employments") or person.get("employments")
     if employments:
         first = employments[0]
-        company = first.get("organization_name") or (first.get("organization") or {}).get(
-            "display_name"
+        company = (
+            first.get("organization_name")
+            or (first.get("organization") or {}).get("display_name")
         )
 
     return {
@@ -238,7 +242,9 @@ async def _call_tool(obo_token: str, name: str, arguments: dict[str, Any]) -> di
             headers={"Authorization": f"Bearer {obo_token}"},
         )
     if resp.status_code != 200:
-        raise ContactOpsError(f"Contact-Ops MCP call '{name}' returned {resp.status_code}")
+        raise ContactOpsError(
+            f"Contact-Ops MCP call '{name}' returned {resp.status_code}"
+        )
     return parse_jsonrpc_result(resp.json())
 
 

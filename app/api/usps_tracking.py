@@ -39,6 +39,7 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -66,6 +67,7 @@ def _redact_url(url: str) -> str:
     parts = urlsplit(url)
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
+
 # Tracking number validator: 13-22 digit numeric (covers standard formats)
 TRACKING_NUMBER_RE = re.compile(r"^\d{13,22}$")
 
@@ -78,7 +80,6 @@ def _get_user_id() -> str | None:
 @dataclass
 class TrackingEvent:
     """One USPS tracking event."""
-
     event: str  # e.g. "DELIVERED", "ARRIVED AT POST OFFICE", "OUT FOR DELIVERY"
     event_time: str | None  # ISO-ish string from USPS
     event_date: str | None  # ISO-ish string from USPS
@@ -91,7 +92,6 @@ class TrackingEvent:
 @dataclass
 class TrackingResult:
     """Result of a USPS tracking lookup."""
-
     tracking_number: str
     is_delivered: bool
     summary: str  # Latest event description
@@ -175,25 +175,21 @@ def _parse_track_response(xml_text: str, tracking_number: str) -> TrackingResult
     # If still no events (summary was flat text only), promote summary
     # to a synthesized event for downstream consumers.
     if not events and summary_text:
-        events.append(
-            TrackingEvent(
-                event=summary_text,
-                event_time=None,
-                event_date=None,
-                event_city=None,
-                event_state=None,
-                event_zip=None,
-                event_country=None,
-            )
-        )
+        events.append(TrackingEvent(
+            event=summary_text,
+            event_time=None, event_date=None,
+            event_city=None, event_state=None,
+            event_zip=None, event_country=None,
+        ))
 
     # Delivery state: USPS sets "Status" to "Delivered" or includes
     # "DELIVERED" in the latest event text.
     status_el = track_info.find("Status")
     status_text = (status_el.text or "").strip().lower() if status_el is not None else ""
 
-    is_delivered = "deliver" in status_text or any(
-        "deliver" in (e.event or "").lower() for e in events[:1]
+    is_delivered = (
+        "deliver" in status_text
+        or any("deliver" in (e.event or "").lower() for e in events[:1])
     )
 
     delivery_date = None
@@ -253,7 +249,11 @@ async def lookup_tracking(tracking_number: str) -> TrackingResult:
         )
 
     # Build XML request per USPS TrackV2 spec
-    xml_req = f'<TrackRequest USERID="{user_id}"><TrackID ID="{cleaned}"></TrackID></TrackRequest>'
+    xml_req = (
+        f'<TrackRequest USERID="{user_id}">'
+        f'<TrackID ID="{cleaned}"></TrackID>'
+        f'</TrackRequest>'
+    )
     params = {"API": USPS_API_NAME, "XML": xml_req}
 
     try:
@@ -301,7 +301,6 @@ async def lookup_tracking(tracking_number: str) -> TrackingResult:
 # ---------------------------------------------------------------------------
 # HTTP endpoint
 # ---------------------------------------------------------------------------
-
 
 class TrackingEventResponse(BaseModel):
     event: str

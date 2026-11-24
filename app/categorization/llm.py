@@ -48,7 +48,7 @@ import httpx
 from app.config import Settings, get_settings
 from app.llm_client import llm_default_headers
 
-_log = logging.getLogger("acctops.categorization.llm")
+_log = logging.getLogger("accounting_ops.categorization.llm")
 
 
 # ---------------------------------------------------------------------------
@@ -68,13 +68,13 @@ class LLMCategorySuggestion:
     for human reviewers and CPA audits).
     """
 
-    category: str  # canonical COA category string; always in allowed_categories
-    confidence: float  # 0.0–1.0 as self-reported by the model; advisory
-    reasoning: str  # one-sentence explanation for the audit trail
-    raw_response: str  # exact completion text for the audit trail
-    model: str  # which model produced it (traceability)
-    endpoint: str  # which endpoint was called (traceability)
-    duration_ms: int  # wall-clock time for the HTTP call
+    category: str        # canonical COA category string; always in allowed_categories
+    confidence: float    # 0.0–1.0 as self-reported by the model; advisory
+    reasoning: str       # one-sentence explanation for the audit trail
+    raw_response: str    # exact completion text for the audit trail
+    model: str           # which model produced it (traceability)
+    endpoint: str        # which endpoint was called (traceability)
+    duration_ms: int     # wall-clock time for the HTTP call
 
 
 # ---------------------------------------------------------------------------
@@ -89,8 +89,8 @@ _FEW_SHOT_EXAMPLES = [
         "content": (
             "Transaction: description='CHECKCARD SYNTH-CLOUD-HOST SAN JOSE CA', "
             "amount=-59.99, payee=None, memo=None\n"
-            'Allowed categories: ["Infrastructure · VPS", "SaaS · AI", '
-            '"Office · Supplies", "Uncategorized"]\n'
+            "Allowed categories: [\"Infrastructure · VPS\", \"SaaS · AI\", "
+            "\"Office · Supplies\", \"Uncategorized\"]\n"
             "Reply with JSON only."
         ),
     },
@@ -106,8 +106,8 @@ _FEW_SHOT_EXAMPLES = [
         "content": (
             "Transaction: description='ACH CREDIT SYNTH MARKETPLACE PAYOUT', "
             "amount=1200.00, payee=None, memo=None\n"
-            'Allowed categories: ["Revenue · Marketplace", "Revenue · Music", '
-            '"Inter-entity transfer", "Uncategorized"]\n'
+            "Allowed categories: [\"Revenue · Marketplace\", \"Revenue · Music\", "
+            "\"Inter-entity transfer\", \"Uncategorized\"]\n"
             "Reply with JSON only."
         ),
     },
@@ -123,8 +123,8 @@ _FEW_SHOT_EXAMPLES = [
         "content": (
             "Transaction: description='Zelle payment from Jordan Lee', "
             "amount=500.00, payee=None, memo=None\n"
-            'Allowed categories: ["Revenue · Marketplace", '
-            '"Owner\'s Contribution", "Owner\'s Draw", "Uncategorized"]\n'
+            "Allowed categories: [\"Revenue · Marketplace\", "
+            "\"Owner's Contribution\", \"Owner's Draw\", \"Uncategorized\"]\n"
             "Reply with JSON only."
         ),
     },
@@ -141,8 +141,8 @@ _FEW_SHOT_EXAMPLES = [
         "content": (
             "Transaction: description='CHECKCARD AMAZON MUSIC*9K8V 888-802-3080 WA', "
             "amount=-9.80, payee=None, memo=None\n"
-            'Allowed categories: ["SaaS · Productivity", "SaaS · AI", '
-            '"Office · Supplies", "Uncategorized"]\n'
+            "Allowed categories: [\"SaaS · Productivity\", \"SaaS · AI\", "
+            "\"Office · Supplies\", \"Uncategorized\"]\n"
             "Reply with JSON only."
         ),
     },
@@ -165,29 +165,29 @@ _SYSTEM_PROMPT = (
     '"confidence" (float 0.0–1.0, your self-assessed confidence), '
     '"reasoning" (one sentence, plain English). '
     "The allowed categories use a middle-dot character `·` (U+00B7) as a separator — "
-    'for example `"Office · Supplies"` NOT `"Office Supplies"`. '
+    "for example `\"Office · Supplies\"` NOT `\"Office Supplies\"`. "
     "Copy the category string character-for-character from the provided list. "
-    'If no allowed category is a clear, confident fit, choose "Uncategorized" '
+    "If no allowed category is a clear, confident fit, choose \"Uncategorized\" "
     "(when it is in the allowed list) with low confidence. Do NOT force a poor "
     "match into an unrelated bucket — abstaining is better than guessing wrong. "
     "CALIBRATION (important): only assign a real category when the merchant's "
     "SPECIFIC nature clearly matches it. If you are inferring from a vague keyword, "
     "or the merchant could plausibly fit several buckets, set category to "
-    '"Uncategorized" with confidence 0.3 or lower — reserve confidence above 0.7 '
+    "\"Uncategorized\" with confidence 0.3 or lower — reserve confidence above 0.7 "
     "for unambiguous matches. Common traps to AVOID: a phone / internet / telecom "
     "bill (AT&T, Verizon, Comcast, T-Mobile) is NOT email or AI software. A music "
     "or video streaming subscription (Amazon Music, Spotify, Netflix, Hulu) is "
     "entertainment — if there is no entertainment/subscription category, use "
-    '"Uncategorized", NOT "productivity". A bar, restaurant, brewery, cafe, '
-    'diner, or music venue is "Meals", NOT "Travel · Lodging" — lodging means '
+    "\"Uncategorized\", NOT \"productivity\". A bar, restaurant, brewery, cafe, "
+    "diner, or music venue is \"Meals\", NOT \"Travel · Lodging\" — lodging means "
     "hotels / motels / Airbnb only. A government or municipal charge (city, county, "
-    'DMV, parks) is usually "Uncategorized" unless it is clearly a specific listed '
+    "DMV, parks) is usually \"Uncategorized\" unless it is clearly a specific listed "
     "service. When unsure between a specific bucket and Uncategorized, prefer "
     "Uncategorized — a downstream reviewer will refine it. "
     "Money the business owner moves to or from the business in their own name "
     "(e.g. Zelle / Venmo / Cash App to or from the owner) is an OWNER transfer, "
-    'not income or an expense: use "Owner\'s Contribution" for money received '
-    'from the owner and "Owner\'s Draw" for money paid to the owner or spent '
+    "not income or an expense: use \"Owner's Contribution\" for money received "
+    "from the owner and \"Owner's Draw\" for money paid to the owner or spent "
     "personally — but only when those categories appear in the allowed list. "
     "Do not include any text outside the JSON object."
 )
@@ -329,7 +329,7 @@ class LLMCategorizer:
             "model": model,
             "messages": messages,
             "max_tokens": self._settings.llm_max_tokens,
-            "temperature": 0.0,  # deterministic; consistent categorization
+            "temperature": 0.0,   # deterministic; consistent categorization
         }
         # Only Qwen3 / llama.cpp needs thinking suppressed (otherwise it burns the
         # whole budget on reasoning_content → empty content). Frontier models
@@ -371,7 +371,7 @@ class LLMCategorizer:
         return LLMCategorySuggestion(
             category=category,
             confidence=max(0.0, min(1.0, float(confidence))),
-            reasoning=reasoning[:500],  # guard against runaway reasoning strings
+            reasoning=reasoning[:500],   # guard against runaway reasoning strings
             raw_response=raw_json,
             model=model,
             endpoint=endpoint,
@@ -546,7 +546,9 @@ def _parse_and_validate(
 
     # 3. Normalised (middle-dot-stripped) match.
     #    Handles Qwen returning "Office Supplies" for canonical "Office · Supplies".
-    allowed_normalized: dict[str, str] = {_normalize_category(c): c for c in allowed_categories}
+    allowed_normalized: dict[str, str] = {
+        _normalize_category(c): c for c in allowed_categories
+    }
     canonical = allowed_normalized.get(_normalize_category(normalized))
     if canonical:
         return canonical, conf_float, reasoning
