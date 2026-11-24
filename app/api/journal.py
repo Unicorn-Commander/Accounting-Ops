@@ -456,6 +456,11 @@ async def post_entry(
     or 'blocked_*' on refusal. Idempotent on (entity_id, source, source_external_id).
     """
     require_role(workspace, "bookkeeper")
+    # AO-MASS-1: entity_id comes from the body, so enforce the membership's
+    # entity_scope BEFORE any session opens. An entity-scoped member must not
+    # post into another entity of the workspace (the MCP twin already does
+    # this through authorize_workspace(workspace_id, entity_id, ...)).
+    assert_entity_in_scope(workspace, body.entity_id)
 
     # TRUST CONTRACT (materiality.py): user_confirmed=True asserts a HUMAN
     # attested this post. A body field is never such evidence — an agent or
@@ -490,6 +495,20 @@ async def post_entry(
             ).first()
             entity_mapped = row is not None
 
+        # AO-MASS-1: sign_matched feeds the tier-L auto-post trust check, so
+        # the server derives it from the category's COA account type, exactly
+        # like the MCP twin (journal_tools.post_journal_entry). The body value
+        # is ANDed in, so a caller can only make the gate stricter, never
+        # claim a match the server would compute false.
+        from app.tools.journal_tools import _derived_sign_matched
+
+        effective_sign_matched = bool(body.sign_matched) and await _derived_sign_matched(
+            session,
+            entity_id=body.entity_id,
+            category=body.category,
+            amount_cents=int(body.amount_cents),
+        )
+
         result = await post_journal_entry(
             session,
             workspace_id=str(workspace.workspace_id),
@@ -504,7 +523,7 @@ async def post_entry(
             category=body.category,
             category_status=body.category_status,
             entity_mapped=entity_mapped,
-            sign_matched=body.sign_matched,
+            sign_matched=effective_sign_matched,
             external_account_id=body.external_account_id,
             has_receipt_link=body.receipt_link_id is not None,
             receipt_link_id=body.receipt_link_id,

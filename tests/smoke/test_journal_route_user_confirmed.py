@@ -86,11 +86,14 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """Answers only the account_entity_mapping probe (entity_mapped=True)."""
+    """Answers the account_entity_mapping probe (entity_mapped=True) and the
+    server-side sign_matched COA lookup (no row: direction not contradicted)."""
 
     async def execute(self, stmt: Any, params: dict[str, Any] | None = None) -> _FakeResult:
         if "account_entity_mapping" in str(stmt):
             return _FakeResult((1,))
+        if "chart_of_account" in str(stmt):
+            return _FakeResult(None)
         raise AssertionError(f"unexpected SQL: {str(stmt)[:80]}")
 
 
