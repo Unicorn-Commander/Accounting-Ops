@@ -374,7 +374,7 @@ async def store_export(
     if not s3.is_configured():
         raise GarageNotConfigured(
             "Object storage (Garage S3) is not configured; the export archive "
-            "cannot be stored. Configure the garage S3 credentials and retry."
+            "cannot be stored. Configure the garage S3 settings and retry."
         )
     bucket = export_bucket(settings, workspace_id)
     key = export_object_key(workspace_id, job_id)
