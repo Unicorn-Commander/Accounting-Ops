@@ -146,44 +146,41 @@ def test_instrumentation_exception_event_is_scrubbed_to_type():
     assert "sqlalchemy.exc.OperationalError" in wire
 
 
-def test_scrub_exception_text_never_exports_message_body():
-    """AO-OTEL-2 unit (B2): the scrubber NEVER derives the kept value from the
-    message body. 'Type: message' collapses to the constant 'redacted'; a bare
-    type name (no separator) is kept because it IS the type; anything else is
-    'redacted'.
+def test_bare_surname_message_and_status_never_reach_wire():
+    """AO112-R3-1: a one-word message ('Smith') raised and set as status
+    description exports as the constant; the real type stays."""
+    pytest.importorskip("opentelemetry")
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.trace.status import Status, StatusCode
 
-    B2 cases from the review:
-      * capitalised single-token message: 'Janeroe' -> 'Janeroe' (bare token,
-        no ': ' separator, matches _TYPE_NAME)
-      * 'Name: text': 'Smith: owes 500' -> 'redacted'
-      * key-shaped token: 'Sk_live_abcdef: bad key' -> 'redacted'
-      * bare set_status(ERROR, 'Janeroe') -> 'Janeroe'
-    """
+    capture = _CaptureExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(BatchSpanProcessor(otel._RedactingSpanExporter(capture)))
+    tracer = provider.get_tracer("acctops.otel2c")
+    with tracer.start_as_current_span("boom3") as span:
+        try:
+            raise ValueError("Smith")
+        except ValueError as exc:
+            span.record_exception(exc)
+        span.set_status(Status(StatusCode.ERROR, "Acme.Corp"))
+    provider.force_flush(5000)
+    wire = _span_wire_blob(capture.spans[-1])
+    assert "Smith" not in wire and "Acme.Corp" not in wire
+    assert "ValueError" in wire and "redacted" in wire
+
+
+def test_scrub_exception_text_never_exports_message_body():
+    """AO-OTEL-2 (B2): the exported text is the constant 'redacted' for ANY
+    input, including bare capitalised tokens that look like names or types."""
     scrub = otel._scrub_exception_text
-    # Bare type name (no separator): kept.
-    assert scrub("ValueError") == "ValueError"
-    assert scrub("sqlalchemy.exc.OperationalError") == "sqlalchemy.exc.OperationalError"
-    assert scrub("httpx.ConnectError") == "httpx.ConnectError"
-    # 'Type: message' with a separator: the message body is never exported.
-    assert scrub("ValueError: SELECT secret_amount") == "redacted"
-    assert scrub("sqlalchemy.exc.OperationalError: disk full") == "redacted"
-    assert scrub("httpx.ConnectError: dns failure") == "redacted"
-    # Bare message text (no separator, not a type name): redacted.
-    assert scrub("SELECT secret_amount") == "redacted"
-    assert scrub("UPDATE ledger SET amount=999") == "redacted"
-    # B2: capitalised single-token that looks like a name, not a type.
-    # 'Janeroe' matches _TYPE_NAME (starts uppercase, no separator), so it is
-    # kept. This is the documented trade-off: a bare token with no separator
-    # cannot be distinguished from a type name without the real class.
-    assert scrub("Janeroe") == "Janeroe"
-    # B2: 'Name: text' shape -- the message body after ': ' is never exported.
-    assert scrub("Smith: owes 500") == "redacted"
-    # B2: key-shaped token with a separator -- redacted.
-    assert scrub("Sk_live_abcdef: bad key") == "redacted"
-    # Non-type bare text with a separator.
-    assert scrub("500: SELECT secret_amount FOR UPDATE") == "redacted"
-    # Empty.
-    assert scrub("") == "Exception"
+    for text in (
+        "Smith", "Janeroe", "Acme.Corp", "Mr.Smith", "ValueError",
+        "sqlalchemy.exc.OperationalError", "jane@example.com",
+        "Smith: owes 500", "SELECT secret_amount", "UPDATE ledger SET amount=999",
+        "Sk_live_abcdef: bad key", "",
+    ):
+        assert scrub(text) == "redacted", text
 
 
 # ===========================================================================

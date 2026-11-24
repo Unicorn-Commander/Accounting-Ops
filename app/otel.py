@@ -1,4 +1,3 @@
-import re
 import time
 from collections.abc import Callable
 
@@ -25,32 +24,19 @@ except ImportError:  # pragma: no cover - permits local import checks before dep
 
 from app.config import get_settings
 
-# A Python type name: a dotted path whose final segment starts with an
-# uppercase letter (e.g. `ValueError`, `sqlalchemy.exc.OperationalError`).
-# Anchored at both ends so it cannot match a substring of a message.
-_TYPE_NAME = re.compile(
-    r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)+[A-Z][A-Za-z0-9_]*$|^[A-Z][A-Za-z0-9_]*$"
-)
+REDACTED = "redacted"
 
 
 def _scrub_exception_text(value: object) -> str:
-    """Collapse an OTel status description / exception message to a safe form.
+    """Return the constant exported in place of any exception text.
 
-    A recorded exception's description and `exception.message` carry the raw
-    exception text (SQL with amounts and names, connector payloads). The
-    message body is NEVER derived from the value: it is replaced with the
-    constant 'redacted'. Only when the entire value is a bare Python type name
-    (no ': ' separator, matches _TYPE_NAME) is it kept, since that IS the type
-    and carries no payload.
+    A recorded exception's status description and `exception.message` carry
+    the raw exception text (SQL with amounts and names, connector payloads,
+    one-word surnames). The exported value is NEVER derived from the input:
+    no regex guess, no pass-through. The real class name travels separately
+    in the event's own `exception.type`.
     """
-    text = str(value).strip()
-    if not text:
-        return "Exception"
-    if ": " in text:
-        return "redacted"
-    if _TYPE_NAME.match(text):
-        return text
-    return "redacted"
+    return REDACTED
 
 
 def _scrub_span_exception_text(span) -> None:
@@ -59,8 +45,8 @@ def _scrub_span_exception_text(span) -> None:
     The SDK's `Span.record_exception` and FastAPI's exception middleware put
     the raw exception text in the span status description and in the
     `exception.message` event attribute (SQL with amounts and names, connector
-    payloads). The message is replaced with the constant 'redacted'; the type
-    is kept only when the value is a bare type name. `exception.type` is NOT
+    payloads). The message is replaced with the constant 'redacted'; the real
+    type stays in `exception.type`. `exception.type` is NOT
     scrubbed (N4): it carries the real class name, which is safe. The
     `exception.stacktrace` is dropped entirely because the frames repeat the
     raw message.
