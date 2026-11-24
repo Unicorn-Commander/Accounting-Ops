@@ -203,7 +203,14 @@ async def ebay_oauth_start(
     Role floor: admin (storing a credential is admin-only, parity with /credentials).
     """
     # Manually resolve membership/role since the path has no {workspace_id}.
-    from app.tenancy import _resolve_membership, apply_service_scope, role_at_least
+    from app.tenancy import (
+        _resolve_membership,
+        apply_service_scope,
+        pin_federation_workspace,
+        role_at_least,
+    )
+    # AO-TOK-2: a Brigade workspace-scoped JWT stays in its claimed workspace.
+    workspace_id = await pin_federation_workspace(auth, workspace_id)
     role, entity_scope, _hipaa, _slug = await _resolve_membership(
         auth.uc_uid, workspace_id, autoprovision=auth.may_autoprovision
     )
