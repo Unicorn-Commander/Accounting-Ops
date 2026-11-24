@@ -88,6 +88,20 @@ TOKEN_BYTES = 32  # 256 bits — exceeds the 32-byte minimum the brief mandates
 _EMAIL_RX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 
+async def _bind_invitation_workspace(session: Any, workspace_id: Any) -> None:
+    """Set the transaction-local workspace GUC for public.workspace_invitation.
+
+    AO-RLS-1 (public migration 0022): the table is ENABLE + FORCE RLS with
+    per-command policies on app.current_workspace, so every transaction that
+    reads or writes invitations binds its workspace first. The explicit
+    ``workspace_id = :wid`` filters stay as a second layer.
+    """
+    await session.execute(
+        text("SELECT set_config('app.current_workspace', :wid, true)"),
+        {"wid": str(workspace_id)},
+    )
+
+
 async def _write_membership_audit(
     session: Any,
     *,
@@ -461,6 +475,7 @@ async def create_invitation(
 
     async with SessionLocal() as session:
         async with session.begin():
+            await _bind_invitation_workspace(session, workspace.workspace_id)
             # No-email-enumeration: if an active pending invitation already
             # exists for (workspace, email), short-circuit with the SAME shape
             # we'd return on success — no token re-emitted, no leakage of
@@ -617,6 +632,7 @@ async def list_invitations(
 
     async with SessionLocal() as session:
         async with session.begin():
+            await _bind_invitation_workspace(session, workspace.workspace_id)
             rows = (
                 await session.execute(text(sql), {"wid": str(workspace.workspace_id)})
             ).mappings().all()
@@ -632,6 +648,7 @@ async def cancel_invitation(
     require_role(workspace, "admin")
     async with SessionLocal() as session:
         async with session.begin():
+            await _bind_invitation_workspace(session, workspace.workspace_id)
             res = await session.execute(
                 text(
                     """
@@ -673,6 +690,7 @@ async def resend_invitation(
 
     async with SessionLocal() as session:
         async with session.begin():
+            await _bind_invitation_workspace(session, workspace.workspace_id)
             row = (
                 await session.execute(
                     text(
@@ -773,6 +791,14 @@ async def accept_invitation(
 
     async with SessionLocal() as session:
         async with session.begin():
+            # AO-RLS-1: the caller has no workspace yet; the token is the key.
+            # The workspace_invitation_by_token policy (public 0022) lets this
+            # transaction see exactly the row whose hash matches, and nothing
+            # else. Transaction-local, so it never outlives this request.
+            await session.execute(
+                text("SELECT set_config('app.invitation_token_hash', :h, true)"),
+                {"h": h},
+            )
             inv = (
                 await session.execute(
                     text(
@@ -798,6 +824,9 @@ async def accept_invitation(
             if inv is None:
                 # Constant response on miss — no enumeration.
                 raise HTTPException(status_code=404, detail="invitation not found or expired")
+            # From here on the transaction acts inside the invitation's own
+            # workspace (the accepted_at UPDATE is under the workspace policy).
+            await _bind_invitation_workspace(session, inv.workspace_id)
             if inv.cancelled_at is not None or inv.accepted_at is not None:
                 raise HTTPException(status_code=410, detail="invitation already resolved")
             if inv.expires_at is not None and inv.expires_at < datetime.now(timezone.utc):
