@@ -141,6 +141,28 @@ def test_safe_fetcher_allows_data_uri():
     assert response.read() == b"hello"
 
 
+def test_safe_fetcher_scheme_check_is_exact_not_prefix():
+    """The scheme check is an exact data: parse, not a prefix match.
+
+    A prefix check (url.startswith("data")) would allow datafile:, DATABASE.,
+    and DATA:.  The fetcher must refuse each of those and only allow a URL
+    whose scheme is exactly data:.
+    """
+    fetcher = safe_url_fetcher()
+    for hostile in (
+        "datafile:///etc/passwd",
+        "DATA:text/plain,hi",
+        " data:text/plain,hi",
+        "database.css",
+        "data",
+    ):
+        with pytest.raises(Exception):
+            fetcher.fetch(hostile)
+    # A real data: URI is still allowed.
+    uri = data_uri_for_bytes(b"ok", "text/plain")
+    assert fetcher.fetch(uri).read() == b"ok"
+
+
 # ---------------------------------------------------------------------------
 # Render checks: the fetcher refuses each hostile URL, nothing leaks
 # ---------------------------------------------------------------------------
@@ -244,9 +266,21 @@ def test_pdf_refuses_css_import():
 
 @WEASYPRINT_SKIP
 def test_render_pdf_does_not_leak_the_file_into_the_pdf(tmp_path):
-    """The shared renderer produces a PDF without the referenced file's bytes."""
+    """The shared renderer produces a PDF without the referenced file's bytes.
+
+    A unique random marker is planted in a temp file.  The hostile document
+    references it as an image and as an attachment.  The marker must be absent
+    from the PDF bytes (raw, hex, and base64, because WeasyPrint compresses
+    attachment streams with Flate, so a raw byte scan of a compressed PDF
+    would pass even when the file leaked).  The pypdf attachment check below
+    makes the test meaningful: the PDF must carry no embedded file.
+    """
+    import base64
+    import secrets
+
     canary = tmp_path / "canary-safe"
-    canary.write_text("CANARY-SAFE-RENDER-5c44\n", encoding="utf-8")
+    marker = f"LEAK-{secrets.token_hex(8)}"
+    canary.write_text(marker + "\n", encoding="utf-8")
     html = _HOSTILE_DOC.format(file=canary.as_uri())
 
     original_urlopen = _no_network()
@@ -256,8 +290,19 @@ def test_render_pdf_does_not_leak_the_file_into_the_pdf(tmp_path):
         _restore_network(original_urlopen)
 
     assert pdf[:4] == b"%PDF"
-    assert b"CANARY-SAFE-RENDER-5c44" not in pdf, "file content leaked into the PDF"
+    raw = marker.encode()
+    assert raw not in pdf, "file content leaked into the PDF bytes (raw)"
+    assert raw.hex() not in pdf.hex(), "file content leaked into the PDF (hex)"
+    assert base64.b64encode(raw).decode() not in pdf.decode("latin-1"), (
+        "file content leaked into the PDF (base64)"
+    )
     assert b"127.0.0.1" not in pdf, "internal host leaked into the PDF"
+    # No attachment embedding the file.
+    reader = _pdf_reader(pdf)
+    if reader is not None:
+        assert list(reader.attachments) == [], (
+            f"PDF carries an attachment: {list(reader.attachments)!r}"
+        )
 
 
 @WEASYPRINT_SKIP
@@ -322,3 +367,23 @@ def test_specialist_pdf_uses_the_safe_renderer(monkeypatch):
     out = specialist_pdf._html_to_pdf("<html><body>DRAFT</body></html>")
     assert out == b"%PDF-1.4 fake"
     assert captured["html"] == "<html><body>DRAFT</body></html>"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _pdf_reader(pdf: bytes):
+    """A pypdf/PyPDF2 reader for the PDF, or None when neither is installed."""
+    import io
+
+    for mod in ("pypdf", "PyPDF2"):
+        try:
+            reader_cls = __import__(mod, fromlist=["PdfReader"]).PdfReader
+        except Exception:
+            continue
+        try:
+            return reader_cls(io.BytesIO(pdf))
+        except Exception:
+            continue
+    return None

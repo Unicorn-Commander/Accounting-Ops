@@ -22,9 +22,7 @@ import re
 from weasyprint import HTML
 from weasyprint.urls import URLFetcher
 
-_ALLOWED_SCHEMES = ("data",)
-
-_TAG_RE = re.compile(r"<[^>]*?>")
+_ALLOWED_SCHEME = "data:"
 
 
 class SafeUrlFetcher(URLFetcher):
@@ -35,10 +33,12 @@ class SafeUrlFetcher(URLFetcher):
     wraps in a ``URLFetchingError`` (treated as a missing resource) because
     ``fail_on_errors`` is False.  No ``file:`` or ``http(s):`` URL is ever
     handed to urllib, so nothing local or internal can be read into a PDF.
+    The scheme check is exact: the URL must start with ``data:`` (colon
+    included), so ``datafile:`` or a relative ``database.css`` is refused.
     """
 
     def fetch(self, url, headers=None):  # type: ignore[override]
-        if not url.startswith(_ALLOWED_SCHEMES):
+        if not isinstance(url, str) or not url.startswith(_ALLOWED_SCHEME):
             raise ValueError(f"blocked URL: {url}")
         return super().fetch(url, headers)
 
@@ -65,18 +65,22 @@ def data_uri_for_bytes(raw: bytes, content_type: str) -> str:
 
 
 def _escape_raw_html(md_text: str) -> str:
-    """Escape angle brackets inside what looks like an HTML tag.
+    """Escape raw HTML in the Markdown source, in two steps.
 
-    ``<script>``, ``<img src=x>`` and ``<a rel="attachment" href=...>`` become
-    visible text in the rendered document.  Markdown constructs that are not
-    tags (bold, lists, tables, fences) do not start with ``<``, so they pass
-    through untouched.
+    Step 1: escape every angle bracket and ampersand with ``html.escape`` so
+    no tag can survive and no entity can be forged by the body.
+
+    Step 2: un-escape ``&gt;`` only at the start of a blockquote line (a line
+    whose first non-space characters are ``&gt;``).  Python-Markdown's
+    blockquote syntax is the one Markdown construct that carries a ``>``
+    which must survive; every other ``>`` is either part of an escaped tag
+    (now harmless) or a comparison operator.  This restores ``> quoted`` to a
+    real blockquote without reopening any raw-HTML channel: a tag at a line
+    start (Python-Markdown's raw-HTML block form) has its ``<`` escaped in
+    step 1 and is never un-escaped by step 2.
     """
-
-    def _escape(match: re.Match[str]) -> str:
-        return _html.escape(match.group(0), quote=False)
-
-    return _TAG_RE.sub(_escape, md_text)
+    escaped = _html.escape(md_text, quote=False)
+    return re.sub(r"^(\s*)&gt;", r"\1>", escaped, flags=re.MULTILINE)
 
 
 def markdown_to_html(md_text: str) -> str:
@@ -84,8 +88,10 @@ def markdown_to_html(md_text: str) -> str:
 
     Raw HTML is escaped first (AO-PDF-2): the body is AI or tenant text, and
     passing a raw tag straight into WeasyPrint lets the draft reference
-    ``file:`` or ``http:`` URLs.  Headings, lists, tables, emphasis, quotes,
-    inline code and fenced code blocks all survive.
+    ``file:`` or ``http:`` URLs.  ``<script>``, ``<img src=x>`` and
+    ``<a rel="attachment" href=...>`` appear as visible text in the renderer
+    input.  Headings, lists, tables, emphasis, quotes, inline code and fenced
+    code blocks all survive.
     """
     try:
         import markdown

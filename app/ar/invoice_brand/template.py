@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import html
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -18,6 +19,8 @@ import tempfile
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 _LOGO = Path(__file__).with_name("mu-special-projects-logo.png")
 _LOGO_URI: str | None = None
@@ -33,6 +36,33 @@ def default_logo_data_uri() -> str:
         raw = _LOGO.read_bytes()
         _LOGO_URI = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
     return _LOGO_URI
+
+
+def _resolve_logo(logo_url: Any, invoice_number: str) -> str:
+    """Pick the logo for the invoice and say when a stored one is dropped.
+
+    The shared safe PDF renderer (AO-PDF-1) fetches only ``data:`` URIs, so a
+    ``file:`` or ``http(s):`` ``logo_url`` cannot be used as-is: it would be
+    refused and the invoice would silently render with no logo.  A ``data:``
+    logo is used as stored.  Any other value falls back to the default logo
+    and a warning is logged so the operator knows the stored logo was dropped
+    (the value is logged without a body, so a long base64 blob never reaches
+    the log).
+    """
+    if logo_url is None:
+        return default_logo_data_uri()
+    url = str(logo_url).strip()
+    if not url:
+        return default_logo_data_uri()
+    if url.startswith("data:"):
+        return url
+    _log.warning(
+        "invoice %s: logo_url is not a data: URI (starts with %r); "
+        "the safe PDF renderer drops it, falling back to the default logo",
+        invoice_number,
+        url[:40],
+    )
+    return default_logo_data_uri()
 
 
 def _esc(value: Any) -> str:
@@ -87,7 +117,7 @@ def render_invoice_html(view: dict[str, Any]) -> str:
     total = view.get("total") or view.get("balance_due") or "0"
     due_label = str(pres.get("due_label") or "on receipt")
     issued = str(view.get("issue_date") or "")
-    logo = view.get("logo_url") or default_logo_data_uri()
+    logo = _resolve_logo(view.get("logo_url"), number)
     customer = str(view.get("customer_name") or "Client")
     email = view.get("customer_email") or ""
     address = view.get("billing_address") or view.get("customer_billing_address") or ""
