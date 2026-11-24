@@ -31,9 +31,11 @@ Policy comes from ``ACCTOPS_AGENT_TOOL_POLICY``, a JSON object mapping an
 
 - No ``agent_id`` on the request (a human's token) -> NOT restricted here. The
   role floor remains the gate; this layer is about non-human callers.
-- ``agent_id`` present but absent from the policy -> NOT restricted. Enrolment
-  is opt-in per agent, so shipping this cannot break an agent nobody has
-  characterised yet.
+- ``agent_id`` present but absent from the policy -> READ-ONLY. It may call a
+  tool whose ``app.api.discovery`` metadata says ``read_only: True`` and
+  nothing else (a tool with no metadata is refused). An agent that must write
+  is enrolled explicitly, with its list or ``"*"``. This used to be fail-open
+  (an unknown agent reached all ~73 tools); AO-MCP-1 closed it.
 - ``agent_id`` present AND in the policy -> the tool must be in its list, or
   the call is refused before the tool body runs.
 
@@ -103,12 +105,39 @@ def is_tool_allowed(agent_id: str | None, tool_name: str) -> bool:
     allowed = _policy().get(agent_id)
     if allowed is None:
         _observe(agent_id, tool_name)
-        return True  # agent not enrolled
+        return _is_read_only_tool(tool_name)  # agent not enrolled: read-only
     return ALLOW_ALL in allowed or tool_name in allowed
 
 
+def is_tool_visible(agent_id: str | None, tool_name: str) -> bool:
+    """Whether ``tools/list`` shows ``tool_name`` to ``agent_id``.
+
+    Same rule as :func:`is_tool_allowed` (an unenrolled agent sees only
+    read-only tools, an enrolled one only its list) but without the
+    observation log, which records calls, not listings.
+    """
+    if not agent_id:
+        return True
+    allowed = _policy().get(agent_id)
+    if allowed is None:
+        return _is_read_only_tool(tool_name)
+    return ALLOW_ALL in allowed or tool_name in allowed
+
+
+def _is_read_only_tool(tool_name: str) -> bool:
+    """True only for a tool the discovery metadata marks read-only.
+
+    Imported lazily: app.api.discovery is the one registry of read_only flags
+    and pulls in FastAPI. A tool missing from it is treated as a write.
+    """
+    from app.api.discovery import _TOOL_METADATA
+
+    meta = _TOOL_METADATA.get(tool_name)
+    return bool(meta and meta.get("read_only") is True)
+
+
 def _observe(agent_id: str, tool_name: str) -> None:
-    """Record that an unenrolled agent used a tool, once per (agent, tool).
+    """Record that an unenrolled agent asked for a tool, once per (agent, tool).
 
     Enrolment needs the agent's REAL tool set, and there is no existing source
     for it: ``decision_audit`` only captures write tools that call

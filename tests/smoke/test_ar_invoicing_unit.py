@@ -310,11 +310,15 @@ class _StubSession:
             self.invoices.append(dict(p))
             return _StubResult([])
         if "INSERT INTO public.invoice_pay_token" in sql:
-            token = p["token"]
-            if token in self.public_tokens:
+            assert "token" not in p, "the raw pay token must never be bound to SQL"
+            token_hash = p["h"]
+            if token_hash in self.public_tokens:
                 return _StubResult([])
-            self.public_tokens.add(token)
-            return _StubResult([_Row(token=token)])
+            self.public_tokens.add(token_hash)
+            return _StubResult([_Row(token_hash=token_hash)])
+        if "UPDATE public.invoice_pay_token SET revoked_at" in sql:
+            self.updates.append("pay_token_revoke")
+            return _StubResult([])
         if "UPDATE invoice" in sql:
             self.updates.append("invoice")
             if self.invoices:
@@ -548,7 +552,7 @@ async def test_create_invoice_draft_does_not_post_until_issue():
 @pytest.mark.asyncio
 async def test_public_token_collision_retries(monkeypatch):
     s = _StubSession()
-    s.public_tokens.add("collision")
+    s.public_tokens.add(ar.hash_pay_token("collision"))
     candidates = iter(("collision", "fresh-token"))
     monkeypatch.setattr(ar.secrets, "token_urlsafe", lambda n: next(candidates))
 
@@ -564,7 +568,8 @@ async def test_public_token_collision_retries(monkeypatch):
         post_journal=False,
     )
     assert view["public_token"] == "fresh-token"
-    assert "fresh-token" in s.public_tokens
+    assert ar.hash_pay_token("fresh-token") in s.public_tokens
+    assert "fresh-token" not in s.public_tokens
 
 
 @pytest.mark.asyncio

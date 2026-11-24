@@ -203,10 +203,17 @@ async def resolve_chat_inference(
     # ---- 2) platform / UC-credit virtual key (only when routing ON) ------
     if settings.route_chat_through_gateway:
         platform_key = None
-        try:
-            from app.security.workspace_llm_keys import get_or_mint_virtual_key
+        from app.security.workspace_llm_keys import (
+            VirtualKeyUnavailableError,
+            get_or_mint_virtual_key,
+        )
 
+        try:
             platform_key = await get_or_mint_virtual_key(workspace_id, claims=claims)
+        except VirtualKeyUnavailableError:
+            # Fail closed: the workspace should meter under its own key, so
+            # neither the platform key nor OpenRouter may stand in for it.
+            raise
         except Exception as e:  # noqa: BLE001 — fail-safe
             _log.warning("virtual-key resolution failed (ws=%s): %s", workspace_id, e)
             platform_key = None

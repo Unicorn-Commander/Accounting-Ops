@@ -64,9 +64,20 @@ async def _seed_pat(
     scopes: list[str] | None = None,
     workspace_scope: list[uuid.UUID] | None = None,
     expires_at: datetime | None = None,
+    never_expires: bool = False,
     revoked: bool = False,
 ) -> uuid.UUID:
-    """Insert a PAT row computed from ``raw_secret``."""
+    """Insert a PAT row computed from ``raw_secret``.
+
+    A PAT with no expiry is refused at verification (AO-TOK-1), so a fixture
+    that does not name ``expires_at`` gets a live 30-day expiry, the same
+    shape the mint path issues. Only ``never_expires=True`` writes a NULL
+    expiry, for the one test that proves such a row is refused.
+    """
+    if never_expires:
+        expires_at = None
+    elif expires_at is None:
+        expires_at = datetime.now(timezone.utc) + timedelta(days=30)
     digest = hash_secret(raw_secret)
     prefix = secret_prefix(raw_secret)
     async with pool.acquire() as conn:
@@ -307,18 +318,16 @@ async def test_pat_cannot_mint_pat(
 
 
 # ---------------------------------------------------------------------------
-# Test 7 — BACKWARD COMPAT: a legacy NULL-expiry, full-scope PAT still works
+# Test 7, AO-TOK-1: a legacy NULL-expiry, full-scope PAT is refused
 #
-# The mint path no longer issues never-expiring tokens (app.security.pat
-# .resolve_ttl refuses ttl_days 0/null). Verification is deliberately
-# untouched, so the ones already in production must keep authenticating.
-# A NOT NULL constraint, an expires_at backfill, or treating NULL as expired
-# would all turn this test red — and would silently revoke live credentials.
+# The mint path stopped issuing never-expiring tokens (resolve_ttl refuses
+# ttl_days 0/null) and production held 0 live NULL-expiry rows on 2026-11-23,
+# so verification now hard-refuses a NULL expires_at.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_legacy_never_expiring_pat_still_authenticates(
+async def test_legacy_never_expiring_pat_is_refused(
     db: asyncpg.Pool, pat_user: uuid.UUID, seeded_workspace: StackConfig
 ) -> None:
     raw = generate_secret()
@@ -331,12 +340,11 @@ async def test_legacy_never_expiring_pat_still_authenticates(
         # role allowed, no workspace restriction, and NO expiry at all.
         scopes=["accounting:read", "accounting:write", "accounting:admin"],
         workspace_scope=None,
-        expires_at=None,
+        never_expires=True,
     )
 
     async with _asgi_client(raw) as c:
         r = await c.get("/api/me/workspaces")
-    assert r.status_code == 200, (
-        "a live NULL-expiry PAT must keep working — the mint-side fix must "
-        f"not revoke already-issued credentials: {r.status_code} {r.text}"
+    assert r.status_code == 401, (
+        f"a NULL-expiry PAT must not authenticate: {r.status_code} {r.text}"
     )

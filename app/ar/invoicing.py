@@ -44,6 +44,7 @@ the hook is the ``materiality_tier`` we already stamp on each row.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 from dataclasses import dataclass
@@ -92,6 +93,85 @@ _ENSURE_ACCOUNTS: dict[str, tuple[str, str, str]] = {
 _CENTS = Decimal("0.01")
 _PUBLIC_TOKEN_BYTES = 32
 _PUBLIC_TOKEN_ATTEMPTS = 8
+# A public /pay/{token} link lives this long. The raw token is never stored:
+# public.invoice_pay_token keeps only its SHA-256 (migration 0021).
+PAY_TOKEN_TTL_DAYS = 60
+
+
+def hash_pay_token(token: str) -> str:
+    """Hex SHA-256 of a public pay token, the only form that is stored."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+async def _mint_pay_token(session: AsyncSession, *, workspace_id: str, invoice_id: str) -> str:
+    """Insert a fresh pay-token row (hash only) and return the raw token once.
+
+    Runs inside the workspace session: RETURNING reads the row back through the
+    workspace-scoped SELECT policy, so no pay-token GUC is set here.
+    """
+    for _ in range(_PUBLIC_TOKEN_ATTEMPTS):
+        candidate = secrets.token_urlsafe(_PUBLIC_TOKEN_BYTES)
+        inserted = (
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO public.invoice_pay_token
+                        (token_hash, workspace_id, invoice_id, expires_at)
+                    VALUES (:h, :wid, :iid, now() + make_interval(days => :ttl))
+                    ON CONFLICT (token_hash) DO NOTHING
+                    RETURNING token_hash
+                    """
+                ),
+                {
+                    "h": hash_pay_token(candidate),
+                    "wid": workspace_id,
+                    "iid": invoice_id,
+                    "ttl": PAY_TOKEN_TTL_DAYS,
+                },
+            )
+        ).first()
+        if inserted is not None:
+            return candidate
+    raise InvoiceError("could not allocate a unique public invoice token")
+
+
+async def revoke_pay_tokens(session: AsyncSession, *, workspace_id: str, invoice_id: str) -> None:
+    """Revoke every live pay link of one invoice (on paid, void, or re-issue)."""
+    await session.execute(
+        text(
+            """
+            UPDATE public.invoice_pay_token SET revoked_at = now()
+            WHERE workspace_id = :wid AND invoice_id = :iid AND revoked_at IS NULL
+            """
+        ),
+        {"wid": workspace_id, "iid": invoice_id},
+    )
+
+
+async def regenerate_pay_link(
+    session: AsyncSession, *, workspace_id: str, invoice_id: str
+) -> dict[str, Any]:
+    """Owner action: revoke every live pay link of an invoice and mint one new one.
+
+    Only a hash is stored, so a read can never show the link again; this is the
+    explicit way to get a shareable link back. The returned view carries the raw
+    token once (in memory only). The previously sent link stops working.
+    """
+    locked = (
+        await session.execute(
+            text("SELECT status FROM invoice WHERE id = :id FOR UPDATE"),
+            {"id": invoice_id},
+        )
+    ).mappings().first()
+    if locked is None:
+        raise InvoiceError(f"invoice {invoice_id} not found")
+    if locked["status"] in ("paid", "void"):
+        raise InvoiceError(f"cannot create a pay link for a {locked['status']} invoice")
+    await revoke_pay_tokens(session, workspace_id=workspace_id, invoice_id=invoice_id)
+    token = await _mint_pay_token(session, workspace_id=workspace_id, invoice_id=invoice_id)
+    view = await _invoice_view(session, invoice_id=invoice_id)
+    view["public_token"] = token
+    return view
 
 
 class InvoiceError(Exception):
@@ -722,6 +802,9 @@ async def _invoice_view(
         )
     ).mappings().all()
     out = {k: _jsonable(v) for k, v in dict(inv).items()}
+    # invoice.public_token is no longer written (AO-TOK-2); a legacy value is
+    # never surfaced. The raw token exists only in a mint response.
+    out.pop("public_token", None)
     out["lines"] = [{k: _jsonable(v) for k, v in dict(r).items()} for r in lines]
     out["payments"] = [{k: _jsonable(v) for k, v in dict(r).items()} for r in payments]
     return out
@@ -944,60 +1027,18 @@ async def create_invoice_from_draft(
         encoded = json.dumps(presentation)
         if len(encoded) <= 8000:
             presentation_json = encoded
-    public_token = None
-    clear_failed = False
-    try:
-        for _ in range(_PUBLIC_TOKEN_ATTEMPTS):
-            candidate = secrets.token_urlsafe(_PUBLIC_TOKEN_BYTES)
-            # RETURNING reads the new row back, which needs the SELECT policy
-            # (token = app.pay_token). Scope that GUC, transaction-locally, to the
-            # one token we are inserting: the runtime role still cannot see any
-            # other row.
-            await session.execute(
-                text("SELECT set_config('app.pay_token', :tok, true)"),
-                {"tok": candidate},
-            )
-            inserted = (
-                await session.execute(
-                    text(
-                        """
-                        INSERT INTO public.invoice_pay_token (token, workspace_id, invoice_id)
-                        VALUES (:token, :wid, :iid)
-                        ON CONFLICT (token) DO NOTHING
-                        RETURNING token
-                        """
-                    ),
-                    {"token": candidate, "wid": workspace_id, "iid": str(invoice_id)},
-                )
-            ).first()
-            if inserted is None:
-                continue
-            public_token = candidate
-            break
-    finally:
-        # Clear on EVERY exit (success, exhaustion, error) so a caller that catches
-        # InvoiceError and keeps the transaction cannot see the last candidate's row.
-        try:
-            await session.execute(text("SELECT set_config('app.pay_token', '', true)"))
-        except Exception:  # noqa: BLE001
-            # Aborted transaction: the caller must roll back, which reverts the
-            # transaction-local GUC anyway. Never mask the original error.
-            clear_failed = True
-    if public_token is None:
-        raise InvoiceError("could not allocate a unique public invoice token")
-    if clear_failed:
-        raise InvoiceError("could not clear the pay-token context")
+    public_token = await _mint_pay_token(
+        session, workspace_id=workspace_id, invoice_id=str(invoice_id)
+    )
     await session.execute(
         text(
             """
-            UPDATE invoice SET public_token = :token,
-                               customer_ops_customer_id = :cust,
+            UPDATE invoice SET customer_ops_customer_id = :cust,
                                presentation = CAST(:presentation AS jsonb)
             WHERE id = :id
             """
         ),
         {
-            "token": public_token,
             "cust": (str(customer_ops_customer_id)[:128] if customer_ops_customer_id else None),
             "presentation": presentation_json,
             "id": str(invoice_id),
@@ -1006,7 +1047,9 @@ async def create_invoice_from_draft(
 
     # ---- Draft-only (quotes seam): NO journal posting, journal_entry_id NULL ----
     if not post_journal:
-        return await _invoice_view(session, invoice_id=str(invoice_id))
+        view = await _invoice_view(session, invoice_id=str(invoice_id))
+        view["public_token"] = public_token  # in memory only, never stored
+        return view
 
     # ---- Post the journal entry (DR AR / CR Revenue per account + tax row) ----
     # Group net-of-discount revenue by revenue account. We apply the (invoice-
@@ -1096,7 +1139,9 @@ async def create_invoice_from_draft(
         {"je": primary_je, "id": str(invoice_id)},
     )
 
-    return await _invoice_view(session, invoice_id=str(invoice_id))
+    view = await _invoice_view(session, invoice_id=str(invoice_id))
+    view["public_token"] = public_token  # in memory only, never stored
+    return view
 
 
 async def issue_invoice_draft(
@@ -1231,7 +1276,14 @@ async def issue_invoice_draft(
         ),
         {"je": primary_je, "id": invoice_id},
     )
-    return await _invoice_view(session, invoice_id=invoice_id)
+    # The draft's link was returned once at create and is not recoverable from
+    # its hash, so issuing mints the customer-facing link and revokes the
+    # draft's. A re-issue of a posted invoice returns early above and keeps it.
+    await revoke_pay_tokens(session, workspace_id=workspace_id, invoice_id=invoice_id)
+    token = await _mint_pay_token(session, workspace_id=workspace_id, invoice_id=invoice_id)
+    view = await _invoice_view(session, invoice_id=invoice_id)
+    view["public_token"] = token
+    return view
 
 
 def _net_of_discount(
@@ -1448,6 +1500,8 @@ async def record_payment(
         text("UPDATE invoice SET balance_due = :bal, status = :st WHERE id = :id"),
         {"bal": new_balance, "st": new_status, "id": invoice_id},
     )
+    if new_status in ("paid", "void"):
+        await revoke_pay_tokens(session, workspace_id=workspace_id, invoice_id=invoice_id)
 
     return await _invoice_view(session, invoice_id=invoice_id)
 
@@ -1574,4 +1628,5 @@ async def void_invoice(
             "id": invoice_id,
         },
     )
+    await revoke_pay_tokens(session, workspace_id=workspace_id, invoice_id=invoice_id)
     return await _invoice_view(session, invoice_id=invoice_id)

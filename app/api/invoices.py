@@ -39,16 +39,27 @@ from app.ar.invoice_brand.template import (
     render_invoice_html,
     render_invoice_pdf,
 )
-from app.connectors.stripe.checkout import create_checkout_session
+from app.connectors.stripe.checkout import (
+    PAY_LINK_UNAVAILABLE,
+    CheckoutUnavailableError,
+    checkout_return_url,
+    create_checkout_session,
+)
 # NOTE (Community Edition carve-out): app.ar.entitlement is the enterprise
 # cross-app entitlement gate (no-op for standalone). Deferred into the create
 # path behind an edition check so community boot never hard-imports it.
 from app.config import get_settings
-from app.ar.invoicing import InvoiceError, normalize_invoice_line_items
+from app.ar.invoicing import (
+    InvoiceError,
+    hash_pay_token,
+    normalize_invoice_line_items,
+    regenerate_pay_link,
+)
 from app.authz import assert_entity_in_scope
 from app.core.business_time import business_today
 from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
+from app.tools._audit import write_decision_audit
 from app.workspace_session import workspace_session
 
 router = APIRouter(tags=["invoices"])
@@ -367,6 +378,47 @@ async def get_invoice_detail(
     return _attach_pdf_url(view, workspace_id)
 
 
+@router.post("/api/workspaces/{workspace_id}/invoices/{invoice_id}/pay-link")
+async def regenerate_pay_link_route(
+    workspace_id: UUID,
+    invoice_id: UUID,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Regenerate the customer's /pay link. Role floor: admin (owner/admin).
+
+    Reads never show public_url (only a hash of the token is stored). This
+    revokes every earlier link of the invoice and returns a new public_url
+    once; the link that was sent before stops working. Minting a bearer link
+    to customer data is an owner/admin act, not an accountant one.
+    """
+    require_role(workspace, "admin")
+    await _load_invoice_scoped(workspace, invoice_id)
+    try:
+        async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+            view = await regenerate_pay_link(
+                session,
+                workspace_id=str(workspace.workspace_id),
+                invoice_id=str(invoice_id),
+            )
+            # Same transaction as the rotation: no audit row, no new link.
+            # Records who rotated which invoice's link, never the token.
+            await write_decision_audit(
+                session,
+                workspace_id=workspace.workspace_id,
+                entity_id=UUID(view["entity_id"]),
+                ctx=workspace,
+                tool_name="regenerate_pay_link",
+                request_payload={"invoice_id": str(invoice_id)},
+                response_payload={"earlier_links_revoked": True},
+                reasoning="owner/admin regenerated the customer pay link",
+                outcome="regenerated",
+                metadata={"actor_uc_uid": workspace.user_uc_uid},
+            )
+    except InvoiceError as exc:
+        raise _invoice_error(exc) from exc
+    return _attach_pdf_url(view, workspace_id)
+
+
 # ---------------------------------------------------------------------------
 # Void
 # ---------------------------------------------------------------------------
@@ -518,28 +570,38 @@ def _public_token_ok(token: str) -> bool:
 
 
 async def _invoice_for_token(token: str) -> dict[str, Any] | None:
+    """Resolve a public pay token to a live, unpaid invoice view, else None.
+
+    Unknown, expired, revoked, paid and void all return None, so /pay answers
+    each of them with the SAME 404 and a caller cannot tell a once-valid link
+    from a guess. No customer data is rendered for any of them.
+    """
     if not _public_token_ok(token):
         return None
+    token_hash = hash_pay_token(token)
     async with SessionLocal() as session:
         async with session.begin():
             await session.execute(text("SET LOCAL search_path = books, public"))
             await session.execute(
-                text("SELECT set_config('app.pay_token', :tok, true)"),
-                {"tok": token},
+                text("SELECT set_config('app.pay_token_hash', :h, true)"),
+                {"h": token_hash},
             )
             row = (
                 await session.execute(
                     text(
                         """
-                        SELECT workspace_id::text AS workspace_id, invoice_id::text AS invoice_id
+                        SELECT workspace_id::text AS workspace_id, invoice_id::text AS invoice_id,
+                               (revoked_at IS NULL AND expires_at > now()) AS live
                         FROM public.invoice_pay_token
-                        WHERE token = :tok
+                        WHERE token_hash = :h
                         """
                     ),
-                    {"tok": token},
+                    {"h": token_hash},
                 )
             ).mappings().first()
     if row is None:
+        return None
+    if not row["live"]:
         return None
     try:
         async with workspace_session(SessionLocal, row["workspace_id"]) as session:
@@ -550,7 +612,22 @@ async def _invoice_for_token(token: str) -> dict[str, Any] | None:
             )
     except InvoiceError:
         return None
+    if view.get("status") in ("paid", "void"):
+        return None
     return _attach_pdf_url(view, row["workspace_id"])
+
+
+_RETURN_HTML = (
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>Invoice payment</title>"
+    "</head><body><p>Thank you. If your payment went through you will receive a "
+    "receipt from the payment processor. You can close this page.</p></body></html>"
+)
+
+
+@router.get("/pay/complete/{invoice_id}", response_class=HTMLResponse)
+async def public_checkout_return(invoice_id: UUID) -> HTMLResponse:
+    """Static Stripe Checkout return page. Shows no invoice or customer data."""
+    return HTMLResponse(_RETURN_HTML, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/pay/{token}", response_class=HTMLResponse)
@@ -581,26 +658,37 @@ async def public_invoice_pdf(token: str) -> Response:
 
 
 async def _attach_pay_link(workspace_id: UUID, view: dict[str, Any]) -> dict[str, Any]:
-    """Fill hosted_pay_url once. Leaves it null when Checkout is not configured."""
-    if view.get("hosted_pay_url") or view.get("status") == "void":
+    """Fill hosted_pay_url once. Leaves it null when Checkout is not configured.
+
+    Runs on every issue, including a re-issue of an already posted invoice whose
+    link is still null after an earlier Stripe failure: that is the retry.
+    """
+    if view.get("hosted_pay_url") or view.get("status") in ("void", "paid"):
         return view
-    public_url = view.get("public_url")
-    if not public_url:
+    if not view.get("id"):
         return view
+    return_url = checkout_return_url(get_settings().public_base_url, str(view["id"]))
     try:
         amount = Decimal(str(view.get("balance_due") or view.get("total") or "0"))
     except Exception:
         return view
-    url = await create_checkout_session(
-        amount=amount,
-        currency=str(view.get("currency") or "USD"),
-        invoice_id=str(view.get("id")),
-        workspace_id=str(workspace_id),
-        invoice_number=str(view.get("invoice_number") or "invoice"),
-        success_url=public_url,
-        cancel_url=public_url,
-        customer_email=view.get("customer_email"),
-    )
+    try:
+        url = await create_checkout_session(
+            amount=amount,
+            currency=str(view.get("currency") or "USD"),
+            invoice_id=str(view.get("id")),
+            workspace_id=str(workspace_id),
+            invoice_number=str(view.get("invoice_number") or "invoice"),
+            success_url=return_url,
+            cancel_url=return_url,
+            customer_email=view.get("customer_email"),
+        )
+    except CheckoutUnavailableError:
+        # Already logged by the connector. The invoice stays posted with a null
+        # link; issuing again is idempotent and retries the session create.
+        view["pay_link_status"] = "unavailable"
+        view["pay_link_warning"] = PAY_LINK_UNAVAILABLE
+        return view
     if not url:
         return view
     async with workspace_session(SessionLocal, workspace_id) as session:

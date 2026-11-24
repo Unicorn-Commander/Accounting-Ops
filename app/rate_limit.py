@@ -98,6 +98,57 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 _log = logging.getLogger("acctops.rate_limit")
 
+try:  # opentelemetry-api is a base dependency; guard like app/otel.py does
+    from opentelemetry import metrics as _otel_metrics
+except ImportError:  # pragma: no cover
+    _otel_metrics = None
+
+# --------------------------------------------------------------------------
+# Limiter failure policy, metric and alert.
+#
+# A limiter error used to fail OPEN everywhere with one WARNING. Now:
+#   * ``expensive`` (LLM chat, PDF/report render, specialist runs) fails
+#     CLOSED with a 503 + Retry-After. That tier is the cost control; an
+#     unmetered retry loop there is the outage this module exists to stop.
+#   * every other tier still fails OPEN: an ordinary read, a write or a
+#     provider webhook must never become an outage because the limiter broke
+#     (a dropped webhook loses an event).
+# Every failure increments the ``acctops.rate_limit.check_failures`` counter
+# (attributes tier + outcome) and the in-process LIMITER_FAILURES tally, and
+# logs at ERROR with the stable marker ``rate_limit_check_failed`` (at most
+# once per _ALERT_INTERVAL_S, carrying the count) for the log-based alert.
+# --------------------------------------------------------------------------
+FAIL_CLOSED_TIERS: frozenset[str] = frozenset({"expensive"})
+_ALERT_INTERVAL_S = 60.0
+LIMITER_FAILURES: dict[tuple[str, str], int] = {}
+_alert_state = {"last": 0.0, "pending": 0}
+_failure_counter = (
+    _otel_metrics.get_meter("acctops.rate_limit").create_counter(
+        "acctops.rate_limit.check_failures",
+        description="Rate limiter check errors, by tier and fail-open/closed outcome",
+    )
+    if _otel_metrics is not None
+    else None
+)
+
+
+def _record_limiter_failure(tier: str, outcome: str, error: Exception) -> None:
+    LIMITER_FAILURES[(tier, outcome)] = LIMITER_FAILURES.get((tier, outcome), 0) + 1
+    if _failure_counter is not None:
+        try:
+            _failure_counter.add(1, {"tier": tier, "outcome": outcome})
+        except Exception:  # noqa: BLE001 - a metric must not break admission
+            pass
+    _alert_state["pending"] += 1
+    now = time.monotonic()
+    if _alert_state["last"] == 0.0 or now - _alert_state["last"] >= _ALERT_INTERVAL_S:
+        _log.error(
+            "rate_limit_check_failed tier=%s outcome=%s failures_since_last_alert=%d error=%s",
+            tier, outcome, _alert_state["pending"], type(error).__name__,
+        )
+        _alert_state["last"] = now
+        _alert_state["pending"] = 0
+
 # --------------------------------------------------------------------------
 # Paths that are NEVER limited.
 # --------------------------------------------------------------------------
@@ -501,9 +552,16 @@ class RateLimitMiddleware:
                 client_host=client[0] if client else None,
             )
         except Exception as e:  # noqa: BLE001
-            # Fail OPEN. A broken limiter must never become an outage — the
-            # thing it protects against is degraded service, not a breach.
-            _log.warning("rate_limit: check failed (%s); allowing request", e)
+            # Policy per tier: see FAIL_CLOSED_TIERS above.
+            try:
+                tier = classify_tier(scope.get("path", ""), scope.get("method", "GET"))
+            except Exception:  # noqa: BLE001
+                tier = "unknown"
+            if tier in FAIL_CLOSED_TIERS:
+                _record_limiter_failure(tier, "fail_closed", e)
+                await self._unavailable(send)
+                return
+            _record_limiter_failure(tier, "fail_open", e)
             decision = None
 
         if decision is not None and not decision.allowed:
@@ -527,6 +585,19 @@ class RateLimitMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_wrapper)
+
+    async def _unavailable(self, send: Send) -> None:
+        body = b'{"detail":"Rate limiter unavailable for this operation. Retry shortly."}'
+        await send({
+            "type": "http.response.start",
+            "status": 503,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                (b"retry-after", b"5"),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
 
     async def _reject(self, scope: Scope, send: Send, decision: Decision) -> None:
         import json

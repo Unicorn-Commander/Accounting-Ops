@@ -44,10 +44,12 @@ def _set_policy(monkeypatch, policy: dict | str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_no_policy_configured_restricts_nobody(monkeypatch):
+def test_no_policy_configured_leaves_agents_read_only(monkeypatch):
+    # AO-MCP-1: an unknown agent used to reach every tool. It is read-only now.
     monkeypatch.delenv(ENV_VAR, raising=False)
     reset_policy_cache()
-    assert is_tool_allowed("receipt-reconciler", "post_journal_entry") is True
+    assert is_tool_allowed("receipt-reconciler", "post_journal_entry") is False
+    assert is_tool_allowed("receipt-reconciler", "list_transactions") is True
     assert is_tool_allowed(None, "post_journal_entry") is True
 
 
@@ -58,11 +60,15 @@ def test_human_callers_are_never_restricted(monkeypatch):
     assert is_tool_allowed("", "post_journal_entry") is True
 
 
-def test_unenrolled_agent_is_not_restricted(monkeypatch):
-    # Enrolment is opt-in, so shipping the feature cannot break an agent that
-    # nobody has characterised yet.
+def test_unenrolled_agent_defaults_to_read_only(monkeypatch):
     _set_policy(monkeypatch, {"receipt-reconciler": ["list_transactions"]})
-    assert is_tool_allowed("listing-ops-ao-sync", "post_journal_entry") is True
+    assert is_tool_allowed("listing-ops-ao-sync", "post_journal_entry") is False
+    assert is_tool_allowed("listing-ops-ao-sync", "decide_approval") is False
+    assert is_tool_allowed("listing-ops-ao-sync", "get_transaction") is True
+    # A tool with no discovery metadata is treated as a write.
+    assert is_tool_allowed("listing-ops-ao-sync", "no_such_tool") is False
+    with pytest.raises(PermissionError):
+        enforce_tool_policy("listing-ops-ao-sync", "post_journal_entry")
 
 
 def test_unenrolled_agent_usage_is_logged_for_enrolment(monkeypatch, caplog):
@@ -237,3 +243,51 @@ def test_wrapped_tools_keep_their_docstrings():
     tools = asyncio.run(server.list_tools())
     undocumented = [t.name for t in tools if not (t.description or "").strip()]
     assert not undocumented, f"tools lost their descriptions: {undocumented[:10]}"
+
+
+def _protocol_tool_list(server) -> set[str]:
+    """tools/list as an MCP client sees it (the registered protocol handler)."""
+    import asyncio
+
+    from mcp import types
+
+    handler = server._mcp_server.request_handlers[types.ListToolsRequest]
+    result = asyncio.run(handler(types.ListToolsRequest(method="tools/list")))
+    return {t.name for t in result.root.tools}
+
+
+def test_tools_list_hides_write_tools_from_unenrolled_agents(monkeypatch):
+    """AO110-R2-P3-1: an unenrolled agent sees only read-only tools, an enrolled
+    agent only its list, a human everything; calls stay refused regardless."""
+    pytest.importorskip("mcp.server.fastmcp")
+    import mcp_server
+    from app.api.discovery import _TOOL_METADATA
+
+    _set_policy(monkeypatch, {"receipt-reconciler": ["list_transactions"]})
+    who: dict = {"agent_id": None}
+
+    class _Auth:
+        @property
+        def agent_id(self):
+            return who["agent_id"]
+
+    monkeypatch.setattr(mcp_server, "current_auth", lambda: _Auth())
+    server = mcp_server.build_server()
+
+    full = _protocol_tool_list(server)
+    assert "post_journal_entry" in full and len(full) > 50
+
+    who["agent_id"] = "listing-ops-ao-sync"  # not enrolled
+    unenrolled = _protocol_tool_list(server)
+    assert "post_journal_entry" not in unenrolled
+    assert "decide_approval" not in unenrolled
+    assert "get_transaction" in unenrolled
+    assert unenrolled and all(_TOOL_METADATA[n].get("read_only") is True for n in unenrolled)
+
+    who["agent_id"] = "receipt-reconciler"
+    assert _protocol_tool_list(server) == {"list_transactions"}
+
+    # The direct FastMCP view (discovery manifest) stays the full surface.
+    import asyncio
+
+    assert {t.name for t in asyncio.run(server.list_tools())} == full
