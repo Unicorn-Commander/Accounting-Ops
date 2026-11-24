@@ -984,9 +984,10 @@ async def accept_invitation(
                        SET accepted_at = now(),
                            accepted_by_user_id = :uid
                      WHERE id = :id
+                       AND workspace_id = :wid
                     """
                 ),
-                {"id": inv.id, "uid": str(user_id)},
+                {"id": inv.id, "wid": str(inv.workspace_id), "uid": str(user_id)},
             )
             accept_workspace = WorkspaceContext(
                 workspace_id=inv.workspace_id,

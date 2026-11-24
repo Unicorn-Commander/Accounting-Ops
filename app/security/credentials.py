@@ -138,13 +138,14 @@ async def store_credential(
                 """
                 UPDATE public.tenant_credentials
                 SET ciphertext = :ciphertext, nonce = :nonce, encrypted_at = now()
-                WHERE id = :id
+                WHERE id = :id AND workspace_id = :workspace_id
                 """
             ),
             {
                 "ciphertext": ciphertext2,
                 "nonce": nonce2,
                 "id": str(final_cred_id),
+                "workspace_id": str(workspace_id),
             },
         )
 
