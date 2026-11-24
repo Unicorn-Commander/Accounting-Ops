@@ -283,18 +283,15 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 # ---------------------------------------------------------------------------
 
 def _render_markdown_to_html(md_text: str) -> str:
-    """Convert Markdown → HTML fragment (tables, fences, etc.)."""
-    try:
-        import markdown
+    """Convert Markdown → HTML fragment (tables, fences, etc.).
 
-        return markdown.markdown(
-            md_text,
-            extensions=["tables", "fenced_code", "codehilite", "toc"],
-        )
-    except ImportError:
-        # Fallback: wrap in <pre> — still usable, just unstyled.
-        escaped = md_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        return f"<pre>{escaped}</pre>"
+    Raw HTML in the body is escaped first (AO-PDF-2): the body is AI or
+    tenant text, and a raw tag would reach the renderer as markup.  See
+    ``app.pdf.safe_render.markdown_to_html``.
+    """
+    from app.pdf.safe_render import markdown_to_html
+
+    return markdown_to_html(md_text)
 
 
 def _build_html(
@@ -320,7 +317,11 @@ def _esc(s: str) -> str:
 
 
 def _html_to_pdf(html: str) -> bytes:
-    """Render HTML → PDF bytes via WeasyPrint.
+    """Render HTML → PDF bytes via the shared safe renderer (AO-PDF-1).
+
+    The renderer's URL fetcher allows only ``data:`` URIs; ``file:`` and
+    ``http(s):`` URLs in the document are refused, so tenant or AI text
+    cannot pull local files or internal URLs into the PDF.
 
     Raises HTTP 500 if WeasyPrint is not installed (pip) or if the required
     system libraries (Pango/GObject) are absent — the latter can happen on a
@@ -328,9 +329,9 @@ def _html_to_pdf(html: str) -> bytes:
     caught so the error message is actionable.
     """
     try:
-        from weasyprint import HTML  # type: ignore[import-untyped]
+        from app.pdf.safe_render import render_pdf
 
-        return HTML(string=html).write_pdf()
+        return render_pdf(html)
     except (ImportError, OSError) as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

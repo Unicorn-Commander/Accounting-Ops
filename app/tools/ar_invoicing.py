@@ -424,7 +424,12 @@ async def issue_invoice_draft(
     Role floor: accountant.
     """
     from app.ar.invoicing import issue_invoice_draft as _issue
-    from app.connectors.stripe.checkout import create_checkout_session
+    from app.connectors.stripe.checkout import (
+        PAY_LINK_UNAVAILABLE,
+        CheckoutUnavailableError,
+        checkout_return_url,
+        create_checkout_session,
+    )
 
     ctx = await authorize_workspace(workspace_id, None, min_role="accountant")
     wid = ctx.workspace_id
@@ -461,19 +466,32 @@ async def issue_invoice_draft(
     except InvoiceError as exc:
         raise ValueError(str(exc)) from exc
     shaped = _shape_invoice_result(view, wid)
-    if not shaped.get("hosted_pay_url") and shaped.get("public_url") and shaped.get("status") != "void":
+    # Runs on a re-issue of a posted invoice too, so a null link left by an
+    # earlier Stripe failure is retried (same Idempotency-Key per invoice).
+    if (
+        not shaped.get("hosted_pay_url")
+        and shaped.get("id")
+        and shaped.get("status") not in ("void", "paid")
+    ):
         from decimal import Decimal
 
-        url = await create_checkout_session(
-            amount=Decimal(str(shaped.get("balance_due") or shaped.get("total") or "0")),
-            currency=str(shaped.get("currency") or "USD"),
-            invoice_id=str(shaped.get("id")),
-            workspace_id=str(wid),
-            invoice_number=str(shaped.get("invoice_number") or "invoice"),
-            success_url=str(shaped["public_url"]),
-            cancel_url=str(shaped["public_url"]),
-            customer_email=shaped.get("customer_email"),
-        )
+        return_url = checkout_return_url(_get_settings().public_base_url, str(shaped["id"]))
+
+        try:
+            url = await create_checkout_session(
+                amount=Decimal(str(shaped.get("balance_due") or shaped.get("total") or "0")),
+                currency=str(shaped.get("currency") or "USD"),
+                invoice_id=str(shaped.get("id")),
+                workspace_id=str(wid),
+                invoice_number=str(shaped.get("invoice_number") or "invoice"),
+                success_url=return_url,
+                cancel_url=return_url,
+                customer_email=shaped.get("customer_email"),
+            )
+        except CheckoutUnavailableError:
+            url = None
+            shaped["pay_link_status"] = "unavailable"
+            shaped["pay_link_warning"] = PAY_LINK_UNAVAILABLE
         if url:
             async with workspace_session(SessionLocal, wid) as session:
                 await session.execute(

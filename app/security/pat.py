@@ -86,12 +86,12 @@ class PATRow:
 
     @property
     def is_expired(self) -> bool:
-        # NULL expires_at = a legacy never-expiring PAT. The mint path no
-        # longer issues these (see resolve_ttl), but VERIFICATION must keep
-        # honouring the ones already in the wild — flipping NULL to "expired"
-        # here would silently revoke live production credentials.
+        # NULL expires_at = a legacy never-expiring PAT. AO-TOK-1: these are
+        # hard-refused (treated as expired). The mint path stopped issuing
+        # them (resolve_ttl) and production held 0 live NULL-expiry rows on
+        # 2026-11-23, so nothing live is revoked by refusing them.
         if self.expires_at is None:
-            return False
+            return True
         return self.expires_at <= datetime.now(timezone.utc)
 
     @property
@@ -195,9 +195,8 @@ def resolve_ttl(ttl_days: int | None) -> datetime:
     "never" sentinel) raises ``MintRequestError`` — non-expiring credentials
     are no longer issued. Negative → error. Capped at MAX_TTL_DAYS.
 
-    NOTE: this is MINT-side only. Already-issued PATs with a NULL expires_at
-    keep verifying exactly as before (see ``PATRow.is_expired`` and the
-    ``expires_at IS NULL OR expires_at > now()`` predicates below).
+    Verification refuses a NULL expires_at too (``PATRow.is_expired``), so a
+    legacy never-expiring row cannot authenticate either.
     """
     if ttl_days is None or ttl_days == 0:
         raise MintRequestError(
@@ -251,7 +250,7 @@ async def count_active_pats(session: AsyncSession, owner_user_id: UUID) -> int:
                 FROM public.personal_access_token
                 WHERE owner_user_id = :uid
                   AND revoked_at IS NULL
-                  AND (expires_at IS NULL OR expires_at > now())
+                  AND expires_at IS NOT NULL AND expires_at > now()
                 """
             ),
             {"uid": str(owner_user_id)},

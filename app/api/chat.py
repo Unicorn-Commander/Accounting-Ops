@@ -704,6 +704,7 @@ async def send_chat_message(
     # so a resolver bug can never block chat.
     from agents.chat.inference_config import resolve_chat_inference
     from agents.chat.persona_registry import GATEWAY_MODEL_SONNET
+    from app.security.workspace_llm_keys import VirtualKeyUnavailableError
 
     _resolved = None
     try:
@@ -717,6 +718,13 @@ async def send_chat_message(
             persona=persona,
             requested_model=body.model,
         )
+    except VirtualKeyUnavailableError:
+        # The workspace's own gateway key could not be minted. Falling back to
+        # the runner default would bill the platform for the customer's spend.
+        raise HTTPException(
+            status_code=503,
+            detail="Workspace AI key unavailable, retry shortly",
+        ) from None
     except Exception:  # noqa: BLE001 — never block chat on routing
         _log.warning("inference resolver failed; using OpenRouter default", exc_info=True)
 

@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from app.agent_tool_policy import enforce_tool_policy
+from app.agent_tool_policy import enforce_tool_policy, is_tool_visible
 from app.config import get_settings
 from app.mcp_auth import current_auth
 from app.tools import (
@@ -129,6 +129,26 @@ def _install_agent_tool_policy(server) -> None:
     server.tool = tool_with_policy
 
 
+def _install_agent_tool_list_filter(server) -> None:
+    """Filter ``tools/list`` by the same per-agent policy the calls enforce.
+
+    An unenrolled agent must not even SEE a write tool it cannot call, and an
+    enrolled one sees only its list. FastMCP registered its own list handler at
+    construction; this re-registers the protocol handler with a filtered view.
+    ``server.list_tools()`` itself stays unfiltered (the discovery manifest and
+    the schema tests read the full surface from it). The call-time refusal in
+    ``_install_agent_tool_policy`` remains the enforcing gate.
+    """
+    full_list = server.list_tools
+
+    async def list_tools_for_caller():
+        auth = current_auth()
+        agent_id = getattr(auth, "agent_id", None)
+        return [t for t in await full_list() if is_tool_visible(agent_id, t.name)]
+
+    server._mcp_server.list_tools()(list_tools_for_caller)
+
+
 def build_server():
     try:
         from mcp.server.fastmcp import FastMCP
@@ -171,6 +191,7 @@ def build_server():
     # ones declared with the ``@server.tool()`` decorator form further down.
     # See app/agent_tool_policy.py for what the policy does and why.
     _install_agent_tool_policy(server)
+    _install_agent_tool_list_filter(server)
 
     # =====================================================================
     # Discovery (workspace + entity enumeration the caller can reach)

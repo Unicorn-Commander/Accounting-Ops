@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import secrets
@@ -78,6 +79,28 @@ CI_RUN_ID_ENV_VARS = ("GITHUB_RUN_ID", "FORGEJO_RUN_ID")
 POSTGRES_PASSWORD = "accounting_ops_test_pw"
 SERVICE_TOKEN = "itest-" + "0" * 40  # >= 32 chars, deterministic for the test run
 SERVICE_UC_UID = "test-service"
+SERVICE_AGENT_ID = "integration-test"
+# AO-MCP-1: an agent_id absent from ACCTOPS_AGENT_TOOL_POLICY may call only
+# read-only MCP tools. The integration service token is an agent, so it is
+# enrolled here with exactly the tools tests/integration drives over /mcp
+# (grep `_call_tool(` and `call_tool(` there), the same explicit enrolment a
+# real write agent needs. Add a tool here when a new integration test calls it.
+SERVICE_AGENT_TOOLS = (
+    "add_specialty_rule",
+    "categorize_transaction",
+    "draft_memo",
+    "flag_for_cpa_review",
+    "get_1099_payees",
+    "get_consolidated_p_and_l",
+    "get_form_1120_data",
+    "get_p_and_l",
+    "get_period_journal",
+    "get_runway",
+    "link_receipt_to_transaction",
+    "list_transactions",
+    "query_specialty_rules",
+    "update_coa_account",
+)
 
 # The least-privilege runtime role + a LOCAL (throwaway-stack-only) password.
 # This is NOT a production secret — it exists only for the ephemeral CI/dev
@@ -194,9 +217,12 @@ def _write_secrets_and_env(
     # (workspace B has no membership row) — preserving the "no active membership"
     # / "permission" error the isolation tests assert.
     service_tokens = (
-        '{"%s": {"uc_uid": "%s", "agent_id": "integration-test", '
+        '{"%s": {"uc_uid": "%s", "agent_id": "%s", '
         '"role_floor": "owner"}}'
-        % (SERVICE_TOKEN, SERVICE_UC_UID)
+        % (SERVICE_TOKEN, SERVICE_UC_UID, SERVICE_AGENT_ID)
+    )
+    agent_tool_policy = json.dumps(
+        {SERVICE_AGENT_ID: list(SERVICE_AGENT_TOOLS)}, separators=(",", ":")
     )
     lines = [
         f"AO_ITEST_PROJECT={project}",
@@ -217,6 +243,9 @@ def _write_secrets_and_env(
         "GARAGE_S3_ENDPOINT=http://garage:3900",
         # Service-token auth for the test caller (see app/auth.py).
         f"ACCTOPS_SERVICE_TOKENS={service_tokens}",
+        # Enrol the test agent's MCP tools (AO-MCP-1); docker-compose.itest.yml
+        # passes this through to the app.
+        f"ACCTOPS_AGENT_TOOL_POLICY={agent_tool_policy}",
         # cpa-export reads a single shared token.
         f"CPA_EXPORT_SERVICE_TOKEN={SERVICE_TOKEN}",
         "OTEL_EXPORTER_OTLP_ENDPOINT=",

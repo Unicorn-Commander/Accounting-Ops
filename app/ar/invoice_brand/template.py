@@ -11,13 +11,13 @@ from __future__ import annotations
 import base64
 import html
 import json
+import logging
 import os
-import shutil
-import subprocess
-import tempfile
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 _LOGO = Path(__file__).with_name("mu-special-projects-logo.png")
 _LOGO_URI: str | None = None
@@ -33,6 +33,33 @@ def default_logo_data_uri() -> str:
         raw = _LOGO.read_bytes()
         _LOGO_URI = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
     return _LOGO_URI
+
+
+def _resolve_logo(logo_url: Any, invoice_number: str) -> str:
+    """Pick the logo for the invoice and say when a stored one is dropped.
+
+    The shared safe PDF renderer (AO-PDF-1) fetches only ``data:`` URIs, so a
+    ``file:`` or ``http(s):`` ``logo_url`` cannot be used as-is: it would be
+    refused and the invoice would silently render with no logo.  A ``data:``
+    logo is used as stored.  Any other value falls back to the default logo
+    and a warning is logged so the operator knows the stored logo was dropped
+    (the value is logged without a body, so a long base64 blob never reaches
+    the log).
+    """
+    if logo_url is None:
+        return default_logo_data_uri()
+    url = str(logo_url).strip()
+    if not url:
+        return default_logo_data_uri()
+    if url.startswith("data:"):
+        return url
+    _log.warning(
+        "invoice %s: logo_url is not a data: URI (starts with %r); "
+        "the safe PDF renderer drops it, falling back to the default logo",
+        invoice_number,
+        url[:40],
+    )
+    return default_logo_data_uri()
 
 
 def _esc(value: Any) -> str:
@@ -87,7 +114,7 @@ def render_invoice_html(view: dict[str, Any]) -> str:
     total = view.get("total") or view.get("balance_due") or "0"
     due_label = str(pres.get("due_label") or "on receipt")
     issued = str(view.get("issue_date") or "")
-    logo = view.get("logo_url") or default_logo_data_uri()
+    logo = _resolve_logo(view.get("logo_url"), number)
     customer = str(view.get("customer_name") or "Client")
     email = view.get("customer_email") or ""
     address = view.get("billing_address") or view.get("customer_billing_address") or ""
@@ -290,40 +317,37 @@ def _qty(value: Any) -> str:
     return f"{n.normalize()}"
 
 
+class PdfRenderUnavailableError(RuntimeError):
+    """WeasyPrint cannot import or render: PDF rendering is unavailable.
+
+    AO107-R3-1: the invoice PDF has exactly one renderer, the shared safe
+    renderer (AO-PDF-1).  A second renderer (a headless browser fallback)
+    could fetch ``file:`` resources the safe fetcher refuses, so it is not
+    a fallback at all: the caller answers 503 "PDF rendering unavailable".
+    """
+
+
 def render_invoice_pdf(document_html: str) -> bytes:
-    """Print the HTML to one PDF. WeasyPrint when it imports, otherwise headless Chrome.
-    Raises when neither can render. The old reportlab invoice is not a fallback.
+    """Print the HTML to one PDF via the shared safe renderer (AO-PDF-1).
+
+    The safe renderer's URL fetcher allows only ``data:`` URIs, so a
+    customer name, line description or logo field carrying a
+    ``file:``/``http(s):`` URL cannot pull local files or internal URLs
+    into the invoice PDF.
+
+    Fail closed (AO107-R3-1): when WeasyPrint cannot be imported (or its
+    Pango/Cairo system libraries are missing), raise
+    ``PdfRenderUnavailableError``; the caller answers 503.  There is no
+    second renderer: a browser fallback would fetch ``file:`` resources
+    the safe fetcher refuses.
     """
     try:
-        from weasyprint import HTML  # type: ignore
+        from app.pdf.safe_render import render_pdf
 
-        return HTML(string=document_html).write_pdf()
-    except Exception:
-        pass
-
-    chrome = (
-        shutil.which("google-chrome")
-        or shutil.which("chromium")
-        or shutil.which("chromium-browser")
-        or "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    )
-    if not chrome or not os.path.exists(chrome):
-        raise RuntimeError("No HTML-to-PDF renderer is available (WeasyPrint or Chrome).")
-    with tempfile.TemporaryDirectory() as tmp:
-        html_path = Path(tmp) / "invoice.html"
-        pdf_path = Path(tmp) / "invoice.pdf"
-        html_path.write_text(document_html, encoding="utf-8")
-        subprocess.run(
-            [
-                chrome,
-                "--headless=new",
-                "--disable-gpu",
-                "--no-pdf-header-footer",
-                f"--print-to-pdf={pdf_path}",
-                html_path.as_uri(),
-            ],
-            check=True,
-            capture_output=True,
-            timeout=30,
-        )
-        return pdf_path.read_bytes()
+        return render_pdf(document_html)
+    except (ImportError, OSError) as exc:
+        raise PdfRenderUnavailableError(
+            "PDF rendering unavailable: WeasyPrint could not be imported "
+            f"or its system libraries (Pango, Cairo, GDK-Pixbuf) are missing. "
+            f"Underlying error: {exc}"
+        ) from exc

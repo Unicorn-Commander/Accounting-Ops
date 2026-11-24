@@ -6,7 +6,8 @@ given (jurisdiction, topic, tax_year) tuple.  The tool queries the
 ``query`` is provided, performs a pgvector cosine-similarity search over the stored
 embeddings to surface the most relevant document(s).
 
-Read-only tool — no authentication required beyond an active session.  The table
+Read-only tool. The rule text is public data, but like its tax_knowledge
+siblings it still requires a bound MCP caller (``_require_caller``).  The table
 grants SELECT to the ``accounting_ops_app`` runtime role (migration 0005).
 
 Typical specialist usage:
@@ -29,6 +30,7 @@ from typing import Any
 from sqlalchemy import text
 
 from app.db import SessionLocal
+from app.tools.tax_knowledge import _require_caller
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,7 @@ async def get_current_rule(
           "gap_note": str | None,  # advice for the specialist when knowledge_gap=True
         }
     """
+    _require_caller()
     limit = max(1, min(limit, 10))
 
     async with SessionLocal() as session:

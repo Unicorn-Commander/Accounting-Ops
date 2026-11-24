@@ -108,8 +108,10 @@ class Harness:
         await self.sql(
             """
             INSERT INTO public.personal_access_token
-                (id, owner_user_id, name, secret_hash, secret_prefix, scopes, workspace_scope)
-            VALUES (:id, :u, 'Fictional test', :hash, :prefix, ARRAY['accounting:read'], :scope)
+                (id, owner_user_id, name, secret_hash, secret_prefix, scopes, workspace_scope,
+                 expires_at)
+            VALUES (:id, :u, 'Fictional test', :hash, :prefix, ARRAY['accounting:read'], :scope,
+                    now() + interval '30 days')
         """,
             id=pid,
             u=uid,
