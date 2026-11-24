@@ -181,3 +181,27 @@ async def test_recent_activity_brigade_jwt_reads_only_its_claim(opened):
 async def test_recent_activity_human_unchanged(opened):
     body = await clients.cpa_recent_activity(days=30, auth=_auth(None))
     assert {i["workspace_id"] for i in body["items"]} == {WS_A, WS_B}
+
+
+# ---------------------------------------------------------------------------
+# AO114-R2-4: GET /api/me/clients/triage
+# ---------------------------------------------------------------------------
+
+
+async def test_triage_scoped_token_lists_only_a(opened):
+    body = await clients.list_my_clients_triage(auth=_scoped_a(role_floor="viewer"))
+    assert [w["id"] for w in body["workspaces"]] == [WS_A]
+    assert body["workspaces"][0]["role"] == "viewer"
+    assert opened == [WS_A]
+    assert body["persona"] == "cpa"
+
+
+async def test_triage_brigade_jwt_lists_only_its_claim(opened):
+    body = await clients.list_my_clients_triage(auth=_brigade_a())
+    assert [w["id"] for w in body["workspaces"]] == [WS_A]
+
+
+async def test_triage_human_unchanged(opened):
+    body = await clients.list_my_clients_triage(auth=_auth(None))
+    assert sorted(w["id"] for w in body["workspaces"]) == sorted([WS_A, WS_B])
+    assert body["persona"] == "platform_admin"

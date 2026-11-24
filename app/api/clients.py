@@ -413,6 +413,8 @@ async def list_my_clients_triage(
     import datetime as dt
     now = dt.datetime.now(dt.timezone.utc)
 
+    # AO114-R2-4: a scoped token triages only the workspaces it is scoped to.
+    rows, clients_onboarded = await _scoped_client_rows(auth, rows, clients_onboarded)
     workspaces: list[dict[str, Any]] = []
 
     for row in rows:
