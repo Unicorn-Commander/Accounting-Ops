@@ -72,6 +72,7 @@ from app.oauth_discovery import (
 )
 from app.rate_limit import RateLimitMiddleware
 from app.security.provisioning_token import provisioning_available
+from app.security_headers import SecurityHeadersMiddleware
 
 settings = get_settings()
 
@@ -84,9 +85,7 @@ from mcp_server import build_server  # noqa: E402  (after settings, before app)
 
 _mcp_server = build_server()
 _mcp_http_app = (
-    _mcp_server.streamable_http_app()
-    if hasattr(_mcp_server, "streamable_http_app")
-    else None
+    _mcp_server.streamable_http_app() if hasattr(_mcp_server, "streamable_http_app") else None
 )
 
 
@@ -115,7 +114,8 @@ async def lifespan(_app: FastAPI):
             logging.getLogger("acctops.main").exception(
                 "brigade federation client init failed (federation calls will "
                 "degrade until the container is restarted): %s: %s",
-                type(exc).__name__, exc,
+                type(exc).__name__,
+                exc,
             )
 
     try:
@@ -140,6 +140,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.middleware("http")(audit_span_middleware)
+# Security response headers (nosniff + CSP + frame-ancestors) on every
+# response. This API serves no HTML pages (the web app is a separate front
+# end), so a restrictive default-src 'self' CSP is safe here and stops a
+# browser MIME-sniffing an inline text/markdown or application/xml download
+# into executable content.
+app.add_middleware(SecurityHeadersMiddleware)
 # Per-tenant / per-principal rate limiting. Added AFTER audit_span_middleware so
 # Starlette places it OUTERMOST (add_middleware inserts at position 0 and the
 # stack is built outermost-first), meaning a throttled request is rejected
@@ -344,14 +350,23 @@ async def well_known_mcps() -> dict:
     /settings/pats UI delivers on.
     """
     tools_curated = [
-        "analyze_pending_approvals", "ai_categorize_pending",
-        "list_transactions", "get_transaction",
-        "categorize_transaction", "link_receipt_to_transaction",
-        "query_specialty_rules", "add_specialty_rule",
-        "get_p_and_l", "get_runway", "get_consolidated_p_and_l",
-        "get_current_rule", "get_form_1120_data",
-        "get_period_journal", "get_1099_payees",
-        "draft_memo", "flag_for_cpa_review",
+        "analyze_pending_approvals",
+        "ai_categorize_pending",
+        "list_transactions",
+        "get_transaction",
+        "categorize_transaction",
+        "link_receipt_to_transaction",
+        "query_specialty_rules",
+        "add_specialty_rule",
+        "get_p_and_l",
+        "get_runway",
+        "get_consolidated_p_and_l",
+        "get_current_rule",
+        "get_form_1120_data",
+        "get_period_journal",
+        "get_1099_payees",
+        "draft_memo",
+        "flag_for_cpa_review",
         "propose_payment_tool",
     ]
     return {
@@ -415,6 +430,7 @@ async def me(auth: AuthContext = Depends(validate_bearer_token)) -> dict:
         "agent_id": auth.agent_id,
         "scopes": auth.scopes,
     }
+
 
 # Disabled routes are absent from the router and OpenAPI, like unknown paths.
 
