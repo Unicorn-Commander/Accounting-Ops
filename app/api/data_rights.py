@@ -18,6 +18,7 @@ is itself destroyed by the purge it records. See ``erasure.ErasureReceipt``.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -36,6 +37,8 @@ from app.workspace_session import SHARED_SCHEMA, workspace_session
 router = APIRouter(tags=["data-rights"])
 
 EXPORT_JOBS_BUCKET = "exports"
+
+_log = logging.getLogger("acctops.data_rights")
 
 
 # --------------------------------------------------------------------------- #
@@ -197,8 +200,17 @@ async def _run_export(workspace_id: UUID, job_id: UUID, requested_by: str, slug:
                 await retention_mod.record_job(
                     session, workspace_id, bucket=EXPORT_JOBS_BUCKET, record=record
                 )
-    except Exception:  # noqa: BLE001 - nothing left to report to
-        pass
+    except Exception as exc:  # noqa: BLE001 - the job row is all the customer has
+        # A failed outcome MUST reach the job row, or the client polls a job
+        # that stays 'running' forever. The exception is logged (with the job
+        # id and the outcome it was carrying) so the silent-swallow that made
+        # this invisible in the first place cannot happen again.
+        _log.exception(
+            "data_rights export job outcome write FAILED (job=%s status=%s); "
+            "the customer's poll endpoint will keep showing the previous "
+            "status. error=%s: %s",
+            job_id, record.get("status"), type(exc).__name__, exc,
+        )
 
 
 @router.post(
