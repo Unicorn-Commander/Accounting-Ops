@@ -362,9 +362,20 @@ def export_bucket(settings: Settings, workspace_id: UUID) -> str:
 async def store_export(
     data: bytes, workspace_id: UUID, job_id: UUID, *, settings: Settings | None = None
 ) -> tuple[str, str]:
-    """Upload the archive. Returns (bucket, object_key). Raises on failure."""
+    """Upload the archive. Returns (bucket, object_key). Raises on failure.
+
+    Fails FAST when the object store is not configured: an export cannot be
+    delivered anywhere without it, so the job must record a failed outcome
+    (the caller writes a failed job row) instead of hanging forever on a
+    background task the client can no longer reach.
+    """
     settings = settings or get_settings()
     s3 = GarageS3Client(settings)
+    if not s3.is_configured():
+        raise GarageNotConfigured(
+            "Object storage (Garage S3) is not configured; the export archive "
+            "cannot be stored. Configure the garage S3 credentials and retry."
+        )
     bucket = export_bucket(settings, workspace_id)
     key = export_object_key(workspace_id, job_id)
     await s3.put_object(
