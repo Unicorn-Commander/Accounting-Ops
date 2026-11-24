@@ -237,9 +237,7 @@ def test_extract_passes_keywords_to_render_pdf(monkeypatch) -> None:
 
     settings = Settings(llm_model="test-model", llm_endpoint_url="http://localhost:9999", llm_api_key="k")
     ext = TaxDocExtractor(settings=settings)
-    result = asyncio.get_event_loop().run_until_complete(
-        ext.extract(body=data, mime_type="application/pdf")
-    )
+    result = asyncio.run(ext.extract(body=data, mime_type="application/pdf"))
     # No TypeError: extract() completed (error is None or a VLM-level error,
     # not a render TypeError).
     assert captured_kwargs["max_pages"] == mod._MAX_PAGES
