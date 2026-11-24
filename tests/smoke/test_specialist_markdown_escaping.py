@@ -159,17 +159,20 @@ def test_inline_tag_with_newlines_is_text():
 
 @MARKDOWN_SKIP
 def test_tag_inside_fenced_code_is_escaped_not_parsed():
-    """A tag inside a fenced code block is escaped and shown as text.
+    """A tag inside a fenced code block is escaped once and shown as text.
 
-    The fence delimiters are not touched by the escape, so the code block
-    still renders; the tag inside it is carried as text (the codehilite
-    highlighter escapes it a second time, so it shows as &amp;lt;).
+    The raw-HTML escape skips fenced code (AO107-R4-2): Python-Markdown
+    escapes the code content itself, so the tag inside the fence carries a
+    single &lt; entity, not the double-escaped &amp;lt; the old
+    escape-everything input produced.
     """
     html = markdown_to_html("```html\n<div class=x>code</div>\n```")
-    # The codehilite wrapper uses <div class="codehilite">; assert the inner
-    # tag is not raw markup (it is escaped to &amp;lt;div by the highlighter).
+    # The codehilite wrapper uses <div class="codehilite">; the inner tag is
+    # escaped once by the highlighter and must not be double-escaped.
     assert 'class="codehilite"' in html, "the fenced code block did not render"
-    assert "&amp;lt;" in html, "the tag inside the fence was not escaped"
+    assert "&lt;" in html, "the tag inside the fence was not escaped"
+    assert "&amp;lt;" not in html, "the tag inside the fence is double-escaped"
+    assert "div" in html, "the tag text was lost"
     assert "code" in html
 
 
@@ -221,3 +224,111 @@ def test_inline_tag_in_table_cell_is_text():
     assert "<img" not in html, "raw <img> in a table cell reached the renderer"
     assert "&lt;img" in html
     assert "<td>2</td>" in html, "the table cell text was lost"
+
+
+# ---------------------------------------------------------------------------
+# AO107-R4-1: Markdown link and image URLs are filtered after rendering
+# ---------------------------------------------------------------------------
+
+
+@MARKDOWN_SKIP
+def test_inline_javascript_link_href_is_dropped():
+    """[js](javascript:alert(1)) must not reach the renderer as a live href.
+
+    Markdown link syntax is not raw HTML, so the input escape cannot filter
+    it.  The post-render filter drops the href and keeps the link text.
+    Fails on 6ffeb71c, where the raw javascript: href reached the renderer.
+    """
+    html = markdown_to_html("[js](javascript:alert(1))")
+    assert "javascript:" not in html.lower(), "a live javascript: href reached the renderer"
+    assert 'href="javascript' not in html, "the unsafe link kept a live href"
+    assert ">js</a>" in html, "the link text was dropped"
+
+
+@MARKDOWN_SKIP
+def test_mixed_case_javascript_link_href_is_dropped():
+    """[x](JaVaScRiPt:alert(1)) is refused: the scheme match is case-insensitive."""
+    html = markdown_to_html("[x](JaVaScRiPt:alert(1))")
+    assert "javascript:" not in html.lower(), "a mixed-case javascript: href reached the renderer"
+    assert ">x</a>" in html, "the link text was dropped"
+
+
+@MARKDOWN_SKIP
+def test_javascript_with_control_chars_is_dropped():
+    """Control characters and whitespace inside a scheme do not bypass the filter."""
+    html = markdown_to_html("[js](java\tscript:alert(1))")
+    assert "script:alert" not in html.replace("\t", "").lower(), (
+        "a control-character javascript: href reached the renderer"
+    )
+
+
+@MARKDOWN_SKIP
+def test_reference_style_javascript_link_is_dropped():
+    """A reference-style definition [r]: javascript:... cannot make a live href."""
+    md = "[r](http://example.com)\n\n[r]: javascript:alert(1)"
+    html = markdown_to_html(md)
+    assert "javascript:" not in html.lower(), (
+        "a reference-style javascript: definition reached the renderer"
+    )
+    assert "http://example.com" in html, "the safe link target was dropped"
+
+
+@MARKDOWN_SKIP
+def test_file_link_href_is_dropped():
+    """[x](file:///etc/passwd) must not reach the renderer as a live href."""
+    html = markdown_to_html("[x](file:///etc/passwd)")
+    assert "file://" not in html, "a live file: href reached the renderer"
+    assert ">x</a>" in html, "the link text was dropped"
+
+
+@MARKDOWN_SKIP
+def test_vbscript_image_src_is_dropped():
+    """![v](vbscript:msgbox) must not reach the renderer as a live src."""
+    html = markdown_to_html("![v](vbscript:msgbox)")
+    assert "vbscript:" not in html.lower(), "a live vbscript: src reached the renderer"
+    assert 'alt="v"' in html, "the image alt text was dropped"
+
+
+@MARKDOWN_SKIP
+def test_data_image_src_is_allowed():
+    """A data: image URL is the supported embedding path and must survive."""
+    html = markdown_to_html("![logo](data:image/png;base64,iVBORw0KGgo=)")
+    assert 'src="data:image/png;base64,iVBORw0KGgo="' in html, (
+        "the data: image src was dropped"
+    )
+
+
+@MARKDOWN_SKIP
+def test_http_image_src_is_dropped():
+    """![i](http://example.com/x.png) must not reach the renderer as a live src.
+
+    Images may only come from data: URIs; an http: image would make the
+    renderer fetch a URL out of tenant text.
+    """
+    html = markdown_to_html("![i](http://example.com/x.png)")
+    assert "http://example.com/x.png" not in html, (
+        "a live http: image src reached the renderer"
+    )
+    assert 'alt="i"' in html, "the image alt text was dropped"
+
+
+@MARKDOWN_SKIP
+def test_protocol_relative_and_relative_urls_are_dropped():
+    """Protocol-relative (//host) and relative links have no allowed scheme."""
+    html = markdown_to_html("[rr](//evil.example/x) and [rel](page.html)")
+    assert "//evil.example" not in html, "a protocol-relative href reached the renderer"
+    assert 'href="page.html"' not in html, "a relative href reached the renderer"
+    assert ">rr</a>" in html and ">rel</a>" in html, "the link texts were dropped"
+
+
+@MARKDOWN_SKIP
+def test_http_mailto_and_anchor_links_survive():
+    """http, https, mailto and # anchors are the allowed link targets."""
+    html = markdown_to_html(
+        "[a](http://example.com/x) [b](https://example.com) "
+        "[c](mailto:op@example.com) [d](#top)"
+    )
+    assert 'href="http://example.com/x"' in html, "http link dropped"
+    assert 'href="https://example.com"' in html, "https link dropped"
+    assert 'href="mailto:op@example.com"' in html, "mailto link dropped"
+    assert 'href="#top"' in html, "anchor link dropped"
