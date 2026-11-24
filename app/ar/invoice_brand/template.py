@@ -293,11 +293,16 @@ def _qty(value: Any) -> str:
 def render_invoice_pdf(document_html: str) -> bytes:
     """Print the HTML to one PDF. WeasyPrint when it imports, otherwise headless Chrome.
     Raises when neither can render. The old reportlab invoice is not a fallback.
+
+    The WeasyPrint path uses the shared safe renderer (AO-PDF-1): its URL
+    fetcher allows only ``data:`` URIs, so a customer name, line description
+    or logo field carrying a ``file:``/``http(s):`` URL cannot pull local
+    files or internal URLs into the invoice PDF.
     """
     try:
-        from weasyprint import HTML  # type: ignore
+        from app.pdf.safe_render import render_pdf
 
-        return HTML(string=document_html).write_pdf()
+        return render_pdf(document_html)
     except Exception:
         pass
 
