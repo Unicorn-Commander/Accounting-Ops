@@ -13,9 +13,6 @@ import html
 import json
 import logging
 import os
-import shutil
-import subprocess
-import tempfile
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -320,71 +317,37 @@ def _qty(value: Any) -> str:
     return f"{n.normalize()}"
 
 
-def _find_chrome() -> str | None:
-    """Locate a headless Chrome binary, or None when this host has none."""
-    for name in ("google-chrome", "chromium", "chromium-browser"):
-        path = shutil.which(name)
-        if path:
-            return path
-    mac = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    return mac if os.path.exists(mac) else None
+class PdfRenderUnavailableError(RuntimeError):
+    """WeasyPrint cannot import or render: PDF rendering is unavailable.
 
-
-def _chrome_flags() -> list[str]:
-    """Flags for the offline print-to-pdf render.
-
-    ``--host-resolver-rules="MAP * ~NOTFOUND"`` makes every DNS lookup fail,
-    so no http(s): or internal URL is fetched while the document renders
-    (verified: the stylesheet is never loaded and no attachment is written).
-    ``--no-sandbox`` is required when this service runs under a container
-    jail (bubblewrap or a dispatcher sandbox) that is itself the sandbox:
-    Chrome's own SUID sandbox cannot start inside it, and headless
-    print-to-pdf needs no extra isolation.  The WeasyPrint path remains the
-    primary guard; this flag keeps the Chrome path from pulling anything
-    over the wire.
+    AO107-R3-1: the invoice PDF has exactly one renderer, the shared safe
+    renderer (AO-PDF-1).  A second renderer (a headless browser fallback)
+    could fetch ``file:`` resources the safe fetcher refuses, so it is not
+    a fallback at all: the caller answers 503 "PDF rendering unavailable".
     """
-    return [
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--no-pdf-header-footer",
-        '--host-resolver-rules="MAP * ~NOTFOUND"',
-    ]
 
 
 def render_invoice_pdf(document_html: str) -> bytes:
-    """Print the HTML to one PDF. WeasyPrint when it imports, otherwise headless Chrome.
-    Raises when neither can render. The old reportlab invoice is not a fallback.
+    """Print the HTML to one PDF via the shared safe renderer (AO-PDF-1).
 
-    The WeasyPrint path uses the shared safe renderer (AO-PDF-1): its URL
-    fetcher allows only ``data:`` URIs, so a customer name, line description
-    or logo field carrying a ``file:``/``http(s):`` URL cannot pull local
-    files or internal URLs into the invoice PDF.
+    The safe renderer's URL fetcher allows only ``data:`` URIs, so a
+    customer name, line description or logo field carrying a
+    ``file:``/``http(s):`` URL cannot pull local files or internal URLs
+    into the invoice PDF.
 
-    The headless Chrome fallback is reached only when WeasyPrint itself is
-    unavailable (import or system-library failure), never on a WeasyPrint
-    render error.  Chrome runs offline: ``--host-resolver-rules`` maps every
-    name to NOTFOUND, so no http(s): or internal URL is fetched; ``file:``
-    resources are refused by the test that guards this path.
+    Fail closed (AO107-R3-1): when WeasyPrint cannot be imported (or its
+    Pango/Cairo system libraries are missing), raise
+    ``PdfRenderUnavailableError``; the caller answers 503.  There is no
+    second renderer: a browser fallback would fetch ``file:`` resources
+    the safe fetcher refuses.
     """
     try:
         from app.pdf.safe_render import render_pdf
 
         return render_pdf(document_html)
-    except (ImportError, OSError):
-        pass
-
-    chrome = _find_chrome()
-    if not chrome:
-        raise RuntimeError("No HTML-to-PDF renderer is available (WeasyPrint or Chrome).")
-    with tempfile.TemporaryDirectory() as tmp:
-        html_path = Path(tmp) / "invoice.html"
-        pdf_path = Path(tmp) / "invoice.pdf"
-        html_path.write_text(document_html, encoding="utf-8")
-        subprocess.run(
-            [chrome, *_chrome_flags(), f"--print-to-pdf={pdf_path}", html_path.as_uri()],
-            check=True,
-            capture_output=True,
-            timeout=30,
-        )
-        return pdf_path.read_bytes()
+    except (ImportError, OSError) as exc:
+        raise PdfRenderUnavailableError(
+            "PDF rendering unavailable: WeasyPrint could not be imported "
+            f"or its system libraries (Pango, Cairo, GDK-Pixbuf) are missing. "
+            f"Underlying error: {exc}"
+        ) from exc

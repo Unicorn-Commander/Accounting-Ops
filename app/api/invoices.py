@@ -34,7 +34,11 @@ from app.ar import (
     void_invoice,
 )
 from app.ar.invoice_brand.email_draft import stage_invoice_email
-from app.ar.invoice_brand.template import render_invoice_html, render_invoice_pdf
+from app.ar.invoice_brand.template import (
+    PdfRenderUnavailableError,
+    render_invoice_html,
+    render_invoice_pdf,
+)
 from app.connectors.stripe.checkout import create_checkout_session
 # NOTE (Community Edition carve-out): app.ar.entitlement is the enterprise
 # cross-app entitlement gate (no-op for standalone). Deferred into the create
@@ -564,8 +568,11 @@ async def public_invoice_pdf(token: str) -> Response:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found")
     try:
         pdf_bytes = render_invoice_pdf(render_invoice_html(view))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    except PdfRenderUnavailableError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PDF rendering unavailable",
+        ) from None
     filename = f"{view.get('invoice_number', 'invoice')}.pdf".replace(" ", "")
     return Response(content=pdf_bytes, media_type="application/pdf", headers={
         "Content-Disposition": f'inline; filename="{filename}"',
@@ -623,8 +630,11 @@ async def get_invoice_pdf(
 
     try:
         pdf_bytes = render_invoice_pdf(render_invoice_html(view))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    except PdfRenderUnavailableError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PDF rendering unavailable",
+        ) from None
     cd_mode = "inline" if disposition.lower().strip() == "inline" else "attachment"
     filename = f"{view.get('invoice_number', 'invoice')}.pdf".replace(" ", "")
     return Response(
