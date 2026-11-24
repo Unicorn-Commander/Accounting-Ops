@@ -150,19 +150,25 @@ class TaxDocExtractor:
 
         mime = (mime_type or "").split(";")[0].strip().lower()
         render_error: str | None = None
-        # fitz PDF work (open + content-stream pre-check + rasterization) is
-        # CPU-bound: run it off the event loop so one heavy uploaded PDF
-        # cannot block the server while it is being refused or rasterized.
-        # Rasterization happens in a worker process (see _render_pdf) so a
-        # pathological page cannot hold the GIL or starve other requests.
-        # Images skip this (no fitz).
+        # fitz PDF work (open + bounded content-stream pre-check) is CPU-bound:
+        # run it off the event loop so one heavy uploaded PDF cannot block the
+        # server while it is being refused. The pre-check is bounded (it never
+        # inflates more than bound+1 bytes), so it is fast even for a
+        # compression-bomb page. Each page that survives the pre-check is then
+        # rasterized in its own spawned process (see _render_pdf) with a hard
+        # kill timeout, so a pathological page that slips through cannot hold
+        # the GIL, block the loop, or starve other requests. Images skip this
+        # (no fitz).
         try:
             if mime in _PDF_MIMES:
                 images, render_error = await run_in_threadpool(
                     _render_pdf, body, max_pages=_MAX_PAGES, dpi=_RENDER_DPI
                 )
             else:
-                images, render_error = _to_page_images(body, mime)
+                # Image mimes pass through as a single page (no fitz, no
+                # render). Any other mime is not extractable here.
+                images = [body] if mime in _IMAGE_MIMES else []
+                render_error = None
         except Exception as exc:  # noqa: BLE001 — render failure must not raise
             return TaxDocExtraction(
                 model=model,
