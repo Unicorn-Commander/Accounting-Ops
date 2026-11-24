@@ -13,11 +13,12 @@ pure-ASGI middleware that wraps ``receive`` and ``send``:
   BEFORE the downstream app runs and before any body is read (fail fast);
 * otherwise the running total of streamed body bytes is counted as the
   downstream app reads them, and the moment it exceeds the cap the middleware
-  sends the 413 itself and ABORTS the app: the next ``receive()`` returns
-  ``http.disconnect`` and the one after raises a private exception the
-  middleware catches. For a chunked over-cap body the app IS entered (Starlette
-  hands it a request), but it is aborted inside the body read and never sees a
-  truncated body: no handler side effects run on partial data.
+  sends the 413 itself and RAISES the private abort exception immediately
+  (R5-P2-1): the chunk that crosses the cap is never returned to the app, so
+  a handler never runs on an over-cap body and no handler side effects happen
+  on partial data. For a chunked over-cap body the app IS entered (Starlette
+  hands it a request), but it is aborted inside the body read; any later
+  ``receive()`` returns ``http.disconnect``.
 
 Because Starlette's outermost ``ServerErrorMiddleware`` would otherwise catch
 the abort exception and render a 500 on top of the 413, the middleware also
@@ -39,9 +40,11 @@ _CAP_BODY = b"Request body exceeds the maximum allowed size."
 class _BodyCapExceeded(Exception):
     """Raised by the wrapped receive() once the body crossed the cap.
 
-    Private to this module: it is the middleware's own abort signal, caught in
-    ``__call__`` so the app never sees it. The app's (partial, truncated-body)
-    request is abandoned and the client got the 413 from the middleware.
+    Private to this module: it is the middleware's own abort signal, raised by
+    the wrapped ``receive()`` the moment the running total crosses the cap (so
+    the crossing chunk is never returned to the app) and caught in ``__call__``
+    so the app never sees it. The app's request is abandoned and the client got
+    the 413 from the middleware.
 
     Starlette's outermost ``ServerErrorMiddleware`` would otherwise catch this
     and turn it into a 500, so ``__call__`` also drops any response the app
@@ -91,15 +94,17 @@ def _declared_length(scope: dict[str, Any]) -> int | None:
 class BodySizeCapMiddleware:
     """Reject request bodies over ``max_bytes`` with 413, before they buffer.
 
-    Counts the streamed ``http.request`` body bytes as the downstream app reads
-    them. A declared ``Content-Length`` over the cap is rejected up front, at
-    once, before the app runs and before any body is read. For a body without
-    a declared length (chunked), the cap is detected mid-read: the moment the
-    running total crosses the cap the middleware sends the 413 itself and
-    aborts the app (the next receive reports disconnect, the one after raises)
-    so a truncated body is never handed to the handler and no handler side
-    effects run on partial data. Any 500 the app's error middleware would emit
-    on top of the 413 is dropped by the wrapped send.
+    A declared ``Content-Length`` over the cap is rejected up front, at once,
+    before the app runs and before any body is read. Otherwise the streamed
+    ``http.request`` body bytes are counted as the downstream app reads them,
+    and the moment the running total crosses the cap the middleware sends the
+    413 itself and RAISES the abort exception at once (R5-P2-1): the chunk
+    that crosses the cap is never returned to the app, so a handler never runs
+    on an over-cap body and no handler side effects run on partial data. For a
+    body without a declared length (chunked) the app IS entered (Starlette
+    hands it a request) but is aborted inside the body read; any later
+    ``receive()`` reports disconnect. Any 500 the app's error middleware would
+    emit on top of the 413 is dropped by the wrapped send.
     """
 
     def __init__(self, app: Any, *, max_bytes: int) -> None:
@@ -123,12 +128,10 @@ class BodySizeCapMiddleware:
 
         async def capped_receive() -> dict[str, Any]:
             if state["exceeded"]:
-                if not state["aborted"]:
-                    # The app has not yet been stopped: abort it now (the 413
-                    # was already sent the moment the cap was crossed).
-                    state["aborted"] = True
-                    raise _BodyCapExceeded()
-                # Already aborted: report disconnect so any other reader stops.
+                # The body crossed the cap on an earlier read: the 413 is on
+                # the wire and the app must be stopped. Report disconnect so
+                # any other reader stops too (the first raise already aborted
+                # the app's own read loop).
                 return {"type": "http.disconnect"}
             message = await receive()
             if message["type"] != "http.request":
@@ -136,12 +139,13 @@ class BodySizeCapMiddleware:
             state["total"] += len(message.get("body", b"") or b"")
             if state["total"] > self._max_bytes:
                 state["exceeded"] = True
-                # The body crossed the cap: send the 413 ourselves, then abort
-                # the app on its next read. The handler never sees this byte
-                # or anything after it, so no side effects run on a truncated
-                # body.
+                # The body crossed the cap: send the 413 ourselves and RAISE
+                # at once (R5-P2-1). The chunk that crossed the cap is never
+                # returned to the app, so a handler never runs on an over-cap
+                # body and no handler side effects run on partial data.
                 state["sent_413"] = True
                 await _send_413(send)
+                raise _BodyCapExceeded()
             return message
 
         async def capped_send(message: dict[str, Any]) -> None:

@@ -169,36 +169,84 @@ async def test_over_cap_chunked_body_is_413_and_handler_never_runs() -> None:
     assert hdrs.get(b"x-frame-options") == b"SAMEORIGIN"
 
 
-async def test_chunked_5x50_with_cap_100_is_413_and_handler_never_runs() -> None:
-    """The exact R3-1 shape: chunked 5 x 50 bytes with a cap of 100. The
-    running total crosses 100 on the 3rd chunk (150 > 100); the middleware
-    413s and aborts the app, and the handler's ``ran`` flag stays False."""
-    # A dedicated ASGI app so the cap is exactly 100 bytes regardless of the
-    # configured document_upload_max_bytes.
+def _cap_app(max_bytes: int, probe_state: dict[str, Any]) -> Any:
+    """A dedicated ASGI app so the cap is exactly ``max_bytes`` regardless of
+    the configured document_upload_max_bytes. The probe records that it ran
+    (the handler's side effect) in ``state``."""
     from app.body_size_cap import BodySizeCapMiddleware
     from starlette.applications import Starlette
     from starlette.routing import Route
 
-    ran = {"flag": False}
-
     async def probe(request: Request) -> PlainTextResponse:
         body = await request.body()
-        ran["flag"] = True
+        probe_state["ran"] = True
+        probe_state["bytes"] = len(body)
         return PlainTextResponse(f"got {len(body)}")
 
     app = Starlette(routes=[Route(_PROBE_PATH, probe, methods=["POST"])])
-    app = BodySizeCapMiddleware(app, max_bytes=100)
+    return BodySizeCapMiddleware(app, max_bytes=max_bytes)
 
+
+async def _post_cap_app(
+    app: Any, probe_state: dict[str, Any], body_bytes: int, *, chunk: int
+) -> list[int]:
+    """POST ``body_bytes`` (chunked) to the dedicated cap app.
+
+    Returns the list of response.start statuses seen; the handler's side
+    effect is recorded in ``probe_state``.
+    """
     status: list[int] = []
 
     async def send(message: dict[str, Any]) -> None:
         if message["type"] == "http.response.start":
             status.append(message["status"])
 
-    # 5 x 50 bytes, chunked (no Content-Length header).
-    await app(_build_scope(_PROBE_PATH, []), _streaming_body(250, chunk=50), send)
+    import asyncio
+
+    try:
+        await asyncio.wait_for(
+            app(_build_scope(_PROBE_PATH, []), _streaming_body(body_bytes, chunk), send),
+            timeout=60,
+        )
+    except asyncio.TimeoutError:
+        raise AssertionError("app call hung: the cap middleware must abort the app, not deadlock it")
+    return status
+
+
+async def test_chunked_5x50_with_cap_100_is_413_and_handler_never_runs() -> None:
+    """The exact R3-1 shape: chunked 5 x 50 bytes with a cap of 100. The
+    running total crosses 100 on the 3rd chunk (150 > 100); the middleware
+    413s and aborts the app, and the handler's ``ran`` flag stays False."""
+    state: dict[str, Any] = {"ran": False, "bytes": 0}
+    app = _cap_app(100, state)
+    status = await _post_cap_app(app, state, 250, chunk=50)
     assert status == [413], f"expected only the 413, got {status}"
-    assert ran["flag"] is False, "the handler must never run on a truncated body"
+    assert state["ran"] is False, "the handler must never run on a truncated body"
+
+
+async def test_chunked_11_bytes_with_cap_10_is_413_and_handler_never_runs() -> None:
+    """R5-P2-1: a SINGLE 11-byte chunk at a cap of 10 crosses on the first
+    read. The middleware must 413 and the handler must never run: the crossing
+    chunk is never returned to the app, so no side effect happens on it."""
+    state: dict[str, Any] = {"ran": False, "bytes": 0}
+    app = _cap_app(10, state)
+    status = await _post_cap_app(app, state, 11, chunk=11)
+    assert status == [413], f"expected only the 413, got {status}"
+    assert state["ran"] is False, "the handler must never run on the crossing chunk"
+    assert state["bytes"] == 0, "no body may be buffered before the 413"
+
+
+async def test_chunked_5_plus_6_with_cap_10_is_413_and_handler_never_runs() -> None:
+    """R5-P2-1: chunks of 5 and 6 bytes at a cap of 10. The first chunk (5) is
+    under the cap and the second (total 11) crosses it. The crossing chunk must
+    never reach the app: 413, and the handler never ran (its side effect did
+    not happen)."""
+    state: dict[str, Any] = {"ran": False, "bytes": 0}
+    app = _cap_app(10, state)
+    status = await _post_cap_app(app, state, 11, chunk=5)
+    assert status == [413], f"expected only the 413, got {status}"
+    assert state["ran"] is False, "the handler must never run on the crossing chunk"
+    assert state["bytes"] == 0, "no body may be buffered before the 413"
 
 
 async def test_under_cap_body_passes_to_handler() -> None:
