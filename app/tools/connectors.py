@@ -15,11 +15,11 @@ Credentials (metadata only — never plaintext):
   - list_credentials         — connector + label + last_used_at
 
 Account mappings (bank account ↔ entity):
-  - list_account_mappings    — live accounts + current entity mappings (accountant)
+  - list_account_mappings    : live accounts + current entity mappings (accountant)
   - upsert_account_mappings  — bulk upsert (accountant)
 
 Category overrides (user-trained category corrections):
-  - list_category_overrides       — bookkeeper
+  - list_category_overrides       : bookkeeper
   - create_category_override      — accountant
 
 DELETE / claim / POST-credentials remain HTTP-only:
