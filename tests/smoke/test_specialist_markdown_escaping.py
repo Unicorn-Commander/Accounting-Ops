@@ -387,3 +387,125 @@ def test_nul_and_c0_controls_are_stripped():
     assert "\x00" not in html and "\x02" not in html and "\x1f" not in html
     assert "<script" not in html
     assert "&lt;script&gt;" in html
+
+
+# ---------------------------------------------------------------------------
+# AO107-R5-2: a real parse of the generated HTML, tag and attribute allowlist
+# ---------------------------------------------------------------------------
+# On a6e90459 the post-filter was a regex with a 16-character lookback, so a
+# long attribute list hid the <a, an entity-encoded scheme was kept because
+# the value carried '&', and every other attribute passed through.
+
+
+@MARKDOWN_SKIP
+def test_long_attachment_anchor_href_is_dropped():
+    """<a rel=attachment ...long attrs... href=file:> never keeps its href."""
+    from app.pdf.safe_render import _sanitize_html
+
+    hostile = (
+        '<a rel="attachment" title="t" class="cccccccccccccccccccccccc" '
+        'data-x="yyyyyyyyyyyyyyyyyyyy" href="file:///etc/passwd">x</a>'
+    )
+    out = _sanitize_html(hostile)
+    assert "file:" not in out and "attachment" not in out
+    assert out == '<a title="t">x</a>'
+    # The same tag in a draft body is text, never markup.
+    html = markdown_to_html(hostile)
+    assert "<a " not in html and "&lt;a rel" in html
+
+
+@MARKDOWN_SKIP
+@pytest.mark.parametrize(
+    "body",
+    [
+        "[x](jav&#x61;script:alert(1))",
+        "[x](&#106;avascript:alert(1))",
+        "[x](javascript&#58;alert(1))",
+        "[x](file&#x3a;///etc/passwd)",
+    ],
+)
+def test_entity_encoded_scheme_is_dropped(body):
+    """The scheme is checked after HTML-unescaping, so entities do not hide it."""
+    html = markdown_to_html(body)
+    assert "href" not in html, f"an entity-encoded scheme kept a live href: {html}"
+    assert ">x</a>" in html
+
+
+@MARKDOWN_SKIP
+def test_entity_encoded_image_scheme_is_dropped():
+    """An entity-encoded file: image src is dropped, the alt text stays."""
+    html = markdown_to_html("![i](fil&#x65;:///etc/passwd)")
+    assert "src" not in html and 'alt="i"' in html
+
+
+@MARKDOWN_SKIP
+@pytest.mark.parametrize(
+    "body",
+    ["[x](java\tscript:alert(1))", "[x](java\nscript:alert(1))", "[x]( \x0bjavascript:alert(1))"],
+)
+def test_whitespace_inside_scheme_is_dropped(body):
+    """Tab, newline or control characters inside the scheme do not bypass it."""
+    html = markdown_to_html(body)
+    assert "href" not in html, f"a split javascript: scheme kept a live href: {html}"
+
+
+@MARKDOWN_SKIP
+def test_javascript_autolink_is_not_a_link():
+    """<javascript:alert(1)> is not a Markdown autolink and stays text."""
+    html = markdown_to_html("<javascript:alert(1)>")
+    assert "<a" not in html and "href" not in html
+    assert "&lt;javascript:alert(1)&gt;" in html
+
+
+@MARKDOWN_SKIP
+def test_http_autolink_survives():
+    """<http://example.com/a> is an allowed autolink."""
+    html = markdown_to_html("<http://example.com/a>")
+    assert '<a href="http://example.com/a">http://example.com/a</a>' in html
+
+
+@MARKDOWN_SKIP
+def test_disallowed_tags_and_attributes_are_dropped():
+    """Only allowlisted tags and a[href|title], img[src|alt] survive the parse."""
+    from app.pdf.safe_render import _sanitize_html
+
+    hostile = (
+        '<p style="background:url(file:///x)" onclick="x()">t</p>'
+        '<img src="data:image/png;base64,AAA=" srcset="file:///a 1x" '
+        'onerror="x()" alt="a" style="x">'
+        '<video poster="file:///p"></video><object data="file:///o"></object>'
+        '<link rel="stylesheet" href="http://127.0.0.1:1/x.css">'
+        '<style>@import url(file:///etc/passwd)</style>'
+        '<td style="text-align: left;">c</td><!-- c --><span class="k">s</span>'
+    )
+    out = _sanitize_html(hostile)
+    for bad in ("style", "onclick", "onerror", "srcset", "poster", "data=",
+                "<video", "<object", "<link", "<span", "<!--", "class"):
+        assert bad not in out, f"{bad} survived the allowlist: {out}"
+    assert '<img src="data:image/png;base64,AAA=" alt="a">' in out
+    assert "<p>t</p>" in out and "<td>c</td>" in out
+    # A dropped <style> element's text is escaped text, never a stylesheet.
+    assert "@import url(file:///etc/passwd)" in out
+
+
+@MARKDOWN_SKIP
+def test_table_alignment_style_is_dropped():
+    """The tables extension's style="text-align" is dropped; the cells stay."""
+    html = markdown_to_html("| a | b |\n|:--|--:|\n| 1 | 2 |")
+    assert "style" not in html
+    assert "<th>a</th>" in html and "<td>2</td>" in html
+
+
+@MARKDOWN_SKIP
+def test_non_image_data_uri_src_is_dropped():
+    """img src allows data:image/* only; data:text/html is dropped."""
+    html = markdown_to_html("![t](data:text/html;base64,PHNjcmlwdD4=)")
+    assert "src" not in html and 'alt="t"' in html
+
+
+@MARKDOWN_SKIP
+def test_link_title_is_kept_and_escaped():
+    """a[title] is kept with its value re-escaped."""
+    html = markdown_to_html('[t](https://example.com "say \\"hi\\" <b>")')
+    assert 'href="https://example.com"' in html
+    assert "<b>" not in html
