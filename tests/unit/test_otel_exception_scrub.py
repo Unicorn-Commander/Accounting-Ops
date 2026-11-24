@@ -5,9 +5,10 @@ Two items, one file:
 AO-OTEL-2 (latent P2): a span that records a raised exception ships the raw
 exception text (SQL with amounts and names, connector payloads) in its status
 description, its `exception` event's `exception.message` attribute and its
-`exception.stacktrace` attribute. app/otel now scrubs all three to the
-exception TYPE only at export time (the existing span processor wraps the OTLP
-exporter in _RedactingSpanExporter).
+`exception.stacktrace` attribute. app/otel now scrubs the message body to the
+constant 'redacted' (or the bare type name when the value IS the type) at
+export time; `exception.type` is kept verbatim (N4). The existing span
+processor wraps the OTLP exporter in _RedactingSpanExporter.
 
 AO-OTEL-3 (P3): the LLM failover span attributes (and event) used the raw
 primary/fallback base_url, which can embed userinfo or a query token. They now
@@ -145,19 +146,43 @@ def test_instrumentation_exception_event_is_scrubbed_to_type():
     assert "sqlalchemy.exc.OperationalError" in wire
 
 
-def test_scrub_exception_text_collapses_to_type():
-    """AO-OTEL-2 unit: the scrubber keeps a leading Python type name and drops
-    bare message text."""
+def test_scrub_exception_text_never_exports_message_body():
+    """AO-OTEL-2 unit (B2): the scrubber NEVER derives the kept value from the
+    message body. 'Type: message' collapses to the constant 'redacted'; a bare
+    type name (no separator) is kept because it IS the type; anything else is
+    'redacted'.
+
+    B2 cases from the review:
+      * capitalised single-token message: 'Janeroe' -> 'Janeroe' (bare token,
+        no ': ' separator, matches _TYPE_NAME)
+      * 'Name: text': 'Smith: owes 500' -> 'redacted'
+      * key-shaped token: 'Sk_live_abcdef: bad key' -> 'redacted'
+      * bare set_status(ERROR, 'Janeroe') -> 'Janeroe'
+    """
     scrub = otel._scrub_exception_text
+    # Bare type name (no separator): kept.
     assert scrub("ValueError") == "ValueError"
-    assert scrub("ValueError: SELECT secret_amount") == "ValueError"
-    assert scrub("sqlalchemy.exc.OperationalError: disk full") == (
-        "sqlalchemy.exc.OperationalError"
-    )
-    assert scrub("httpx.ConnectError: dns failure") == "httpx.ConnectError"
-    assert scrub("SELECT secret_amount") == "Exception"
-    assert scrub("UPDATE ledger SET amount=999") == "Exception"
-    assert scrub("500: SELECT secret_amount FOR UPDATE") == "Exception"
+    assert scrub("sqlalchemy.exc.OperationalError") == "sqlalchemy.exc.OperationalError"
+    assert scrub("httpx.ConnectError") == "httpx.ConnectError"
+    # 'Type: message' with a separator: the message body is never exported.
+    assert scrub("ValueError: SELECT secret_amount") == "redacted"
+    assert scrub("sqlalchemy.exc.OperationalError: disk full") == "redacted"
+    assert scrub("httpx.ConnectError: dns failure") == "redacted"
+    # Bare message text (no separator, not a type name): redacted.
+    assert scrub("SELECT secret_amount") == "redacted"
+    assert scrub("UPDATE ledger SET amount=999") == "redacted"
+    # B2: capitalised single-token that looks like a name, not a type.
+    # 'Janeroe' matches _TYPE_NAME (starts uppercase, no separator), so it is
+    # kept. This is the documented trade-off: a bare token with no separator
+    # cannot be distinguished from a type name without the real class.
+    assert scrub("Janeroe") == "Janeroe"
+    # B2: 'Name: text' shape -- the message body after ': ' is never exported.
+    assert scrub("Smith: owes 500") == "redacted"
+    # B2: key-shaped token with a separator -- redacted.
+    assert scrub("Sk_live_abcdef: bad key") == "redacted"
+    # Non-type bare text with a separator.
+    assert scrub("500: SELECT secret_amount FOR UPDATE") == "redacted"
+    # Empty.
     assert scrub("") == "Exception"
 
 

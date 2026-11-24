@@ -1,3 +1,4 @@
+import re
 import time
 from collections.abc import Callable
 
@@ -9,6 +10,8 @@ try:
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.trace import Span
+    from opentelemetry.trace.status import Status
 except ImportError:  # pragma: no cover - permits local import checks before dependency install
     propagate = None
     trace = None
@@ -17,51 +20,50 @@ except ImportError:  # pragma: no cover - permits local import checks before dep
     Resource = None
     TracerProvider = None
     BatchSpanProcessor = None
-
-from opentelemetry.trace import Span
-from opentelemetry.trace.status import Status
+    Span = None
+    Status = None
 
 from app.config import get_settings
 
-
-import re
-
-# A Python type name: a dotted path whose final segment is a class name
-# (e.g. `ValueError`, `sqlalchemy.exc.OperationalError`).
+# A Python type name: a dotted path whose final segment starts with an
+# uppercase letter (e.g. `ValueError`, `sqlalchemy.exc.OperationalError`).
+# Anchored at both ends so it cannot match a substring of a message.
 _TYPE_NAME = re.compile(
-    r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*\.[A-Z][A-Za-z0-9_]*$"
-    r"|[A-Z][A-Za-z0-9_]*$"
+    r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)+[A-Z][A-Za-z0-9_]*$|^[A-Z][A-Za-z0-9_]*$"
 )
 
 
 def _scrub_exception_text(value: object) -> str:
-    """Collapse an OTel status description / exception attribute to the TYPE only.
+    """Collapse an OTel status description / exception message to a safe form.
 
     A recorded exception's description and `exception.message` carry the raw
-    exception text (SQL with amounts and names, connector payloads). Telemetry
-    keeps the type for triage; the message is dropped.
-
-    `exception.message` attributes are either '<Type>: <message>' (the SDK
-    prepends the type) or the bare message; a status description is usually the
-    bare message. When the leading token is a Python type name we keep it,
-    otherwise the whole value is treated as message text and replaced.
+    exception text (SQL with amounts and names, connector payloads). The
+    message body is NEVER derived from the value: it is replaced with the
+    constant 'redacted'. Only when the entire value is a bare Python type name
+    (no ': ' separator, matches _TYPE_NAME) is it kept, since that IS the type
+    and carries no payload.
     """
     text = str(value).strip()
     if not text:
         return "Exception"
-    first = text.split(": ", 1)[0].strip()
-    return first if _TYPE_NAME.match(first) else "Exception"
+    if ": " in text:
+        return "redacted"
+    if _TYPE_NAME.match(text):
+        return text
+    return "redacted"
 
 
-def _scrub_span_exception_text(span: Span) -> None:
+def _scrub_span_exception_text(span) -> None:
     """Scrub exception text out of a span's status + `exception` events.
 
     The SDK's `Span.record_exception` and FastAPI's exception middleware put
     the raw exception text in the span status description and in the
     `exception.message` event attribute (SQL with amounts and names, connector
-    payloads). Both are replaced with the exception TYPE only. Events already
-    carry `exception.type`, so the type survives; only the message text is
-    dropped.
+    payloads). The message is replaced with the constant 'redacted'; the type
+    is kept only when the value is a bare type name. `exception.type` is NOT
+    scrubbed (N4): it carries the real class name, which is safe. The
+    `exception.stacktrace` is dropped entirely because the frames repeat the
+    raw message.
     """
     try:
         # ReadableSpan exposes `status` as a read-only property; mutate the
@@ -79,9 +81,12 @@ def _scrub_span_exception_text(span: Span) -> None:
             if event.name != "exception":
                 continue
             scrubbed = dict(event.attributes or {})
-            for key in ("exception.message", "exception.type"):
-                if key in scrubbed:
-                    scrubbed[key] = _scrub_exception_text(scrubbed[key])
+            if "exception.message" in scrubbed:
+                scrubbed["exception.message"] = _scrub_exception_text(
+                    scrubbed["exception.message"]
+                )
+            # `exception.type` is NOT scrubbed: it carries the real class name
+            # (e.g. 'socket.gaierror'), which is safe and useful for triage.
             # The traceback frames repeat the raw message (SQL, amounts,
             # names). Drop it entirely: the type is already kept.
             scrubbed.pop("exception.stacktrace", None)
