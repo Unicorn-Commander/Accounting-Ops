@@ -341,6 +341,7 @@ jobs:
               "tests.integration.test_add_client": 1,
               "tests.integration.test_approval_recommendations": 3,
               "tests.integration.test_approvals": 1,
+              "tests.integration.test_audit_log_force_rls": 3,  # AO111-R2-F9
               "tests.integration.test_ar_payment_concurrency_pg": 1,
               "tests.integration.test_data_rights": 6,
               "tests.integration.test_document_upload": 2,  # 4 minus the 2 Garage nodes deselected above (batch b5531251 item 11 restores 4)
