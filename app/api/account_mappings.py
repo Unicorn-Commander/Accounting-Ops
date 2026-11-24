@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
 from app.security.credentials import get_credential_plaintext
 from app.security.outbound import (
@@ -190,6 +191,10 @@ async def upsert_account_mappings(
 ) -> dict[str, Any]:
     """Upsert a bulk set of mappings. Idempotent by (source, external_account_id)."""
     require_role(workspace, "accountant")
+    # AO-MASS-3: every target entity must be inside the membership's
+    # entity_scope, checked before any write (the whole batch is refused).
+    for m in body.mappings:
+        assert_entity_in_scope(workspace, m.entity_id)
 
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         # Validate that entity_ids exist in this workspace

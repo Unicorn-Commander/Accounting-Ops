@@ -238,7 +238,8 @@ async def patch_setup_progress(
 
     Top-level fields:
       * ``skipped`` (bool) - "Skip and continue" path
-      * ``completed_at`` (ISO datetime or null) - flips when setup finishes
+      * ``completed_at`` (any non-empty string marks setup finished and is
+        stamped with the server's time; empty string clears it)
 
     Role floor: accountant. Setup is a write action and shouldn't be done
     by viewers or generic bookkeepers.
@@ -289,8 +290,11 @@ async def patch_setup_progress(
             if body.skipped is not None:
                 current["skipped"] = body.skipped
             if body.completed_at is not None:
-                # Allow caller to explicitly clear (empty string -> None).
-                current["completed_at"] = body.completed_at or None
+                # AO-MASS-3: the server stamps the completion time; the
+                # caller's value only says "complete" (non-empty) or "clear"
+                # (empty string -> None). A client clock or a back-dated
+                # string is never persisted.
+                current["completed_at"] = now_iso if body.completed_at else None
 
             current["steps"] = steps
 

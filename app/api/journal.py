@@ -132,6 +132,9 @@ async def link_coa_account(
     code uses for the cash side of each entry to the right physical account.
     """
     require_role(workspace, "accountant")
+    # AO-MASS-3: entity_scope, like the sibling COA routes (Audit 2026-05-31
+    # Bug 1), so a scoped member cannot relink another entity's cash account.
+    assert_entity_in_scope(workspace, body.entity_id)
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         ok = await link_external_account(
             session,
