@@ -198,6 +198,34 @@ def test_render_child_exit_gives_render_failed(monkeypatch) -> None:
     assert elapsed_s < 5.0, f"render took {elapsed_s:.1f}s (should not hang)"
 
 
+def test_pipe_failure_releases_render_slot(monkeypatch) -> None:
+    """R11-P2-3: a Pipe() failure (EMFILE under fd pressure) must not leak a
+    render slot: the call returns a visible error and the semaphore value is
+    back to _RENDER_CONCURRENCY. The old code bound parent_conn inside the
+    try, so the finally raised UnboundLocalError before reaching the
+    release, leaking the slot permanently."""
+    import errno
+
+    ctx = mod._RENDER_MP_CTX
+
+    def _failing_pipe(duplex: bool = True):
+        raise OSError(errno.EMFILE, "too many open files")
+
+    monkeypatch.setattr(ctx, "Pipe", _failing_pipe, raising=False)
+    data = _one_page_pdf()
+
+    out, error = mod._render_pdf(data, max_pages=1, dpi=150)
+
+    assert out == []
+    assert error, "a Pipe() failure must give a visible error"
+    assert not isinstance(error, Exception)
+    # The slot must be back: the semaphore value is at its full concurrency.
+    assert mod._RENDER_SLOT._value == mod._RENDER_CONCURRENCY, (
+        f"render slot leaked: semaphore value {mod._RENDER_SLOT._value} "
+        f"!= {mod._RENDER_CONCURRENCY}"
+    )
+
+
 def test_render_concurrency_bounded_across_calls() -> None:
     """R10-P2-1(b): N concurrent _render_pdf calls never have more than
     _RENDER_CONCURRENCY live render processes at once. The module-level

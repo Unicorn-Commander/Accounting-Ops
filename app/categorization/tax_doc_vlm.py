@@ -75,9 +75,14 @@ _RENDER_CONCURRENCY = 2
 # the hard guarantee a thread join cannot give (the C rasterizer holds the
 # GIL, so a join deadline cannot interrupt a page already inside it).
 _RENDER_PAGE_BUDGET_S = 10.0
+# How long the parent waits for a render slot before giving up with a visible
+# "render busy" error. Without this, callers queue indefinitely behind
+# stalled pages, each pinning a threadpool thread.
+_RENDER_SLOT_WAIT_S = 30.0
 # Module-level bound on how many page render processes may be live at once
 # (across every concurrent _render_pdf call, not per call). Acquired in the
-# parent around each page render and released in the parent's finally.
+# parent around each page render (with a wait cap, see _RENDER_SLOT_WAIT_S)
+# and released in the parent's finally.
 _RENDER_SLOT = threading.BoundedSemaphore(_RENDER_CONCURRENCY)
 # Spawn context: never fork (no inherited secrets/sockets, no
 # fork-from-thread deadlock). A child opened via fork could inherit the
@@ -170,6 +175,11 @@ class TaxDocExtractor:
                 images = [body] if mime in _IMAGE_MIMES else []
                 render_error = None
         except Exception as exc:  # noqa: BLE001 — render failure must not raise
+            # Covers the whole render dispatch: a page over the content bound
+            # or the budget, a child that died without a result, a render slot
+            # that could not be acquired, and child STARTUP failures (a Pipe()
+            # EMFILE under fd pressure): all are visible errors, never an
+            # exception out of the upload.
             return TaxDocExtraction(
                 model=model,
                 duration_ms=int((time.monotonic() - t0) * 1000),
@@ -342,12 +352,37 @@ def _render_pdf(
 
             # Bounded concurrency across ALL concurrent _render_pdf calls: the
             # module-level semaphore is acquired in the parent around the page
-            # render (start + join + kill) and released in the parent's finally.
-            # If start() raises after the slot is held, the finally releases it.
-            _RENDER_SLOT.acquire()
-            proc: multiprocessing.context.SpawnProcess | None = None
+            # render (pipe + start + wait + kill) and released in the parent's
+            # finally. Acquire with a wait cap: a caller that cannot get a
+            # slot in _RENDER_SLOT_WAIT_S fails with a visible "render busy"
+            # instead of queueing forever behind stalled pages.
+            if not _RENDER_SLOT.acquire(timeout=_RENDER_SLOT_WAIT_S):
+                error = "render busy"
+                _log.warning(
+                    "tax_doc_vlm render: page %d: no render slot within %.0fs "
+                    "(partial after %d page(s))",
+                    page_index,
+                    _RENDER_SLOT_WAIT_S,
+                    len(out),
+                )
+                break
+            parent_conn = child_conn = proc = None
             try:
-                parent_conn, child_conn = _RENDER_MP_CTX.Pipe(duplex=False)
+                try:
+                    parent_conn, child_conn = _RENDER_MP_CTX.Pipe(duplex=False)
+                except OSError:
+                    # Pipe() failed (e.g. EMFILE): no child, no pipe. The
+                    # finally below still releases the slot; return a visible
+                    # failure instead of letting the OSError propagate out of
+                    # _render_pdf.
+                    error = "render failed"
+                    _log.warning(
+                        "tax_doc_vlm render: page %d pipe creation failed "
+                        "(partial after %d page(s))",
+                        page_index,
+                        len(out),
+                    )
+                    break
                 proc = _RENDER_MP_CTX.Process(
                     target=_render_one_page,
                     args=(pdf_bytes, page_index, zoom, child_conn),
@@ -396,8 +431,19 @@ def _render_pdf(
                 )
                 break
             finally:
-                parent_conn.close()
-                _RENDER_SLOT.release()
+                # Clean up whatever exists (a Pipe() or start() failure leaves
+                # some of these unbound or half-created): close the pipe ends,
+                # kill a live child, and ALWAYS release the slot (in its own
+                # finally so a cleanup error cannot leak it).
+                try:
+                    for conn in (parent_conn, child_conn):
+                        if conn is not None:
+                            conn.close()
+                    if proc is not None and proc.is_alive():
+                        proc.kill()
+                        proc.join(1)
+                finally:
+                    _RENDER_SLOT.release()
     finally:
         doc.close()
     return out, error
