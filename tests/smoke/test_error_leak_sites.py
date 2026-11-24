@@ -129,7 +129,12 @@ def test_irs_forms_503_detail_contract() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_usps_fault_has_no_upstream_xml(monkeypatch) -> None:
+async def test_usps_fault_has_no_upstream_xml(monkeypatch, caplog) -> None:
+    """The USPS response body is upstream XML: the fault must not carry it, and
+    the log must not either (only the HTTP status is logged, never
+    resp.text)."""
+    import logging
+
     import httpx
 
     import app.api.usps_tracking as usps
@@ -152,18 +157,26 @@ async def test_usps_fault_has_no_upstream_xml(monkeypatch) -> None:
     # Enable the lookup so the code path reaches the HTTP call.
     monkeypatch.setattr(usps, "_get_user_id", lambda: "test-user")
 
-    result = await usps.lookup_tracking("94001118992234567890")
+    with caplog.at_level(logging.WARNING, logger=usps.__name__):
+        result = await usps.lookup_tracking("94001118992234567890")
+
     assert MARKER not in (result.fault or "")
     assert "503" in (result.fault or "")
     assert result.is_delivered is False
+    # The upstream body must not reach the log either (only the status).
+    for record in caplog.records:
+        assert MARKER not in record.getMessage()
+    assert any("USPS HTTP 503" in r.getMessage() for r in caplog.records)
 
 
 async def test_usps_transport_error_redacts_query_string(monkeypatch, caplog) -> None:
     """An httpx transport error embeds the request URL, whose query string
-    carries the TrackRequest XML (USER ID credential). The log must redact the
-    query string so the credential never reaches the log."""
-    import httpx
+    carries the TrackRequest XML (USER ID credential). The log must carry only
+    the exception TYPE -- never str(exc), never the URL -- so the credential
+    never reaches the log."""
     import logging
+
+    import httpx
 
     import app.api.usps_tracking as usps
 
@@ -191,8 +204,11 @@ async def test_usps_transport_error_redacts_query_string(monkeypatch, caplog) ->
     # The credential (in the query string) must NOT appear in any log record.
     for record in caplog.records:
         assert MARKER not in record.getMessage()
-    # But the log line must still be present (the failure is visible).
-    assert any("USPS transport error" in r.getMessage() for r in caplog.records)
+    # But the log line must still be present (the failure is visible), carrying
+    # the exception TYPE rather than its text.
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("USPS transport error" in m for m in msgs)
+    assert any("ConnectError" in m for m in msgs)
 
 
 # ---------------------------------------------------------------------------

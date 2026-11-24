@@ -39,8 +39,6 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -54,18 +52,6 @@ router = APIRouter(tags=["usps-tracking"])
 
 USPS_TRACK_URL = "https://secure.shippingapis.com/ShippingAPI.dll"
 USPS_API_NAME = "TrackV2"
-
-
-def _redact_url(url: str) -> str:
-    """Strip the query string from a URL before it reaches a log.
-
-    The USPS request carries the API name + a TrackRequest XML (which embeds
-    the USER ID) in the query string, so an httpx error that embeds the request
-    URL would leak that credential into the log. Keep scheme+host+path; drop
-    the query (and fragment).
-    """
-    parts = urlsplit(url)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 # Tracking number validator: 13-22 digit numeric (covers standard formats)
@@ -260,14 +246,15 @@ async def lookup_tracking(tracking_number: str) -> TrackingResult:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(USPS_TRACK_URL, params=params)
     except httpx.HTTPError as exc:
-        # The exception can carry the request URL, whose query string embeds
-        # the API name + TrackRequest XML (which carries the USER ID): redact
-        # the query string so the credential never reaches the log.
+        # The request carries USERID in the query string, and httpx errors
+        # embed the full request URL in str(exc): logging str(exc) would leak
+        # that credential into the log. Log ONLY the exception TYPE (never
+        # str(exc), never the URL); the tracking number is already redacted by
+        # the caller where it matters and is safe to log here.
         logger.warning(
-            "USPS transport error for %s: %s [url=%s]",
+            "USPS transport error for %s: %s",
             cleaned,
-            _redact_url(str(exc)),
-            _redact_url(USPS_TRACK_URL),
+            type(exc).__name__,
         )
         return TrackingResult(
             tracking_number=cleaned,
@@ -279,12 +266,12 @@ async def lookup_tracking(tracking_number: str) -> TrackingResult:
         )
 
     if resp.status_code != 200:
-        # The USPS response body is upstream XML: log it, fixed fault.
+        # The USPS response body is upstream XML: log ONLY the HTTP status
+        # (never resp.text), fixed fault.
         logger.warning(
-            "USPS HTTP %s for %s body=%r",
+            "USPS HTTP %s for %s",
             resp.status_code,
             cleaned,
-            resp.text[:200],
         )
         return TrackingResult(
             tracking_number=cleaned,
