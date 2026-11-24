@@ -1,6 +1,7 @@
 # Copyright (C) 2026 Magic Unicorn Unconventional Technology & Stuff Inc
 # and the Accounting-Ops contributors.
 # SPDX-License-Identifier: Apache-2.0
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
@@ -106,8 +107,16 @@ async def lifespan(_app: FastAPI):
 
             await init_brigade_client()
             shutdown_brigade_client = _shutdown_brigade
-        except Exception:  # noqa: BLE001 - brigade client must never block startup
-            pass
+        except Exception as exc:  # noqa: BLE001 - brigade client must never block startup
+            # A bare `pass` here hid a dead federation seam: every federated
+            # call then failed deep in the request path with no trace back to
+            # the init that never happened. The init still must not block
+            # startup, but the failure has to be in the logs.
+            logging.getLogger("acctops.main").exception(
+                "brigade federation client init failed (federation calls will "
+                "degrade until the container is restarted): %s: %s",
+                type(exc).__name__, exc,
+            )
 
     try:
         session_manager = getattr(_mcp_server, "session_manager", None)

@@ -66,6 +66,7 @@ from sqlalchemy import text
 
 from agents.sentinel.actions import (
     ActionContext,
+    _write_finding,
     kill_switch_active,
 )
 from agents.sentinel.cadence import (
@@ -406,7 +407,43 @@ async def run_workspace_cycle(
     cycle_started = dt.datetime.now(tz=dt.timezone.utc)
     check_results: list[dict[str, Any]] = []
     for check_type in due_checks:
-        result = await run_one_check(workspace_id, check_type, cycle_id, config)
+        try:
+            result = await run_one_check(workspace_id, check_type, cycle_id, config)
+        except Exception as e:  # noqa: BLE001 - a crash here used to leave NO row at all
+            # The check row would otherwise never appear: run_one_check only
+            # records its own per-check exceptions, and a crash OUT of it (or
+            # of the recording itself) used to vanish into the manual trigger's
+            # _log.exception with no sentinel_finding / check-run row. Write a
+            # failed check-run row best-effort so the failure is visible in the
+            # check-runs surface, then keep the cycle going.
+            _log.exception(
+                "Sentinel: check %s crashed outside its own handler "
+                "(workspace=%s cycle=%s)", check_type, workspace_id, cycle_id,
+            )
+            try:
+                async with workspace_session(SessionLocal, workspace_id) as session:
+                    await _write_finding(
+                        session,
+                        workspace_id=workspace_id,
+                        entity_id=None,
+                        check_type=check_type,
+                        severity="warning",
+                        title=f"Sentinel check crashed: {check_type}",
+                        summary=f"check {check_type} crashed; no finding recorded "
+                                f"by the check itself (cycle {cycle_id})",
+                        details={"cycle_id": str(cycle_id),
+                                 "error": f"{type(e).__name__}: {e}"[:1000]},
+                        action_type=None,
+                        action_ref_id=None,
+                        check_run_id=None,
+                        decision_audit_id=None,
+                    )
+            except Exception:  # noqa: BLE001 - nothing left to report to
+                _log.exception(
+                    "Sentinel: could not write the crash finding for check %s",
+                    check_type,
+                )
+            result = {"check_type": check_type, "error": f"crashed: {type(e).__name__}"}
         check_results.append(result)
 
     # Stamp last_run_at

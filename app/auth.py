@@ -1205,10 +1205,20 @@ async def _ensure_keycloak_user_identity(
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - DB blip → soft-return
-        _log.warning(
-            "[acctops.auth] keycloak identity ensure skipped (db error %s) — "
-            "falling through; downstream may still auto-provision",
+        # A failed INSERT here is NOT a soft blip the user can simply retry:
+        # the user_account row never lands, and every later request resolves
+        # to the unprovisioned-identity 403 with no visible reason (the
+        # 2026-07-22 ghost-identity incident family). Log at ERROR with the
+        # uc_uid so the stuck identity is findable, then soft-return as
+        # before -- auth must survive the DB blip, and the next request
+        # retries the INSERT.
+        _log.error(
+            "[acctops.auth] keycloak identity ensure FAILED (db error %s) for "
+            "uc_uid=%r -- no user_account row written; the caller will see a "
+            "403 unprovisioned response until the next request retries the "
+            "insert. falling through; downstream may still auto-provision",
             exc.__class__.__name__,
+            uc_uid,
         )
         return
 

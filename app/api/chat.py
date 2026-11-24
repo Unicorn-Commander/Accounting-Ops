@@ -918,7 +918,16 @@ async def send_chat_message(
                         {"sid": str(session_id), "cancelled": cancelled},
                     )
             except Exception:  # pragma: no cover
-                _log.exception("Failed to persist assistant message")
+                # The assistant row was INSERTed up front (empty placeholder);
+                # if this UPDATE is lost the client sees a blank assistant
+                # bubble for a turn that happened. That must be LOUD in the
+                # logs -- a plain log-and-succeed here is exactly how the
+                # 2026-07 "conversation reflects nothing" reports were born.
+                _log.exception(
+                    "Failed to persist assistant message (session=%s "
+                    "message=%s); the row keeps its placeholder content",
+                    session_id, assistant_message_id,
+                )
 
     return StreamingResponse(
         _generator(),
