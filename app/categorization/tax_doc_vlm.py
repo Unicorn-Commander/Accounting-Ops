@@ -70,10 +70,14 @@ _RENDER_DPI = 150
 # once, across ALL concurrent _render_pdf calls (a module-level object, not
 # per call). More than a couple of live MuPDF rasterizers just burns CPUs.
 _RENDER_CONCURRENCY = 2
-# Per-page wall-clock budget. The parent does proc.join(budget): a page still
-# rasterizing when the budget is up is KILLED by the OS (proc.kill), which is
-# the hard guarantee a thread join cannot give (the C rasterizer holds the
-# GIL, so a join deadline cannot interrupt a page already inside it).
+# Per-page wall-clock budget. The parent waits on the child's pipe for the
+# PNG (poll(budget)); a child still rasterizing when the budget is up is
+# KILLED by the OS (proc.kill), which is the hard guarantee a thread join
+# cannot give (the C rasterizer holds the GIL, so a join deadline cannot
+# interrupt a page already inside it). Waiting on the pipe (not the process)
+# is what makes a finished child's result reachable: a child whose PNG is
+# larger than the pipe buffer blocks in conn.send while the process is still
+# alive, so a process join would time out a page that already sent its result.
 _RENDER_PAGE_BUDGET_S = 10.0
 # How long the parent waits for a render slot before giving up with a visible
 # "render busy" error. Without this, callers queue indefinitely behind
@@ -304,12 +308,16 @@ def _render_pdf(
       compression bomb): a heavy page is refused in well under a second,
       before it can burn a render process.
     - TIME cap: each page that survives the pre-check is rasterized in its
-      own spawned process (``multiprocessing`` spawn context, never fork) and
-      the parent does ``proc.join(budget)``. A page still rasterizing when the
-      budget is up is KILLED by the OS (``proc.kill``) and counted as a
-      visible ``render timeout (partial)``. A process timeout can be enforced
-      by the OS; a thread join cannot interrupt a GIL-holding rasterizer, so
-      this is the hard guarantee, with the pre-check in front of it.
+      own spawned process (``multiprocessing`` spawn context, never fork).
+      The parent waits on the child's pipe (``parent_conn.poll(budget)``),
+      not on the process: a child whose PNG is larger than the pipe buffer
+      blocks in ``conn.send`` while the process is still alive, so a process
+      join would time out a page that already sent its result. A child still
+      rasterizing when the budget is up is KILLED by the OS (``proc.kill``)
+      and counted as a visible ``render timeout (partial)``. A process
+      timeout can be enforced by the OS; a thread join cannot interrupt a
+      GIL-holding rasterizer, so this is the hard guarantee, with the
+      pre-check in front of it.
     - CONCURRENCY cap: a MODULE-level ``threading.BoundedSemaphore`` is held
       around each page render, bounding how many page render processes are
       live at once across ALL concurrent ``_render_pdf`` calls (not per call).
@@ -389,37 +397,51 @@ def _render_pdf(
                 )
                 proc.start()
                 child_conn.close()
-                # Wait up to the budget for the child to exit. is_alive() is
-                # the reliable liveness check (join's return value is not
-                # always 0 on a clean exit, depending on the platform), so a
-                # child that has finished is the one that is no longer alive.
-                proc.join(per_page_budget_s)
-                if not proc.is_alive():
-                    # The child finished within the budget. Take its result:
-                    # the child is dead, so the pipe holds at most one item.
-                    # A child that died without sending (os._exit, a hard
-                    # crash) leaves the pipe closed: recv() raises EOFError,
-                    # which is a visible "render failed", not a timeout.
-                    # (poll() alone cannot tell "sent" from "died without
-                    # sending": a fast exit can leave a half-closed pipe that
-                    # poll() still reports, so recv's EOF is the real signal.)
+                # Wait up to the budget for the child's PNG on the PIPE, not
+                # for the process to exit: a child whose PNG is larger than
+                # the pipe buffer blocks in conn.send while the process is
+                # still alive, so a process join would time out a page that
+                # already sent its result. poll() is the deadline: it is True
+                # when data is waiting (the child sent) or the pipe is closed
+                # (the child died without sending; recv() then raises
+                # EOFError = a visible "render failed"), and False when the
+                # budget is up (the child is still rasterizing).
+                got = parent_conn.poll(per_page_budget_s)
+                if got:
                     try:
                         png = parent_conn.recv()
-                        out.append(png)
-                        continue
                     except EOFError:
+                        # The child died without sending a result (os._exit,
+                        # a hard crash): the pipe closed with no item. A
+                        # visible failure, not a timeout. Reap the dead child
+                        # and stop here -- do not fall through to the timeout
+                        # path (which would overwrite the error).
+                        if proc.is_alive():
+                            proc.kill()
+                        proc.join(1)
                         error = "render failed"
                         _log.warning(
-                            "tax_doc_vlm render: page %d render child exited without "
-                            "a result (partial after %d page(s))",
+                            "tax_doc_vlm render: page %d render child exited "
+                            "without a result (partial after %d page(s))",
                             page_index,
                             len(out),
                         )
                         break
-                # The child is still rasterizing after the budget: kill it by
-                # the OS (a thread join cannot interrupt the GIL-holding C
-                # rasterizer) and count it as a visible timeout.
-                proc.kill()
+                    else:
+                        # Take the result, then reap the child (it has
+                        # finished or is about to exit after conn.send).
+                        proc.join(1)
+                        if proc.is_alive():
+                            proc.kill()
+                            proc.join(1)
+                        out.append(png)
+                        continue
+                # poll timed out: the child is still rasterizing (or has not
+                # sent yet). Kill it by the OS (a thread join cannot
+                # interrupt the GIL-holding C rasterizer) and count it as a
+                # visible timeout.
+                if proc.is_alive():
+                    proc.kill()
                 proc.join(1)
                 error = "render timeout (partial)"
                 _log.warning(
@@ -460,15 +482,12 @@ def _render_one_page(
     parent owns the timeout and the kill (see _render_pdf); the child does
     no timeout bookkeeping of its own. If anything here fails (a MuPDF error,
     a page the doc cannot open), the child exits without sending a result,
-    which the parent counts as a visible ``render failed``.
+    which the parent counts as a visible ``render failed`` (the closed pipe
+    makes the parent's recv() raise EOFError).
     """
-    # Import the real package, not the deprecated ``fitz`` shim: the shim is a
-    # thin re-export layer that does not survive a spawn re-import (the child
-    # re-runs the import in a fresh interpreter and the shim's lazy bindings
-    # are gone), so it raises in the child and the render would time out.
-    # ``pymupdf`` is the same library (``fitz`` is its deprecated alias) and
-    # imports cleanly in the child.
-    import pymupdf  # the real package (fitz is its deprecated alias)
+    # ``pymupdf`` is the same library as the deprecated ``fitz`` alias; it
+    # imports cleanly in the spawn child.
+    import pymupdf
 
     try:
         matrix = pymupdf.Matrix(zoom, zoom)
@@ -479,8 +498,7 @@ def _render_one_page(
         finally:
             wdoc.close()
     except Exception:  # noqa: BLE001 - a child that fails dies with no result
-        # The parent sees a non-zero exit and no pipe item: a visible
-        # "render failed". Nothing to send; the process ends here.
+        # Nothing to send; the process ends here with the pipe closed.
         return
     finally:
         conn.close()

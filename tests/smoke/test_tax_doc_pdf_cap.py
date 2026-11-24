@@ -9,10 +9,10 @@ The renderer now:
     a page over the bound before it can burn a render process, including a
     Flate-compressed page and a compression bomb;
   - rasterizes each surviving page in its own SPAWNED process (never fork) and
-    the parent does ``proc.join(budget)``: a page still rasterizing past the
-    budget is KILLED by the OS and counted as a visible
-    ``render timeout (partial)`` (a thread join cannot interrupt the
-    GIL-holding C rasterizer);
+    the parent waits on the child's PIPE (``poll(budget)``): a page still
+    rasterizing past the budget is KILLED by the OS and counted as a visible
+    ``render timeout (partial)`` (waiting on the pipe, not the process, is what
+    keeps a finished child's large PNG reachable);
   - bounds how many render processes are live at once with a MODULE-level
     ``threading.BoundedSemaphore`` (across all concurrent ``_render_pdf``
     calls, not per call).
@@ -25,6 +25,7 @@ rasterizer would not produce in a test.
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import resource
@@ -148,19 +149,19 @@ def test_render_returns_pngs_for_good_pages() -> None:
 
 
 def test_render_timeout_kills_child(monkeypatch, caplog) -> None:
-    """R10-P2-1(a): a page that overruns the per-page budget is KILLED by the
+    """R11-P1-1: a page that overruns the per-page budget is KILLED by the
     OS, the render returns with a visible ``render timeout (partial)`` and zero
-    pages, and the render child is DEAD right after the timeout returns.
+    pages.
 
     The fake render child (injected for the heavy page, standing in for a
     pathological rasterize) burns CPU past the budget; the parent's
-    ``proc.join(budget)`` must time out and ``proc.kill()`` must reap it.
+    ``poll(budget)`` must time out and ``proc.kill()`` must reap it.
     """
     data = _one_page_pdf()
     monkeypatch.setattr(mod, "_RENDER_PAGE_BUDGET_S", 2.0)
     # The fake heavy render child (module-level so spawn can pickle it) burns
-    # CPU past the budget then stays alive: the parent must join(budget), see
-    # it still alive, and kill it.
+    # CPU past the budget then stays alive: the parent must poll(budget), see
+    # no data, and kill the still-alive child.
     monkeypatch.setattr(mod, "_render_one_page", _slow_render_child)
 
     with caplog.at_level(logging.WARNING, logger="accounting_ops.tax_doc_vlm"):
@@ -177,6 +178,60 @@ def test_render_timeout_kills_child(monkeypatch, caplog) -> None:
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings, "a partial render must log a WARNING"
     assert any("partial" in r.getMessage() for r in warnings)
+
+
+def _noise_page_pdf() -> bytes:
+    """A one-page PDF with a full-page noise image: its PNG is well over the
+    64 KiB pipe buffer (the size that deadlocked the process-join wait)."""
+    import pymupdf
+
+    # A 2000x2000 grayscale block-noise page. Per-pixel random bytes
+    # compress well under PNG's predictors, but value noise (8x8 blocks,
+    # nearest-upsampled) is incompressible: its PNG is ~280 KiB, well over
+    # the 64 KiB pipe buffer (the size that deadlocked a process-join wait).
+    w = h = 2000
+    block = 8
+    bw, bh = w // block + 1, h // block + 1
+    grid = os.urandom(bw * bh)
+    px = bytearray()
+    for y in range(h):
+        gy = min(y // block, bh - 1)
+        row = grid[gy * bw : (gy + 1) * bw]
+        for x in range(w):
+            px.append(row[min(x // block, bw - 1)])
+    # A grayscale block-noise pixmap; samples length is w*h. pymupdf has no
+    # frombytes: from_buffer on samples_mv shares the pixmap's memory (a
+    # from_buffer_copy would write a throwaway copy), so memmove the noise in.
+    pix = pymupdf.Pixmap(pymupdf.csGRAY, (0, 0, w, h))
+    n = len(px)
+    arr = (ctypes.c_char * n).from_buffer(pix.samples_mv)
+    ctypes.memmove(ctypes.addressof(arr), bytes(px), n)
+    # A lossless PNG of the incompressible noise (lossy JPEG would shrink it).
+    png = pix.tobytes("png")
+    doc = pymupdf.open()
+    page = doc.new_page(width=w, height=h)
+    page.insert_image(page.rect, stream=png)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_large_png_page_renders_no_timeout() -> None:
+    """R11-P1-1: a page whose PNG is well over the 64 KiB pipe buffer must
+    render one page with no error. The parent waits on the pipe (poll +
+    recv), not on the process, so a child blocked in conn.send with a large
+    PNG is collected as a success instead of being killed as a timeout.
+    """
+    data = _noise_page_pdf()
+    out, error = mod._render_pdf(data, max_pages=1, dpi=72)
+    assert error is None, f"large PNG page failed: {error!r}"
+    assert len(out) == 1
+    assert out[0].startswith(b"\x89PNG")
+    # The precondition that makes this test meaningful: the rendered PNG is
+    # well over the pipe buffer (64 KiB on this kernel).
+    assert len(out[0]) > 200_000, (
+        f"test page PNG is only {len(out[0])} bytes (not over the pipe buffer)"
+    )
 
 
 def test_render_child_exit_gives_render_failed(monkeypatch) -> None:
