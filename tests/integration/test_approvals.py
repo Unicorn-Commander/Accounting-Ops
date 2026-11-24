@@ -22,11 +22,19 @@ down.
 from __future__ import annotations
 
 import datetime as dt
+from types import SimpleNamespace
+from typing import Any
+from uuid import UUID
 
 import asyncpg
 import httpx
 import pytest
+from fastapi import HTTPException
 
+from app.api.approvals import DecideRequest, decide_approval
+from app.auth import AuthContext
+from app.config import get_settings
+from app.tenancy import WorkspaceContext
 from tests.conftest import (
     TEST_ENTITY_ID,
     TEST_EXTERNAL_ACCOUNT_ID,
@@ -34,6 +42,7 @@ from tests.conftest import (
     TEST_WORKSPACE_B_ENTITY_ID,
     TEST_WORKSPACE_B_ID,
     TEST_WORKSPACE_ID,
+    TEST_WORKSPACE_SLUG,
     StackConfig,
 )
 from tests.integration.conftest import fetch_chain_rows
@@ -43,6 +52,16 @@ pytestmark = pytest.mark.integration
 
 _SCHEMA = "books"  # shared-schema model (was per-workspace accounting_ops_<uuid>); mirrors app.workspace_session.SHARED_SCHEMA
 EFFECTIVE_DATE = dt.date(2026, 3, 5).isoformat()
+
+# The stack service token is a MACHINE principal (scripts/integration_env.py);
+# since AO-APR-1 the decide endpoint rejects it for every ledger-attesting
+# subject type. Human approval therefore runs the REAL decide_approval handler
+# in-process with a synthetic verified-interactive Keycloak browser-session
+# identity, against the live database — the same fixture
+# tests/integration/test_stripe_approval_postgres.py::_human_decide uses. The
+# human uc_uid is the STACK HUMAN (stack.uc_uid): it holds the owner
+# membership, and approve paths stamp it as the approving human.
+HUMAN = "integration-reviewer"
 
 
 def _run_tag() -> str:
@@ -166,6 +185,12 @@ async def _decide(
     base_url: str, token: str, approval_id: str, decision: str,
     extra: dict | None = None,
 ) -> httpx.Response:
+    """REST decide with the stack service token (machine principal).
+
+    Still used by the RBAC / cross-workspace / out-of-scope denials, which all
+    resolve before the human-session gate. It is NOT a valid decider for the
+    ledger-attesting subject types (AO-APR-1): use _human_decide for those.
+    """
     headers = {"Authorization": f"Bearer {token}"}
     body = {"decision": decision}
     if extra:
@@ -177,6 +202,62 @@ async def _decide(
         )
 
 
+def _human_ctx(uc_uid: str, role: str = "owner") -> WorkspaceContext:
+    return WorkspaceContext(
+        TEST_WORKSPACE_ID, TEST_WORKSPACE_SLUG, role, uc_uid, None, None, False
+    )
+
+
+def _human_auth(uc_uid: str) -> AuthContext:
+    return AuthContext(
+        uc_uid,
+        None,
+        (),
+        {
+            "azp": get_settings().keycloak_client_id,
+            "auth_time": 1,
+            "sid": "integration-fixture-session",
+            "preferred_username": HUMAN,
+        },
+        may_autoprovision=True,
+    )
+
+
+async def _human_decide(
+    stack: StackConfig,
+    approval_id: str,
+    decision: str,
+    extra: dict[str, Any] | None = None,
+) -> SimpleNamespace:
+    """Decide in-process as the workspace's verified interactive human.
+
+    Runs the REAL decide_approval handler (app/api/approvals.py) against the
+    live database with a synthetic Keycloak browser-session identity — the
+    same fixture the passing Stripe human-approval tests use
+    (test_stripe_approval_postgres.py::_human_decide). The uc_uid is the stack
+    human (stack.uc_uid), which holds the owner membership. HTTPException
+    denials are normalized to the SimpleNamespace shape the tests assert on.
+    """
+    ctx = _human_ctx(stack.uc_uid)
+    auth = _human_auth(stack.uc_uid)
+    try:
+        body = await decide_approval(
+            workspace_id=TEST_WORKSPACE_ID,
+            approval_id=UUID(approval_id),
+            body=DecideRequest(decision=decision, **(extra or {})),
+            workspace=ctx,
+            auth=auth,
+        )
+    except HTTPException as exc:
+        detail = str(exc.detail)
+        return SimpleNamespace(
+            status_code=exc.status_code,
+            text=detail,
+            json=lambda: {"detail": detail},
+        )
+    return SimpleNamespace(status_code=200, text=str(body), json=lambda: body)
+
+
 # ==========================================================================
 # (1) Approve a material recat -> reversal + restatement applied; chain green
 # ==========================================================================
@@ -184,7 +265,7 @@ async def _decide(
 async def test_approve_material_recat_applies_reversal_and_restatement(
     db: asyncpg.Pool, seeded_workspace: StackConfig
 ) -> None:
-    base, token = seeded_workspace.base_url, seeded_workspace.token
+    base, token = seeded_workspace.base_url, seeded_workspace.token  # noqa: F841
     # -$25 tier L seed: posts cleanly for the machine principal. The recat of
     # this posted entry is the material action that queues (payload tier M).
     original_id = await _post_expense(
@@ -220,8 +301,10 @@ async def test_approve_material_recat_applies_reversal_and_restatement(
     assert payload["action"] == "recategorize"
     assert rev_before == 0, "queued recat must NOT touch the ledger"
 
-    # APPROVE — applies the held recat.
-    r = await _decide(base, token, approval_id, "approve")
+    # APPROVE — applies the held recat. The stack service token is a machine
+    # principal and gets 403 at the human-session gate (AO-APR-1); the approve
+    # therefore runs through the interactive-human fixture.
+    r = await _human_decide(seeded_workspace, approval_id, "approve")
     assert r.status_code == 200, r.text
     decided = r.json()
     assert decided["ok"] is True and decided["decision"] == "approved"
@@ -286,7 +369,7 @@ async def test_approve_material_recat_applies_reversal_and_restatement(
 async def test_reject_material_recat_leaves_ledger_untouched(
     db: asyncpg.Pool, seeded_workspace: StackConfig
 ) -> None:
-    base, token = seeded_workspace.base_url, seeded_workspace.token
+    base, token = seeded_workspace.base_url, seeded_workspace.token  # noqa: F841
     # -$25 tier L seed (see test 1): the machine principal's post auto-lands.
     original_id = await _post_expense(
         base, token, f"appr-rej-{_run_tag()}", cents=-2500, category="SaaS · AI"
@@ -426,15 +509,16 @@ async def _seed_proposed_rule(db: asyncpg.Pool, kind: str) -> tuple[str, str]:
 async def test_approve_compliance_rule_activates_it(
     db: asyncpg.Pool, seeded_workspace: StackConfig
 ) -> None:
-    base, token = seeded_workspace.base_url, seeded_workspace.token
     kind = f"appr_rule_{_run_tag()}"
     approval_id, rule_id = await _seed_proposed_rule(db, kind)
 
     # Proposed under an inactive profile -> NOT visible to query_specialty_rules.
     assert not await _query_specialty_rules_visible(db, kind), "pending rule must be hidden"
 
-    # APPROVE -> activate.
-    r = await _decide(base, token, approval_id, "approve")
+    # APPROVE -> activate. The rule activation stamps the durable human
+    # decision, so the machine principal is gated out (AO-APR-1); the approve
+    # runs through the interactive-human fixture.
+    r = await _human_decide(seeded_workspace, approval_id, "approve")
     assert r.status_code == 200, r.text
     decided = r.json()
     assert decided["applied"] is True
@@ -484,7 +568,7 @@ async def test_decide_denied_below_accountant_floor(
     """Deciding is a professional attestation gated at the `accountant` floor (so
     a CPA/accountant serving a client can act on it). A bookkeeper — below
     accountant — is denied, and the held action is NOT applied."""
-    base, token = seeded_workspace.base_url, seeded_workspace.token
+    base, token = seeded_workspace.base_url, seeded_workspace.token  # noqa: F841
     # -$25 tier L seed (see test 1): the machine principal's post auto-lands.
     original_id = await _post_expense(
         base, token, f"appr-rbac-{_run_tag()}", cents=-2500, category="SaaS · AI"
@@ -535,7 +619,7 @@ async def test_decide_denied_out_of_scope_entity(
 ) -> None:
     """A member scoped to a DIFFERENT entity cannot decide an approval that
     belongs to the test entity — entity-scope enforced through the real token."""
-    base, token = seeded_workspace.base_url, seeded_workspace.token
+    base, token = seeded_workspace.base_url, seeded_workspace.token  # noqa: F841
     # -$25 tier L seed (see test 1): the machine principal's post auto-lands.
     original_id = await _post_expense(
         base, token, f"appr-scope-{_run_tag()}", cents=-2500, category="SaaS · AI"
@@ -634,7 +718,6 @@ async def test_approve_bank_transaction_import_posts_journal_entry(
     Shape mirrors test_approve_material_recat_applies_reversal_and_restatement:
       seed pending row → APPROVE → assert journal entry + status=approved + audit.
     """
-    base, token = seeded_workspace.base_url, seeded_workspace.token
     tag = _run_tag()
     sxid = f"bofa-1792:2022-01-31:001:{tag}"
 
@@ -664,8 +747,10 @@ async def test_approve_bank_transaction_import_posts_journal_entry(
     assert aq_before["subject_type"] == "bank_transaction_import"
     assert je_before == 0, "no journal entry should exist before approve"
 
-    # APPROVE via real HTTP endpoint.
-    r = await _decide(base, token, approval_id, "approve")
+    # APPROVE. The import is applied with user_confirmed=True + the human
+    # stamped, so the machine principal is gated out (AO-APR-1); the approve
+    # runs through the interactive-human fixture against the live database.
+    r = await _human_decide(seeded_workspace, approval_id, "approve")
     assert r.status_code == 200, r.text
     decided = r.json()
     assert decided["ok"] is True
@@ -768,7 +853,6 @@ async def test_approve_bank_transaction_import_with_category_override(
       → journal entry lands on 6210, not 6700
       → approval row marked approved + audit written
     """
-    base, token = seeded_workspace.base_url, seeded_workspace.token
     tag = _run_tag()
     sxid = f"bofa-1792:2022-02-15:001:{tag}"
 
@@ -781,9 +865,11 @@ async def test_approve_bank_transaction_import_with_category_override(
         category="Banking · Fees",
     )
 
-    # Override to "SaaS · AI" (account 6210).
-    r = await _decide(
-        base, token, approval_id, "approve",
+    # Override to "SaaS · AI" (account 6210). The override approve applies the
+    # import as the human attestation (AO-APR-1), so it runs through the
+    # interactive-human fixture.
+    r = await _human_decide(
+        seeded_workspace, approval_id, "approve",
         extra={"category_override": "SaaS · AI"},
     )
     assert r.status_code == 200, r.text
@@ -823,7 +909,6 @@ async def test_approve_bank_transaction_import_invalid_category_override_rejecte
     db: asyncpg.Pool, seeded_workspace: StackConfig
 ) -> None:
     """Passing an unknown category_override returns 422; row stays pending."""
-    base, token = seeded_workspace.base_url, seeded_workspace.token
     tag = _run_tag()
     sxid = f"bofa-1792:2022-02-20:001:{tag}"
 
@@ -835,8 +920,8 @@ async def test_approve_bank_transaction_import_invalid_category_override_rejecte
         category="Banking · Fees",
     )
 
-    r = await _decide(
-        base, token, approval_id, "approve",
+    r = await _human_decide(
+        seeded_workspace, approval_id, "approve",
         extra={"category_override": "Not A Real Category"},
     )
     assert r.status_code == 422, r.text
@@ -850,3 +935,192 @@ async def test_approve_bank_transaction_import_invalid_category_override_rejecte
                 approval_id,
             )
     assert status == "pending", "invalid category_override must not mark the row decided"
+
+
+# ==========================================================================
+# (9) AO-APR-1 / PWR-99: the stack service token is a MACHINE principal and
+#     must NOT approve any ledger-attesting subject type. The 403s below are
+#     driven over the REAL REST route with the REAL stack token (the same
+#     fixture the passing human-approval tests above use for the human side);
+#     the state read back proves nothing was applied. (The same gate on the
+#     MCP decide_approval path is proven in
+#     tests/smoke/test_approval_decision_human_gate.py, which covers the
+#     agent + PAT + human cases for every subject type without a stack.)
+# ==========================================================================
+
+
+async def _seed_ebay_approval(db: asyncpg.Pool, transaction_id: str) -> str:
+    """Seed an ebay_post_transaction approval row + the connector state row the
+    decision record merges into (same shape the eBay worker writes). Idempotent
+    upserts: the connector_state row is unique per (entity, connector,
+    instance), and other tests in this module may have left one behind."""
+    import uuid as _uuid
+
+    approval_id = str(_uuid.uuid4())
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            await conn.execute(
+                """
+                INSERT INTO connector_state (
+                    id, workspace_id, entity_id, connector_name,
+                    connector_instance_name, state
+                ) VALUES (
+                    gen_random_uuid(), $1, $2, 'ebay_finances', 'default',
+                    '{"approved_ebay_items": {}, "rejected_ebay_items": {}}'::jsonb
+                )
+                ON CONFLICT (entity_id, connector_name, connector_instance_name)
+                DO UPDATE SET state = EXCLUDED.state
+                """,
+                str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID),
+            )
+            await conn.execute(
+                """
+                INSERT INTO approval_queue (
+                    id, workspace_id, entity_id, subject_type, subject_id,
+                    amount, currency_code, usd_equivalent_at_event_time,
+                    status, reasoning, requested_by_identity, payload
+                ) VALUES (
+                    $1, $2, $3, 'ebay_post_transaction', gen_random_uuid(),
+                    9.00, 'USD', 9.00, 'pending', $4, 'ebay-sync', $5::jsonb
+                )
+                """,
+                approval_id, str(TEST_WORKSPACE_ID), str(TEST_ENTITY_ID),
+                f"eBay item {transaction_id} awaits review.",
+                (
+                    '{"action": "ebay_post_transaction", '
+                    f'"ebay_transaction_id": "{transaction_id}", '
+                    '"amount_cents": 900, "currency": "USD"}'
+                ),
+            )
+    return approval_id
+
+
+@pytest.mark.asyncio
+async def test_machine_cannot_approve_recat_or_bank_import(db, seeded_workspace) -> None:
+    """Agent/PAT-class machine principal: recat + bank import approve get 403
+    and the ledger is untouched (read back), per subject type."""
+    tag = _run_tag()
+    original_id = await _post_expense(
+        seeded_workspace.base_url, seeded_workspace.token,
+        f"appr-mach-recat-{tag}", cents=-2500, category="SaaS · AI",
+    )
+    recat_approval = await _queue_material_recat(db, original_id, "Infrastructure · VPS")
+    sxid = f"bofa-1792:2022-03-31:001:{tag}"
+    bti_approval = await _seed_bank_txn_import_approval(
+        db, sxid=sxid, effective_date="2022-03-15", amount_cents=-9900,
+        category="Banking · Fees",
+    )
+
+    recat_r = await _decide(
+        seeded_workspace.base_url, seeded_workspace.token, recat_approval, "approve"
+    )
+    bti_r = await _decide(
+        seeded_workspace.base_url, seeded_workspace.token, bti_approval, "approve"
+    )
+    assert recat_r.status_code == 403, recat_r.text
+    assert "human session" in recat_r.text
+    assert bti_r.status_code == 403, bti_r.text
+    assert "human session" in bti_r.text
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            recat_status = await conn.fetchval(
+                "SELECT status::text FROM approval_queue WHERE id::text = $1",
+                recat_approval,
+            )
+            bti_status = await conn.fetchval(
+                "SELECT status::text FROM approval_queue WHERE id::text = $1",
+                bti_approval,
+            )
+            rev = await conn.fetchval(
+                "SELECT count(*) FROM journal_entry WHERE reverses_entry_id::text = $1",
+                original_id,
+            )
+            je = await conn.fetchval(
+                "SELECT count(*) FROM journal_entry "
+                "WHERE source = 'bofa-statement' AND source_external_id = $1", sxid,
+            )
+    assert recat_status == "pending", "machine approve must not finalize the recat"
+    assert bti_status == "pending", "machine approve must not finalize the import"
+    assert rev == 0, "machine approve must not post a reversal"
+    assert je == 0, "machine approve must not post the import"
+
+
+@pytest.mark.asyncio
+async def test_machine_cannot_approve_compliance_rule(db, seeded_workspace) -> None:
+    """Agent/PAT-class machine principal: compliance_rule approve gets 403 and
+    the rule stays under its INACTIVE holding profile (PWR-99: an agent is
+    never the approver of an activation)."""
+    kind = f"appr_rule_mach_{_run_tag()}"
+    approval_id, rule_id = await _seed_proposed_rule(db, kind)
+
+    r = await _decide(
+        seeded_workspace.base_url, seeded_workspace.token, approval_id, "approve"
+    )
+    assert r.status_code == 403, r.text
+    assert "human session" in r.text
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            status = await conn.fetchval(
+                "SELECT status::text FROM approval_queue WHERE id::text = $1",
+                approval_id,
+            )
+            prof_active = await conn.fetchval(
+                """
+                SELECT p.active FROM compliance_rule r
+                JOIN compliance_profile p ON p.id = r.profile_id
+                WHERE r.id::text = $1
+                """,
+                rule_id,
+            )
+    assert status == "pending", "machine approve must not finalize the rule"
+    assert prof_active is False, "machine approve must not activate the rule"
+
+
+@pytest.mark.asyncio
+async def test_machine_cannot_approve_ebay_post_transaction(db, seeded_workspace) -> None:
+    """Agent/PAT-class machine principal: ebay_post_transaction approve gets
+    403 and NO decision row / ebay decision record is written (the next worker
+    pass must not see a durable human decision it never made)."""
+    txn_id = f"TXN-MACHINE-{_run_tag()}"
+    approval_id = await _seed_ebay_approval(db, txn_id)
+
+    r = await _decide(
+        seeded_workspace.base_url, seeded_workspace.token, approval_id, "approve"
+    )
+    assert r.status_code == 403, r.text
+    assert "human session" in r.text
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(f'SET LOCAL search_path = "{_SCHEMA}", public')
+            status = await conn.fetchval(
+                "SELECT status::text FROM approval_queue WHERE id::text = $1",
+                approval_id,
+            )
+            decision_rows = await conn.fetchval(
+                "SELECT count(*) FROM decision_audit "
+                "WHERE tool_name = 'approval_decision' AND entity_id = $1 "
+                "AND request_payload->>'approval_id' = $2",
+                TEST_ENTITY_ID, approval_id,
+            )
+            state = await conn.fetchrow(
+                "SELECT state FROM connector_state WHERE entity_id = $1 "
+                "AND connector_name = 'ebay_finances'",
+                TEST_ENTITY_ID,
+            )
+    assert status == "pending"
+    assert decision_rows == 0, "403 must not write a decision_audit row"
+    assert state is not None
+    import json as _json
+
+    st = state["state"] if isinstance(state["state"], dict) else _json.loads(state["state"])
+    approved = st.get("approved_ebay_items") or {}
+    rejected = st.get("rejected_ebay_items") or {}
+    assert txn_id not in approved and txn_id not in rejected, (
+        "403 must not write an ebay decision record into connector_state"
+    )

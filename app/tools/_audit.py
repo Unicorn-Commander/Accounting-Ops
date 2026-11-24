@@ -35,13 +35,20 @@ async def write_decision_audit(
     reasoning: str,
     outcome: str,
     source_document_id: UUID | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> UUID:
     """Append one decision_audit row. Returns its id.
 
     JSONB columns are bound as text and cast with ``::jsonb`` so arbitrary
     request/response shapes are stored safely (parameterized — never f-string
-    interpolated).
+    interpolated). ``metadata`` merges into request_payload (the record's
+    existing JSONB details field) when present, e.g. the real non-human
+    principal (agent id / pat id) behind a decision whose decided_by stays
+    the workspace human's id.
     """
+    request = dict(request_payload)
+    if metadata:
+        request["metadata"] = metadata
     audit_id = uuid4()
     await session.execute(
         text(
@@ -55,14 +62,14 @@ async def write_decision_audit(
                 :tool_name, CAST(:request AS jsonb), CAST(:response AS jsonb),
                 :reasoning, :source_document_id, :model_version, :outcome
             )
-            """
+            """,
         ),
         {
             "id": str(audit_id),
             "wid": str(workspace_id),
             "eid": str(entity_id),
             "tool_name": tool_name,
-            "request": json.dumps(request_payload),
+            "request": json.dumps(request),
             "response": json.dumps(response_payload) if response_payload is not None else None,
             "reasoning": reasoning or "",
             "source_document_id": str(source_document_id) if source_document_id else None,

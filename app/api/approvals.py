@@ -220,6 +220,75 @@ def _require_stripe_decision_human(auth: AuthContext, workspace: WorkspaceContex
         )
 
 
+# Subject types whose APPROVE path must not run for an agent or PAT caller.
+# An agent is never the approver: approving any of these stamps the durable
+# decision with the workspace human's id (decided_by / approving_human /
+# _record_*_decision), and the next worker pass acts on that durable human
+# decision. The set therefore covers every branch that writes decided_by or a
+# connector decision record on approve, not just the ones that apply a ledger
+# entry immediately:
+#   journal_entry_post, journal_recategorization, bank_transaction_import,
+#   manual_journal_entry_proposal, stripe_post_balance_transaction apply the
+#   held entry with user_confirmed=True + approving_human stamped;
+#   ebay_post_transaction arms the worker replay "after this durable human
+#   decision" (_record_ebay_decision, decision=approve);
+#   compliance_rule activates the proposed rule (an agent-approved rule
+#   becomes an active control the agent's own output is then checked against).
+_LEDGER_APPROVAL_SUBJECT_TYPES = frozenset(
+    {
+        "journal_entry_post",
+        "journal_recategorization",
+        "bank_transaction_import",
+        "manual_journal_entry_proposal",
+        "stripe_post_balance_transaction",
+        "ebay_post_transaction",
+        "compliance_rule",
+    }
+)
+
+
+def _require_interactive_human(auth: AuthContext, workspace: WorkspaceContext) -> None:
+    """Reject an agent or PAT caller approving a material ledger change.
+
+    Reuses the journal_entry_post rule (workspace.agent_id / pat_scopes check)
+    and the full interactive-human proof, so no non-interactive principal can
+    stamp its own recat or bank import as human-approved.
+    """
+    if (
+        workspace.agent_id is not None
+        or workspace.pat_scopes is not None
+        or not _is_interactive_human(auth, workspace)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Approval of this ledger change requires a human session",
+        )
+
+
+def _decision_principal(workspace: WorkspaceContext, auth: Any) -> str | None:
+    """The real non-human principal behind this decision, if there is one.
+
+    decided_by keeps its meaning (the workspace human's id, the person the
+    record is accountable to), so an agent's or PAT's decision must not be
+    recorded AS that human. For an agent caller this is the agent id (the
+    AuthContext `act` agent, else the workspace-level agent id); for a PAT
+    caller it is the pat_id claim. None for a human interactive session.
+    Written into the decision record's audit metadata (no migration).
+
+    ``auth`` may not be an AuthContext: the MCP wrapper historically called the
+    HTTP handler with the raw ``Depends`` default in place of the real token.
+    A non-AuthContext (or a missing principal) is treated as 'no principal', so
+    the audit write never crashes on a stray attribute read.
+    """
+    if not isinstance(auth, AuthContext):
+        auth = None
+    if workspace.agent_id is not None or (auth is not None and auth.agent_id is not None):
+        return auth.agent_id if auth is not None else workspace.agent_id
+    if workspace.pat_scopes is not None:
+        return auth.claims.get("pat_id") if auth is not None else "pat"
+    return None
+
+
 @router.post("/api/workspaces/{workspace_id}/approvals/{approval_id}/decide")
 async def decide_approval(
     workspace_id: UUID,
@@ -420,11 +489,29 @@ async def decide_approval(
                 response_payload=response,
                 reasoning=body.note or "Rejected by human reviewer.",
                 outcome="rejected",
+                metadata=(
+                    {"decided_by_principal": principal}
+                    if (principal := _decision_principal(workspace, auth))
+                    else None
+                ),
             )
             decision_outcome = "rejected"
 
         else:
             # ---------------- APPROVE ----------------
+            # House rule: an agent is never the approver. Every subject type in
+            # _LEDGER_APPROVAL_SUBJECT_TYPES requires a verified interactive
+            # human BEFORE any apply/record helper runs, so an agent or PAT can
+            # never stamp its own material change as human-approved (nothing is
+            # applied, no decision row, no connector decision record). The
+            # earlier per-branch checks (journal_entry_post / stripe / ebay,
+            # above) already deny non-interactive callers on BOTH approve and
+            # reject; this gate is what additionally covers
+            # journal_recategorization, bank_transaction_import,
+            # manual_journal_entry_proposal and compliance_rule on approve.
+            if subject_type in _LEDGER_APPROVAL_SUBJECT_TYPES:
+                _require_interactive_human(auth, workspace)
+
             if subject_type == "journal_recategorization":
                 applied = await _approve_recategorization(
                     session,
@@ -539,6 +626,11 @@ async def decide_approval(
                 response_payload=response,
                 reasoning=body.note or "Approved by human reviewer.",
                 outcome="approved",
+                metadata=(
+                    {"decided_by_principal": principal}
+                    if (principal := _decision_principal(workspace, auth))
+                    else None
+                ),
             )
             decision_outcome = "approved"
 

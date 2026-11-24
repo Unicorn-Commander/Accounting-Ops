@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from app.api import approvals
 from app.auth import AuthContext, validate_bearer_token
@@ -251,7 +251,11 @@ def test_ebay_approval_http_route_forwards_stored_snapshot():
     asyncio.run(run())
 
 
-def test_legacy_direct_tool_delegate_keeps_working_without_new_auth_parameter():
+def test_direct_tool_delegate_rejects_agent_principal_before_applying():
+    """A bank_transaction_import approve driven through the handler without a
+    separate auth parameter must reject an agent principal (AO-APR-1): the
+    apply helper never runs and nothing is marked decided. (The delegate no
+    longer approves for agent callers, so this is the behavior the test pins.)"""
     async def run():
         wid, eid, aid = uuid4(), uuid4(), uuid4()
         ctx = WorkspaceContext(wid, "isolated", "admin", "owner", "legacy-agent", None, False)
@@ -280,15 +284,19 @@ def test_legacy_direct_tool_delegate_keeps_working_without_new_auth_parameter():
                 approvals,
                 "_approve_bank_transaction_import",
                 AsyncMock(return_value={"journal_entry_id": str(uuid4())}),
-            ),
-            patch.object(approvals, "_mark_decided", AsyncMock()),
+            ) as apply_import,
+            patch.object(approvals, "_mark_decided", AsyncMock()) as mark,
             patch.object(approvals, "write_decision_audit", AsyncMock(return_value=uuid4())),
             patch.object(approvals, "_project_approval_decision"),
         ):
-            result = await approvals.decide_approval(
-                wid, aid, approvals.DecideRequest(decision="approve"), ctx
-            )
-            assert result["applied"] is True
+            with pytest.raises(HTTPException) as denial:
+                await approvals.decide_approval(
+                    wid, aid, approvals.DecideRequest(decision="approve"), ctx
+                )
+            assert denial.value.status_code == 403
+            assert "human session" in denial.value.detail
+            apply_import.assert_not_awaited()
+            mark.assert_not_awaited()
 
     asyncio.run(run())
 
