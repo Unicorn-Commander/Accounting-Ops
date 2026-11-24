@@ -64,9 +64,20 @@ async def _seed_pat(
     scopes: list[str] | None = None,
     workspace_scope: list[uuid.UUID] | None = None,
     expires_at: datetime | None = None,
+    never_expires: bool = False,
     revoked: bool = False,
 ) -> uuid.UUID:
-    """Insert a PAT row computed from ``raw_secret``."""
+    """Insert a PAT row computed from ``raw_secret``.
+
+    A PAT with no expiry is refused at verification (AO-TOK-1), so a fixture
+    that does not name ``expires_at`` gets a live 30-day expiry, the same
+    shape the mint path issues. Only ``never_expires=True`` writes a NULL
+    expiry, for the one test that proves such a row is refused.
+    """
+    if never_expires:
+        expires_at = None
+    elif expires_at is None:
+        expires_at = datetime.now(timezone.utc) + timedelta(days=30)
     digest = hash_secret(raw_secret)
     prefix = secret_prefix(raw_secret)
     async with pool.acquire() as conn:
@@ -329,7 +340,7 @@ async def test_legacy_never_expiring_pat_is_refused(
         # role allowed, no workspace restriction, and NO expiry at all.
         scopes=["accounting:read", "accounting:write", "accounting:admin"],
         workspace_scope=None,
-        expires_at=None,
+        never_expires=True,
     )
 
     async with _asgi_client(raw) as c:
