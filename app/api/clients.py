@@ -44,6 +44,7 @@ from sqlalchemy import text
 
 from app.auth import AuthContext, validate_bearer_token
 from app.db import SessionLocal
+from app.tenancy import aggregate_scope
 from app.workspace_session import workspace_session
 
 _log = logging.getLogger("acctops.clients")
@@ -121,6 +122,9 @@ async def list_my_clients(
             ).mappings().all()
             clients_onboarded = await _clients_onboarded_count(session, user_id)
 
+    # AO114-R2-2: a scoped token (service token, PAT, Brigade JWT) lists only
+    # the workspaces it is scoped to, at its capped role. Humans unchanged.
+    rows, clients_onboarded = await _scoped_client_rows(auth, rows, clients_onboarded)
     workspaces: list[dict[str, Any]] = []
 
     for row in rows:
@@ -175,6 +179,45 @@ async def list_my_clients(
         "total_workspaces": len(workspaces),
         "total_open_items": sum(w["open_items_count"] for w in workspaces),
     }
+
+
+async def _scoped_client_rows(
+    auth: AuthContext, rows: Iterable[Any], clients_onboarded: int
+) -> tuple[list[dict[str, Any]], int]:
+    """Pass the /api/me/clients* membership rows through the AggregateScope.
+
+    Each kept row carries the capped ``role`` and narrowed ``entity_scope``
+    (as a list of str, the shape the membership column has). For a restricted
+    caller ``clients_onboarded`` counts only the kept rows it onboarded, so the
+    persona does not reveal workspaces outside the token's scope.
+    """
+    gate = await aggregate_scope(auth)
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        entry = dict(row)
+        raw = entry.get("entity_scope")
+        try:
+            membership_scope = (
+                tuple(UUID(str(e)) for e in raw) if raw else None
+            )
+        except ValueError:
+            if gate.restricted:
+                continue  # never widen a malformed scope for a scoped token
+            kept.append(entry)
+            continue
+        scoped = gate.row(entry["id"], role=entry["role"], entity_scope=membership_scope)
+        if scoped is None:
+            continue
+        role, entity_scope = scoped
+        entry["role"] = role
+        if gate.restricted:
+            entry["entity_scope"] = (
+                [str(e) for e in entity_scope] if entity_scope is not None else None
+            )
+        kept.append(entry)
+    if gate.restricted:
+        clients_onboarded = sum(1 for r in kept if r.get("onboarded_by_me"))
+    return kept, clients_onboarded
 
 
 @router.get("/api/me/cpa-recent-activity")

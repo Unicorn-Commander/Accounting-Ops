@@ -477,6 +477,14 @@ class AggregateScope:
     # token may see (empty = a malformed claim, which sees nothing).
     federation_workspaces: frozenset[UUID] | None = None
 
+    @property
+    def restricted(self) -> bool:
+        """True when this caller may see less than all of its memberships."""
+        return (
+            self.federation_workspaces is not None
+            or self.auth.service_scope is not None
+        )
+
     def row(
         self,
         workspace_id: UUID | str,
