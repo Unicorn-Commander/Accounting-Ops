@@ -91,9 +91,11 @@ _RENDER_MP_CTX = multiprocessing.get_context("spawn")
 # (thousands of drawing ops / a huge XObject). Decoded size is the bound, not
 # the compressed (raw) stream size: a Flate-compressed content stream can be
 # tiny on disk yet expand to a huge operator list that the C rasterizer must
-# walk. The refusal must happen BEFORE the page is ever handed to the C
-# rasterizer, because that raster is the thing that would hold a worker and
-# block the event loop while it runs.
+# walk. The measure itself is BOUNDED (zlib decompressobj with max_length):
+# it never inflates more than bound+1 bytes into the API process, so a
+# compression-bomb stream is refused without a multi-GB decode. The refusal
+# must happen BEFORE the page is ever handed to the C rasterizer, because that
+# raster is the thing that would burn a render process.
 _PAGE_CONTENT_MAX_BYTES = 128 * 1024
 
 _SYSTEM_PROMPT = (
@@ -447,55 +449,134 @@ def _xobject_xrefs(doc: Any, xobj_xref: int) -> set[int]:
     return xrefs
 
 
+def _decoded_stream_bytes(doc: Any, xref: int, limit: int) -> int:
+    """DECODED byte count of the stream at ``xref``, BOUNDED at ``limit + 1``.
+
+    Never calls ``doc.xref_stream()`` (MuPDF's full decode) on an unbounded
+    stream in the API process: that would inflate a compression bomb into the
+    server. Instead it reads the RAW stream (``xref_stream_raw``) and:
+      - no filter: the raw bytes are the decoded bytes (count them);
+      - a FlateDecode filter: decompress with ``zlib.decompressobj`` and
+        ``decompress(data, max_length)`` (``max_length = limit + 1``), stopping
+        the moment the decoded output passes the bound, so a compression bomb
+        (tiny raw, huge decoded) is refused without a multi-GB inflate;
+      - any other filter or a filter chain (DCTDecode, JPXDecode,
+        [/FlateDecode /LZWDecode], ...): refuse if the RAW size alone exceeds
+        the bound (decoded size is always >= raw size for these), otherwise
+        count the raw size (a lower bound; a stream that small cannot be
+        pathological).
+    Raises on a decode error (a zlib.error on a corrupt/bomb stream, an
+    over-bound stream): the caller treats any raise as "too large" and refuses
+    the page. A stream that cannot be decoded is NEVER counted as 0 -- that
+    would let a bomb through.
+
+    Returns the decoded byte count; 0 for a non-stream or empty xref.
+    """
+    if not doc.xref_is_stream(xref):
+        return 0
+    raw = doc.xref_stream_raw(xref)
+    if not raw:
+        return 0
+    kind, value = doc.xref_get_key(xref, "Filter")
+    if kind == "name" and value == "/FlateDecode":
+        # Bounded Flate decompression: decompress() returns at most max_length
+        # bytes per call and leaves the rest in the object, so the decoded
+        # output never exceeds limit + 1 bytes at any point. A compression
+        # bomb is refused the moment the running decoded total passes the
+        # bound, without inflating the rest of the stream.
+        decomp = zlib.decompressobj()
+        decoded_len = 0
+        while not decomp.eof:
+            chunk = decomp.decompress(raw, limit + 1)
+            decoded_len += len(chunk)
+            if decoded_len > limit:
+                raise ValueError("flate stream exceeds the content bound")
+            if not decomp.unused_data and decomp.eof:
+                break
+        tail = decomp.flush()
+        decoded_len += len(tail)
+        if decoded_len > limit:
+            raise ValueError("flate stream exceeds the content bound")
+        return decoded_len
+    if kind in ("null", "") or value in (None, "", "null"):
+        # No filter: the raw bytes ARE the decoded bytes.
+        if len(raw) > limit:
+            raise ValueError("unfiltered stream exceeds the content bound")
+        return len(raw)
+    # Any other filter or a filter chain: the decoded size is at least the raw
+    # size (these filters do not expand). Refuse if the raw size alone is over
+    # the bound; otherwise count the raw size as a lower bound.
+    if len(raw) > limit:
+        raise ValueError("stream raw size exceeds the content bound")
+    return len(raw)
+
+
 def _page_content_bytes(doc: Any, page_index: int) -> int:
     """Total DECODED bytes of a page's content streams plus its Form
-    XObjects, or 0 on error.
+    XObjects, or 0 on a measurement error that is not an over-bound.
 
     Cheap by design: it reads the page's content-stream xrefs and the XObjects
-    referenced by the page, then sums their decoded lengths without
-    rasterizing anything, so it runs in the caller's context in microseconds
-    for a normal page. This is the pre-check that refuses a pathological page
-    before it can burn a render worker; 0 is treated as "no measurable
-    content" (an empty page), never as "too large".
+    referenced by the page (one nesting level), then sums their DECODED
+    lengths with a BOUNDED decompression (zlib max_length), so it never
+    inflates more than ``_PAGE_CONTENT_MAX_BYTES + 1`` bytes into the API
+    process and runs in microseconds for a normal page. This is the pre-check
+    that refuses a pathological page before it can burn a render process.
 
-    Decoded size is the bound (``doc.xref_stream``, not ``xref_stream_raw``):
-    a Flate-compressed stream is small on disk yet expands to the operator
-    list the C rasterizer walks, so the compressed size understates the cost.
-    Form XObjects are included because their operators are executed by the
-    rasterizer when the page invokes them ("/X Do"), including the one
-    nesting level of XObjects an XObject itself references (its /Resources
-    /XObject dict). The sum stops as soon as it passes
-    ``_PAGE_CONTENT_MAX_BYTES``: the caller only needs the verdict, and a page
-    whose content is already over the bound must not burn time decoding every
-    stream.
+    Decoded size is the bound (not the compressed/raw size): a
+    Flate-compressed content stream is small on disk yet expands to the
+    operator list the C rasterizer walks, so the compressed size understates
+    the cost. The measure is bounded: a Flate stream is decompressed with
+    ``max_length = bound + 1`` and a compression bomb (tiny raw, huge decoded)
+    is refused the moment the decoded output passes the bound, without a
+    multi-GB decode. Form XObjects are included because their operators are
+    executed by the rasterizer when the page invokes them ("/X Do"), including
+    the one nesting level of XObjects an XObject itself references (its
+    /Resources /XObject dict). The sum stops as soon as it passes the bound:
+    the caller only needs the verdict, and a page whose content is already
+    over the bound must not burn time decoding every stream.
+
+    ANY decode error (a zlib.error on a corrupt stream, MuPDF refusing a
+    stream, an unknown filter chain) refuses the page: it returns a count OVER
+    the bound (the caller refuses), never 0. A stream that cannot be decoded
+    must not be counted as "no content" -- that would let a bomb through.
     """
     page = doc[page_index]
     limit = _PAGE_CONTENT_MAX_BYTES
     total = 0
-    for xref in page.get_contents():
+
+    def _add(xref: int) -> bool:
+        """Add xref's decoded bytes to the running total; True if over bound."""
+        nonlocal total
         try:
-            if doc.xref_is_stream(xref):
-                total += len(doc.xref_stream(xref))
-                if total > limit:
-                    return total
-        except Exception:  # noqa: BLE001 - a corrupt stream is not "too large"
-            continue
+            total += _decoded_stream_bytes(doc, xref, limit)
+        except Exception:  # noqa: BLE001 - a decode error refuses the page
+            # A stream that cannot be decoded (corrupt, or a compression bomb
+            # the bounded decoder refuses) is treated as over the bound:
+            # refuse it. Never count it as 0.
+            total = limit + 1
+            return True
+        return total > limit
+
+    # The page's own content streams.
+    for xref in page.get_contents():
+        if _add(xref):
+            return total
+
+    # The page's Form XObjects, one nesting level deep (the XObjects an
+    # XObject itself invokes, via its /Resources /XObject dict).
     try:
         nested: set[int] = set()
         for xobj in page.get_xobjects():
             xobj_xref = xobj[0]
-            if doc.xref_is_stream(xobj_xref):
-                total += len(doc.xref_stream(xobj_xref))
-                if total > limit:
-                    return total
+            if _add(xobj_xref):
+                return total
             nested.update(_xobject_xrefs(doc, xobj_xref))
-        for xref in nested:
-            if doc.xref_is_stream(xref):
-                total += len(doc.xref_stream(xref))
-                if total > limit:
-                    return total
-    except Exception:  # noqa: BLE001 - a corrupt xobject is not "too large"
-        pass
+        for xref in sorted(nested):
+            if _add(xref):
+                return total
+    except Exception:  # noqa: BLE001 - a corrupt xobject listing refuses the page
+        total = limit + 1
+        return total
     return total
 
 

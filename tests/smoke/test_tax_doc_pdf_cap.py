@@ -248,3 +248,212 @@ def test_render_concurrency_bounded_across_calls() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# AO108-R10-P2-2: the bounded decoded content-size pre-check
+# ---------------------------------------------------------------------------
+
+
+def _heavy_content_stream() -> bytes:
+    """A decoded content stream of ~200 KB of rect ops, far over the 128 KB
+    bound. Used as the payload of the Flate-compressed heavy page below."""
+    return b"\n".join(
+        ("%d %d 8 4 re f" % ((i * 3) % 600, (i * 7) % 650)).encode("latin-1")
+        for i in range(12000)
+    )
+
+
+def _deflate(data: bytes) -> bytes:
+    c = zlib.compressobj(9, zlib.DEFLATED, 15)
+    return c.compress(data) + c.flush()
+
+
+def _form_xobject(stream_raw: bytes, inner: bytes = b"") -> bytes:
+    comp = _deflate(stream_raw)
+    return (
+        b"<< /Type /XObject /Subtype /Form /BBox [0 0 595 842] "
+        b"/Resources <<" + inner + b">> /Matrix [1 0 0 1 0 0] "
+        b"/Filter /FlateDecode /Length "
+        + str(len(comp)).encode() + b" >>\nstream\n" + comp + b"\nendstream\n"
+    )
+
+
+def _minimal_pdf(objs: list[tuple[int, bytes]]) -> bytes:
+    """A minimal valid single-page PDF with the given objects (explicit xrefs)."""
+    header = b"%PDF-1.4\n"
+    body = b""
+    offsets: dict[int, int] = {}
+    for xref, obj in objs:
+        offsets[xref] = len(header) + len(body)
+        body += b"%d 0 obj\n" % xref + obj + b"endobj\n"
+    xref_pos = len(header) + len(body)
+    max_xref = max(x for x, _ in objs)
+    xref = b"xref\n0 %d\n0000000000 65535 f \n" % (max_xref + 1)
+    for x in range(1, max_xref + 1):
+        xref += (
+            b"%010d 00000 n \n" % offsets[x]
+            if x in offsets
+            else b"0000000000 65535 f \n"
+        )
+    xref += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n" % (max_xref + 1)
+    return header + body + xref + str(xref_pos).encode() + b"\n%%EOF"
+
+
+def _flate_heavy_page_pdf() -> bytes:
+    """A one-page PDF whose content stream is a SINGLE Flate stream: tiny raw
+    (deflate of ~200 KB of rect ops), huge decoded (over the 128 KB bound)."""
+    ops = _heavy_content_stream()
+    comp = _deflate(ops)
+    return _minimal_pdf(
+        [
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>\n"),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n"),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+                b"/Contents 4 0 R >>\n",
+            ),
+            (
+                4,
+                b"<< /Length "
+                + str(len(comp)).encode()
+                + b" /Filter /FlateDecode >>\nstream\n"
+                + comp
+                + b"\nendstream\n",
+            ),
+        ]
+    )
+
+
+def test_flate_heavy_page_refused_by_bounded_precheck() -> None:
+    """R10-P2-2(a): a page whose content stream is ONE Flate stream with a RAW
+    size under the bound but a DECODED size over it must be refused by the
+    bounded pre-check. The test asserts raw < bound < decoded in itself: a
+    raw-size (compressed) measure would let this page through, and an unbounded
+    decode would inflate the whole stream. The bounded measure refuses it fast.
+    """
+    data = _flate_heavy_page_pdf()
+    doc = fitz.open(stream=data, filetype="pdf")
+    xref = doc[0].get_contents()[0]
+    raw_len = len(doc.xref_stream_raw(xref))
+    # The test itself proves the raw/decoded distinction: the compressed
+    # stream is small, the decoded operator list is over the bound.
+    assert raw_len < mod._PAGE_CONTENT_MAX_BYTES, (
+        f"test precondition failed: raw {raw_len} not under the bound"
+    )
+    decoded_len = len(zlib.decompress(doc.xref_stream_raw(xref)))
+    assert decoded_len > mod._PAGE_CONTENT_MAX_BYTES, (
+        f"test precondition failed: decoded {decoded_len} not over the bound"
+    )
+    doc.close()
+
+    t0 = time.monotonic()
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    elapsed_s = time.monotonic() - t0
+
+    assert out == []
+    assert error == "page too large (partial)"
+    # The refusal comes from the bounded pre-check (a fitz open + a bounded
+    # Flate decode that stops at the bound), not the per-page budget: it must
+    # be well under the budget.
+    assert elapsed_s < 2.0, f"pre-check refusal took {elapsed_s:.1f}s (not fast)"
+
+
+def test_compression_bomb_page_refused_without_inflate() -> None:
+    """R10-P2-2(b): a Flate compression bomb (a content stream that is tiny raw
+    but decodes to hundreds of MB) must be refused by the bounded pre-check,
+    and the test process's RSS must grow by less than 50 MB (the bounded
+    decoder never inflates the whole stream)."""
+    # A bomb: 512 MiB of spaces compresses to ~0.5 MiB raw but decodes to
+    # 512 MiB. Far over the 128 KB bound; an unbounded decode would balloon
+    # the process.
+    bomb = b" " * (512 * 1024 * 1024)
+    comp = zlib.compress(bomb, 9)
+    data = _minimal_pdf(
+        [
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>\n"),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n"),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+                b"/Contents 4 0 R >>\n",
+            ),
+            (
+                4,
+                b"<< /Length "
+                + str(len(comp)).encode()
+                + b" /Filter /FlateDecode >>\nstream\n"
+                + comp
+                + b"\nendstream\n",
+            ),
+        ]
+    )
+
+    ru_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    t0 = time.monotonic()
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    elapsed_s = time.monotonic() - t0
+    ru_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+    assert out == []
+    assert error == "page too large (partial)"
+    # The bounded decoder refused the bomb fast (no multi-GB inflate).
+    assert elapsed_s < 5.0, f"bomb refusal took {elapsed_s:.1f}s (not fast)"
+    # The process must not have inflated the bomb: RSS growth < 50 MB.
+    # ru_maxrss is in KB on Linux.
+    growth_kb = ru_after - ru_before
+    assert growth_kb < 50 * 1024, (
+        f"RSS grew by {growth_kb / 1024:.1f} MiB (the bomb was inflated)"
+    )
+
+
+def test_normal_page_passes_bounded_precheck() -> None:
+    """R10-P2-2(c) control: a normal one-page W-2-like PDF (a few KB of
+    decoded content) is under the bound and still rasterizes to a PNG."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "W-2 sample")
+    for i in range(5):
+        page.draw_rect(
+            fitz.Rect(10, 10 + i, 50, 20 + i), color=(1, 0, 0), fill=(0, 1, 0)
+        )
+    data = doc.tobytes(deflate=True)
+    doc.close()
+
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    assert error is None
+    assert len(out) == 1
+    assert out[0].startswith(b"\x89PNG")
+
+
+def test_xobject_heavy_page_refused_by_precheck() -> None:
+    """R10-P2-2: a page whose own content stream is tiny but invokes a heavy
+    Form XObject must be refused by the decoded-size pre-check. The page
+    content stream is ~9 bytes decoded; the XObject stream it invokes is a
+    Flate stream whose decoded size is over the bound. A page-level-only
+    measure would let it through."""
+    # Build the page by invoking the heavy source page as a Form XObject
+    # ("/FzFrm0 Do"): the page content stream is tiny, the XObject is heavy.
+    d = fitz.open()
+    page = d.new_page()
+    # A heavy source page (its decoded content is over the bound).
+    src = fitz.open()
+    spage = src.new_page()
+    for i in range(20000):
+        spage.draw_rect(
+            fitz.Rect(i % 595, (i * 7) % 840, (i % 595) + 2, (i * 7) % 840 + 1),
+            color=(1, 0, 0),
+            fill=(0, 1, 0),
+        )
+    src_bytes = src.tobytes()
+    src.close()
+    page.show_pdf_page(page.rect, fitz.open(stream=src_bytes, filetype="pdf"), 0)
+    data = d.tobytes(deflate=True)
+    d.close()
+
+    t0 = time.monotonic()
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    elapsed_s = time.monotonic() - t0
+
+    assert out == []
+    assert error == "page too large (partial)"
+    assert elapsed_s < 3.0, f"pre-check refusal took {elapsed_s:.1f}s (not fast)"
