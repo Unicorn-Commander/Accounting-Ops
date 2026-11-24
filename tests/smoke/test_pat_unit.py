@@ -317,13 +317,11 @@ class TestRoundtrip:
 
 
 # ---------------------------------------------------------------------------
-# BACKWARD-COMPATIBILITY GUARD — legacy credentials must keep verifying
+# AO-TOK-1: legacy NULL-expiry PATs are hard-refused
 #
-# The mint path no longer issues never-expiring, full-scope PATs. VERIFICATION
-# is deliberately untouched: tokens already in production that carry a NULL
-# expires_at and the owner's whole scope set must keep authenticating
-# byte-for-byte. If a future change adds a NOT NULL constraint, backfills
-# expires_at, or flips NULL to "expired", these tests go red.
+# The old mint path wrote never-expiring, full-scope PATs. Production held 0
+# live rows with a NULL expires_at (measured 2026-11-23), so verification now
+# treats NULL as expired instead of honouring it forever.
 # ---------------------------------------------------------------------------
 
 
@@ -364,8 +362,8 @@ class _FakeSession:
         return _FakeResult(self._rows)
 
 
-class TestLegacyNullExpiryStillVerifies:
-    def test_null_expiry_row_is_not_expired(self):
+class TestLegacyNullExpiryRefused:
+    def test_null_expiry_row_is_expired(self):
         row = _legacy_row(generate_secret())
         pat = PATRow(
             id=row.id,
@@ -379,31 +377,16 @@ class TestLegacyNullExpiryStillVerifies:
             last_used_at=None,
             revoked_at=None,
         )
-        assert pat.is_expired is False
-        assert pat.is_active is True
+        assert pat.is_expired is True
+        assert pat.is_active is False
 
-    async def test_null_expiry_full_scope_pat_still_authenticates(self):
-        """The exact credential the old mint path produced — no expiry, every
-        scope, no workspace restriction — must still resolve on verification."""
+    async def test_null_expiry_full_scope_pat_no_longer_authenticates(self):
+        """The exact credential the old mint path produced must not verify."""
         raw = generate_secret()
         session = _FakeSession([_legacy_row(raw)])
-
-        found = await find_active_pat_by_token(session, raw)  # type: ignore[arg-type]
-
-        assert found is not None, "a live NULL-expiry PAT must still verify"
-        pat, owner_user_id, owner_uc_uid = found
-        assert pat.expires_at is None
-        assert pat.workspace_scope is None
-        assert set(pat.scopes) == {
-            "accounting:read",
-            "accounting:write",
-            "accounting:admin",
-        }
-        assert owner_uc_uid == "legacy-owner-uc-uid"
-        assert owner_user_id == pat.owner_user_id
+        assert await find_active_pat_by_token(session, raw) is None  # type: ignore[arg-type]
 
     async def test_revoked_legacy_pat_still_rejected(self):
-        """Revocation still beats the NULL-expiry allowance."""
         raw = generate_secret()
         session = _FakeSession([_legacy_row(raw, revoked=True)])
         assert await find_active_pat_by_token(session, raw) is None  # type: ignore[arg-type]
@@ -415,9 +398,14 @@ class TestLegacyNullExpiryStillVerifies:
         session = _FakeSession([row])
         assert await find_active_pat_by_token(session, raw) is None  # type: ignore[arg-type]
 
-    def test_count_query_still_treats_null_expiry_as_live(self):
-        """The SQL predicate that decides 'is this token still active' must
-        keep the `expires_at IS NULL` arm — dropping it would retroactively
-        kill every legacy token."""
+    async def test_finite_future_expiry_still_authenticates(self):
+        raw = generate_secret()
+        row = _legacy_row(raw)
+        row.expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+        session = _FakeSession([row])
+        assert await find_active_pat_by_token(session, raw) is not None  # type: ignore[arg-type]
+
+    def test_count_query_does_not_count_null_expiry_as_live(self):
         src = inspect.getsource(count_active_pats)
-        assert "expires_at IS NULL OR expires_at > now()" in src
+        assert "expires_at IS NULL OR" not in src
+        assert "expires_at IS NOT NULL AND expires_at > now()" in src

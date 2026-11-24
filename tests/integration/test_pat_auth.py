@@ -307,18 +307,16 @@ async def test_pat_cannot_mint_pat(
 
 
 # ---------------------------------------------------------------------------
-# Test 7 — BACKWARD COMPAT: a legacy NULL-expiry, full-scope PAT still works
+# Test 7 — AO-TOK-1: a legacy NULL-expiry, full-scope PAT is refused
 #
-# The mint path no longer issues never-expiring tokens (app.security.pat
-# .resolve_ttl refuses ttl_days 0/null). Verification is deliberately
-# untouched, so the ones already in production must keep authenticating.
-# A NOT NULL constraint, an expires_at backfill, or treating NULL as expired
-# would all turn this test red — and would silently revoke live credentials.
+# The mint path stopped issuing never-expiring tokens (resolve_ttl refuses
+# ttl_days 0/null) and production held 0 live NULL-expiry rows on 2026-11-23,
+# so verification now hard-refuses a NULL expires_at.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_legacy_never_expiring_pat_still_authenticates(
+async def test_legacy_never_expiring_pat_is_refused(
     db: asyncpg.Pool, pat_user: uuid.UUID, seeded_workspace: StackConfig
 ) -> None:
     raw = generate_secret()
@@ -336,7 +334,6 @@ async def test_legacy_never_expiring_pat_still_authenticates(
 
     async with _asgi_client(raw) as c:
         r = await c.get("/api/me/workspaces")
-    assert r.status_code == 200, (
-        "a live NULL-expiry PAT must keep working — the mint-side fix must "
-        f"not revoke already-issued credentials: {r.status_code} {r.text}"
+    assert r.status_code == 401, (
+        f"a NULL-expiry PAT must not authenticate: {r.status_code} {r.text}"
     )
