@@ -554,12 +554,11 @@ async def _run_tax_extraction(
     try:
         from app.categorization.tax_doc_vlm import TaxDocExtractor
 
-        # extract() is a coroutine: awaiting it runs its GIL-bound fitz PDF work
-        # (open + pre-check + rasterization) off the event loop via its own
-        # run_in_threadpool(_render_pdf) inside, so one heavy uploaded PDF cannot
-        # block the server while it is being refused or rasterized. Awaiting a
-        # coroutine in a worker thread (run_in_threadpool) would hand back an
-        # un-awaited coroutine, so the extraction result would never be read.
+        # extract() is a coroutine: awaiting it runs its CPU-bound fitz PDF work
+        # (open + pre-check + rasterization) off the event loop. Rasterization
+        # happens in a worker process (ProcessPoolExecutor inside _render_pdf)
+        # so one heavy uploaded PDF cannot hold the GIL or block the server's
+        # event loop while it is being refused or rasterized.
         result = await TaxDocExtractor().extract(body=body, mime_type=mime_type)
         status_val = "failed" if result.error else "extracted"
         confidence = (

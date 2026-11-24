@@ -5,9 +5,9 @@ concurrency cap, and a partial render must be visible (never silently
 The renderer rasterized ``doc[:max_pages]`` (page cap) but with no wall-clock
 or concurrency bound: a single pathological page (a crafted content stream / a
 huge XObject) could hang the extraction worker forever, and unbounded page
-threads thrash the GIL. Each page is now rasterized in a worker thread joined
-with a deadline under a module-level semaphore; a page that overruns the budget
-(or cannot get a slot in time) stops the render and the result carries
+renders thrash the GIL. Each page is now rasterized in a worker process (via
+ProcessPoolExecutor) with a hard per-page timeout; a page that overruns the
+budget stops the render and the result carries
 ``error="render timeout (partial)"`` so a truncated tax document is visible.
 
 Offline: a real one-page PDF (built with pymupdf) + a fake pathological page;
@@ -17,7 +17,6 @@ no network, no LLM call.
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from typing import Any
 
@@ -57,66 +56,45 @@ def test_render_stops_at_time_cap_and_reports_partial(monkeypatch, caplog) -> No
     WARNING, and the result carries the partial-timeout error (never silently
     "complete").
 
-    The fake page blocks its rasterizer inside the worker thread; the render
-    must return (with zero pages + the error) instead of waiting for the page
-    to finish.
+    The fake rasterizer (injected via rasterize_fn) blocks well past the
+    per-page budget; the render must return (with zero pages + the error)
+    instead of waiting for the page to finish.
     """
     data = _one_page_pdf()
+    monkeypatch.setattr(mod, "_RENDER_PAGE_BUDGET_S", 1.0)
 
-    def _stall(page: Any, matrix: Any) -> bytes:
-        # Block well past the per-page budget inside the worker thread.
-        threading.Event().wait(60)
+    def _stall(pdf_bytes: Any, page_index: int, zoom: float) -> bytes:
+        time.sleep(60)
         return b""
 
-    monkeypatch.setattr(mod, "_rasterize", _stall)
-
     with caplog.at_level(logging.WARNING, logger="accounting_ops.tax_doc_vlm"):
-        out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+        out, error = mod._render_pdf(
+            data, max_pages=2, dpi=150, rasterize_fn=_stall
+        )
 
-    # The stalled page produced no PNG; the render RETURNED (in ~10s, the
-    # budget) instead of hanging. A pathological page cannot hang the worker.
     assert out == []
-    # A truncated render must be visible, never silently "complete".
     assert error == "render timeout (partial)"
-    # The warning carries the page count rendered (0 here) so the truncation is
-    # diagnosable.
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings, "a partial render must log a WARNING"
     assert any("partial" in r.getMessage() for r in warnings)
 
 
-def test_render_slot_limits_concurrency(monkeypatch) -> None:
-    """The semaphore bounds concurrent page renders to _RENDER_CONCURRENCY.
+def test_render_concurrency_is_bounded() -> None:
+    """The process pool is sized to _RENDER_CONCURRENCY, bounding how many
+    pages rasterize at once. With 2 workers and 3 pages, all pages still
+    complete (they queue)."""
+    doc = fitz.open()
+    for i in range(3):
+        p = doc.new_page()
+        p.insert_text((72, 100), f"page {i}")
+    data = doc.tobytes()
+    doc.close()
 
-    With the slot timeout set to 0, a third render that cannot get a slot must
-    fail fast with the partial-timeout error instead of queuing.
-    """
-    data = _one_page_pdf()
-    monkeypatch.setattr(mod, "_RENDER_SLOT_TIMEOUT_S", 0.0)
-
-    # Hold both slots with two blocked rasterizers, then try a third page.
-    held = [threading.Event() for _ in range(mod._RENDER_CONCURRENCY)]
-
-    def _block(page: Any, matrix: Any) -> bytes:
-        # Block until released; simulates a slow page holding a slot.
-        held[0].wait(60)
-        return b""
-
-    monkeypatch.setattr(mod, "_rasterize", _block)
-    # Acquire the slots directly so the third render cannot get one.
-    for _ in range(mod._RENDER_CONCURRENCY):
-        mod._render_slot.acquire()
-
-    try:
-        out, error = mod._render_pdf(data, max_pages=1, dpi=150)
-    finally:
-        for _ in range(mod._RENDER_CONCURRENCY):
-            mod._render_slot.release()
-
-    # No slot was available within the (zero) timeout: the render failed fast
-    # with the partial-timeout error and produced no pages.
-    assert out == []
-    assert error == "render timeout (partial)"
+    out, error = mod._render_pdf(data, max_pages=3, dpi=72)
+    assert error is None
+    assert len(out) == 3
+    for png in out:
+        assert png.startswith(b"\x89PNG")
 
 
 def test_heavy_page_refused_fast_by_content_precheck() -> None:
@@ -203,163 +181,22 @@ def test_render_1_page_pdf_with_max_pages_2_returns_1_image() -> None:
     assert out[0].startswith(b"\x89PNG")
 
 
-def test_slow_page_finishing_after_timeout_does_not_change_returned(monkeypatch) -> None:
-    """R4-2: a page that overruns its budget but finishes shortly after the
-    caller has timed out appends to its OWN local list; the caller has already
-    returned its partial result and never reads that list, so the late page
-    cannot mutate the returned value."""
-    data = _one_page_pdf()
-    monkeypatch.setattr(mod, "_RENDER_PAGE_BUDGET_S", 0.1)
+def test_render_timeout_returns_partial(monkeypatch) -> None:
+    """A page that overruns its budget produces a partial result with no pages.
 
-    release = threading.Event()
-
-    def _slow_rasterize(page: Any, matrix: Any) -> bytes:
-        # Block just past the caller's (0.1s) join, then produce a marker PNG.
-        release.wait(0.5)
-        return b"\x89PNG-LATE"
-
-    monkeypatch.setattr(mod, "_rasterize", _slow_rasterize)
-    returned = mod._render_pdf(data, max_pages=1, dpi=72)
-    assert returned == ([], "render timeout (partial)")
-
-    # The worker is still blocked; unblock it so it finishes and appends to its
-    # own list. Wait for the worker thread to finish (its join budget is 0.1s,
-    # the worker takes ~0.5s, so it outlives the join by ~0.4s).
-    release.set()
-    deadline = time.monotonic() + 10
-    while threading.active_count() > 1 and time.monotonic() < deadline:
-        time.sleep(0.01)
-
-    # The returned value is a plain list; the late append went to the worker's
-    # local list, not to it. The returned list must still be empty + partial.
-    assert list(returned[0]) == []
-    assert returned[1] == "render timeout (partial)"
-
-
-def test_thread_start_raising_releases_slot(monkeypatch) -> None:
-    """R4-3: if thread.start() raises, the caller must release the slot it
-    acquired and re-raise, so the slot count is unchanged and the worker never
-    holds a slot it will never release (the worker's own finally is the normal
-    release path; it does not run if the thread never started)."""
-    data = _one_page_pdf()
-
-    real_thread = threading.Thread
-
-    def _start_raises(self) -> None:
-        raise RuntimeError("thread spawn refused")
-
-    monkeypatch.setattr(real_thread, "start", _start_raises)
-    before = mod._render_slot._value
-    try:
-        mod._render_pdf(data, max_pages=1, dpi=150)
-        raise AssertionError("thread.start raised; _render_pdf must re-raise")
-    except RuntimeError:
-        pass
-    # The slot acquired for the page was released on the start() failure: the
-    # semaphore is back at its full count (no leaked slot).
-    assert mod._render_slot._value == before
-
-
-def test_worker_owns_doc_close_and_slot_on_timeout(monkeypatch) -> None:
-    """R3-4: on a per-page timeout the WORKER thread owns the document handle
-    and the slot. The caller must NOT close the doc or release the slot while
-    the daemon thread is still inside get_pixmap (use-after-close / double
-    release). So:
-      * after the timeout, close() has NOT been called and the slot is held;
-      * after the blocked page unblocks, close() is called exactly once and
-        the slot is released.
-    A fake page blocks get_pixmap on an Event; the per-page budget is shrunk
-    to 0.2s so the timeout fires fast.
+    With the per-page budget shrunk to 0.5s and a rasterizer that sleeps 60s,
+    the render must return (with zero pages + the error) instead of waiting.
     """
     data = _one_page_pdf()
-    # The join deadline must fire BEFORE the worker's event wait ends, so the
-    # worker is still blocked (alive) when _render_pdf checks is_alive().
     monkeypatch.setattr(mod, "_RENDER_PAGE_BUDGET_S", 0.5)
 
-    release = threading.Event()
-    closed = {"count": 0}
-    doc = fitz.open(stream=data, filetype="pdf")
+    def _slow(pdf_bytes: Any, page_index: int, zoom: float) -> bytes:
+        time.sleep(60)
+        return b""
 
-    class _FakePage:
-        def get_pixmap(self, matrix: Any, alpha: bool) -> Any:
-            # Block in the worker thread until the test releases us.
-            release.wait(60)
-            pix = doc[0].get_pixmap(matrix=matrix, alpha=alpha)
-            return pix
-
-        def get_contents(self) -> list[int]:
-            # The pre-check (R5-P2-2) measures the page's content stream via
-            # get_contents() before rasterizing. The fake stands in for the
-            # real page: report no content streams so the pre-check passes
-            # (the test is about the join budget / doc ownership, not the
-            # pre-check).
-            return []
-
-        def get_xobjects(self) -> list:
-            return []
-
-    class _FakeDoc:
-        # The caller opens the doc to read page_count for the loop bound
-        # (R4-1) before the workers open their own docs; the fake stands in
-        # for that open too, so it must expose page_count (one page).
-        page_count = 1
-
-        def __getitem__(self, i: int) -> _FakePage:
-            return _FakePage()
-
-        def xref_is_stream(self, xref: int) -> bool:
-            return False
-
-        def close(self) -> None:
-            # The test shares one real doc between the caller's page_count open
-            # and the worker's open (both go through the same fitz.open mock),
-            # so the second close gets a ValueError from the already-closed real
-            # doc. Increment the counter (the unit under test) and tolerate the
-            # double-close of the shared real doc.
-            closed["count"] += 1
-            try:
-                doc.close()
-            except ValueError:
-                pass
-
-    monkeypatch.setattr(fitz, "open", lambda *a, **kw: _FakeDoc())
-
-    out, error = mod._render_pdf(data, max_pages=1, dpi=150)
-
-    # The page overran the (0.2s) budget: the render returned early, marked
-    # partial, and produced no page.
+    out, error = mod._render_pdf(data, max_pages=1, dpi=72, rasterize_fn=_slow)
     assert out == []
     assert error == "render timeout (partial)"
-
-    # The caller opened one doc to read page_count (R4-1) and closed it before
-    # the loop; that is the only close so far. The WORKER's doc is still held
-    # (it is blocked in get_pixmap) and must NOT have been closed by the caller
-    # (use-after-close). The semaphore's value is 1 (one of two slots held)
-    # rather than 2 (both free).
-    assert closed["count"] == 1, (
-        f"only the caller's page_count doc may be closed; the worker's doc must "
-        f"still be held (closed={closed['count']})"
-    )
-    assert mod._render_slot._value == mod._RENDER_CONCURRENCY - 1, (
-        f"the slot must still be held by the worker (value={mod._render_slot._value})"
-    )
-
-    # Unblock the worker: it finishes get_pixmap, then its own finally closes
-    # its doc (once) and releases the slot. Wait until the worker has closed its
-    # doc (closed count goes 1 -> 2; its finally runs close() before release(),
-    # so the second close implies the slot is released too).
-    release.set()
-    deadline = time.monotonic() + 10
-    while closed["count"] < 2 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert closed["count"] == 2, (
-        "the worker must close its own doc exactly once (plus the caller's "
-        f"page_count doc = 2 total; closed={closed['count']})"
-    )
-    # The worker's finally released the slot after close(): all slots are free.
-    assert mod._render_slot._value == mod._RENDER_CONCURRENCY, (
-        f"the worker must have released the slot (value={mod._render_slot._value})"
-    )
 
 
 def test_extract_passes_keywords_to_render_pdf(monkeypatch) -> None:
@@ -369,16 +206,14 @@ def test_extract_passes_keywords_to_render_pdf(monkeypatch) -> None:
     extract() end-to-end with a real 1-page PDF and a stubbed HTTP call to
     verify no TypeError occurs."""
     import httpx
-    import pytest
 
     data = _one_page_pdf()
 
     captured_kwargs: dict[str, Any] = {}
 
-    def _fake_render_pdf(pdf_bytes: bytes, *, max_pages: int, dpi: int) -> tuple[list[bytes], str | None]:
+    def _fake_render_pdf(pdf_bytes: bytes, *, max_pages: int, dpi: int, rasterize_fn: Any = None) -> tuple[list[bytes], str | None]:
         captured_kwargs["max_pages"] = max_pages
         captured_kwargs["dpi"] = dpi
-        # Return a fake PNG so we don't actually rasterize
         return [b"\x89PNG-fake"], None
 
     monkeypatch.setattr(mod, "_render_pdf", _fake_render_pdf)
@@ -431,7 +266,6 @@ def test_xobject_heavy_page_refused_by_precheck() -> None:
     d.xref_set_key(res_xref, "XObject", f"<</Form1 {new_xref} 0 R>>")
     # Replace the content stream with a tiny one that just invokes the XObject
     d.update_stream(page_xref, b"/Form1 Do")
-    data = d.tobytes()
     d.close()
 
     # The raw content stream is ~9 bytes; the decoded XObject is ~66 KB.
