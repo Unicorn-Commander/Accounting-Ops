@@ -1,19 +1,20 @@
 """AO-SW-5: failure paths must leave a visible trace.
 
 The sweep found worker / background failure paths that left NO durable row and
-no loud log: a crashing sync worker kept the previous "ok" in
-connector_state (connector surface read healthy); a failed tax extraction never
-wrote its document_extraction row (receipt invisible instead of "failed"); a
-sentinel check crashing outside its own handler left no finding row.
+no loud log: a failed tax extraction never wrote its document_extraction row
+(receipt invisible instead of "failed"); a sentinel check crashing outside its
+own handler left no finding row. (The crashing-sync-worker case -- stripe_sync
+/ ebay_sync keeping a stale "ok" in connector_state -- moved to the money
+batch: its outcome write dropped continuation cursors + failure counts on the
+UPDATE path, so it is out of scope for this low-risk PR.)
 
-The fix persists a visible crash state in each case.
+The fix persists a visible crash state in each in-scope case.
 
 Offline: every DB surface is a recording fake; no network, no Postgres.
 """
 
 from __future__ import annotations
 
-import json
 from contextlib import asynccontextmanager
 from typing import Any
 from uuid import uuid4
@@ -36,125 +37,6 @@ class _Row:
 
     def one(self) -> Any:
         return self._rows[0]
-
-
-# ---------------------------------------------------------------------------
-# stripe_sync: unhandled workspace crash -> durable sync_crashed outcome
-# ---------------------------------------------------------------------------
-
-
-class _StateSession:
-    """Recording session: SELECTs return nothing (no existing connector_state
-    row), so the outcome writer takes its INSERT branch; the INSERT params are
-    kept for inspection."""
-
-    def __init__(self) -> None:
-        self.inserts: list[dict[str, Any]] = []
-        self.updates: list[dict[str, Any]] = []
-
-    def begin(self) -> Any:
-        @asynccontextmanager
-        async def _tx():
-            yield self
-
-        return _tx()
-
-    async def execute(self, stmt: Any, params: dict[str, Any] | None = None) -> Any:
-        sql = str(stmt).strip().upper()
-        if sql.startswith("INSERT"):
-            assert params is not None
-            self.inserts.append(params)
-            return _Row([uuid4()])
-        if sql.startswith("UPDATE"):
-            assert params is not None
-            self.updates.append(params)
-            return _Row([])
-        return _Row([])
-
-
-async def _fake_entity_lookup(workspace_id: Any, hint: Any) -> Any:
-    return uuid4()
-
-
-def _make_workspace_session(sessions: list[_StateSession]) -> Any:
-    @asynccontextmanager
-    async def fake_workspace_session(factory: Any, workspace_id: Any):
-        s = _StateSession()
-        sessions.append(s)
-        yield s
-
-    return fake_workspace_session
-
-
-@pytest.fixture
-def stripe_recorder(monkeypatch):
-    import scripts.stripe_sync as mod
-
-    sessions: list[_StateSession] = []
-    monkeypatch.setattr(mod, "workspace_session", _make_workspace_session(sessions))
-    monkeypatch.setattr(mod, "_entity_for_credential", _fake_entity_lookup)
-    return mod, sessions
-
-
-async def test_stripe_unhandled_crash_persists_crash_outcome(
-    stripe_recorder,
-) -> None:
-    mod, sessions = stripe_recorder
-    wid = uuid4()
-    crash = RuntimeError("mapper exploded before outcome write")
-
-    await mod._persist_unhandled_outcome(wid, crash)  # must not raise
-
-    assert sessions, "the crash outcome must go to the workspace DB"
-    session = sessions[-1]
-    assert session.inserts, "no connector_state row -> INSERT with crash state"
-    state = json.loads(session.inserts[0]["state"])
-    assert state["last_outcome"] == "sync_crashed"
-    assert "mapper exploded" in state["last_crash_error"]
-    # The crash must not be mistaken for progress: no progress keys in the
-    # patch, and the INSERT's last_sync_at is NULL.
-    assert "last_sync_at" not in state
-    assert "started_at" not in state
-    assert "finished_at" not in state
-    assert "window_gte" not in state
-    assert session.inserts[0]["last_sync_at"] is None
-
-
-# ---------------------------------------------------------------------------
-# ebay_sync: same contract on the eBay worker
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def ebay_recorder(monkeypatch):
-    import scripts.ebay_sync as mod
-
-    sessions: list[_StateSession] = []
-    monkeypatch.setattr(mod, "workspace_session", _make_workspace_session(sessions))
-    monkeypatch.setattr(mod, "_entity_for_credential", _fake_entity_lookup)
-    return mod, sessions
-
-
-async def test_ebay_unhandled_crash_persists_crash_outcome(ebay_recorder) -> None:
-    mod, sessions = ebay_recorder
-    wid = uuid4()
-    crash = RuntimeError("payout page vanished")
-
-    await mod._persist_unhandled_outcome(wid, crash)  # must not raise
-
-    assert sessions, "the crash outcome must go to the workspace DB"
-    session = sessions[-1]
-    assert session.inserts, "no connector_state row -> INSERT with crash state"
-    state = json.loads(session.inserts[0]["patch"])
-    assert state["last_outcome"] == "sync_crashed"
-    assert "payout page vanished" in state["last_crash_error"]
-    # The crash must not be mistaken for progress: no progress keys in the
-    # patch, and the INSERT's last_sync_at is NULL.
-    assert "last_sync_at" not in state
-    assert "started_at" not in state
-    assert "finished_at" not in state
-    assert "_ebay_continuation_cursor" not in state
-    assert session.inserts[0]["last_sync_at"] is None
 
 
 # ---------------------------------------------------------------------------
