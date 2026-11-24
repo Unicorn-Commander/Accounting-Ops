@@ -25,6 +25,7 @@ from app.ar.invoicing import (
     hash_pay_token,
     issue_invoice_draft,
     record_payment,
+    regenerate_pay_link,
     void_invoice,
 )
 from app.workspace_session import workspace_session
@@ -279,3 +280,64 @@ async def test_expired_revoked_paid_answer_exactly_like_unknown(app_sessions, ow
         for kind, answer in answers.items():
             assert answer == answers["unknown"], f"{kind}{suffix} differs from unknown"
             assert b"Example Customer" not in answer[1] and b"example.com" not in answer[1]
+
+
+async def test_reads_hide_the_link_and_regenerate_rotates_it(app_sessions, workspace) -> None:
+    """AO110-R2-P2-2: a read never shows public_url; the explicit regenerate
+    action revokes the old link and returns a new one exactly once."""
+    from app.ar.invoicing import get_invoice
+
+    ws = workspace[0]
+    view = await _create(app_sessions, ws, f"regen-{uuid.uuid4()}")
+    old = view["public_token"]
+    async with workspace_session(app_sessions, ws["workspace_id"]) as session:
+        read = await get_invoice(session, workspace_id=ws["workspace_id"], invoice_id=view["id"])
+    assert "public_token" not in read
+    assert "public_url" not in invoices_api._attach_pdf_url(read, uuid.UUID(ws["workspace_id"]))
+
+    async with workspace_session(app_sessions, ws["workspace_id"]) as session:
+        fresh = await regenerate_pay_link(
+            session, workspace_id=ws["workspace_id"], invoice_id=view["id"]
+        )
+    new = fresh["public_token"]
+    assert new and new != old
+    shaped = invoices_api._attach_pdf_url(fresh, uuid.UUID(ws["workspace_id"]))
+    assert shaped["public_url"].endswith(f"/pay/{new}")
+    assert await invoices_api._invoice_for_token(old) is None
+    assert isinstance(await invoices_api._invoice_for_token(new), dict)
+
+    async with workspace_session(app_sessions, ws["workspace_id"]) as session:
+        await record_payment(
+            session, workspace_id=ws["workspace_id"], invoice_id=view["id"],
+            actor_uc_uid="rls-test", amount=view["total"],
+        )
+    with pytest.raises(InvoiceError, match="paid"):
+        async with workspace_session(app_sessions, ws["workspace_id"]) as session:
+            await regenerate_pay_link(
+                session, workspace_id=ws["workspace_id"], invoice_id=view["id"]
+            )
+
+
+async def test_link_sent_before_0021_keeps_working_until_its_expiry(app_sessions, owner, workspace) -> None:
+    """AO110-R2-P2-2: 0021 hashed legacy rows in place with the SQL below and
+    set expires_at = created_at + 60 days, so a raw token a customer already
+    holds still resolves, and stops at the cut-off."""
+    ws = workspace[0]
+    view = await _create(app_sessions, ws, f"legacy-{uuid.uuid4()}")
+    raw = "legacy-" + uuid.uuid4().hex + uuid.uuid4().hex[:8]
+    migrated = await owner.fetchval(
+        "SELECT encode(sha256(convert_to($1::text, 'UTF8')), 'hex')", raw
+    )
+    assert migrated == hash_pay_token(raw)
+    await owner.execute(
+        "INSERT INTO public.invoice_pay_token (token_hash, workspace_id, invoice_id, created_at, expires_at) "
+        "VALUES ($1, $2::uuid, $3::uuid, now() - interval '59 days', now() + interval '1 day')",
+        migrated, ws["workspace_id"], view["id"],
+    )
+    assert isinstance(await invoices_api._invoice_for_token(raw), dict)
+    await owner.execute(
+        "UPDATE public.invoice_pay_token SET expires_at = created_at + interval '58 days' "
+        "WHERE token_hash = $1",
+        migrated,
+    )
+    assert await invoices_api._invoice_for_token(raw) is None

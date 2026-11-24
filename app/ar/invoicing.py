@@ -148,6 +148,32 @@ async def revoke_pay_tokens(session: AsyncSession, *, workspace_id: str, invoice
     )
 
 
+async def regenerate_pay_link(
+    session: AsyncSession, *, workspace_id: str, invoice_id: str
+) -> dict[str, Any]:
+    """Owner action: revoke every live pay link of an invoice and mint one new one.
+
+    Only a hash is stored, so a read can never show the link again; this is the
+    explicit way to get a shareable link back. The returned view carries the raw
+    token once (in memory only). The previously sent link stops working.
+    """
+    locked = (
+        await session.execute(
+            text("SELECT status FROM invoice WHERE id = :id FOR UPDATE"),
+            {"id": invoice_id},
+        )
+    ).mappings().first()
+    if locked is None:
+        raise InvoiceError(f"invoice {invoice_id} not found")
+    if locked["status"] in ("paid", "void"):
+        raise InvoiceError(f"cannot create a pay link for a {locked['status']} invoice")
+    await revoke_pay_tokens(session, workspace_id=workspace_id, invoice_id=invoice_id)
+    token = await _mint_pay_token(session, workspace_id=workspace_id, invoice_id=invoice_id)
+    view = await _invoice_view(session, invoice_id=invoice_id)
+    view["public_token"] = token
+    return view
+
+
 class InvoiceError(Exception):
     """A clean, caller-surfaceable AR error (bad input, missing entity, etc.)."""
 

@@ -49,7 +49,12 @@ from app.connectors.stripe.checkout import (
 # cross-app entitlement gate (no-op for standalone). Deferred into the create
 # path behind an edition check so community boot never hard-imports it.
 from app.config import get_settings
-from app.ar.invoicing import InvoiceError, hash_pay_token, normalize_invoice_line_items
+from app.ar.invoicing import (
+    InvoiceError,
+    hash_pay_token,
+    normalize_invoice_line_items,
+    regenerate_pay_link,
+)
 from app.authz import assert_entity_in_scope
 from app.core.business_time import business_today
 from app.db import SessionLocal
@@ -369,6 +374,32 @@ async def get_invoice_detail(
     """Fetch one invoice (header + lines + payments). Role floor: viewer."""
     require_role(workspace, "viewer")
     view = await _load_invoice_scoped(workspace, invoice_id)
+    return _attach_pdf_url(view, workspace_id)
+
+
+@router.post("/api/workspaces/{workspace_id}/invoices/{invoice_id}/pay-link")
+async def regenerate_pay_link_route(
+    workspace_id: UUID,
+    invoice_id: UUID,
+    workspace: WorkspaceContext = Depends(resolve_workspace),
+) -> dict:
+    """Regenerate the customer's /pay link. Role floor: accountant.
+
+    Reads never show public_url (only a hash of the token is stored). This
+    revokes every earlier link of the invoice and returns a new public_url
+    once; the link that was sent before stops working.
+    """
+    require_role(workspace, "accountant")
+    await _load_invoice_scoped(workspace, invoice_id)
+    try:
+        async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+            view = await regenerate_pay_link(
+                session,
+                workspace_id=str(workspace.workspace_id),
+                invoice_id=str(invoice_id),
+            )
+    except InvoiceError as exc:
+        raise _invoice_error(exc) from exc
     return _attach_pdf_url(view, workspace_id)
 
 
