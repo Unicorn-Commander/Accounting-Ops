@@ -300,144 +300,184 @@ def test_mcp_human_session_still_approves_recat_and_bank_import(subject_type):
 
 
 # --------------------------------------------------------------------------
-# AO-APR-1: the gate now covers ebay_post_transaction too. Approve arms a
-# durable worker replay via _record_ebay_decision, so an agent or PAT caller
-# gets 403 and the record helper never runs; a human session still gets
-# through. (compliance_rule + the real-principal recording are covered in the
-# follow-up commits.) The real-REST machine 403 + state read-back for the stack
-# service token is proven in tests/integration/test_approvals.py.
+# AO-APR-1 / PWR-99: the same gate now covers the two subject types the round-2
+# review called out — ebay_post_transaction (approve arms a durable worker
+# replay via _record_ebay_decision) and compliance_rule (approve activates a
+# proposed rule). For both, an agent or PAT caller gets 403 and the apply/record
+# helper never runs; a human session still gets through. The real-REST machine
+# 403 + state read-back for the stack service token is proven in
+# tests/integration/test_approvals.py::test_machine_cannot_approve_*.
 # --------------------------------------------------------------------------
 def test_agent_and_pat_cannot_approve_ebay_or_compliance_rule():
-    """Agent + PAT approve of an ebay_post_transaction gets 403 BEFORE the
-    record helper runs: no durable decision, row never marked decided."""
-    for caller in (_agent_caller, _pat_caller):
+    """Agent + PAT approve of an ebay_post_transaction or a compliance_rule gets
+    403 BEFORE the record/activate helper runs: no durable decision, no rule
+    activation, row never marked decided."""
+    for subject_type in ("ebay_post_transaction", "compliance_rule"):
+        for caller in (_agent_caller, _pat_caller):
+            async def run():
+                session, row = _session_for(subject_type)
+
+                @asynccontextmanager
+                async def _fake_ws(*args):
+                    yield session
+
+                ctx, auth = caller()
+                with (
+                    patch.object(approvals, "workspace_session", _fake_ws),
+                    patch.object(approvals, "_record_ebay_decision", AsyncMock()) as record,
+                    patch.object(approvals, "_approve_compliance_rule", AsyncMock()) as activate,
+                    patch.object(approvals, "_mark_decided", AsyncMock()) as mark,
+                    patch.object(approvals, "write_decision_audit", AsyncMock(return_value=uuid4())),
+                    patch.object(approvals, "_project_approval_decision"),
+                ):
+                    with pytest.raises(HTTPException) as denial:
+                        await approvals.decide_approval(
+                            WID, UUID(row["id"]),
+                            approvals.DecideRequest(decision="approve"), ctx, auth,
+                        )
+                assert denial.value.status_code == 403
+                assert "human session" in denial.value.detail
+                record.assert_not_awaited()
+                activate.assert_not_awaited()
+                mark.assert_not_awaited()
+                assert row["status"] == "pending"
+
+            asyncio.run(run())
+
+
+def test_human_session_still_approves_ebay_and_compliance_rule():
+    """A verified interactive human still approves both new subject types: the
+    record/activate helper runs and the row is marked decided approved."""
+    for subject_type in ("ebay_post_transaction", "compliance_rule"):
         async def run():
-            session, row = _session_for("ebay_post_transaction")
+            session, row = _session_for(subject_type)
 
             @asynccontextmanager
             async def _fake_ws(*args):
                 yield session
 
-            ctx, auth = caller()
             with (
                 patch.object(approvals, "workspace_session", _fake_ws),
                 patch.object(approvals, "_record_ebay_decision", AsyncMock()) as record,
+                patch.object(approvals, "_approve_compliance_rule", AsyncMock(
+                    return_value={"rule_id": str(uuid4()), "active_profile_id": str(uuid4())}
+                )) as activate,
                 patch.object(approvals, "_mark_decided", AsyncMock()) as mark,
                 patch.object(approvals, "write_decision_audit", AsyncMock(return_value=uuid4())),
                 patch.object(approvals, "_project_approval_decision"),
             ):
-                with pytest.raises(HTTPException) as denial:
-                    await approvals.decide_approval(
-                        WID, UUID(row["id"]),
-                        approvals.DecideRequest(decision="approve"), ctx, auth,
-                    )
-            assert denial.value.status_code == 403
-            assert "human session" in denial.value.detail
-            record.assert_not_awaited()
-            mark.assert_not_awaited()
-            assert row["status"] == "pending"
+                ctx, auth = _human_ctx(), _human_auth()
+                outcome = await approvals.decide_approval(
+                    WID, UUID(row["id"]),
+                    approvals.DecideRequest(decision="approve"), ctx, auth,
+                )
+            assert outcome["ok"] is True and outcome["decision"] == "approved"
+            if subject_type == "ebay_post_transaction":
+                assert outcome["applied"] is False  # queued_for_sync, not posted now
+                assert record.await_count == 1
+                assert record.call_args.kwargs["decision"] == "approve"
+                assert record.call_args.kwargs["decided_by"] == HUMAN
+            else:
+                assert outcome["applied"] is True
+                assert activate.await_count == 1
+            assert mark.call_args.kwargs["new_status"] == "approved"
 
         asyncio.run(run())
 
 
-def test_human_session_still_approves_ebay():
-    """A verified interactive human still approves an ebay_post_transaction:
-    the record helper runs (approve, stamped with the human id) and the row is
-    marked decided approved."""
+# --------------------------------------------------------------------------
+# PWR-99 (AO106-R2-4): the decision record must carry the REAL non-human
+# principal. decided_by keeps its meaning (the workspace human's id, the person
+# the record is accountable to), so an agent or PAT decision is recorded with its
+# own principal in the audit metadata (decided_by_principal) — no migration; the
+# field lives in the decision_audit request_payload JSONB the handler already
+# writes. A human decision carries no such metadata.
+# --------------------------------------------------------------------------
+def test_agent_reject_records_real_agent_principal():
+    """An agent's reject is audited with decided_by_principal = the agent id
+    (not the workspace human), and decided_by stays the human's id."""
     async def run():
-        session, row = _session_for("ebay_post_transaction")
+        session, row = _session_for("journal_recategorization")
 
         @asynccontextmanager
         async def _fake_ws(*args):
             yield session
 
+        ctx, auth = _agent_caller()
         with (
             patch.object(approvals, "workspace_session", _fake_ws),
-            patch.object(approvals, "_record_ebay_decision", AsyncMock()) as record,
             patch.object(approvals, "_mark_decided", AsyncMock()) as mark,
-            patch.object(approvals, "write_decision_audit", AsyncMock(return_value=uuid4())),
+            patch.object(approvals, "write_decision_audit", AsyncMock(return_value=uuid4())) as audit,
             patch.object(approvals, "_project_approval_decision"),
         ):
-            ctx, auth = _human_ctx(), _human_auth()
             outcome = await approvals.decide_approval(
                 WID, UUID(row["id"]),
-                approvals.DecideRequest(decision="approve"), ctx, auth,
+                approvals.DecideRequest(decision="reject"), ctx, auth,
             )
-        assert outcome["ok"] is True and outcome["decision"] == "approved"
-        assert outcome["applied"] is False  # queued_for_sync, not posted now
-        assert record.await_count == 1
-        assert record.call_args.kwargs["decision"] == "approve"
-        assert record.call_args.kwargs["decided_by"] == HUMAN
-        assert mark.call_args.kwargs["new_status"] == "approved"
+        assert outcome["ok"] is True and outcome["decision"] == "rejected"
+        # The durable stamp keeps the human id (accountability)...
+        assert mark.call_args.kwargs["decided_by"] == HUMAN
+        # ...while the audit record names the real agent principal.
+        assert audit.await_count == 1
+        kwargs = audit.call_args.kwargs
+        assert kwargs["metadata"] == {"decided_by_principal": AGENT}
 
     asyncio.run(run())
 
 
-# --------------------------------------------------------------------------
-# PWR-99: the gate now covers compliance_rule too. Approve activates a proposed
-# rule, so an agent or PAT caller gets 403 and the activate helper never runs;
-# a human session still gets through.
-# --------------------------------------------------------------------------
-def test_agent_and_pat_cannot_approve_compliance_rule():
-    """Agent + PAT approve of a compliance_rule gets 403 BEFORE the activate
-    helper runs: no rule activation, row never marked decided."""
-    for caller in (_agent_caller, _pat_caller):
-        async def run():
-            session, row = _session_for("compliance_rule")
-
-            @asynccontextmanager
-            async def _fake_ws(*args):
-                yield session
-
-            ctx, auth = caller()
-            with (
-                patch.object(approvals, "workspace_session", _fake_ws),
-                patch.object(approvals, "_approve_compliance_rule", AsyncMock()) as activate,
-                patch.object(approvals, "_mark_decided", AsyncMock()) as mark,
-                patch.object(approvals, "write_decision_audit", AsyncMock(return_value=uuid4())),
-                patch.object(approvals, "_project_approval_decision"),
-            ):
-                with pytest.raises(HTTPException) as denial:
-                    await approvals.decide_approval(
-                        WID, UUID(row["id"]),
-                        approvals.DecideRequest(decision="approve"), ctx, auth,
-                    )
-            assert denial.value.status_code == 403
-            assert "human session" in denial.value.detail
-            activate.assert_not_awaited()
-            mark.assert_not_awaited()
-            assert row["status"] == "pending"
-
-        asyncio.run(run())
-
-
-def test_human_session_still_approves_compliance_rule():
-    """A verified interactive human still approves a compliance_rule: the
-    activate helper runs and the row is marked decided approved."""
+def test_pat_reject_records_real_pat_principal():
+    """A PAT's reject is audited with decided_by_principal = the pat_id claim,
+    decided_by staying the workspace human's id."""
     async def run():
-        session, row = _session_for("compliance_rule")
+        session, row = _session_for("bank_transaction_import")
 
         @asynccontextmanager
         async def _fake_ws(*args):
             yield session
 
+        ctx, auth = _pat_caller()
         with (
             patch.object(approvals, "workspace_session", _fake_ws),
-            patch.object(approvals, "_approve_compliance_rule", AsyncMock(
-                return_value={"rule_id": str(uuid4()), "active_profile_id": str(uuid4())}
-            )) as activate,
             patch.object(approvals, "_mark_decided", AsyncMock()) as mark,
-            patch.object(approvals, "write_decision_audit", AsyncMock(return_value=uuid4())),
+            patch.object(approvals, "write_decision_audit", AsyncMock(return_value=uuid4())) as audit,
             patch.object(approvals, "_project_approval_decision"),
         ):
-            ctx, auth = _human_ctx(), _human_auth()
             outcome = await approvals.decide_approval(
                 WID, UUID(row["id"]),
-                approvals.DecideRequest(decision="approve"), ctx, auth,
+                approvals.DecideRequest(decision="reject"), ctx, auth,
             )
-        assert outcome["ok"] is True and outcome["decision"] == "approved"
-        assert outcome["applied"] is True
-        assert activate.await_count == 1
-        assert mark.call_args.kwargs["new_status"] == "approved"
+        assert outcome["ok"] is True and outcome["decision"] == "rejected"
+        assert mark.call_args.kwargs["decided_by"] == HUMAN
+        assert audit.await_count == 1
+        assert audit.call_args.kwargs["metadata"] == {"decided_by_principal": "fixture-pat"}
+
+    asyncio.run(run())
+
+
+def test_human_reject_records_no_principal_metadata():
+    """A human interactive session's decision carries no decided_by_principal
+    metadata — the principal IS the human, already stamped as decided_by."""
+    async def run():
+        session, row = _session_for("journal_recategorization")
+
+        @asynccontextmanager
+        async def _fake_ws(*args):
+            yield session
+
+        ctx, auth = _human_ctx(), _human_auth()
+        with (
+            patch.object(approvals, "workspace_session", _fake_ws),
+            patch.object(approvals, "_mark_decided", AsyncMock()) as mark,
+            patch.object(approvals, "write_decision_audit", AsyncMock(return_value=uuid4())) as audit,
+            patch.object(approvals, "_project_approval_decision"),
+        ):
+            outcome = await approvals.decide_approval(
+                WID, UUID(row["id"]),
+                approvals.DecideRequest(decision="reject"), ctx, auth,
+            )
+        assert outcome["ok"] is True and outcome["decision"] == "rejected"
+        assert mark.call_args.kwargs["decided_by"] == HUMAN
+        assert audit.await_count == 1
+        assert audit.call_args.kwargs["metadata"] is None
 
     asyncio.run(run())

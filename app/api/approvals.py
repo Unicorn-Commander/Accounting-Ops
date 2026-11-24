@@ -265,6 +265,23 @@ def _require_interactive_human(auth: AuthContext, workspace: WorkspaceContext) -
         )
 
 
+def _decision_principal(workspace: WorkspaceContext, auth: AuthContext) -> str | None:
+    """The real non-human principal behind this decision, if there is one.
+
+    decided_by keeps its meaning (the workspace human's id — the person the
+    record is accountable to), so an agent's or PAT's decision must not be
+    recorded AS that human. For an agent caller this is the agent id (the
+    AuthContext `act` agent, else the workspace-level agent id); for a PAT
+    caller it is the pat_id claim. None for a human interactive session.
+    Written into the decision record's audit metadata (no migration).
+    """
+    if workspace.agent_id is not None or auth.agent_id is not None:
+        return auth.agent_id or workspace.agent_id
+    if workspace.pat_scopes is not None:
+        return auth.claims.get("pat_id") or "pat"
+    return None
+
+
 @router.post("/api/workspaces/{workspace_id}/approvals/{approval_id}/decide")
 async def decide_approval(
     workspace_id: UUID,
@@ -465,6 +482,11 @@ async def decide_approval(
                 response_payload=response,
                 reasoning=body.note or "Rejected by human reviewer.",
                 outcome="rejected",
+                metadata=(
+                    {"decided_by_principal": principal}
+                    if (principal := _decision_principal(workspace, auth))
+                    else None
+                ),
             )
             decision_outcome = "rejected"
 
@@ -593,6 +615,11 @@ async def decide_approval(
                 response_payload=response,
                 reasoning=body.note or "Approved by human reviewer.",
                 outcome="approved",
+                metadata=(
+                    {"decided_by_principal": principal}
+                    if (principal := _decision_principal(workspace, auth))
+                    else None
+                ),
             )
             decision_outcome = "approved"
 
