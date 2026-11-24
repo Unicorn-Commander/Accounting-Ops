@@ -16,8 +16,6 @@ from contextlib import asynccontextmanager
 from typing import Any
 from uuid import uuid4
 
-import pytest
-
 import app.api.data_rights as api
 import app.data_rights.export as export_mod
 
