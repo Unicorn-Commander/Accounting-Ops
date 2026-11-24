@@ -226,12 +226,14 @@ async def get_credential_plaintext(
         )
         raise
 
-    # Bump last_used_at and audit.
+    # Bump last_used_at and audit. Scoped to the workspace so a credential id
+    # from another tenant can never bump (or even be located by) this call.
     await session.execute(
         text(
-            "UPDATE public.tenant_credentials SET last_used_at = now() WHERE id = :id"
+            "UPDATE public.tenant_credentials SET last_used_at = now() "
+            "WHERE id = :id AND workspace_id = :workspace_id"
         ),
-        {"id": str(cred_id)},
+        {"id": str(cred_id), "workspace_id": str(workspace_id)},
     )
     await _log(
         session,
