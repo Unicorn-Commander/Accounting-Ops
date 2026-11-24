@@ -145,9 +145,9 @@ def test_pay_page_serves_html_csp_and_body_is_allowed_by_it(monkeypatch) -> None
     assert "style-src 'unsafe-inline' https://fonts.googleapis.com" in csp
     assert "font-src https://fonts.gstatic.com" in csp
     assert "img-src 'self' data: https:" in csp
-    # The connected pay button targets the hosted Stripe Checkout URL; the
-    # policy's form-action must allow it.
-    assert "form-action 'self' https://checkout.stripe.com" in csp
+    # The template has no forms (the Stripe pay button is a link, not a form
+    # submit), so form-action is 'none'.
+    assert "form-action 'none'" in csp
     assert "https://checkout.stripe.com/c/pay/test-token" in body
 
     # A JSON route keeps the strict default policy (setdefault: the route does

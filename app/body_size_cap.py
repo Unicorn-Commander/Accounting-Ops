@@ -124,7 +124,7 @@ class BodySizeCapMiddleware:
             await _send_413(send)
             return
 
-        state = {"total": 0, "exceeded": False, "aborted": False, "sent_413": False}
+        state = {"total": 0, "exceeded": False, "sent_413": False}
 
         async def capped_receive() -> dict[str, Any]:
             if state["exceeded"]:

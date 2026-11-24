@@ -15,10 +15,9 @@ and the invoice preview, both rendering ``app/ar/invoice_brand/template.py``
 CSP forbids inline styles renders unstyled, so those routes set the looser
 ``INVOICE_HTML_CSP`` in the response itself. The middleware uses
 ``setdefault`` for the CSP, so a per-route header wins and every other
-response keeps the strict default. The pay page is a public link that can sit
-in an email and is never embedded in a frame, so the invoice policy carries
-``frame-ancestors 'none'``; the preview is same-origin only, so it keeps the
-default ``frame-ancestors 'self'``.
+response keeps the strict default. Both the pay page and the preview are
+never embedded in a frame, so ``INVOICE_HTML_CSP`` carries
+``frame-ancestors 'none'``.
 
 /docs and /redoc are kept (the edge does not block them and the API is the
 only surface that documents it); they keep the strict default policy, which
@@ -42,10 +41,10 @@ CONTENT_SECURITY_POLICY = (
 
 # The invoice HTML page (pay page + preview) needs exactly what the brand
 # template ships: inline <style> + style= attributes, the Google Fonts
-# stylesheet and font files, the data: logo, and the hosted Stripe Checkout
-# link target for a connected pay button (the template has no forms and no
-# other external targets). No scripts anywhere: script-src 'none'. The public
-# pay page is never embedded in a frame, so frame-ancestors 'none'.
+# stylesheet and font files, and the data: logo. No scripts anywhere:
+# script-src 'none'. Neither the pay page nor the preview is ever embedded in
+# a frame, so frame-ancestors 'none'. The template has no forms, so
+# form-action is 'none' (the Stripe pay button is a link, not a form submit).
 INVOICE_HTML_CSP = (
     "default-src 'none'; "
     "style-src 'unsafe-inline' https://fonts.googleapis.com; "
@@ -54,7 +53,7 @@ INVOICE_HTML_CSP = (
     "script-src 'none'; "
     "frame-ancestors 'none'; "
     "base-uri 'none'; "
-    "form-action 'self' https://checkout.stripe.com"
+    "form-action 'none'"
 )
 
 
