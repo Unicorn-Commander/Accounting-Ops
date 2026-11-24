@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Before deploy (PR #110)
+
+- security(pat): personal access tokens with a NULL `expires_at` are
+  hard-refused from release day (they used to verify forever). Before the
+  release, run this read-only count on each ring; any row it returns stops
+  authenticating the moment the release lands, so re-mint it first:
+
+  ```sql
+  SELECT count(*) FROM public.personal_access_token
+  WHERE expires_at IS NULL AND revoked_at IS NULL;
+  ```
+
+  (legacy1 measured 0 such live rows on 2026-11-23.)
+- migration(public 0021_invoice_pay_token_hash): `public.invoice_pay_token`
+  now keys on `token_hash` (SHA-256), adds `expires_at` (60 days; existing rows
+  get `created_at + 60 days`) and `revoked_at`, and grants the runtime role
+  `UPDATE (revoked_at)` only. One head; downgrade restores the 0018 shape but
+  every link minted after the upgrade stops resolving after a downgrade.
+  `invoice.public_token` is no longer written or shown.
+- behaviour(invoices): pay links. The raw `/pay/{token}` link is returned
+  only by the create, issue and new
+  `POST /api/workspaces/{wid}/invoices/{id}/pay-link` (regenerate) responses;
+  GET, list and MCP `get_invoice` no longer carry `public_url`. Regenerate
+  revokes the earlier link. A link expires after 60 days and is revoked on
+  issue (the draft link), full payment and void; an expired, revoked, paid,
+  void or unknown token all answer the same 404. A link sent before the
+  release keeps working until `created_at + 60 days`. Stripe Checkout now
+  returns customers to a static `/pay/complete/{invoice_id}` page, and
+  re-issuing a posted invoice whose pay link failed retries it (same
+  idempotency key `invoice-checkout-<invoice_id>`). If `/pay/*` is routed by
+  path at the proxy, `/pay/complete/*` is covered by the same rule.
+- behaviour(mcp): an agent id that is not in `ACCTOPS_AGENT_TOOL_POLICY` is
+  read-only and its `tools/list` shows only read-only tools. Enrol any agent
+  that must write before the release.
+
 - security(approvals): agents and PATs can no longer approve recats, bank
   imports, manual journals, Stripe or eBay postings or activate compliance
   rules; every approve path that stamps a durable human decision now requires a
