@@ -160,10 +160,13 @@ app.middleware("http")(audit_span_middleware)
 app.add_middleware(BodySizeCapMiddleware, max_bytes=settings.document_upload_max_bytes)
 # Security response headers (nosniff + CSP + frame-ancestors) on every
 # response, including the 413 the cap middleware sends (it wraps BodySizeCap,
-# see the note above). This API serves no HTML pages (the web app is a
-# separate front end), so a restrictive default-src 'self' CSP is safe here and
-# stops a browser MIME-sniffing an inline text/markdown or application/xml
-# download into executable content.
+# see the note above). The web app is a separate front end behind the same
+# edge, so the DEFAULT policy is a strict default-src 'self' that stops a
+# browser MIME-sniffing an inline text/markdown or application/xml download
+# into executable content. The two HTML routes this API does serve (the public
+# pay page and the invoice preview) set INVOICE_HTML_CSP on their own response
+# (the middleware setdefaults, so the per-route header wins) because the brand
+# template needs inline styles, Google Fonts and a data: logo.
 app.add_middleware(SecurityHeadersMiddleware)
 # Per-tenant / per-principal rate limiting. Added AFTER audit_span_middleware so
 # Starlette places it OUTERMOST (add_middleware inserts at position 0 and the

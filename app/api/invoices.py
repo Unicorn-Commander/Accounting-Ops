@@ -35,6 +35,7 @@ from app.ar import (
 )
 from app.ar.invoice_brand.email_draft import stage_invoice_email
 from app.ar.invoice_brand.template import render_invoice_html, render_invoice_pdf
+from app.security_headers import INVOICE_HTML_CSP
 from app.connectors.stripe.checkout import create_checkout_session
 # NOTE (Community Edition carve-out): app.ar.entitlement is the enterprise
 # cross-app entitlement gate (no-op for standalone). Deferred into the create
@@ -498,11 +499,19 @@ async def preview_invoice(
     invoice_id: UUID,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> HTMLResponse:
-    """Branded HTML for a draft or a posted invoice. Does not post."""
+    """Branded HTML for a draft or a posted invoice. Does not post.
+
+    The response carries INVOICE_HTML_CSP (the brand template needs inline
+    styles + Google Fonts + the data: logo); the security-headers middleware
+    setdefaults, so this route header wins over the strict API default.
+    """
     require_role(workspace, "viewer")
     view = await _load_invoice_scoped(workspace, invoice_id)
     view = _attach_pdf_url(view, workspace_id)
-    return HTMLResponse(render_invoice_html(view))
+    return HTMLResponse(
+        render_invoice_html(view),
+        headers={"Content-Security-Policy": INVOICE_HTML_CSP},
+    )
 
 
 def _public_token_ok(token: str) -> bool:
@@ -554,7 +563,14 @@ async def public_invoice(token: str) -> HTMLResponse:
     view = await _invoice_for_token(token)
     if view is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found")
-    return HTMLResponse(render_invoice_html(view), headers={"Cache-Control": "no-store"})
+    # The brand template renders inline <style>, style= attributes, Google
+    # Fonts and a data: logo: the strict API CSP would render the page
+    # unstyled. This route sets INVOICE_HTML_CSP (the middleware setdefaults,
+    # so the route header wins).
+    return HTMLResponse(
+        render_invoice_html(view),
+        headers={"Cache-Control": "no-store", "Content-Security-Policy": INVOICE_HTML_CSP},
+    )
 
 
 @router.get("/pay/{token}/pdf")
