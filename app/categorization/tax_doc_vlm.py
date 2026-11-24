@@ -281,7 +281,15 @@ def _render_pdf(
     # double-released slot). Reopening the bytes per page is cheap (a 20-page
     # scan is a few KB and opens in ~ms) and is the only fitz-safe way to let
     # each worker own its handle.
-    for page_index in range(max_pages):
+    #
+    # The loop bound is min(max_pages, page_count), not max_pages: a PDF with
+    # fewer pages than the cap (the common case, a single-page W-2 or 1099)
+    # must rasterize every page it has without doc[page_index] raising
+    # IndexError for the missing pages.
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page_count = doc.page_count
+    doc.close()
+    for page_index in range(min(max_pages, page_count)):
         # Bound concurrency: a page render that cannot get a slot within the
         # timeout fails loudly rather than queuing behind a pathological one.
         if not _render_slot.acquire(timeout=_RENDER_SLOT_TIMEOUT_S):

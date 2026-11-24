@@ -128,6 +128,24 @@ def test_render_returns_pngs_for_good_pages() -> None:
     assert out[0].startswith(b"\x89PNG")
 
 
+def test_render_1_page_pdf_with_max_pages_2_returns_1_image() -> None:
+    """R4-1: a single-page W-2/1099 with max_pages=2 (_MAX_PAGES) must rasterize
+    its one page, not raise IndexError from doc[1] on the missing second page.
+    The loop bound is min(max_pages, page_count)."""
+    # A minimal one-page PDF (no text, matching the reviewer's snippet).
+    d = fitz.open()
+    d.new_page()
+    b = d.tobytes()
+    d.close()
+
+    out, error = mod._render_pdf(b, max_pages=2, dpi=72)
+    assert error is None
+    # Exactly 1 image: the document has one page, the cap is two, the loop
+    # stops at the document's page count.
+    assert len(out) == 1
+    assert out[0].startswith(b"\x89PNG")
+
+
 def test_worker_owns_doc_close_and_slot_on_timeout(monkeypatch) -> None:
     """R3-4: on a per-page timeout the WORKER thread owns the document handle
     and the slot. The caller must NOT close the doc or release the slot while
@@ -156,6 +174,11 @@ def test_worker_owns_doc_close_and_slot_on_timeout(monkeypatch) -> None:
             return pix
 
     class _FakeDoc:
+        # The caller opens the doc to read page_count for the loop bound
+        # (R4-1) before the workers open their own docs; the fake stands in
+        # for that open too, so it must expose page_count (one page).
+        page_count = 1
+
         def __getitem__(self, i: int) -> _FakePage:
             return _FakePage()
 
@@ -172,23 +195,31 @@ def test_worker_owns_doc_close_and_slot_on_timeout(monkeypatch) -> None:
     assert out == []
     assert error == "render timeout (partial)"
 
-    # The caller must NOT have closed the doc or released the slot: the worker
-    # still owns both (it is blocked in get_pixmap). The semaphore's value is
-    # 1 (one of two slots held) rather than 2 (both free).
-    assert closed["count"] == 0, "caller must not close the doc while the worker holds it"
+    # The caller opened one doc to read page_count (R4-1) and closed it before
+    # the loop; that is the only close so far. The WORKER's doc is still held
+    # (it is blocked in get_pixmap) and must NOT have been closed by the caller
+    # (use-after-close). The semaphore's value is 1 (one of two slots held)
+    # rather than 2 (both free).
+    assert closed["count"] == 1, (
+        f"only the caller's page_count doc may be closed; the worker's doc must "
+        f"still be held (closed={closed['count']})"
+    )
     assert mod._render_slot._value == mod._RENDER_CONCURRENCY - 1, (
         f"the slot must still be held by the worker (value={mod._render_slot._value})"
     )
 
     # Unblock the worker: it finishes get_pixmap, then its own finally closes
-    # the doc (once) and releases the slot. Wait until the worker has closed the
-    # doc (its finally runs close() before release(), so close count 1 implies
-    # the slot is released too).
+    # its doc (once) and releases the slot. Wait until the worker has closed its
+    # doc (closed count goes 1 -> 2; its finally runs close() before release(),
+    # so the second close implies the slot is released too).
     release.set()
     deadline = time.monotonic() + 10
-    while closed["count"] < 1 and time.monotonic() < deadline:
+    while closed["count"] < 2 and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert closed["count"] == 1, "the worker must close the doc exactly once"
+    assert closed["count"] == 2, (
+        "the worker must close its own doc exactly once (plus the caller's "
+        f"page_count doc = 2 total; closed={closed['count']})"
+    )
     # The worker's finally released the slot after close(): all slots are free.
     assert mod._render_slot._value == mod._RENDER_CONCURRENCY, (
         f"the worker must have released the slot (value={mod._render_slot._value})"
