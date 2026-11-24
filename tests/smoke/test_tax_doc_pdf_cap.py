@@ -425,6 +425,81 @@ def test_normal_page_passes_bounded_precheck() -> None:
     assert out[0].startswith(b"\x89PNG")
 
 
+def _content_pdf(filter_spec: bytes, stream_bytes: bytes) -> bytes:
+    """A one-page PDF whose single content stream has ``filter_spec`` (a raw
+    /Filter value: a name, an array, or an indirect ref) and the given
+    (already-encoded) stream bytes."""
+    return _minimal_pdf(
+        [
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>\n"),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n"),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+                b"/Contents 4 0 R >>\n",
+            ),
+            (
+                4,
+                b"<< /Length "
+                + str(len(stream_bytes)).encode()
+                + b" /Filter "
+                + filter_spec
+                + b" >>\nstream\n"
+                + stream_bytes
+                + b"\nendstream\n",
+            ),
+        ]
+    )
+
+
+def test_flate_array_filter_heavy_page_refused_by_precheck() -> None:
+    """R11-P2-2: the ARRAY form /Filter [/FlateDecode] with a heavy stream must
+    be refused exactly like the bare-name form. The old code only
+    recognised the bare name and counted the array form at its raw size, so a
+    tiny compressed stream overran the bound undetected."""
+    ops = _heavy_content_stream()
+    comp = _deflate(ops)
+    data = _content_pdf(b"[ /FlateDecode ]", comp)
+    t0 = time.monotonic()
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    elapsed_s = time.monotonic() - t0
+
+    assert out == []
+    assert error == "page too large (partial)"
+    assert elapsed_s < 2.0, f"array-filter refusal took {elapsed_s:.1f}s"
+
+
+def test_runlength_filter_page_refused_by_precheck() -> None:
+    """R11-P2-2: a /RunLengthDecode content stream (which decodes larger than
+    its raw size and that the bounded decoder does not understand) must be
+    refused, not counted at its raw size."""
+    # A run-length stream: pairs of (repeat count, byte). 20000 x "A".
+    raw = b"\x4e" * 10000  # 78 = 0x4E: repeat the next byte 79 times
+    data = _content_pdf(b"/RunLengthDecode", raw)
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+
+    assert out == []
+    assert error == "page too large (partial)"
+
+
+def test_filter_chain_page_refused_by_precheck() -> None:
+    """R11-P2-2: a two-filter chain ([/ASCII85Decode /FlateDecode]) on a
+    content stream must be refused (the bounded decoder understands only
+    exactly [/FlateDecode])."""
+    inner = _deflate(_heavy_content_stream())
+    # ASCII85 of the flate stream (base64.a85encode is the A85 variant PDF
+    # uses, adobe=False; the exact encoding does not matter: the chain itself
+    # must be refused before any decode).
+    import base64
+
+    a85 = base64.a85encode(inner, adobe=False)
+    data = _content_pdf(b"[ /ASCII85Decode /FlateDecode ]", a85)
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+
+    assert out == []
+    assert error == "page too large (partial)"
+
+
 def test_xobject_heavy_page_refused_by_precheck() -> None:
     """R10-P2-2: a page whose own content stream is tiny but invokes a heavy
     Form XObject must be refused by the decoded-size pre-check. The page

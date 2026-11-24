@@ -455,6 +455,31 @@ def _xobject_xrefs(doc: Any, xobj_xref: int) -> set[int]:
     return xrefs
 
 
+def _filter_list(doc: Any, xref: int) -> list[str]:
+    """The stream's /Filter normalised to a list of filter names.
+
+    PDFs spell /Filter three ways: a bare name (``/FlateDecode``), an array
+    (``[/FlateDecode]`` or a chain ``[/A85Decode /FlateDecode]``), or an
+    indirect object (``3 0 R`` to either of those). This returns the names as
+    a list; an empty list means no filter. A name that cannot be resolved
+    (indirect cycle, malformed) raises: the caller treats any raise as
+    "refuse the page".
+    """
+    kind, value = doc.xref_get_key(xref, "Filter")
+    if kind in ("null", "") or value in (None, "", "null"):
+        return []
+    if kind == "array" and isinstance(value, str):
+        return [t.strip() for t in re.findall(r"/\S+", value)]
+    if kind == "xref" and isinstance(value, str):
+        m = re.match(r"(\d+)\s+0\s+R", value)
+        if not m:
+            raise ValueError("unresolvable /Filter indirect reference")
+        return _filter_list(doc, int(m.group(1)))
+    if kind == "name":
+        return [value] if value not in (None, "", "null") else []
+    raise ValueError("unrecognised /Filter encoding")
+
+
 def _decoded_stream_bytes(doc: Any, xref: int, limit: int) -> int:
     """DECODED byte count of the stream at ``xref``, BOUNDED at ``limit + 1``.
 
@@ -462,15 +487,16 @@ def _decoded_stream_bytes(doc: Any, xref: int, limit: int) -> int:
     stream in the API process: that would inflate a compression bomb into the
     server. Instead it reads the RAW stream (``xref_stream_raw``) and:
       - no filter: the raw bytes are the decoded bytes (count them);
-      - a FlateDecode filter: decompress with ``zlib.decompressobj`` and
-        ``decompress(data, max_length)`` (``max_length = limit + 1``), stopping
-        the moment the decoded output passes the bound, so a compression bomb
+      - exactly [/FlateDecode] (bare name, array, or indirect): decompress
+        with ``zlib.decompressobj`` at ``max_length = limit + 1``, stopping the
+        moment the decoded output passes the bound, so a compression bomb
         (tiny raw, huge decoded) is refused without a multi-GB inflate;
-      - any other filter or a filter chain (DCTDecode, JPXDecode,
-        [/FlateDecode /LZWDecode], ...): refuse if the RAW size alone exceeds
-        the bound (decoded size is always >= raw size for these), otherwise
-        count the raw size (a lower bound; a stream that small cannot be
-        pathological).
+      - ANY other filter or filter chain (RunLengthDecode, LZWDecode,
+        [/A85Decode /FlateDecode], ...): REFUSE. Real content streams are
+        Flate or unfiltered; any other filter can expand a tiny raw stream to
+        a large decoded one (RunLengthDecode and LZWDecode do), and the
+        bounded decoder only understands Flate, so counting such a stream at
+        its raw size would understate a bomb.
     Raises on a decode error (a zlib.error on a corrupt/bomb stream, an
     over-bound stream): the caller treats any raise as "too large" and refuses
     the page. A stream that cannot be decoded is NEVER counted as 0 -- that
@@ -483,8 +509,8 @@ def _decoded_stream_bytes(doc: Any, xref: int, limit: int) -> int:
     raw = doc.xref_stream_raw(xref)
     if not raw:
         return 0
-    kind, value = doc.xref_get_key(xref, "Filter")
-    if kind == "name" and value == "/FlateDecode":
+    filters = _filter_list(doc, xref)
+    if filters == ["/FlateDecode"]:
         # Bounded Flate decompression: decompress() returns at most max_length
         # bytes per call and leaves the rest in the object, so the decoded
         # output never exceeds limit + 1 bytes at any point. A compression
@@ -504,17 +530,17 @@ def _decoded_stream_bytes(doc: Any, xref: int, limit: int) -> int:
         if decoded_len > limit:
             raise ValueError("flate stream exceeds the content bound")
         return decoded_len
-    if kind in ("null", "") or value in (None, "", "null"):
+    if not filters:
         # No filter: the raw bytes ARE the decoded bytes.
         if len(raw) > limit:
             raise ValueError("unfiltered stream exceeds the content bound")
         return len(raw)
-    # Any other filter or a filter chain: the decoded size is at least the raw
-    # size (these filters do not expand). Refuse if the raw size alone is over
-    # the bound; otherwise count the raw size as a lower bound.
-    if len(raw) > limit:
-        raise ValueError("stream raw size exceeds the content bound")
-    return len(raw)
+    # Any other filter or filter chain: refuse. These filters can expand
+    # (RunLengthDecode, LZWDecode) and the bounded decoder does not understand
+    # them, so the raw size is not a safe lower bound.
+    raise ValueError(
+        "unsupported content stream filter " + " ".join(filters)
+    )
 
 
 def _page_content_bytes(doc: Any, page_index: int) -> int:
