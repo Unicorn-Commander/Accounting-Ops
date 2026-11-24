@@ -48,7 +48,7 @@ from app.connectors.stripe.checkout import (
 # cross-app entitlement gate (no-op for standalone). Deferred into the create
 # path behind an edition check so community boot never hard-imports it.
 from app.config import get_settings
-from app.ar.invoicing import InvoiceError, normalize_invoice_line_items
+from app.ar.invoicing import InvoiceError, hash_pay_token, normalize_invoice_line_items
 from app.authz import assert_entity_in_scope
 from app.core.business_time import business_today
 from app.db import SessionLocal
@@ -521,30 +521,44 @@ def _public_token_ok(token: str) -> bool:
     return all(ch.isalnum() or ch in "-_" for ch in token)
 
 
-async def _invoice_for_token(token: str) -> dict[str, Any] | None:
+_INACTIVE = object()
+_INACTIVE_HTML = (
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>Invoice link</title>"
+    "</head><body><p>This invoice link is no longer active. If you have just paid, "
+    "thank you. Contact the sender for a new link.</p></body></html>"
+)
+
+
+async def _invoice_for_token(token: str) -> dict[str, Any] | object | None:
+    """Resolve a public pay token. None = unknown; _INACTIVE = expired, revoked,
+    paid or void (no customer PII is rendered for those)."""
     if not _public_token_ok(token):
         return None
+    token_hash = hash_pay_token(token)
     async with SessionLocal() as session:
         async with session.begin():
             await session.execute(text("SET LOCAL search_path = books, public"))
             await session.execute(
-                text("SELECT set_config('app.pay_token', :tok, true)"),
-                {"tok": token},
+                text("SELECT set_config('app.pay_token_hash', :h, true)"),
+                {"h": token_hash},
             )
             row = (
                 await session.execute(
                     text(
                         """
-                        SELECT workspace_id::text AS workspace_id, invoice_id::text AS invoice_id
+                        SELECT workspace_id::text AS workspace_id, invoice_id::text AS invoice_id,
+                               (revoked_at IS NULL AND expires_at > now()) AS live
                         FROM public.invoice_pay_token
-                        WHERE token = :tok
+                        WHERE token_hash = :h
                         """
                     ),
-                    {"tok": token},
+                    {"h": token_hash},
                 )
             ).mappings().first()
     if row is None:
         return None
+    if not row["live"]:
+        return _INACTIVE
     try:
         async with workspace_session(SessionLocal, row["workspace_id"]) as session:
             view = await get_invoice(
@@ -554,7 +568,13 @@ async def _invoice_for_token(token: str) -> dict[str, Any] | None:
             )
     except InvoiceError:
         return None
+    if view.get("status") in ("paid", "void"):
+        return _INACTIVE
     return _attach_pdf_url(view, row["workspace_id"])
+
+
+def _inactive_response() -> HTMLResponse:
+    return HTMLResponse(_INACTIVE_HTML, status_code=410, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/pay/{token}", response_class=HTMLResponse)
@@ -562,6 +582,8 @@ async def public_invoice(token: str) -> HTMLResponse:
     view = await _invoice_for_token(token)
     if view is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found")
+    if view is _INACTIVE:
+        return _inactive_response()
     return HTMLResponse(render_invoice_html(view), headers={"Cache-Control": "no-store"})
 
 
@@ -570,6 +592,8 @@ async def public_invoice_pdf(token: str) -> Response:
     view = await _invoice_for_token(token)
     if view is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found")
+    if view is _INACTIVE:
+        return _inactive_response()
     try:
         pdf_bytes = render_invoice_pdf(render_invoice_html(view))
     except PdfRenderUnavailableError:

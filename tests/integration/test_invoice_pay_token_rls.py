@@ -1,9 +1,9 @@
-"""create_invoice_from_draft AS the runtime role (accounting_ops_app) under FORCE RLS.
+"""Invoice pay tokens AS the runtime role (accounting_ops_app) under FORCE RLS.
 
-Regression for: ``INSERT INTO public.invoice_pay_token ... ON CONFLICT DO NOTHING
-RETURNING token`` needs the SELECT policy (``token = app.pay_token``) to read the
-returned row back, so as the least-privilege role it failed with
-"new row violates row-level security policy". Needs ACCTOPS_TEST_DSN (owner) and
+Covers create (RETURNING through the workspace SELECT policy) and AO-TOK-2:
+only a SHA-256 of the token is stored, a link expires, and it is revoked on
+void / paid / issue, after which /pay shows no customer data. Needs
+ACCTOPS_TEST_DSN (owner) and
 ACCTOPS_TEST_APP_DSN (runtime role) on a Postgres with both migration chains at
 head and a provisioned workspace with an entity; SKIPS otherwise.
 """
@@ -16,7 +16,15 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.ar.invoicing import InvoiceError, create_invoice_from_draft
+from app.api import invoices as invoices_api
+from app.ar.invoicing import (
+    InvoiceError,
+    create_invoice_from_draft,
+    hash_pay_token,
+    issue_invoice_draft,
+    record_payment,
+    void_invoice,
+)
 from app.workspace_session import workspace_session
 from tests.conftest import StackConfig
 
@@ -73,7 +81,7 @@ async def workspace(owner):
     return [dict(r) for r in rows]
 
 
-async def _create(sm, ws: dict, ref: str) -> dict:
+async def _create(sm, ws: dict, ref: str, **kw) -> dict:
     async with workspace_session(sm, ws["workspace_id"]) as session:
         return await create_invoice_from_draft(
             session,
@@ -84,30 +92,37 @@ async def _create(sm, ws: dict, ref: str) -> dict:
             external_ref=ref,
             customer={"name": "Example Customer LLC", "email": "ap@example.com"},
             line_items=[{"description": "Consulting", "quantity": 2, "unit_price": "50.00"}],
+            **kw,
         )
 
 
-async def test_create_invoice_as_runtime_role_issues_pay_token(
-    runtime_sessionmaker, owner, workspace
-) -> None:
+async def test_create_stores_only_a_hash_with_expiry(runtime_sessionmaker, owner, workspace) -> None:
     ws = workspace[0]
     view = await _create(runtime_sessionmaker, ws, f"tok-{uuid.uuid4()}")
-    assert view["id"]
+    token = view["public_token"]
+    assert token and len(token) >= 43
     row = await owner.fetchrow(
-        "SELECT t.token, t.workspace_id::text AS wid, i.public_token "
+        "SELECT t.token_hash, t.workspace_id::text AS wid, t.revoked_at, "
+        "t.expires_at - now() AS ttl, i.public_token "
         "FROM public.invoice_pay_token t JOIN books.invoice i ON i.id = t.invoice_id "
         "WHERE t.invoice_id = $1::uuid",
         view["id"],
     )
     assert row is not None, "no pay-token row written"
     assert row["wid"] == ws["workspace_id"]
-    assert row["public_token"] == row["token"]
+    assert row["token_hash"] == hash_pay_token(token)
+    assert row["public_token"] is None, "the raw token must not be stored on the invoice"
+    assert row["revoked_at"] is None
+    assert 59 <= row["ttl"].days <= 60
+    cols = await owner.fetch(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = 'invoice_pay_token'"
+    )
+    assert "token" not in {c["column_name"] for c in cols}
 
 
-async def test_runtime_role_still_cannot_enumerate_pay_tokens(
-    runtime_sessionmaker, workspace
-) -> None:
-    """The SELECT policy is untouched: with no app.pay_token the role sees nothing."""
+async def test_runtime_role_cannot_enumerate_pay_tokens(runtime_sessionmaker, workspace) -> None:
+    """No workspace and no token-hash GUC: the role sees nothing."""
     await _create(runtime_sessionmaker, workspace[0], f"enum-{uuid.uuid4()}")
     async with runtime_sessionmaker() as session:
         async with session.begin():
@@ -115,82 +130,105 @@ async def test_runtime_role_still_cannot_enumerate_pay_tokens(
     assert n == 0
 
 
-async def _guc(session) -> str:
-    return (
-        await session.execute(text("SELECT coalesce(current_setting('app.pay_token', true), '')"))
-    ).scalar_one()
-
-
-async def test_guc_cleared_after_successful_create_and_candidates_isolated(
-    runtime_sessionmaker, workspace
-) -> None:
-    """After a successful create the GUC is empty in the SAME transaction, and a
-    token candidate for workspace A cannot expose B's row (checked both ways)."""
+async def test_workspace_sees_only_its_own_rows(runtime_sessionmaker, workspace) -> None:
     if len(workspace) < 2:
         pytest.skip("needs two provisioned workspaces")
     a, b = workspace[0], workspace[1]
-    tok = {}
-    for ws in (a, b):
-        async with workspace_session(runtime_sessionmaker, ws["workspace_id"]) as session:
-            view = await create_invoice_from_draft(
-                session,
-                workspace_id=ws["workspace_id"],
-                entity_id=ws["entity_id"],
-                actor_uc_uid="rls-test",
-                external_source="rls-test",
-                external_ref=f"iso-{uuid.uuid4()}",
-                customer={"name": "Example Customer LLC", "email": "ap@example.com"},
-                line_items=[{"description": "Consulting", "quantity": 1, "unit_price": "10.00"}],
-            )
-            assert await _guc(session) == ""
-            n = (await session.execute(text("SELECT count(*) FROM public.invoice_pay_token"))).scalar_one()
-            assert n == 0
-            tok[ws["workspace_id"]] = view["public_token"]
+    await _create(runtime_sessionmaker, a, f"iso-{uuid.uuid4()}")
+    await _create(runtime_sessionmaker, b, f"iso-{uuid.uuid4()}")
     for mine, other in ((a, b), (b, a)):
         async with workspace_session(runtime_sessionmaker, mine["workspace_id"]) as session:
-            await session.execute(
-                text("SELECT set_config('app.pay_token', :t, true)"),
-                {"t": tok[mine["workspace_id"]]},
-            )
             rows = (
                 await session.execute(text("SELECT workspace_id::text FROM public.invoice_pay_token"))
             ).scalars().all()
-            assert other["workspace_id"] not in rows
+        assert rows and other["workspace_id"] not in rows
 
 
-async def test_exhausted_attempts_clear_guc_and_hide_other_workspace(
-    runtime_sessionmaker, workspace, monkeypatch
-) -> None:
-    """Force every candidate to collide with B's token: allocation fails, the GUC is
-    cleared, and the still-usable transaction sees none of B's rows."""
-    if len(workspace) < 2:
-        pytest.skip("needs two provisioned workspaces")
-    a, b = workspace[0], workspace[1]
-    async with workspace_session(runtime_sessionmaker, b["workspace_id"]) as session:
-        view = await create_invoice_from_draft(
-            session,
-            workspace_id=b["workspace_id"],
-            entity_id=b["entity_id"],
-            actor_uc_uid="rls-test",
-            external_source="rls-test",
-            external_ref=f"coll-{uuid.uuid4()}",
-            customer={"name": "Example Customer LLC", "email": "ap@example.com"},
-            line_items=[{"description": "Consulting", "quantity": 1, "unit_price": "10.00"}],
+async def test_runtime_role_may_only_touch_revoked_at(runtime_sessionmaker, workspace) -> None:
+    ws = workspace[0]
+    await _create(runtime_sessionmaker, ws, f"grant-{uuid.uuid4()}")
+    for stmt in (
+        "UPDATE public.invoice_pay_token SET expires_at = now() + interval '9 years'",
+        "DELETE FROM public.invoice_pay_token",
+    ):
+        with pytest.raises(Exception, match="permission denied"):
+            async with workspace_session(runtime_sessionmaker, ws["workspace_id"]) as session:
+                await session.execute(text(stmt))
+
+
+async def test_exhausted_attempts_raise(runtime_sessionmaker, workspace, monkeypatch) -> None:
+    ws = workspace[0]
+    first = await _create(runtime_sessionmaker, ws, f"coll-{uuid.uuid4()}")
+    monkeypatch.setattr(
+        "app.ar.invoicing.secrets.token_urlsafe", lambda *_a, **_k: first["public_token"]
+    )
+    with pytest.raises(InvoiceError):
+        await _create(runtime_sessionmaker, ws, f"coll-b-{uuid.uuid4()}")
+
+
+@pytest_asyncio.fixture
+async def app_sessions(runtime_sessionmaker, monkeypatch):
+    """Point the /pay lookup at the runtime role."""
+    monkeypatch.setattr(invoices_api, "SessionLocal", runtime_sessionmaker)
+    return runtime_sessionmaker
+
+
+async def test_public_lookup_live_then_inactive_after_void(app_sessions, owner, workspace) -> None:
+    ws = workspace[0]
+    view = await _create(app_sessions, ws, f"void-{uuid.uuid4()}")
+    token = view["public_token"]
+    live = await invoices_api._invoice_for_token(token)
+    assert isinstance(live, dict) and live["id"] == view["id"]
+    async with workspace_session(app_sessions, ws["workspace_id"]) as session:
+        await void_invoice(
+            session, workspace_id=ws["workspace_id"], invoice_id=view["id"],
+            actor_uc_uid="rls-test", reason="test",
         )
-    b_token = view["public_token"]
-    monkeypatch.setattr("app.ar.invoicing.secrets.token_urlsafe", lambda *_a, **_k: b_token)
-    async with workspace_session(runtime_sessionmaker, a["workspace_id"]) as session:
-        with pytest.raises(InvoiceError):
-            await create_invoice_from_draft(
-                session,
-                workspace_id=a["workspace_id"],
-                entity_id=a["entity_id"],
-                actor_uc_uid="rls-test",
-                external_source="rls-test",
-                external_ref=f"coll-a-{uuid.uuid4()}",
-                customer={"name": "Example Customer LLC", "email": "ap@example.com"},
-                line_items=[{"description": "Consulting", "quantity": 1, "unit_price": "10.00"}],
-            )
-        assert await _guc(session) == ""
-        n = (await session.execute(text("SELECT count(*) FROM public.invoice_pay_token"))).scalar_one()
-        assert n == 0
+    assert await invoices_api._invoice_for_token(token) is invoices_api._INACTIVE
+    revoked = await owner.fetchval(
+        "SELECT revoked_at FROM public.invoice_pay_token WHERE invoice_id = $1::uuid", view["id"]
+    )
+    assert revoked is not None
+    resp = await invoices_api.public_invoice(token)
+    assert resp.status_code == 410
+    assert b"Example Customer" not in resp.body and b"example.com" not in resp.body
+
+
+async def test_full_payment_revokes_the_link(app_sessions, workspace) -> None:
+    ws = workspace[0]
+    view = await _create(app_sessions, ws, f"paid-{uuid.uuid4()}")
+    async with workspace_session(app_sessions, ws["workspace_id"]) as session:
+        paid = await record_payment(
+            session, workspace_id=ws["workspace_id"], invoice_id=view["id"],
+            actor_uc_uid="rls-test", amount=view["total"],
+        )
+    assert paid["status"] == "paid"
+    assert await invoices_api._invoice_for_token(view["public_token"]) is invoices_api._INACTIVE
+
+
+async def test_public_lookup_inactive_when_expired(app_sessions, owner, workspace) -> None:
+    ws = workspace[0]
+    view = await _create(app_sessions, ws, f"exp-{uuid.uuid4()}")
+    await owner.execute(
+        "UPDATE public.invoice_pay_token SET expires_at = now() - interval '1 minute' "
+        "WHERE invoice_id = $1::uuid",
+        view["id"],
+    )
+    assert await invoices_api._invoice_for_token(view["public_token"]) is invoices_api._INACTIVE
+
+
+async def test_issue_rotates_the_draft_link(app_sessions, workspace) -> None:
+    ws = workspace[0]
+    draft = await _create(app_sessions, ws, f"draft-{uuid.uuid4()}", post_journal=False)
+    async with workspace_session(app_sessions, ws["workspace_id"]) as session:
+        issued = await issue_invoice_draft(
+            session, workspace_id=ws["workspace_id"], invoice_id=draft["id"],
+            actor_uc_uid="rls-test",
+        )
+    assert issued["public_token"] and issued["public_token"] != draft["public_token"]
+    assert await invoices_api._invoice_for_token(draft["public_token"]) is invoices_api._INACTIVE
+    assert isinstance(await invoices_api._invoice_for_token(issued["public_token"]), dict)
+
+
+async def test_unknown_token_is_not_found(app_sessions) -> None:
+    assert await invoices_api._invoice_for_token("x" * 43) is None

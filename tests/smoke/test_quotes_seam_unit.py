@@ -647,11 +647,11 @@ class _SeamStubSession:
             b["void_reason"] = p["reason"]
             return _Result([])
 
-        if "set_config('app.pay_token'" in sql:
-            return _Result([])
         if "INSERT INTO public.invoice_pay_token" in sql:
-            return _Result([_Row(token=p["token"])])
-        if "UPDATE invoice SET public_token" in sql:
+            return _Result([_Row(token_hash=p["h"])])
+        if "UPDATE invoice SET customer_ops_customer_id" in sql:
+            return _Result([])
+        if "UPDATE public.invoice_pay_token SET revoked_at" in sql:
             return _Result([])
 
         # ---- ledger: must never be touched ----
