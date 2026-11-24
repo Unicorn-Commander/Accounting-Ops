@@ -7,8 +7,10 @@ created and nothing here invents a URL.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import logging
 import os
 import time
 from decimal import Decimal
@@ -18,6 +20,21 @@ import httpx
 
 _API = "https://api.stripe.com/v1/checkout/sessions"
 _VERSION = "2024-06-20"
+
+logger = logging.getLogger(__name__)
+
+# Attempts for one Checkout Session create. Every attempt reuses the same
+# Idempotency-Key (invoice-checkout-<invoice_id>), so a retry after a timeout
+# whose first request did land returns the SAME session from Stripe and can
+# never create a second one for the invoice.
+_ATTEMPTS = 3
+_BACKOFF_SECONDS = 0.5
+
+PAY_LINK_UNAVAILABLE = "Pay link unavailable, retry issuing the invoice to create it."
+
+
+class CheckoutUnavailableError(RuntimeError):
+    """Checkout is configured but Stripe did not return a session URL."""
 
 
 def checkout_configured() -> bool:
@@ -68,7 +85,12 @@ async def create_checkout_session(
     cancel_url: str,
     customer_email: str | None = None,
 ) -> str | None:
-    """Create one Checkout Session for card and US bank (ACH). None when no key is set."""
+    """Create one Checkout Session for card and US bank (ACH).
+
+    Returns None only when Checkout is not configured or nothing is owed.
+    Raises CheckoutUnavailableError when Stripe fails after the retries, so a
+    caller can surface "pay link unavailable" instead of a silent null link.
+    """
     key = os.environ.get("STRIPE_CHECKOUT_SECRET_KEY")
     if not key:
         return None
@@ -92,24 +114,40 @@ async def create_checkout_session(
     }
     if customer_email:
         data["customer_email"] = customer_email
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                _API,
-                data=data,
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Stripe-Version": _VERSION,
-                    "Idempotency-Key": f"invoice-checkout-{invoice_id}",
-                },
-            )
-    except httpx.HTTPError:
-        return None
-    if response.status_code >= 400:
-        return None
-    try:
-        body: dict[str, Any] = response.json()
-    except (TypeError, ValueError):
-        return None
-    url = body.get("url")
-    return str(url) if url else None
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Stripe-Version": _VERSION,
+        "Idempotency-Key": f"invoice-checkout-{invoice_id}",
+    }
+    reason = "no attempt"
+    for attempt in range(1, _ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(_API, data=data, headers=headers)
+        except httpx.HTTPError as exc:
+            reason = f"transport error {type(exc).__name__}"
+        else:
+            status = response.status_code
+            if status < 400:
+                try:
+                    body: dict[str, Any] = response.json()
+                except (TypeError, ValueError):
+                    body = {}
+                url = body.get("url") if isinstance(body, dict) else None
+                if url:
+                    return str(url)
+                reason = "response carried no session url"
+                break
+            reason = f"HTTP {status}"
+            if status != 429 and status < 500:
+                # A 4xx other than 429 is not transient; retrying repeats it.
+                break
+        if attempt < _ATTEMPTS:
+            await asyncio.sleep(_BACKOFF_SECONDS * attempt)
+    logger.warning(
+        "stripe checkout session failed for invoice %s (workspace %s): %s",
+        invoice_id,
+        workspace_id,
+        reason,
+    )
+    raise CheckoutUnavailableError(reason)

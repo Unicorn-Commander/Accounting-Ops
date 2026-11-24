@@ -39,7 +39,11 @@ from app.ar.invoice_brand.template import (
     render_invoice_html,
     render_invoice_pdf,
 )
-from app.connectors.stripe.checkout import create_checkout_session
+from app.connectors.stripe.checkout import (
+    PAY_LINK_UNAVAILABLE,
+    CheckoutUnavailableError,
+    create_checkout_session,
+)
 # NOTE (Community Edition carve-out): app.ar.entitlement is the enterprise
 # cross-app entitlement gate (no-op for standalone). Deferred into the create
 # path behind an edition check so community boot never hard-imports it.
@@ -591,16 +595,23 @@ async def _attach_pay_link(workspace_id: UUID, view: dict[str, Any]) -> dict[str
         amount = Decimal(str(view.get("balance_due") or view.get("total") or "0"))
     except Exception:
         return view
-    url = await create_checkout_session(
-        amount=amount,
-        currency=str(view.get("currency") or "USD"),
-        invoice_id=str(view.get("id")),
-        workspace_id=str(workspace_id),
-        invoice_number=str(view.get("invoice_number") or "invoice"),
-        success_url=public_url,
-        cancel_url=public_url,
-        customer_email=view.get("customer_email"),
-    )
+    try:
+        url = await create_checkout_session(
+            amount=amount,
+            currency=str(view.get("currency") or "USD"),
+            invoice_id=str(view.get("id")),
+            workspace_id=str(workspace_id),
+            invoice_number=str(view.get("invoice_number") or "invoice"),
+            success_url=public_url,
+            cancel_url=public_url,
+            customer_email=view.get("customer_email"),
+        )
+    except CheckoutUnavailableError:
+        # Already logged by the connector. The invoice stays posted with a null
+        # link; issuing again is idempotent and retries the session create.
+        view["pay_link_status"] = "unavailable"
+        view["pay_link_warning"] = PAY_LINK_UNAVAILABLE
+        return view
     if not url:
         return view
     async with workspace_session(SessionLocal, workspace_id) as session:

@@ -424,7 +424,11 @@ async def issue_invoice_draft(
     Role floor: accountant.
     """
     from app.ar.invoicing import issue_invoice_draft as _issue
-    from app.connectors.stripe.checkout import create_checkout_session
+    from app.connectors.stripe.checkout import (
+        PAY_LINK_UNAVAILABLE,
+        CheckoutUnavailableError,
+        create_checkout_session,
+    )
 
     ctx = await authorize_workspace(workspace_id, None, min_role="accountant")
     wid = ctx.workspace_id
@@ -464,16 +468,21 @@ async def issue_invoice_draft(
     if not shaped.get("hosted_pay_url") and shaped.get("public_url") and shaped.get("status") != "void":
         from decimal import Decimal
 
-        url = await create_checkout_session(
-            amount=Decimal(str(shaped.get("balance_due") or shaped.get("total") or "0")),
-            currency=str(shaped.get("currency") or "USD"),
-            invoice_id=str(shaped.get("id")),
-            workspace_id=str(wid),
-            invoice_number=str(shaped.get("invoice_number") or "invoice"),
-            success_url=str(shaped["public_url"]),
-            cancel_url=str(shaped["public_url"]),
-            customer_email=shaped.get("customer_email"),
-        )
+        try:
+            url = await create_checkout_session(
+                amount=Decimal(str(shaped.get("balance_due") or shaped.get("total") or "0")),
+                currency=str(shaped.get("currency") or "USD"),
+                invoice_id=str(shaped.get("id")),
+                workspace_id=str(wid),
+                invoice_number=str(shaped.get("invoice_number") or "invoice"),
+                success_url=str(shaped["public_url"]),
+                cancel_url=str(shaped["public_url"]),
+                customer_email=shaped.get("customer_email"),
+            )
+        except CheckoutUnavailableError:
+            url = None
+            shaped["pay_link_status"] = "unavailable"
+            shaped["pay_link_warning"] = PAY_LINK_UNAVAILABLE
         if url:
             async with workspace_session(SessionLocal, wid) as session:
                 await session.execute(
