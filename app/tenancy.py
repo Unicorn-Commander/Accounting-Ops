@@ -452,6 +452,32 @@ def apply_service_scope(
     return role, entity_scope
 
 
+def service_scope_for_row(
+    auth: AuthContext,
+    workspace_id: UUID,
+    *,
+    role: str,
+    entity_scope: tuple[UUID, ...] | None,
+) -> tuple[str, tuple[UUID, ...] | None] | None:
+    """AO-TOK-3: ``apply_service_scope`` for one row of a cross-workspace list.
+
+    The /api/me/* aggregates walk every membership of the caller instead of
+    resolving one workspace. For a principal with a ``service_scope`` each row
+    must pass the same gate a single-workspace route applies: the capped role
+    and narrowed entity scope are returned, and a row the token is not scoped
+    to (a 403 from ``apply_service_scope``) yields None so the caller skips it.
+    Humans (no service_scope) get their row back unchanged.
+    """
+    try:
+        return apply_service_scope(
+            auth, workspace_id, role=role, entity_scope=entity_scope
+        )
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            return None
+        raise
+
+
 _FEDERATION_WORKSPACE_MISMATCH = (
     "workspace does not match the federation token's scoped workspace"
 )

@@ -33,6 +33,7 @@ from app.tenancy import (  # noqa: F401  (re-export)
     require_role,
     resolve_workspace,
     resolve_workspace_for_federation,
+    service_scope_for_row,
 )
 from app.workspace_session import workspace_session
 
@@ -102,6 +103,14 @@ async def list_my_workspaces(
     workspaces: list[dict[str, Any]] = []
     for row in rows:
         entry = dict(row)
+        # AO-TOK-3: a service token / PAT lists only the workspaces it is
+        # scoped to, at its capped role. Humans are unchanged.
+        scoped = service_scope_for_row(
+            auth, UUID(entry["id"]), role=entry["role"], entity_scope=None
+        )
+        if scoped is None:
+            continue
+        entry["role"] = scoped[0]
         # Canonical suite role (SUITE-IDENTITY §7) — additive; keep raw `role`.
         entry["role_canonical"] = canonical_role(entry["role"])
         # Canonical workspace key alias (the suite atom) — additive; keep `id`.
