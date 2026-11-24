@@ -100,10 +100,15 @@ def parse_jsonrpc_result(payload: dict[str, Any]) -> dict[str, Any]:
     a JSON-RPC error envelope or an ``isError`` result.
     """
     if "error" in payload and payload["error"]:
+        # The JSON-RPC error message is Contact-Ops' own internal text: log it,
+        # return only the (numeric) code so nothing upstream reaches the client.
         err = payload["error"]
-        raise ContactOpsError(
-            f"Contact-Ops error {err.get('code')}: {err.get('message')}"
+        _log.warning(
+            "[contact-ops] jsonrpc error code=%s message=%r",
+            err.get("code"),
+            str(err.get("message"))[:300],
         )
+        raise ContactOpsError(f"Contact-Ops error (code {err.get('code')})")
     result = payload.get("result") or {}
     if result.get("isError"):
         raise ContactOpsError("Contact-Ops returned an error result")
@@ -113,7 +118,13 @@ def parse_jsonrpc_result(payload: dict[str, Any]) -> dict[str, Any]:
             try:
                 return json.loads(block["text"])
             except json.JSONDecodeError as exc:
-                raise ContactOpsError(f"Unparseable Contact-Ops payload: {exc}") from exc
+                # The payload is upstream-internal: log it, fixed message.
+                _log.warning(
+                    "[contact-ops] unparseable payload: %s body=%r",
+                    exc,
+                    block["text"][:300],
+                )
+                raise ContactOpsError("Contact-Ops returned an unparseable payload") from exc
     # Some tools may return structured content directly.
     if isinstance(result.get("structuredContent"), dict):
         return result["structuredContent"]
@@ -195,8 +206,9 @@ async def exchange_token(subject_token: str) -> str:
         resp = await client.post(token_url, data=data)
     if resp.status_code != 200:
         # AO111-R2-F13: the token endpoint's body can echo the request (it
-        # carries client_secret + subject_token); log status + length only.
-        _log.info(
+        # carries client_secret + subject_token); log status + length only,
+        # never resp.text, at WARNING so the failure stays visible.
+        _log.warning(
             "[contact-ops] token exchange failed: HTTP %s (body %d bytes)",
             resp.status_code,
             len(resp.content or b""),

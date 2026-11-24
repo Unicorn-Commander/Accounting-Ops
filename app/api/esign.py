@@ -62,6 +62,35 @@ from app.workspace_session import workspace_session
 _log = logging.getLogger("acctops.esign.api")
 router = APIRouter(tags=["esign"])
 
+
+async def _read_capped(file: UploadFile, max_bytes: int) -> bytes | None:
+    """Read an UploadFile in 256 KiB chunks, returning None once the running
+    total crosses ``max_bytes`` (the caller 413s on None).
+
+    Note: Starlette has ALREADY spooled the multipart body by the time this
+    runs, so this is a secondary guard on the in-memory UploadFile, not the
+    first line of defense. The real cap is the ASGI middleware
+    (``BodySizeCapMiddleware`` in app/body_size_cap.py, registered on
+    app.main.app), which rejects an over-cap request with 413 before the body
+    is spooled and the handler ever runs. A signed PDF is re-uploaded after
+    being signed out-of-band; without the middleware the old path (whole-body
+    ``read()`` + length compare) would have buffered an arbitrarily large body
+    before the 413 fired.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    chunk_size = 1024 * 256
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 _ESIGN_CHANNEL = "esign"
 _PREFIX = (
     "/api/workspaces/{workspace_id}/entities/{entity_id}"
@@ -271,9 +300,14 @@ async def mark_signed(
 
     signed_bytes: bytes | None = None
     if signed_pdf is not None:
-        signed_bytes = await signed_pdf.read()
-        max_bytes = get_settings().document_upload_max_bytes
-        if len(signed_bytes) > max_bytes:
+        # The upload is read in 256 KiB chunks and ABORTED the moment the cap
+        # is crossed, so the in-memory UploadFile is never held past the cap
+        # (the old path did `await signed_pdf.read()` whole, then compared the
+        # length). The first line of defense is the ASGI
+        # BodySizeCapMiddleware, which 413s an over-cap request before the
+        # body is spooled; see _read_capped's docstring.
+        signed_bytes = await _read_capped(signed_pdf, get_settings().document_upload_max_bytes)
+        if signed_bytes is None:
             raise HTTPException(
                 status_code=413, detail="Signed PDF exceeds the maximum allowed size."
             )

@@ -1,6 +1,7 @@
 # Copyright (C) 2026 Magic Unicorn Unconventional Technology & Stuff Inc
 # and the Accounting-Ops contributors.
 # SPDX-License-Identifier: Apache-2.0
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
@@ -69,8 +70,10 @@ from app.oauth_discovery import (
     protected_resource_metadata_url,
     router as oauth_discovery_router,
 )
+from app.body_size_cap import BodySizeCapMiddleware
 from app.rate_limit import RateLimitMiddleware
 from app.security.provisioning_token import provisioning_available
+from app.security_headers import SecurityHeadersMiddleware
 
 settings = get_settings()
 
@@ -106,8 +109,17 @@ async def lifespan(_app: FastAPI):
 
             await init_brigade_client()
             shutdown_brigade_client = _shutdown_brigade
-        except Exception:  # noqa: BLE001 - brigade client must never block startup
-            pass
+        except Exception as exc:  # noqa: BLE001 - brigade client must never block startup
+            # A bare `pass` here hid a dead federation seam: every federated
+            # call then failed deep in the request path with no trace back to
+            # the init that never happened. The init still must not block
+            # startup, but the failure has to be in the logs.
+            logging.getLogger("acctops.main").exception(
+                "brigade federation client init failed (federation calls will "
+                "degrade until the container is restarted): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
 
     try:
         session_manager = getattr(_mcp_server, "session_manager", None)
@@ -131,6 +143,31 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.middleware("http")(audit_span_middleware)
+# AO-UP-5: enforce the upload cap at the ASGI layer, not just after Starlette
+# has spooled the body into memory. The FastAPI max_body_size kwarg does not
+# work on the locked pins (it is swallowed as an extra and nothing is
+# installed), so the cap lives in a pure-ASGI middleware: a request whose
+# streamed body exceeds document_upload_max_bytes is rejected with 413 before
+# it is fully buffered, and the handler never runs. The cap shares the same
+# env var the web edge reads (client_max_body_size), so edge + app stay in
+# lockstep.
+#
+# Added BEFORE SecurityHeadersMiddleware below: add_middleware inserts at
+# position 0 and the stack is built outermost-first, so the later
+# SecurityHeadersMiddleware ends up OUTERMOST and wraps the 413 the cap
+# middleware emits. That is deliberate: the 413 body is text/plain and must
+# carry nosniff + CSP + frame-ancestors like every other response.
+app.add_middleware(BodySizeCapMiddleware, max_bytes=settings.document_upload_max_bytes)
+# Security response headers (nosniff + CSP + frame-ancestors) on every
+# response, including the 413 the cap middleware sends (it wraps BodySizeCap,
+# see the note above). The web app is a separate front end behind the same
+# edge, so the DEFAULT policy is a strict default-src 'self' that stops a
+# browser MIME-sniffing an inline text/markdown or application/xml download
+# into executable content. The two HTML routes this API does serve (the public
+# pay page and the invoice preview) set INVOICE_HTML_CSP on their own response
+# (the middleware setdefaults, so the per-route header wins) because the brand
+# template needs inline styles, Google Fonts and a data: logo.
+app.add_middleware(SecurityHeadersMiddleware)
 # Per-tenant / per-principal rate limiting. Added AFTER audit_span_middleware so
 # Starlette places it OUTERMOST (add_middleware inserts at position 0 and the
 # stack is built outermost-first), meaning a throttled request is rejected

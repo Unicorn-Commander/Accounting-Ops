@@ -104,6 +104,17 @@ class Settings(BaseModel):
     # object store from a giant-file DoS. 100 MB covers large multi-page scanned
     # tax documents / statement bundles as well as receipts and CSVs. Override via
     # env DOCUMENT_UPLOAD_MAX_BYTES (the web edge proxy reads the same var).
+    #
+    # AO-UP-5: this cap was only enforced AFTER Starlette spooled the body into
+    # memory (each upload route reads the whole file, then compares the length).
+    # The app now ALSO enforces it at the ASGI layer (BodySizeCapMiddleware in
+    # app/body_size_cap.py, registered on app.main.app) so a request whose
+    # streamed body exceeds the cap is rejected with 413 before it is fully
+    # buffered and the handler never runs. The FastAPI max_body_size kwarg does
+    # NOT work on the locked pins (it is swallowed as an extra and installs
+    # nothing), which is why the cap lives in the middleware instead. The two
+    # caps share this one value, so the edge (client_max_body_size) and the app
+    # stay in lockstep.
     document_upload_max_bytes: int = 100 * 1024 * 1024
 
     otel_exporter_otlp_endpoint: str | None = None

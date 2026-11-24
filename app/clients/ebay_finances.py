@@ -32,7 +32,54 @@ TIMEOUT_SECONDS = 25.0
 
 
 class EbayFinancesError(Exception):
-    """Raised when the MCP returns an error or is unreachable."""
+    """Raised when the MCP returns an error or is unreachable.
+
+    The message is a FIXED string per failure class: the upstream eBay /
+    MCP response body is internal (and can carry token-adjacent values) so
+    only its length is logged, and it is never embedded here. Callers surface this message
+    to the client verbatim (it lands in the ``errors[]`` array of the
+    transactions list endpoint), so it must stay safe.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        upstream_status: int | None = None,
+        upstream_body: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.upstream_status = upstream_status
+        self.upstream_body = upstream_body
+
+
+def _ebay_upstream_error(
+    what: str, status_code: int, body: str, *, extra: str = ""
+) -> EbayFinancesError:
+    """Build a safe EbayFinancesError: log the upstream body length, keep
+    the message fixed (status + what + any caller-supplied context that is not
+    the upstream body). AO-SECRET-1: the log gets the body LENGTH only."""
+    logger.warning("ebay upstream error: %s HTTP %s body_len=%d", what, status_code, len(body))
+    detail = f"eBay {what} failed with HTTP {status_code}"
+    if extra:
+        detail = f"{detail} ({extra})"
+    return EbayFinancesError(detail, upstream_status=status_code, upstream_body=body[:300])
+
+
+def _parse_jsonrpc_error(payload: dict) -> None:
+    """Raise a SAFE EbayFinancesError for a JSON-RPC error envelope.
+
+    The JSON-RPC error object can quote the upstream eBay body: keep only its
+    numeric code, never its message or data (in the log or the exception).
+    """
+    if "error" in payload and payload["error"]:
+        err = payload["error"]
+        code = err.get("code") if isinstance(err, dict) else None
+        logger.warning("ebay-finances-mcp returned a JSON-RPC error code=%s", code)
+        raise EbayFinancesError(
+            f"ebay-finances-mcp error (code {code})" if isinstance(code, int)
+            else "ebay-finances-mcp error"
+        )
 
 
 def _upstream_error(what: str, resp: httpx.Response) -> EbayFinancesError:
@@ -172,16 +219,7 @@ async def _call_mcp_tool(tool_name: str, arguments: dict) -> Any:
             raise _upstream_error("ebay-finances-mcp tools/call", call_resp)
         data = _parse_sse_or_json(call_resp)
 
-    if "error" in data and data["error"]:
-        # The JSON-RPC error object can quote the upstream eBay body: keep
-        # only its numeric code, never its message or data.
-        err = data["error"]
-        code = err.get("code") if isinstance(err, dict) else None
-        logger.warning("ebay-finances-mcp returned a JSON-RPC error code=%s", code)
-        raise EbayFinancesError(
-            f"ebay-finances-mcp error (code {code})" if isinstance(code, int)
-            else "ebay-finances-mcp error"
-        )
+    _parse_jsonrpc_error(data)
     result = data.get("result") or {}
     contents = result.get("content") or []
     if not contents:

@@ -37,6 +37,7 @@ short-lived concurrent ingests; the caller can optionally share a client).
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -46,6 +47,8 @@ import httpx
 
 from app.config import Settings, get_settings
 from app.llm_client import llm_default_headers
+
+_log = logging.getLogger("accounting_ops.categorization.llm")
 
 
 # ---------------------------------------------------------------------------
@@ -391,11 +394,14 @@ class LLMCategorizer:
                 resp = await client.get(url, headers=headers)
                 reachable = resp.status_code < 500
         except Exception as exc:
+            # str(exc) can carry the full URL (with the API key in the header
+            # on some clients) or a proxy error body: log it, fixed message.
+            _log.warning("categorizer health probe failed: %s", exc)
             return {
                 "endpoint": settings.categorizer_endpoint_url,
                 "model": settings.categorizer_model,
                 "reachable": False,
-                "error": str(exc),
+                "error": type(exc).__name__,
             }
         return {
             "endpoint": settings.categorizer_endpoint_url,

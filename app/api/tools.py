@@ -9,6 +9,7 @@ Workspace-level routes (no entity scoping):
 All routes resolve workspace + entity context via FastAPI dependency, enforce
 RBAC via require_role, then delegate to app.tools functions.
 """
+import logging
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -41,6 +42,8 @@ from app.tools import (
     upsert_entity_owner,
 )
 from app.tools._cpa_export_client import fetch_return_package
+
+_log = logging.getLogger("acctops.api.tools")
 
 
 router = APIRouter(
@@ -118,15 +121,31 @@ def _phase_1(exc: NotImplementedError) -> HTTPException:
 
 
 def _cpa_export_http_error(exc: Exception) -> HTTPException:
+    """Map a cpa-export client failure to a status code with a SAFE detail.
+
+    The exception message is a fixed string (the client never embeds the
+    sidecar's response body in it), so ``str(exc)`` is already safe to return.
+    Anything that is NOT one of the four known client failure classes is an
+    unexpected internal error: log it full and return a generic 502 detail so
+    internal text (a traceback, a file path, an upstream body) can never reach
+    the client.
+    """
     if isinstance(exc, PermissionError):
         code = status.HTTP_403_FORBIDDEN
-    elif isinstance(exc, LookupError):
+        return HTTPException(status_code=code, detail=str(exc))
+    if isinstance(exc, LookupError):
         code = status.HTTP_404_NOT_FOUND
-    elif isinstance(exc, ValueError):
+        return HTTPException(status_code=code, detail=str(exc))
+    if isinstance(exc, ValueError):
         code = status.HTTP_400_BAD_REQUEST
-    else:
-        code = status.HTTP_502_BAD_GATEWAY
-    return HTTPException(status_code=code, detail=str(exc))
+        return HTTPException(status_code=code, detail=str(exc))
+    # Unexpected (not one of the client's four failure classes): the message is
+    # not a vetted fixed string, so do not echo it.
+    _log.exception("cpa-export unexpected failure: %s: %s", type(exc).__name__, exc)
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail="cpa-export request failed. The request was logged; retry or contact support.",
+    )
 
 
 # Read endpoints (viewer+) ---------------------------------------------------

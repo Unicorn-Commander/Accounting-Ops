@@ -47,6 +47,7 @@ cpa-export data was missing.
 
 from __future__ import annotations
 
+import logging
 import os
 from uuid import UUID
 
@@ -61,6 +62,8 @@ from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.tools._cpa_export_client import resolve_cpa_export_bearer
 from app.workspace_session import workspace_session
+
+logger = logging.getLogger("acctops.api.irs_forms")
 
 router = APIRouter(tags=["irs-forms"])
 
@@ -273,10 +276,13 @@ async def generate_irs_form(
             cpa_package=cpa_package,
         )
     except FileNotFoundError as exc:
+        # The exception carries the full server-side template path: log it,
+        # return only the form name (the caller already knows it).
+        logger.warning("IRS form template missing: %s", exc)
         raise HTTPException(
             status_code=503,
             detail=(
-                f"IRS form PDF template missing: {exc}. "
+                "IRS form PDF template missing. "
                 "Run scripts/download_irs_forms.sh on the server to download it."
             ),
         ) from exc

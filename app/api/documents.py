@@ -554,6 +554,11 @@ async def _run_tax_extraction(
     try:
         from app.categorization.tax_doc_vlm import TaxDocExtractor
 
+        # extract() is a coroutine: awaiting it runs its CPU-bound fitz PDF work
+        # (open + pre-check + rasterization) off the event loop. Rasterization
+        # happens in a worker process (ProcessPoolExecutor inside _render_pdf)
+        # so one heavy uploaded PDF cannot hold the GIL or block the server's
+        # event loop while it is being refused or rasterized.
         result = await TaxDocExtractor().extract(body=body, mime_type=mime_type)
         status_val = "failed" if result.error else "extracted"
         confidence = (
@@ -612,8 +617,43 @@ async def _run_tax_extraction(
             result.tax_year,
             status_val,
         )
-    except Exception:  # noqa: BLE001 — a background task must never crash loudly
+    except Exception as exc:  # noqa: BLE001 — a background task must never crash loudly
+        # The receipt would otherwise stay stuck: no document_extraction row is
+        # ever written on failure, so list_documents shows no extraction status
+        # at all and the document looks like it is still pending. Write a
+        # status='failed' row (the schema's documented failure state) so the
+        # receipt is visibly un-read.
         _log.exception("tax extraction failed for receipt=%s", receipt_id)
+        try:
+            async with workspace_session(SessionLocal, workspace_id) as session:
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO document_extraction (
+                            id, workspace_id, entity_id, receipt_id,
+                            status, error, extracted_at
+                        ) VALUES (
+                            :id, :wid, :eid, :rid, 'failed', :error, now()
+                        )
+                        ON CONFLICT (receipt_id) DO UPDATE SET
+                            status = EXCLUDED.status,
+                            error = EXCLUDED.error,
+                            extracted_at = now()
+                        """
+                    ),
+                    {
+                        "id": str(uuid4()),
+                        "wid": str(workspace_id),
+                        "eid": str(entity_id),
+                        "rid": str(receipt_id),
+                        "error": f"{type(exc).__name__}: {exc}"[:2000],
+                    },
+                )
+        except Exception:  # noqa: BLE001 — the original failure is already logged
+            _log.exception(
+                "tax extraction failure row write also failed for receipt=%s",
+                receipt_id,
+            )
 
 
 def _coerce_amount(extraction) -> tuple[Decimal | None, str | None]:

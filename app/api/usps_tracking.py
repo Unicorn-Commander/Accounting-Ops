@@ -39,7 +39,6 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -53,6 +52,7 @@ router = APIRouter(tags=["usps-tracking"])
 
 USPS_TRACK_URL = "https://secure.shippingapis.com/ShippingAPI.dll"
 USPS_API_NAME = "TrackV2"
+
 
 # Tracking number validator: 13-22 digit numeric (covers standard formats)
 TRACKING_NUMBER_RE = re.compile(r"^\d{13,22}$")
@@ -246,8 +246,15 @@ async def lookup_tracking(tracking_number: str) -> TrackingResult:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(USPS_TRACK_URL, params=params)
     except httpx.HTTPError as exc:
-        # AO111-R2-F13: the request URL carries USERID in its query string and
-        # httpx messages can include it; return the error class only.
+        # The request carries USERID in the query string, and httpx errors
+        # embed the full request URL in str(exc): logging str(exc) would leak
+        # that credential into the log. Log ONLY the exception TYPE (never
+        # str(exc), never the URL). AO111-R2-F13: return the error class only.
+        logger.warning(
+            "USPS transport error for %s: %s",
+            cleaned,
+            type(exc).__name__,
+        )
         return TrackingResult(
             tracking_number=cleaned,
             is_delivered=False,
@@ -258,8 +265,14 @@ async def lookup_tracking(tracking_number: str) -> TrackingResult:
         )
 
     if resp.status_code != 200:
-        # AO111-R2-F13: fixed text + status (and body length) only, never the
-        # raw upstream body.
+        # The USPS response body is upstream XML: log ONLY the HTTP status
+        # (never resp.text). AO111-R2-F13: fixed text + status (and body
+        # length) only, never the raw upstream body.
+        logger.warning(
+            "USPS HTTP %s for %s",
+            resp.status_code,
+            cleaned,
+        )
         return TrackingResult(
             tracking_number=cleaned,
             is_delivered=False,

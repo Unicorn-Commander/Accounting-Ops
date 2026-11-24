@@ -11,11 +11,14 @@ snapshots for rendering).
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+_log = logging.getLogger("acctops.contacts")
 
 # Kinds we accept for an imported contact. Anything else is coerced to
 # "customer" so a bad client payload can't write arbitrary kinds.
@@ -262,9 +265,13 @@ async def bulk_import_counterparties(
                 updated += 1
             else:
                 created += 1
-        except Exception as exc:  # noqa: BLE001 — collect, don't abort the batch
+        except Exception:  # noqa: BLE001 — collect, don't abort the batch
             skipped += 1
-            errors.append({"index": idx, "name": name, "error": str(exc)})
+            # A DB failure's str(exc) is the SQLAlchemy statement (SQL text +
+            # bound params) — internal detail that must not reach the client.
+            # Log it full, return a fixed per-row message.
+            _log.exception("contact import row %d (%r) failed", idx, name)
+            errors.append({"index": idx, "name": name, "error": "row could not be imported"})
 
     return {
         "created": created,
