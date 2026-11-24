@@ -25,7 +25,7 @@
   only by the create, issue and new
   `POST /api/workspaces/{wid}/invoices/{id}/pay-link` (regenerate) responses;
   GET, list and MCP `get_invoice` no longer carry `public_url`. Regenerate
-  revokes the earlier link. A link expires after 60 days and is revoked on
+  needs role owner or admin and revokes the earlier link. A link expires after 60 days and is revoked on
   issue (the draft link), full payment and void; an expired, revoked, paid,
   void or unknown token all answer the same 404. A link sent before the
   release keeps working until `created_at + 60 days`. Stripe Checkout now

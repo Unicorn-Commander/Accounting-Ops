@@ -318,6 +318,55 @@ async def test_reads_hide_the_link_and_regenerate_rotates_it(app_sessions, works
             )
 
 
+def _as_role(ws: dict, role: str):
+    from app.tenancy import WorkspaceContext
+
+    return WorkspaceContext(
+        workspace_id=uuid.UUID(ws["workspace_id"]),
+        workspace_slug="regen-test",
+        role=role,
+        user_uc_uid=f"regen-{role}",
+        agent_id=None,
+        entity_scope=None,
+        hipaa_protected=False,
+    )
+
+
+async def _regenerate_as(ws: dict, invoice_id: str, role: str) -> httpx.Response:
+    from app.tenancy import resolve_workspace
+
+    app = FastAPI()
+    app.include_router(invoices_api.router)
+    app.dependency_overrides[resolve_workspace] = lambda: _as_role(ws, role)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ao.example.com") as client:
+        return await client.post(
+            f"/api/workspaces/{ws['workspace_id']}/invoices/{invoice_id}/pay-link"
+        )
+
+
+async def test_regenerate_route_is_owner_admin_only(app_sessions, workspace) -> None:
+    """AO110-R3-P2-A: accountant and viewer get 403 and the link is untouched;
+    owner gets a new link once and the old token stops working."""
+    ws = workspace[0]
+    view = await _create(app_sessions, ws, f"regen-route-{uuid.uuid4()}")
+    old = view["public_token"]
+    for role in ("viewer", "accountant"):
+        resp = await _regenerate_as(ws, view["id"], role)
+        assert resp.status_code == 403, (role, resp.status_code, resp.text)
+        assert isinstance(await invoices_api._invoice_for_token(old), dict), role
+
+    resp = await _regenerate_as(ws, view["id"], "owner")
+    assert resp.status_code == 200, resp.text
+    url = resp.json()["public_url"]
+    new = url.rsplit("/pay/", 1)[1]
+    assert new and new != old
+    assert await invoices_api._invoice_for_token(old) is None
+    assert isinstance(await invoices_api._invoice_for_token(new), dict)
+    status, _ = await _public_get(f"/pay/{old}")
+    assert status == 404
+
+
 async def test_link_sent_before_0021_keeps_working_until_its_expiry(app_sessions, owner, workspace) -> None:
     """AO110-R2-P2-2: 0021 hashed legacy rows in place with the SQL below and
     set expires_at = created_at + 60 days, so a raw token a customer already

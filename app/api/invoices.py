@@ -383,13 +383,14 @@ async def regenerate_pay_link_route(
     invoice_id: UUID,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
-    """Regenerate the customer's /pay link. Role floor: accountant.
+    """Regenerate the customer's /pay link. Role floor: admin (owner/admin).
 
     Reads never show public_url (only a hash of the token is stored). This
     revokes every earlier link of the invoice and returns a new public_url
-    once; the link that was sent before stops working.
+    once; the link that was sent before stops working. Minting a bearer link
+    to customer data is an owner/admin act, not an accountant one.
     """
-    require_role(workspace, "accountant")
+    require_role(workspace, "admin")
     await _load_invoice_scoped(workspace, invoice_id)
     try:
         async with workspace_session(SessionLocal, workspace.workspace_id) as session:
