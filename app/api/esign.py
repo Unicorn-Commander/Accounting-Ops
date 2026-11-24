@@ -39,6 +39,7 @@ Routes (all nested under a work product; entity-scoped + workspace-isolated):
   POST .../work-products/{wp_id}/signature-requests/{id}/cancel
        Cancel a non-terminal request. Role floor: accountant.
 """
+
 from __future__ import annotations
 
 import logging
@@ -62,10 +63,32 @@ from app.workspace_session import workspace_session
 _log = logging.getLogger("acctops.esign.api")
 router = APIRouter(tags=["esign"])
 
+
+async def _read_capped(file: UploadFile, max_bytes: int) -> bytes | None:
+    """Read an UploadFile into memory in 256 KiB chunks, returning None as
+    soon as the running total crosses ``max_bytes``.
+
+    A signed PDF is re-uploaded after being signed out-of-band, and there is
+    no size signal before the upload; the whole-body read + length compare
+    would have buffered an arbitrarily large body before the 413 fired.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    chunk_size = 1024 * 256
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 _ESIGN_CHANNEL = "esign"
 _PREFIX = (
-    "/api/workspaces/{workspace_id}/entities/{entity_id}"
-    "/work-products/{wp_id}/signature-requests"
+    "/api/workspaces/{workspace_id}/entities/{entity_id}/work-products/{wp_id}/signature-requests"
 )
 
 
@@ -78,9 +101,10 @@ async def _fetch_signature_request(
     session, entity_id: UUID, wp_id: UUID, sr_id: UUID
 ) -> dict | None:
     return (
-        await session.execute(
-            text(
-                """
+        (
+            await session.execute(
+                text(
+                    """
                 SELECT id::text, entity_id::text, work_product_id::text,
                        provider, external_id, status, signer_name, signer_email,
                        signing_url, signed_garage_key, signed_path,
@@ -88,10 +112,13 @@ async def _fetch_signature_request(
                 FROM signature_request
                 WHERE id = :id AND entity_id = :eid AND work_product_id = :wpid
                 """
-            ),
-            {"id": str(sr_id), "eid": str(entity_id), "wpid": str(wp_id)},
+                ),
+                {"id": str(sr_id), "eid": str(entity_id), "wpid": str(wp_id)},
+            )
         )
-    ).mappings().first()
+        .mappings()
+        .first()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -162,14 +189,17 @@ async def create_signature_request(
             )
     except ProviderUnavailable as exc:
         # The insert was rolled back with the transaction — no orphan row.
-        raise HTTPException(
-            status_code=502, detail=f"E-signature provider unavailable: {exc}"
-        )
+        raise HTTPException(status_code=502, detail=f"E-signature provider unavailable: {exc}")
 
     _log.info(
         "esign.request created sr=%s wp=%s ws=%s entity=%s by=%s provider=%s status=%s",
-        result["id"], wp_id, workspace.workspace_id, entity_id,
-        workspace.user_uc_uid, result["provider"], result["status"],
+        result["id"],
+        wp_id,
+        workspace.workspace_id,
+        entity_id,
+        workspace.user_uc_uid,
+        result["provider"],
+        result["status"],
     )
     return result
 
@@ -193,28 +223,30 @@ async def list_signature_requests(
     limit = max(1, min(limit, 500))
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         where = ["entity_id = :eid", "work_product_id = :wpid"]
-        params: dict[str, Any] = {
-            "eid": str(entity_id), "wpid": str(wp_id), "limit": limit
-        }
+        params: dict[str, Any] = {"eid": str(entity_id), "wpid": str(wp_id), "limit": limit}
         if status_filter:
             where.append("status = :st")
             params["st"] = status_filter.strip().lower()
         rows = (
-            await session.execute(
-                text(
-                    f"""
+            (
+                await session.execute(
+                    text(
+                        f"""
                     SELECT id::text, work_product_id::text, provider, external_id,
                            status, signer_name, signer_email, signing_url,
                            signed_garage_key, signed_path, created_at, updated_at
                     FROM signature_request
-                    WHERE {' AND '.join(where)}
+                    WHERE {" AND ".join(where)}
                     ORDER BY created_at DESC
                     LIMIT :limit
                     """
-                ),
-                params,
+                    ),
+                    params,
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
     return {"items": [dict(r) for r in rows]}
 
 
@@ -240,9 +272,7 @@ async def get_signature_request(
                 # sync_status returns None ONLY when the request doesn't exist
                 # (the existence check precedes any provider call).
                 if synced is None:
-                    raise HTTPException(
-                        status_code=404, detail="Signature request not found"
-                    )
+                    raise HTTPException(status_code=404, detail="Signature request not found")
             except ProviderUnavailable as exc:
                 # Best-effort: fall back to the stored status rather than 502.
                 _log.warning("esign.sync provider unavailable sr=%s: %s", sr_id, exc)
@@ -271,9 +301,12 @@ async def mark_signed(
 
     signed_bytes: bytes | None = None
     if signed_pdf is not None:
-        signed_bytes = await signed_pdf.read()
-        max_bytes = get_settings().document_upload_max_bytes
-        if len(signed_bytes) > max_bytes:
+        # The upload is read in 1 MiB chunks and ABORTED the moment the cap is
+        # crossed, so a multi-GB signed-PDF upload cannot be slurped into
+        # memory before the 413 fires (the old path did `await signed_pdf.read()`
+        # whole, then compared the length).
+        signed_bytes = await _read_capped(signed_pdf, get_settings().document_upload_max_bytes)
+        if signed_bytes is None:
             raise HTTPException(
                 status_code=413, detail="Signed PDF exceeds the maximum allowed size."
             )
@@ -295,7 +328,10 @@ async def mark_signed(
             raise HTTPException(status_code=404, detail="Signature request not found")
     _log.info(
         "esign.mark_signed sr=%s wp=%s ws=%s by=%s stored=%s",
-        sr_id, wp_id, workspace.workspace_id, workspace.user_uc_uid,
+        sr_id,
+        wp_id,
+        workspace.workspace_id,
+        workspace.user_uc_uid,
         bool(signed_bytes),
     )
     return result
@@ -313,15 +349,16 @@ async def cancel_signature_request(
     assert_entity_in_scope(workspace, entity_id)
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         try:
-            result = await cancel(
-                session, entity_id=entity_id, work_product_id=wp_id, sr_id=sr_id
-            )
+            result = await cancel(session, entity_id=entity_id, work_product_id=wp_id, sr_id=sr_id)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         if result is None:
             raise HTTPException(status_code=404, detail="Signature request not found")
     _log.info(
         "esign.cancel sr=%s wp=%s ws=%s by=%s",
-        sr_id, wp_id, workspace.workspace_id, workspace.user_uc_uid,
+        sr_id,
+        wp_id,
+        workspace.workspace_id,
+        workspace.user_uc_uid,
     )
     return result
