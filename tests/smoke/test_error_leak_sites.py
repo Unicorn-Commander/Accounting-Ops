@@ -158,6 +158,43 @@ async def test_usps_fault_has_no_upstream_xml(monkeypatch) -> None:
     assert result.is_delivered is False
 
 
+async def test_usps_transport_error_redacts_query_string(monkeypatch, caplog) -> None:
+    """An httpx transport error embeds the request URL, whose query string
+    carries the TrackRequest XML (USER ID credential). The log must redact the
+    query string so the credential never reaches the log."""
+    import httpx
+    import logging
+
+    import app.api.usps_tracking as usps
+
+    class _FakeClient:
+        async def __aenter__(self) -> "_FakeClient":
+            return self
+
+        async def __aexit__(self, *a: Any) -> None:
+            return None
+
+        async def get(self, url: str, params: dict[str, Any]) -> Any:
+            # Simulate a transport error whose message embeds the full request
+            # URL (query string included).
+            raise httpx.ConnectError(
+                f"failed to connect to {url}?API=TrackV2&XML=%3CUser%3E{MARKER}%3C%2FUser%3E"
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: _FakeClient())
+    monkeypatch.setattr(usps, "_get_user_id", lambda: "test-user")
+
+    with caplog.at_level(logging.WARNING, logger=usps.__name__):
+        result = await usps.lookup_tracking("94001118992234567890")
+
+    assert result.is_delivered is False
+    # The credential (in the query string) must NOT appear in any log record.
+    for record in caplog.records:
+        assert MARKER not in record.getMessage()
+    # But the log line must still be present (the failure is visible).
+    assert any("USPS transport error" in r.getMessage() for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # Regulatory feeds: the returned per-source error must be the class name, not
 # the feed's own error text (URL + upstream snippet).

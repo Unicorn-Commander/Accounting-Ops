@@ -39,7 +39,7 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -53,6 +53,18 @@ router = APIRouter(tags=["usps-tracking"])
 
 USPS_TRACK_URL = "https://secure.shippingapis.com/ShippingAPI.dll"
 USPS_API_NAME = "TrackV2"
+
+
+def _redact_url(url: str) -> str:
+    """Strip the query string from a URL before it reaches a log.
+
+    The USPS request carries the API name + a TrackRequest XML (which embeds
+    the USER ID) in the query string, so an httpx error that embeds the request
+    URL would leak that credential into the log. Keep scheme+host+path; drop
+    the query (and fragment).
+    """
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 # Tracking number validator: 13-22 digit numeric (covers standard formats)
 TRACKING_NUMBER_RE = re.compile(r"^\d{13,22}$")
@@ -248,9 +260,15 @@ async def lookup_tracking(tracking_number: str) -> TrackingResult:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(USPS_TRACK_URL, params=params)
     except httpx.HTTPError as exc:
-        # The exception can carry the request URL (with the tracking number +
-        # the API name): log it, return a fixed fault.
-        logger.warning("USPS transport error for %s: %s", cleaned, exc)
+        # The exception can carry the request URL, whose query string embeds
+        # the API name + TrackRequest XML (which carries the USER ID): redact
+        # the query string so the credential never reaches the log.
+        logger.warning(
+            "USPS transport error for %s: %s [url=%s]",
+            cleaned,
+            _redact_url(str(exc)),
+            _redact_url(USPS_TRACK_URL),
+        )
         return TrackingResult(
             tracking_number=cleaned,
             is_delivered=False,
