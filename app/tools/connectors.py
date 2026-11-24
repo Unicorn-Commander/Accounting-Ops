@@ -338,7 +338,7 @@ async def list_account_mappings(
         {"live_accounts": [...], "mappings": [...], "entities": [...],
          "unmapped_count": int}
 
-    Role floor: viewer.
+    Role floor: accountant (enforced by the HTTP handler, AO-CLIENT-1).
     """
     workspace = await authorize_workspace(workspace_id, None, min_role="viewer")
     from app.api.account_mappings import list_account_mappings as _http

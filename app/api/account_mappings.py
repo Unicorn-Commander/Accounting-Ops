@@ -108,7 +108,15 @@ async def list_account_mappings(
     workspace_id: UUID,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict[str, Any]:
-    """Discover live accounts + return current mappings + entities for selection."""
+    """Discover live accounts + return current mappings + entities for selection.
+
+    Accountant floor, same as the PUT (AO-CLIENT-1). The response carries every
+    entity's bank mappings and the full entity list, and the call dials the
+    workspace's SimpleFIN access URL, so a viewer / client_user / bookkeeper
+    (or an entity-scoped member reading another entity) must never reach it.
+    The gate runs BEFORE the credential read and the discovery call.
+    """
+    require_role(workspace, "accountant")
     # 1. Discover live accounts from connectors (SimpleFIN for now).
     accounts: list[dict[str, Any]] = []
     access_url = await _simplefin_access_url(workspace)
