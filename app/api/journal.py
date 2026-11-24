@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 from typing import Any, Optional
 from uuid import UUID
 
@@ -97,10 +98,22 @@ async def seed_coa(
     workspace. Idempotent — re-running on a seeded entity is a no-op.
     """
     require_role(workspace, "accountant")
+    # AO111-R2-F8: a member with a restricted entity_scope seeds only its own
+    # entities, never every active entity of the workspace.
+    scope = assert_entity_in_scope(workspace, None)
+    scope_sql = ""
+    params: dict[str, Any] = {}
+    if scope is not None:
+        scope_sql = " AND id = ANY(:entity_scope)"
+        params["entity_scope"] = [str(e) for e in scope]
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         entities = (
             await session.execute(
-                text("SELECT id::text, display_name FROM entity WHERE status = 'active'")
+                text(
+                    "SELECT id::text, display_name FROM entity WHERE status = 'active'"
+                    + scope_sql
+                ),
+                params,
             )
         ).mappings().all()
         results = []
@@ -132,6 +145,9 @@ async def link_coa_account(
     code uses for the cash side of each entry to the right physical account.
     """
     require_role(workspace, "accountant")
+    # AO-MASS-3: entity_scope, like the sibling COA routes (Audit 2026-05-31
+    # Bug 1), so a scoped member cannot relink another entity's cash account.
+    assert_entity_in_scope(workspace, body.entity_id)
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         ok = await link_external_account(
             session,
@@ -456,6 +472,11 @@ async def post_entry(
     or 'blocked_*' on refusal. Idempotent on (entity_id, source, source_external_id).
     """
     require_role(workspace, "bookkeeper")
+    # AO-MASS-1: entity_id comes from the body, so enforce the membership's
+    # entity_scope BEFORE any session opens. An entity-scoped member must not
+    # post into another entity of the workspace (the MCP twin already does
+    # this through authorize_workspace(workspace_id, entity_id, ...)).
+    assert_entity_in_scope(workspace, body.entity_id)
 
     # TRUST CONTRACT (materiality.py): user_confirmed=True asserts a HUMAN
     # attested this post. A body field is never such evidence — an agent or
@@ -490,6 +511,45 @@ async def post_entry(
             ).first()
             entity_mapped = row is not None
 
+        # AO111-R2-F4: has_receipt_link lifts the IRS 274(d) block, so a body
+        # receipt_link_id is evidence only once the server has checked it,
+        # with the same validate_receipt the MCP twin and the pending-post
+        # path use (same workspace, entity, source transaction and amount).
+        # An unknown or other-workspace id is refused; nothing is posted.
+        if body.receipt_link_id is not None:
+            from app.journal.pending_post import validate_receipt
+
+            try:
+                await validate_receipt(
+                    session,
+                    workspace_id=workspace.workspace_id,
+                    entity_id=body.entity_id,
+                    request=SimpleNamespace(
+                        receipt_link_id=str(body.receipt_link_id),
+                        source=body.source,
+                        source_external_id=body.source_external_id,
+                        amount_cents=int(body.amount_cents),
+                    ),
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    422, str(exc)
+                ) from exc
+
+        # AO-MASS-1: sign_matched feeds the tier-L auto-post trust check, so
+        # the server derives it from the category's COA account type, exactly
+        # like the MCP twin (journal_tools.post_journal_entry). The body value
+        # is ANDed in, so a caller can only make the gate stricter, never
+        # claim a match the server would compute false.
+        from app.tools.journal_tools import _derived_sign_matched
+
+        effective_sign_matched = bool(body.sign_matched) and await _derived_sign_matched(
+            session,
+            entity_id=body.entity_id,
+            category=body.category,
+            amount_cents=int(body.amount_cents),
+        )
+
         result = await post_journal_entry(
             session,
             workspace_id=str(workspace.workspace_id),
@@ -504,7 +564,7 @@ async def post_entry(
             category=body.category,
             category_status=body.category_status,
             entity_mapped=entity_mapped,
-            sign_matched=body.sign_matched,
+            sign_matched=effective_sign_matched,
             external_account_id=body.external_account_id,
             has_receipt_link=body.receipt_link_id is not None,
             receipt_link_id=body.receipt_link_id,

@@ -162,10 +162,12 @@ async def meter_uc_mcp_call(
         ) as client:
             resp = await client.post(url, json=body)
         if resp.status_code >= 400:
+            # AO111-R2-F13: status + body length only, never the gateway's
+            # body (the request carried the caller's uc_ bearer).
             _log.info(
-                "uc_ mcp meter HTTP %s: %s",
+                "uc_ mcp meter HTTP %s (body %d bytes)",
                 resp.status_code,
-                (resp.text or "")[:200],
+                len(resp.content or b""),
             )
             return None
         return resp.json()

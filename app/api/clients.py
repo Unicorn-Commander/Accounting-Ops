@@ -855,6 +855,7 @@ async def add_client(
         _hash_token,
         _invite_email_body,
         _normalize_email,
+        _bind_invitation_workspace,
         _write_membership_audit,
     )
     from app.mailer import send_email
@@ -958,6 +959,7 @@ async def add_client(
         invitation_id = uuid4()
         async with SessionLocal() as session:
             async with session.begin():
+                await _bind_invitation_workspace(session, wid)
                 await session.execute(
                     text(
                         """

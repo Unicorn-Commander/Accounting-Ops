@@ -194,7 +194,13 @@ async def exchange_token(subject_token: str) -> str:
     async with httpx.AsyncClient(timeout=_TIMEOUT, headers={"User-Agent": _UA}) as client:
         resp = await client.post(token_url, data=data)
     if resp.status_code != 200:
-        _log.info("[contact-ops] token exchange failed: %s %s", resp.status_code, resp.text[:300])
+        # AO111-R2-F13: the token endpoint's body can echo the request (it
+        # carries client_secret + subject_token); log status + length only.
+        _log.info(
+            "[contact-ops] token exchange failed: HTTP %s (body %d bytes)",
+            resp.status_code,
+            len(resp.content or b""),
+        )
         raise ContactOpsError(
             "Could not obtain a Contact-Ops access token (token-exchange "
             f"returned {resp.status_code}). The uchub client may not be "

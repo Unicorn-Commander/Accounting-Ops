@@ -11,6 +11,7 @@ import {
 import { CheckCircle2 } from "lucide-react";
 import { getActiveContext } from "@/lib/active-context";
 import { getAccountMappings } from "@/lib/account-mappings";
+import { unmappedBanner } from "@/lib/account-mappings-banner";
 import { formatUSD } from "@/lib/cash-position";
 import { getRecentTransactions, type LiveTransaction } from "@/lib/transactions";
 import { QueueColumnClient } from "@/components/queue-column";
@@ -36,7 +37,8 @@ export default async function ReconciliationQueuePage() {
 
   const unknown = transactions.filter((t) => t.category_status === "unknown");
 
-  const unmappedAcctCount = mappings?.unmapped_count ?? 0;
+  const banner = unmappedBanner(mappings);
+  const unmappedAcctCount = banner.kind === "unmapped" ? banner.count : 0;
 
   return (
     <AppShell>
@@ -81,6 +83,12 @@ export default async function ReconciliationQueuePage() {
               </Link>
             </div>
           </div>
+        )}
+
+        {banner.kind === "not_for_role" && (
+          <p className="mb-6 text-xs text-ink-secondary">
+            Account mapping status is not available for your role.
+          </p>
         )}
 
         {transactions.length === 0 ? (

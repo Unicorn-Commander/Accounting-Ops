@@ -263,3 +263,14 @@ async def test_metadata_min_roles_are_known_values():
             f"{tool_name}: min_role={meta['min_role']!r} is not in "
             f"_SCOPE_FOR_ROLE ({sorted(known_roles)})"
         )
+
+
+async def test_mapping_and_override_reads_carry_the_http_floor():
+    """AO111-R2-F2/F6: the manifest must not advertise a lower floor than the
+    HTTP route enforces (account-mappings GET: accountant; category-overrides
+    GET: bookkeeper)."""
+    async with _client() as c:
+        m = (await c.get("/.well-known/mcps.json")).json()
+    floors = {t["name"]: t["min_role"] for t in m["tools"]}
+    assert floors["list_account_mappings"] == "accountant"
+    assert floors["list_category_overrides"] == "bookkeeper"

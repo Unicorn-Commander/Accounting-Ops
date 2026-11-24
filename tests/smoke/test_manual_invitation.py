@@ -25,6 +25,9 @@ class Session:
     def __init__(self, rows):
         self.rows = iter(rows)
         self.calls = []
+        # Transaction-local GUC binds (AO-RLS-1) are recorded apart from the
+        # data statements so the call counts below keep meaning "queries".
+        self.gucs = []
 
     async def __aenter__(self):
         return self
@@ -37,9 +40,10 @@ class Session:
         yield self
 
     async def execute(self, sql, params):
-        self.calls.append((str(sql), params))
-        if "set_config('app.current_workspace'" in str(sql):
+        if "set_config(" in str(sql):
+            self.gucs.append((str(sql), params))
             return SimpleNamespace(first=lambda: None)
+        self.calls.append((str(sql), params))
         if "INSERT INTO public.membership_audit" in str(sql):
             return SimpleNamespace(first=lambda: None)
         row = next(self.rows)
@@ -256,6 +260,11 @@ async def test_redemption_verified_matching_email_accepted(monkeypatch):
 
     assert result["status"] == "accepted"
     assert any("UPDATE public.workspace_invitation" in sql for sql, _ in session.calls)
+    # AO-RLS-1: the lookup is bound to the token hash, the writes to the
+    # invitation's own workspace.
+    bound = [params for _, params in session.gucs]
+    assert {"h": members._hash_token("synthetic-capability")} in bound
+    assert {"wid": str(inv.workspace_id)} in bound
     mail.assert_not_awaited()
 
 

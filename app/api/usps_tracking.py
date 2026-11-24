@@ -246,23 +246,27 @@ async def lookup_tracking(tracking_number: str) -> TrackingResult:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(USPS_TRACK_URL, params=params)
     except httpx.HTTPError as exc:
+        # AO111-R2-F13: the request URL carries USERID in its query string and
+        # httpx messages can include it; return the error class only.
         return TrackingResult(
             tracking_number=cleaned,
             is_delivered=False,
-            summary=f"USPS HTTP error: {exc}",
+            summary=f"USPS HTTP error: {exc.__class__.__name__}",
             delivery_date=None,
             events=[],
-            fault=str(exc),
+            fault=exc.__class__.__name__,
         )
 
     if resp.status_code != 200:
+        # AO111-R2-F13: fixed text + status (and body length) only, never the
+        # raw upstream body.
         return TrackingResult(
             tracking_number=cleaned,
             is_delivered=False,
             summary=f"USPS HTTP {resp.status_code}",
             delivery_date=None,
             events=[],
-            fault=f"HTTP {resp.status_code}: {resp.text[:120]}",
+            fault=f"HTTP {resp.status_code} (body {len(resp.content or b'')} bytes)",
         )
 
     return _parse_track_response(resp.text, cleaned)

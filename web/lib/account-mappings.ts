@@ -37,11 +37,16 @@ export type AccountMappingsResponse = {
   unmapped_count: number;
 };
 
+export type AccountMappingsResult =
+  | ({ kind: "ok" } & AccountMappingsResponse)
+  | { kind: "forbidden" }
+  | { kind: "unavailable" };
+
 export async function getAccountMappings(
   workspaceId: string
-): Promise<AccountMappingsResponse | null> {
+): Promise<AccountMappingsResult> {
   const session = await auth();
-  if (!session?.accessToken) return null;
+  if (!session?.accessToken) return { kind: "unavailable" };
   try {
     const res = await fetch(`${INTERNAL_BASE}/api/workspaces/${workspaceId}/account-mappings`, {
       headers: {
@@ -50,9 +55,12 @@ export async function getAccountMappings(
       },
       cache: "no-store"
     });
-    if (!res.ok) return null;
-    return (await res.json()) as AccountMappingsResponse;
+    // AO111-R2-F5: the GET needs accountant; a 403 is "not for your role",
+    // never "0 unmapped accounts".
+    if (res.status === 403) return { kind: "forbidden" };
+    if (!res.ok) return { kind: "unavailable" };
+    return { kind: "ok", ...((await res.json()) as AccountMappingsResponse) };
   } catch {
-    return null;
+    return { kind: "unavailable" };
   }
 }

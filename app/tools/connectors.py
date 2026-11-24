@@ -15,18 +15,19 @@ Credentials (metadata only — never plaintext):
   - list_credentials         — connector + label + last_used_at
 
 Account mappings (bank account ↔ entity):
-  - list_account_mappings    — live accounts + current entity mappings
+  - list_account_mappings    : live accounts + current entity mappings (accountant)
   - upsert_account_mappings  — bulk upsert (accountant)
 
 Category overrides (user-trained category corrections):
-  - list_category_overrides       — viewer
+  - list_category_overrides       : bookkeeper
   - create_category_override      — accountant
 
 DELETE / claim / POST-credentials remain HTTP-only:
   * deleting credentials, claiming a SimpleFIN setup token, and uploading
     plaintext secrets are too sensitive to surface to an MCP caller.
 
-Role floor: viewer for reads, accountant for upserts (mirrors HTTP).
+Role floor: viewer for reads, bookkeeper for list_category_overrides,
+accountant for list_account_mappings and upserts (mirrors HTTP).
 """
 from __future__ import annotations
 
@@ -338,9 +339,9 @@ async def list_account_mappings(
         {"live_accounts": [...], "mappings": [...], "entities": [...],
          "unmapped_count": int}
 
-    Role floor: viewer.
+    Role floor: accountant (AO-CLIENT-1; the HTTP handler enforces it too).
     """
-    workspace = await authorize_workspace(workspace_id, None, min_role="viewer")
+    workspace = await authorize_workspace(workspace_id, None, min_role="accountant")
     from app.api.account_mappings import list_account_mappings as _http
     return await _http(workspace_id=workspace_id, workspace=workspace)
 
@@ -405,24 +406,19 @@ async def list_category_overrides(
 
     Returns: {"overrides": [...]}
 
-    Role floor: viewer.
+    Role floor: bookkeeper, and a scoped member sees only its own entities'
+    rules plus the workspace-wide ones (AO111-R2-F1: delegates to the HTTP
+    handler, which enforces both, so the twin cannot drift).
     """
-    await authorize_workspace(workspace_id, None, min_role="viewer")
-    async with workspace_session(SessionLocal, workspace_id) as session:
-        rows = (
-            await session.execute(
-                text(
-                    """
-                    SELECT id::text, entity_id::text, pattern, category,
-                           debit_account, credit_account, created_by_uc_uid,
-                           created_at, match_count
-                    FROM category_override
-                    ORDER BY created_at DESC
-                    """
-                )
-            )
-        ).mappings().all()
-    return {"overrides": [{k: _b(v) for k, v in dict(r).items()} for r in rows]}
+    workspace = await authorize_workspace(workspace_id, None, min_role="bookkeeper")
+    from app.api.category_overrides import list_overrides as _http
+
+    result = await _http(workspace_id=workspace_id, workspace=workspace)
+    return {
+        "overrides": [
+            {k: _b(v) for k, v in r.items()} for r in result["overrides"]
+        ]
+    }
 
 
 async def create_category_override(

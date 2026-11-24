@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+from app.authz import assert_entity_in_scope
 from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.workspace_session import workspace_session
@@ -43,18 +44,31 @@ async def list_overrides(
     workspace_id: UUID,
     workspace: WorkspaceContext = Depends(resolve_workspace),
 ) -> dict:
+    # AO-CLIENT-2: bookkeeper floor (the role that proposes categorizations)
+    # and the membership's entity_scope. A scoped member sees its own
+    # entities' rules plus the workspace-wide ones (entity_id IS NULL, which
+    # apply to every entity), never another entity's rules or their authors.
+    require_role(workspace, "bookkeeper")
+    scope_restriction = assert_entity_in_scope(workspace, None)
+    where = "1=1"
+    params: dict[str, Any] = {}
+    if scope_restriction is not None:
+        where = "(entity_id IS NULL OR entity_id = ANY(:entity_scope))"
+        params["entity_scope"] = [str(e) for e in scope_restriction]
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
         rows = (
             await session.execute(
                 text(
-                    """
+                    f"""
                     SELECT id::text, entity_id::text, pattern, category,
                            debit_account, credit_account, created_by_uc_uid,
                            created_at, match_count
                     FROM category_override
+                    WHERE {where}
                     ORDER BY created_at DESC
                     """
-                )
+                ),
+                params,
             )
         ).mappings().all()
     return {"overrides": [dict(r) for r in rows]}
@@ -70,6 +84,10 @@ async def create_override(
     entity_id, pattern) — second post with same pattern updates the
     category instead of failing."""
     require_role(workspace, "accountant")
+    # AO111-R2-F3: an entity-scoped member may only write its own entities'
+    # rules. A workspace-wide rule (entity_id NULL) applies to every entity,
+    # so it is refused for a scoped member too.
+    _assert_rule_entity_in_scope(workspace, body.entity_id)
 
     pattern_lower = body.pattern.lower().strip()
     if not pattern_lower:
@@ -138,6 +156,17 @@ async def delete_override(
 ) -> dict:
     require_role(workspace, "accountant")
     async with workspace_session(SessionLocal, workspace.workspace_id) as session:
+        # AO111-R2-F3: load the row's entity first so a scoped member cannot
+        # delete another entity's (or a workspace-wide) rule.
+        found = (
+            await session.execute(
+                text("SELECT entity_id FROM category_override WHERE id = :id"),
+                {"id": str(override_id)},
+            )
+        ).first()
+        if found is None:
+            raise HTTPException(404, "Override not found")
+        _assert_rule_entity_in_scope(workspace, found.entity_id)
         result = await session.execute(
             text("DELETE FROM category_override WHERE id = :id"),
             {"id": str(override_id)},
@@ -145,6 +174,25 @@ async def delete_override(
     if result.rowcount == 0:
         raise HTTPException(404, "Override not found")
     return {"ok": True}
+
+
+def _assert_rule_entity_in_scope(
+    workspace: WorkspaceContext, entity_id: UUID | str | None
+) -> None:
+    """Write-side scope rule for category_override rows.
+
+    A concrete entity goes through assert_entity_in_scope (403 out of scope).
+    A workspace-wide row (entity_id NULL) touches every entity, so a member
+    with a restricted entity_scope may not write it.
+    """
+    if entity_id is None:
+        if workspace.entity_scope is not None:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "A workspace-wide override needs an unscoped membership",
+            )
+        return
+    assert_entity_in_scope(workspace, entity_id)
 
 
 async def load_overrides_for_workspace(
