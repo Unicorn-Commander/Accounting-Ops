@@ -79,7 +79,7 @@ def _result() -> Any:
 async def test_store_export_fails_fast_when_object_store_absent() -> None:
     """store_export must raise before any network attempt when S3 is unconfigured.
 
-    The blank-credential Settings are the real 'not configured' state
+    The blank S3 settings are the real 'not configured' state
     (is_configured() is False); the exception is the type the download route
     already maps to 503, and it carries a clear message, not the archive.
     """
