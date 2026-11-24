@@ -835,6 +835,107 @@ def test_other_filters_and_chains_refused_as_unsupported(
     assert error == "page too large (partial)"
 
 
+def _indirect_filter_pdf(
+    filter_spec: bytes, filter_obj: bytes, stream_bytes: bytes
+) -> bytes:
+    """A one-page PDF whose content stream's /Filter is ``filter_spec`` (an
+    indirect form: "5 0 R" or "[5 0 R]") and object 5 is ``filter_obj``."""
+    return _minimal_pdf(
+        [
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>\n"),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n"),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+                b"/Contents 4 0 R >>\n",
+            ),
+            (
+                4,
+                b"<< /Length "
+                + str(len(stream_bytes)).encode()
+                + b" /Filter "
+                + filter_spec
+                + b" >>\nstream\n"
+                + stream_bytes
+                + b"\nendstream\n",
+            ),
+            (5, filter_obj + b"\n"),
+        ]
+    )
+
+
+_INDIRECT_FILTER_SHAPES = [
+    pytest.param(b"5 0 R", b"/FlateDecode", id="ref-to-name"),
+    pytest.param(b"5 0 R", b"[/FlateDecode]", id="ref-to-array"),
+    pytest.param(b"[5 0 R]", b"/FlateDecode", id="array-of-ref"),
+]
+
+
+@pytest.mark.parametrize("filter_spec, filter_obj", _INDIRECT_FILTER_SHAPES)
+def test_indirect_filter_heavy_page_refused_by_decoded_size(
+    filter_spec: bytes, filter_obj: bytes
+) -> None:
+    """R12-P2-B: an indirect /Filter used to resolve to [] ("no filter") and
+    skip the decoded-size bound. It now resolves the indirect object's OWN
+    value, so a heavy Flate stream is refused on the decoded-size path."""
+    data = _indirect_filter_pdf(
+        filter_spec, filter_obj, _deflate(_heavy_content_stream())
+    )
+    doc, xref = _stream_doc(data)
+    assert mod._filter_list(doc, xref) == ["/FlateDecode"]
+    with pytest.raises(ValueError, match="flate stream exceeds the content bound"):
+        mod._decoded_stream_bytes(doc, xref, mod._PAGE_CONTENT_MAX_BYTES)
+    doc.close()
+
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    assert out == []
+    assert error == "page too large (partial)"
+
+
+@pytest.mark.parametrize("filter_spec, filter_obj", _INDIRECT_FILTER_SHAPES)
+def test_indirect_filter_light_page_renders(
+    filter_spec: bytes, filter_obj: bytes
+) -> None:
+    """R12-P2-B control: the same indirect shapes with a light stream pass
+    the pre-check (counted at the decoded size) and render."""
+    data = _indirect_filter_pdf(filter_spec, filter_obj, _deflate(_light_ops()))
+    doc, xref = _stream_doc(data)
+    assert mod._decoded_stream_bytes(doc, xref, mod._PAGE_CONTENT_MAX_BYTES) == len(
+        _light_ops()
+    )
+    doc.close()
+
+    out, error = mod._render_pdf(data, max_pages=2, dpi=72)
+    assert error is None
+    assert len(out) == 1 and out[0].startswith(b"\x89PNG")
+
+
+@pytest.mark.parametrize(
+    "filter_spec, filter_obj, reason",
+    [
+        (b"5 0 R", b"5 0 R", "chain too deep"),
+        (b"7 0 R", b"/FlateDecode", "dangling"),
+        (b"5 0 R", b"null", "unresolvable"),
+        (b"[5 0 R]", b"[/FlateDecode]", "not a name"),
+        (b"5 0 R", b"<< /A 1 >>", "unrecognised"),
+    ],
+)
+def test_unresolvable_indirect_filter_raises_and_refuses(
+    filter_spec: bytes, filter_obj: bytes, reason: str
+) -> None:
+    """R12-P2-B: an indirect /Filter that does not resolve to names RAISES
+    (refuse), never returns [] (which would skip the bound)."""
+    data = _indirect_filter_pdf(filter_spec, filter_obj, b"BT ET")
+    doc, xref = _stream_doc(data)
+    with pytest.raises(ValueError, match=reason):
+        mod._filter_list(doc, xref)
+    doc.close()
+
+    out, error = mod._render_pdf(data, max_pages=2, dpi=72)
+    assert out == []
+    assert error == "page too large (partial)"
+
+
 def _xobject_heavy_page_pdf() -> bytes:
     """A one-page PDF whose content stream is tiny (one "/FzFrm0 Do") but
     invokes a Form XObject whose decoded stream is over the bound. Built

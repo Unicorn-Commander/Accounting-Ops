@@ -528,28 +528,79 @@ _PDF_NAME_RE = re.compile(r"/[^\s/\[\]<>(){}%]+")
 def _filter_list(doc: Any, xref: int) -> list[str]:
     """The stream's /Filter normalised to a list of filter names.
 
-    PDFs spell /Filter three ways: a bare name (``/FlateDecode``), an array
-    (``[/FlateDecode]`` or a chain ``[/ASCII85Decode /FlateDecode]``), or an
-    indirect object (``3 0 R`` to either of those). This returns the names as
-    a list; an empty list means no filter. A name that cannot be resolved
-    (indirect cycle, malformed) raises: the caller treats any raise as
-    "refuse the page".
+    PDFs spell /Filter as a bare name (``/FlateDecode``), an array
+    (``[/FlateDecode]`` or a chain ``[/ASCII85Decode /FlateDecode]``), an
+    indirect object (``5 0 R`` to either of those), or an array with
+    indirect elements (``[5 0 R]``). This returns the names as a list; an
+    empty list means the stream has NO /Filter key. Anything that does not
+    resolve to names (a dangling or cyclic reference, a non-name element,
+    malformed text) RAISES, never returns []: the caller treats any raise as
+    "refuse the page", and [] would skip the decoded-size bound.
     """
     kind, value = doc.xref_get_key(xref, "Filter")
     if kind in ("null", "") or value in (None, "", "null"):
         return []
-    if kind == "array" and isinstance(value, str):
-        # Tokenise PDF names properly: a name ends at whitespace or a
-        # delimiter, so "[/FlateDecode]" is "/FlateDecode" (not
-        # "/FlateDecode]") and "[/ASCII85Decode/FlateDecode]" is two names.
-        return _PDF_NAME_RE.findall(value)
-    if kind == "xref" and isinstance(value, str):
-        m = re.match(r"(\d+)\s+0\s+R", value)
-        if not m:
-            raise ValueError("unresolvable /Filter indirect reference")
-        return _filter_list(doc, int(m.group(1)))
-    if kind == "name":
-        return [value] if value not in (None, "", "null") else []
+    if not isinstance(value, str):
+        raise ValueError("unrecognised /Filter encoding")
+    if kind not in ("name", "array", "xref"):
+        raise ValueError("unrecognised /Filter encoding")
+    return _filter_value_names(doc, value, depth=0)
+
+
+# An indirect reference token ("5 0 R").
+_PDF_REF_RE = re.compile(r"(\d+)\s+(\d+)\s+R")
+# How many indirect hops a /Filter value may take before it is refused.
+_FILTER_MAX_DEPTH = 4
+
+
+def _resolve_filter_ref(doc: Any, ref: re.Match[str], depth: int) -> str:
+    """The OWN value of the indirect object ``ref`` (doc.xref_object), as
+    text. Raises on a dangling, free or too-deep reference."""
+    if depth >= _FILTER_MAX_DEPTH:
+        raise ValueError("/Filter indirect chain too deep")
+    target = int(ref.group(1))
+    if not 0 < target < doc.xref_length():
+        raise ValueError("dangling /Filter indirect reference")
+    text = doc.xref_object(target, compressed=True).strip()
+    if not text or text == "null":
+        raise ValueError("unresolvable /Filter indirect reference")
+    return text
+
+
+def _filter_value_names(doc: Any, value: str, depth: int) -> list[str]:
+    """Filter names of one /Filter value text (a name, an array, or an
+    indirect reference to either). Raises on anything else."""
+    text = value.strip()
+    ref = _PDF_REF_RE.fullmatch(text)
+    if ref:
+        return _filter_value_names(
+            doc, _resolve_filter_ref(doc, ref, depth), depth + 1
+        )
+    if _PDF_NAME_RE.fullmatch(text):
+        return [text]
+    if text.startswith("[") and text.endswith("]"):
+        names: list[str] = []
+        pos, inner = 0, text[1:-1]
+        while pos < len(inner):
+            if inner[pos].isspace():
+                pos += 1
+                continue
+            m = _PDF_NAME_RE.match(inner, pos)
+            if m:
+                names.append(m.group(0))
+                pos = m.end()
+                continue
+            m = _PDF_REF_RE.match(inner, pos)
+            if m:
+                # An indirect array element must resolve to ONE name.
+                elem = _resolve_filter_ref(doc, m, depth)
+                if not _PDF_NAME_RE.fullmatch(elem):
+                    raise ValueError("/Filter array element is not a name")
+                names.append(elem)
+                pos = m.end()
+                continue
+            raise ValueError("unrecognised /Filter array element")
+        return names
     raise ValueError("unrecognised /Filter encoding")
 
 
