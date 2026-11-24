@@ -12,6 +12,11 @@ real members.py code AS the runtime role (accounting_ops_app) and prove:
     workspace, and cancel cannot touch another workspace's invitation;
   * accept-by-token (no workspace context yet) still resolves, both the
     unauthenticated "needs_auth" path and the authenticated accept;
+  * the other invitation writers run under the policies as the runtime role:
+    clients.add_client's owner invitation insert, members.resend_invitation
+    (token rotation; B's row cannot be resent from A) and
+    member_removal.remove_person's cancel (A's pending invitation for the
+    removed person is cancelled, the same email's invitation in B is not);
   * when the owner DSN is a non-superuser owner (the production shape),
     FORCE binds it too: no GUC -> 0 rows. A superuser owner (the CI compose
     stack) bypasses RLS by design, so that one check only runs when it means
@@ -35,8 +40,9 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
-from app import auth
-from app.api import members
+from app import auth, mailer
+from app.api import clients, members
+from app.security import member_removal
 from app.tenancy import WorkspaceContext
 from tests.conftest import StackConfig
 
@@ -133,6 +139,17 @@ def runtime_session(monkeypatch, stack: StackConfig):
     engine = create_async_engine(_sqla_url(stack.app_dsn))
     maker = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(members, "SessionLocal", maker)
+    monkeypatch.setattr(clients, "SessionLocal", maker)
+    monkeypatch.setattr(member_removal, "SessionLocal", maker)
+    sent: list[str] = []
+
+    async def _no_mail(session, *, to_email, **_kw):
+        # No network in tests: record the recipient, deliver nothing.
+        sent.append(to_email)
+        return {"mode": "fixture", "sent": False}
+
+    monkeypatch.setattr(members, "send_email", _no_mail)
+    monkeypatch.setattr(mailer, "send_email", _no_mail)
     yield maker
 
 
@@ -285,3 +302,150 @@ async def test_accept_by_token_still_works(pools, two_workspaces, runtime_sessio
         a, subject,
     )
     assert role == "bookkeeper"
+
+
+async def _owner_invitation_row(owner, wid: uuid.UUID, iid: uuid.UUID):
+    async with owner.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT set_config('app.current_workspace', $1, true)", str(wid))
+            return await conn.fetchrow(
+                f"SELECT token_hash, resent_count, cancelled_at FROM {T} WHERE id = $1", iid
+            )
+
+
+async def _runtime_count(runtime, bound: uuid.UUID, iid: uuid.UUID) -> int:
+    async with runtime.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT set_config('app.current_workspace', $1, true)", str(bound))
+            return await conn.fetchval(f"SELECT count(*) FROM {T} WHERE id = $1", iid)
+
+
+async def test_resend_rotates_token_in_its_own_workspace_only(
+    pools, two_workspaces, runtime_session
+) -> None:
+    owner, _ = pools
+    (a, b), invites, tokens = two_workspaces
+    created = await members.create_invitation(
+        a,
+        members.InvitationCreate(email="new-guest@example.com", role="viewer",
+                                 delivery_mode="manual_link"),
+        workspace=_ctx(a),
+    )
+    iid = uuid.UUID(created["id"])
+    old_token = parse_qs(urlsplit(created["delivery"]["accept_url"]).query)["token"][0]
+    before = await _owner_invitation_row(owner, a, iid)
+
+    assert (await members.resend_invitation(a, iid, workspace=_ctx(a)))["ok"] is True
+    after = await _owner_invitation_row(owner, a, iid)
+    assert after["resent_count"] == before["resent_count"] + 1
+    assert after["token_hash"] != before["token_hash"]
+    # The rotated-out token no longer resolves the invitation.
+    anon = Request({"type": "http", "headers": []})
+    with pytest.raises(HTTPException) as exc:
+        await members.accept_invitation(request=anon, token=old_token)
+    assert exc.value.status_code == 404
+
+    # B's invitation cannot be resent from A's context, and is untouched.
+    with pytest.raises(HTTPException) as exc:
+        await members.resend_invitation(a, invites[b], workspace=_ctx(a))
+    assert exc.value.status_code == 404
+    b_row = await _owner_invitation_row(owner, b, invites[b])
+    assert b_row["resent_count"] == 0
+    assert b_row["token_hash"] == hashlib.sha256(tokens[b].encode()).hexdigest()
+
+
+async def test_remove_person_cancels_only_its_workspace_invitation(
+    pools, two_workspaces, runtime_session
+) -> None:
+    owner, _ = pools
+    (a, b), _, _ = two_workspaces
+    uid = uuid.uuid4()
+    subject = f"rls-invite-{uuid.uuid4().hex[:8]}"
+    email = f"{subject}@example.com"
+    await owner.execute(
+        "INSERT INTO public.user_account (id, uc_uid, email, is_active) VALUES ($1, $2, $3, true)",
+        uid, subject, email,
+    )
+    try:
+        await owner.execute(
+            "INSERT INTO public.workspace_membership (id, user_id, workspace_id, role) "
+            "VALUES (gen_random_uuid(), $1, $2, CAST('viewer' AS workspace_role))",
+            uid, a,
+        )
+        in_a = await _owner_insert_invitation(owner, a, email, f"fictional-rm-{uuid.uuid4().hex}")
+        in_b = await _owner_insert_invitation(owner, b, email, f"fictional-rm-{uuid.uuid4().hex}")
+
+        await member_removal.remove_person(a, user_id=uid, actor=_ctx(a))
+
+        assert (await _owner_invitation_row(owner, a, in_a))["cancelled_at"] is not None
+        assert (await _owner_invitation_row(owner, b, in_b))["cancelled_at"] is None
+    finally:
+        for wid in (a, b):
+            async with owner.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        "SELECT set_config('app.current_workspace', $1, true)", str(wid)
+                    )
+                    await conn.execute(f"DELETE FROM {T} WHERE workspace_id = $1 AND email = $2",
+                                       wid, email)
+                    await conn.execute(
+                        "DELETE FROM public.membership_audit WHERE workspace_id = $1 "
+                        "AND target_user_id = $2",
+                        wid, uid,
+                    )
+        await owner.execute("DELETE FROM public.workspace_membership WHERE user_id = $1", uid)
+        await owner.execute("DELETE FROM public.user_account WHERE id = $1", uid)
+
+
+async def test_add_client_owner_invitation_lands_in_the_new_workspace(
+    pools, two_workspaces, runtime_session, monkeypatch, stack: StackConfig
+) -> None:
+    from scripts import provision_workspace as shared
+
+    owner, runtime = pools
+    (a, _b), _, _ = two_workspaces
+    uid = uuid.uuid4()
+    subject = f"rls-invite-cpa-{uuid.uuid4().hex[:8]}"
+    await owner.execute(
+        "INSERT INTO public.user_account (id, uc_uid, is_active) VALUES ($1, $2, true)",
+        uid, subject,
+    )
+    owner_engine = create_async_engine(_sqla_url(stack.dsn))
+    monkeypatch.setattr(shared, "_admin_engine", lambda: owner_engine)
+    monkeypatch.setattr(
+        clients, "_caller_account",
+        AsyncMock(return_value=(uid, "cpa@example.com", ["owner"], 0)),
+    )
+    caller = auth.AuthContext(subject, None, (), {})
+    wid: uuid.UUID | None = None
+    try:
+        res = await clients.add_client(
+            clients.AddClientRequest(
+                business_name="Fictional Client Books", owner_email="client-owner@example.com"
+            ),
+            auth=caller,
+        )
+        wid = uuid.UUID(res["workspace_id"])
+        iid = uuid.UUID(res["owner_invitation"]["id"])
+        # Written as the runtime role under the new workspace's GUC; visible
+        # there, invisible from another workspace's context.
+        assert await _runtime_count(runtime, wid, iid) == 1
+        assert await _runtime_count(runtime, a, iid) == 0
+        row = await _owner_invitation_row(owner, wid, iid)
+        assert row is not None and row["cancelled_at"] is None
+    finally:
+        await owner_engine.dispose()
+        if wid is not None:
+            async with owner.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        "SELECT set_config('app.current_workspace', $1, true)", str(wid)
+                    )
+                    await conn.execute(f"DELETE FROM {T} WHERE workspace_id = $1", wid)
+                    await conn.execute(
+                        "DELETE FROM public.membership_audit WHERE workspace_id = $1", wid
+                    )
+                    await conn.execute("DELETE FROM books.entity WHERE workspace_id = $1", wid)
+            await owner.execute("DELETE FROM public.workspace_membership WHERE workspace_id = $1", wid)
+            await owner.execute("DELETE FROM public.workspace WHERE id = $1", wid)
+        await owner.execute("DELETE FROM public.user_account WHERE id = $1", uid)

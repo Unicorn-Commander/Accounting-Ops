@@ -362,7 +362,7 @@ jobs:
               "tests.integration.test_tax_mcp_tools": 1,
               "tests.integration.test_tax_review_queue": 10,
               "tests.integration.test_tenant_isolation": 1,
-              "tests.integration.test_workspace_invitation_rls": 5,  # AO-RLS-1
+              "tests.integration.test_workspace_invitation_rls": 8,  # AO-RLS-1, AO111-R2-F10
           }
           details = [
               f"{mod}={byfile.get(mod, 0)}/{minimums[mod]}"
