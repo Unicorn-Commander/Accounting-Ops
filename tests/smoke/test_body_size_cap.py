@@ -108,7 +108,15 @@ async def _post(body_bytes: int, *, chunked: bool = False, chunk: int = 1024) ->
         if message["type"] == "http.response.start":
             status.append(message["status"])
 
-    await main.app(_build_scope(_PROBE_PATH, headers), _streaming_body(body_bytes, chunk), send)
+    import asyncio
+
+    try:
+        await asyncio.wait_for(
+            main.app(_build_scope(_PROBE_PATH, headers), _streaming_body(body_bytes, chunk), send),
+            timeout=60,
+        )
+    except asyncio.TimeoutError:
+        raise AssertionError("app call hung: the cap middleware must abort the app, not deadlock it")
     return status, _PROBE_STATE["ran"], _PROBE_STATE["bytes"]
 
 
@@ -128,9 +136,12 @@ async def test_over_cap_with_content_length_is_413_and_handler_never_runs() -> N
     assert buffered == 0, "no body may be buffered before the 413"
 
 
-async def test_over_cap_chunked_body_is_413_mid_stream() -> None:
+async def test_over_cap_chunked_body_is_413_and_handler_never_runs() -> None:
     """A chunked (no Content-Length) body that crosses the cap mid-stream is
-    413'd once the running total exceeds it; the body stops being read."""
+    413'd by the middleware, and the handler NEVER runs: the middleware
+    aborts the app (later receives report disconnect, then raise) instead of
+    delivering a truncated body, so no handler side effects happen on partial
+    data."""
     import app.config as config
 
     _mount_probe()
@@ -141,9 +152,45 @@ async def test_over_cap_chunked_body_is_413_mid_stream() -> None:
         statuses, ran, buffered = await _post(cap + 4096, chunked=True, chunk=1024)
     finally:
         _unmount_probe()
-    assert 413 in statuses
-    # The handler read at most cap bytes before the stream was cut.
-    assert buffered <= cap, "the body must stop being read once the cap is crossed"
+    # Exactly one response start: the 413. The handler's 200 never goes out.
+    assert statuses == [413], f"expected only the 413, got {statuses}"
+    assert ran is False, "the handler must never run on a truncated body"
+    assert buffered == 0, "the handler must not read any of the over-cap body"
+
+
+async def test_chunked_5x50_with_cap_100_is_413_and_handler_never_runs() -> None:
+    """The exact R3-1 shape: chunked 5 x 50 bytes with a cap of 100. The
+    running total crosses 100 on the 3rd chunk (150 > 100); the middleware
+    413s and aborts the app, and the handler's ``ran`` flag stays False."""
+    import app.config as config
+
+    # A dedicated ASGI app so the cap is exactly 100 bytes regardless of the
+    # configured document_upload_max_bytes.
+    from app.body_size_cap import BodySizeCapMiddleware
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    ran = {"flag": False}
+
+    async def probe(request: Request) -> PlainTextResponse:
+        body = await request.body()
+        ran["flag"] = True
+        return PlainTextResponse(f"got {len(body)}")
+
+    app = Starlette(routes=[Route(_PROBE_PATH, probe, methods=["POST"])])
+    app = BodySizeCapMiddleware(app, max_bytes=100)
+
+    status: list[int] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.start":
+            status.append(message["status"])
+
+    # 5 x 50 bytes, chunked (no Content-Length header).
+    await app(_build_scope(_PROBE_PATH, []), _streaming_body(250, chunk=50), send)
+    assert status == [413], f"expected only the 413, got {status}"
+    assert ran["flag"] is False, "the handler must never run on a truncated body"
+    assert config is not None  # keep the import (settings cap is irrelevant here)
 
 
 async def test_under_cap_body_passes_to_handler() -> None:
