@@ -843,6 +843,89 @@ def test_a85_z_run_refused_before_decoding() -> None:
     doc.close()
 
 
+def _a85_junk_tail_pdf(refs: int, junk_bytes: int) -> bytes:
+    """A one-page PDF whose content stream is A85(zlib(light ops) + junk):
+    the Flate decoder stops at its own EOF (a few decoded bytes) but the A85
+    decode would walk the whole multi-MB raw stream. The page references the
+    stream ``refs`` times (/Contents [4 0 R 4 0 R ...])."""
+    stream = _a85(_deflate(_light_ops()) + os.urandom(junk_bytes))
+    contents = b"[" + b" ".join([b"4 0 R"] * refs) + b"]"
+    return _minimal_pdf(
+        [
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>\n"),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n"),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+                b"/Contents " + contents + b" >>\n",
+            ),
+            (
+                4,
+                b"<< /Length "
+                + str(len(stream)).encode()
+                + b" /Filter [/ASCII85Decode /FlateDecode] >>\nstream\n"
+                + stream
+                + b"\nendstream\n",
+            ),
+        ]
+    )
+
+
+@pytest.mark.parametrize("refs", [1, 40, 4000])
+def test_large_a85_stream_refused_before_decoding(refs: int) -> None:
+    """AO-113-R13-1: a multi-MB A85 stream with a valid short Flate prefix
+    is refused on its RAW size before the pure-Python A85 decode, once per
+    xref however many times the page references it, in well under a
+    second (it used to cost about 0.24 s per reference and render)."""
+    data = _a85_junk_tail_pdf(refs, 2 * 1024 * 1024)
+    doc, xref = _stream_doc(data)
+    with pytest.raises(ValueError, match="ascii85 stream raw size exceeds"):
+        mod._decoded_stream_bytes(doc, xref, mod._PAGE_CONTENT_MAX_BYTES)
+
+    calls: list[int] = []
+    real = mod._decoded_stream_bytes
+
+    def _counting(d: Any, x: int, limit: int) -> int:
+        calls.append(x)
+        return real(d, x, limit)
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(mod, "_decoded_stream_bytes", _counting)
+    try:
+        t0 = time.monotonic()
+        total = mod._page_content_bytes(doc, 0)
+        elapsed_s = time.monotonic() - t0
+    finally:
+        mp.undo()
+        doc.close()
+    assert total > mod._PAGE_CONTENT_MAX_BYTES
+    assert calls == [xref]
+    assert elapsed_s < 0.5, f"pre-check took {elapsed_s:.2f}s"
+
+    t0 = time.monotonic()
+    out, error = mod._render_pdf(data, max_pages=2, dpi=72)
+    elapsed_s = time.monotonic() - t0
+    assert out == []
+    assert error == "page too large (partial)"
+    assert elapsed_s < 1.0, f"refusal took {elapsed_s:.2f}s"
+
+
+def test_repeated_light_a85_reference_measured_once_counted_each_time() -> None:
+    """AO-113-R13-1: the per-xref dedupe still COUNTS every reference (a
+    page that repeats a light stream pays its size per reference) and the
+    page renders; the decode itself runs once."""
+    data = _a85_junk_tail_pdf(40, 0)
+    doc, xref = _stream_doc(data)
+    one = mod._decoded_stream_bytes(doc, xref, mod._PAGE_CONTENT_MAX_BYTES)
+    assert one == len(_light_ops())
+    assert mod._page_content_bytes(doc, 0) == 40 * one
+    doc.close()
+
+    out, error = mod._render_pdf(data, max_pages=2, dpi=72)
+    assert error is None
+    assert len(out) == 1 and out[0].startswith(b"\x89PNG")
+
+
 def test_heavy_flate_array_refused_by_decoded_size() -> None:
     """R12-P2-A: the heavy [/FlateDecode] (no spaces) array page is refused by
     the bounded Flate (decoded size), now that the name tokenises."""

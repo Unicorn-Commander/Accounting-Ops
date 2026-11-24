@@ -680,6 +680,14 @@ def _decoded_stream_bytes(doc: Any, xref: int, limit: int) -> int:
         # chars to 4 bytes (a "z" is 1 char to 4 zero bytes), so the decoded
         # A85 output is checked against the raw size BEFORE decoding; the
         # A85 output (at most the raw size) is then fed to the bounded Flate.
+        # The A85 decode is pure Python (about 0.1 s per MB) and the Flate
+        # decoder ignores bytes after its own EOF, so a short valid Flate
+        # prefix plus megabytes of junk would cost CPU without counting. A
+        # Flate stream that decodes to <= limit is never much larger than
+        # limit, and A85 grows it 5:4 (plus line breaks), so refuse a raw
+        # stream over _a85_raw_max(limit) BEFORE decoding.
+        if len(raw) > _a85_raw_max(limit):
+            raise ValueError("ascii85 stream raw size exceeds the content bound")
         return _bounded_flate_len(_bounded_a85_decode(raw), limit)
     if filters == ["/FlateDecode"]:
         return _bounded_flate_len(raw, limit)
@@ -694,6 +702,15 @@ def _decoded_stream_bytes(doc: Any, xref: int, limit: int) -> int:
     raise ValueError(
         "unsupported content stream filter " + " ".join(filters)
     )
+
+
+def _a85_raw_max(limit: int) -> int:
+    """Largest raw [/ASCII85Decode /FlateDecode] stream a within-bound page
+    can need: a Flate stream decoding to <= ``limit`` bytes is at most about
+    ``limit`` plus stored-block overhead; A85 makes it 5:4 larger, and
+    whitespace (line wrapping) adds a little more. Twice the bound plus 4 KB
+    covers all of that with room to spare."""
+    return 2 * limit + 4096
 
 
 def _bounded_a85_decode(raw: bytes) -> bytes:
@@ -775,12 +792,18 @@ def _page_content_bytes(doc: Any, page_index: int) -> int:
     page = doc[page_index]
     limit = _PAGE_CONTENT_MAX_BYTES
     total = 0
+    # Each xref is measured ONCE; a repeated reference (/Contents [4 0 R
+    # 4 0 R ...]) adds its cached size, so repeating a reference cannot
+    # repeat the decode cost.
+    sizes: dict[int, int] = {}
 
     def _add(xref: int) -> bool:
         """Add xref's decoded bytes to the running total; True if over bound."""
         nonlocal total
         try:
-            total += _decoded_stream_bytes(doc, xref, limit)
+            if xref not in sizes:
+                sizes[xref] = _decoded_stream_bytes(doc, xref, limit)
+            total += sizes[xref]
         except Exception:  # noqa: BLE001 - a decode error refuses the page
             # A stream that cannot be decoded (corrupt, or a compression bomb
             # the bounded decoder refuses) is treated as over the bound:
