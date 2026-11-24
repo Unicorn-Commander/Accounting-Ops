@@ -258,3 +258,35 @@ def test_failover_span_attributes_are_redacted():
         assert val is not None
         assert "sk-or-v1-abc123secret" not in val, "raw userinfo leaked in event"
         assert "leakquery123" not in val, "raw query token leaked in event"
+
+
+def test_log_failover_logs_no_credential_and_no_exception_message(caplog):
+    """AO112-R3-3: the LOUD failover warning carries the exception TYPE and the
+    redacted endpoints only: no base_url credential, no str(exc)."""
+    import logging
+
+    from app.llm_client import LlmTarget, _log_failover
+
+    primary = LlmTarget(
+        base_url="https://user:pw-primary-secret@primary.example.com/v1?token=qtok-primary",
+        api_key="sk-primary-secret",
+        model="m1",
+        label="primary",
+    )
+    fallback = LlmTarget(
+        base_url="https://sk-or-v1-abc123secret@fallback.example.com/api/v1?token=qtok-fallback",
+        api_key="sk-fallback-secret",
+        model="m2",
+        label="fallback",
+    )
+    exc = RuntimeError("SELECT secret_amount FROM ledger WHERE name='Jane Doe'")
+    with caplog.at_level(logging.WARNING):
+        _log_failover("http_503", exc, primary, fallback, "chat.completions")
+
+    out = caplog.text
+    assert "LLM FAILOVER" in out and "RuntimeError" in out
+    for leaked in (
+        "secret_amount", "Jane Doe", "pw-primary-secret", "qtok-primary",
+        "sk-or-v1-abc123secret", "qtok-fallback", "sk-primary-secret", "sk-fallback-secret",
+    ):
+        assert leaked not in out, f"{leaked!r} leaked into the failover log"
