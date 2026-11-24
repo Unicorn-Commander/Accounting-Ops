@@ -73,17 +73,32 @@ def _slow_success_render_child(
     so concurrent renders overlap and the module-level semaphore is saturated.
     The parent holds the slot for start + join(budget); with 6 concurrent calls
     and a bound of 2, at most 2 children are live at once, so total wall time
-    is ~3 batches of _HOLD_S (the bound), not 1 batch (no bound)."""
+    is ~3 batches of _HOLD_S (the bound), not 1 batch (no bound).
+
+    Also registers its own pid in the dir named by the AO_RENDER_PID_DIR env
+    var (one file per live child) so the concurrency test can count live
+    render children by a robust process count instead of a cmdline guess. The
+    child removes its pid file on the way out (finally)."""
     import pymupdf
 
-    matrix = pymupdf.Matrix(zoom, zoom)
-    wdoc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    pix = wdoc[page_index].get_pixmap(matrix=matrix, alpha=False)
-    wdoc.close()
-    conn.send(pix.tobytes("png"))
-    # Hold the process (and thus its semaphore slot) live past the send so the
-    # concurrent calls overlap; the parent's join reaps it on exit.
-    time.sleep(_HOLD_S)
+    pid_dir = os.environ.get("AO_RENDER_PID_DIR")
+    my_pid_file = f"{pid_dir}/{os.getpid()}" if pid_dir else None
+    if my_pid_file:
+        with open(my_pid_file, "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+
+    try:
+        matrix = pymupdf.Matrix(zoom, zoom)
+        wdoc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        pix = wdoc[page_index].get_pixmap(matrix=matrix, alpha=False)
+        wdoc.close()
+        conn.send(pix.tobytes("png"))
+        # Hold the process (and thus its semaphore slot) live past the send so
+        # the concurrent calls overlap; the parent's join reaps it on exit.
+        time.sleep(_HOLD_S)
+    finally:
+        if my_pid_file and os.path.exists(my_pid_file):
+            os.unlink(my_pid_file)
 
 
 def _one_page_pdf() -> bytes:
@@ -148,21 +163,53 @@ def test_render_returns_pngs_for_good_pages() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _slow_render_child_with_pid(
+    pdf_bytes: Any, page_index: Any, zoom: Any, conn: Any
+) -> None:
+    """_slow_render_child + a pid record: burns CPU past the per-page budget
+    (a CPU-bound rasterizer holds the GIL and is the thing the kill must
+    interrupt), then keeps the process alive so the parent's poll(budget)
+    times out and the parent must kill it. Records its pid to a file first
+    (the test asserts the child is DEAD right after the timeout returns)."""
+    _record_child_pid()
+    _slow_render_child(pdf_bytes, page_index, zoom, conn)
+
+
+def _record_child_pid() -> None:
+    """Module-level (spawn can pickle it): writes the child's own pid to the
+    file named by the AO_RENDER_PID_FILE env var. A spawn child is a separate
+    process, so neither a module global nor a file path can cross the boundary
+    by reference -- but an env var is inherited by the child at spawn time, so
+    the child writes its pid to the path the test chose. The test sets the env
+    var before the render; the child reads it and writes its pid there."""
+    path = os.environ.get("AO_RENDER_PID_FILE")
+    if path is None:
+        return
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(str(os.getpid()))
+
+
 def test_render_timeout_kills_child(monkeypatch, caplog) -> None:
-    """R11-P1-1: a page that overruns the per-page budget is KILLED by the
-    OS, the render returns with a visible ``render timeout (partial)`` and zero
-    pages.
+    """R11-P1-1 + P3: a page that overruns the per-page budget is KILLED by
+    the OS, the render returns with a visible ``render timeout (partial)`` and
+    zero pages, and the render child is DEAD right after the timeout returns.
 
     The fake render child (injected for the heavy page, standing in for a
     pathological rasterize) burns CPU past the budget; the parent's
     ``poll(budget)`` must time out and ``proc.kill()`` must reap it.
     """
+    import tempfile
+
     data = _one_page_pdf()
-    monkeypatch.setattr(mod, "_RENDER_PAGE_BUDGET_S", 2.0)
+    pid_file = tempfile.mkstemp(suffix=".pid")[1]
     # The fake heavy render child (module-level so spawn can pickle it) burns
     # CPU past the budget then stays alive: the parent must poll(budget), see
-    # no data, and kill the still-alive child.
-    monkeypatch.setattr(mod, "_render_one_page", _slow_render_child)
+    # no data, and kill the still-alive child. The pid-recording variant writes
+    # the child pid to pid_file (spawn is a separate process, so the test passes
+    # the path via an env var the child inherits; the child writes its pid there).
+    monkeypatch.setenv("AO_RENDER_PID_FILE", pid_file)
+    monkeypatch.setattr(mod, "_RENDER_PAGE_BUDGET_S", 2.0)
+    monkeypatch.setattr(mod, "_render_one_page", _slow_render_child_with_pid)
 
     with caplog.at_level(logging.WARNING, logger="accounting_ops.tax_doc_vlm"):
         t0 = time.monotonic()
@@ -174,6 +221,21 @@ def test_render_timeout_kills_child(monkeypatch, caplog) -> None:
     # The parent did not wait out the 60s fake page: the budget (2s) + kill
     # bookkeeping is the only time spent.
     assert elapsed_s < 10.0, f"render took {elapsed_s:.1f}s (kill did not fire)"
+    # R11-P3: ASSERT the child is dead right after the timeout returns. The
+    # child wrote its pid to pid_file (spawn is a separate process).
+    render_pid = None
+    if os.path.exists(pid_file):
+        with open(pid_file, "r", encoding="utf-8") as fh:
+            text = fh.read().strip()
+        if text:
+            render_pid = int(text)
+    assert render_pid is not None, "no render child was started"
+    try:
+        os.kill(render_pid, 0)
+        alive = True
+    except OSError:
+        alive = False
+    assert not alive, f"render child {render_pid} still alive after the timeout"
     # A partial render must log a WARNING.
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings, "a partial render must log a WARNING"
@@ -281,27 +343,61 @@ def test_pipe_failure_releases_render_slot(monkeypatch) -> None:
     )
 
 
-def test_render_concurrency_bounded_across_calls() -> None:
-    """R10-P2-1(b): N concurrent _render_pdf calls never have more than
-    _RENDER_CONCURRENCY live render processes at once. The module-level
-    semaphore is acquired in the parent around each page render (start + join),
-    so a call that cannot get a slot blocks (its process is not started) until
-    one frees up."""
+def _live_render_child_count(pid_dir: str) -> int:
+    """Count live render children: each fake render child writes its own pid
+    file into ``pid_dir`` on entry and removes it on exit (finally), so the
+    file count is a robust LIVE-PROCESS count (no cmdline guess, which cannot
+    see the spawn child's target -- the target is sent over the pipe, not in
+    the cmdline)."""
+    try:
+        return len(os.listdir(pid_dir))
+    except OSError:
+        return 0
+
+
+def test_render_concurrency_bounded_across_calls(monkeypatch) -> None:
+    """R10-P2-1(b) + R11-P3: N concurrent _render_pdf calls never have more
+    than _RENDER_CONCURRENCY live render processes at once. The module-level
+    semaphore is acquired in the parent around each page render (pipe + start
+    + wait), so a call that cannot get a slot blocks until one frees up.
+
+    The bound is proven by a LIVE-PROCESS COUNT, not by wall time: a sampler
+    thread records the max number of live render children (each child registers
+    its own pid file) while 6 concurrent renders overlap. The fake render child
+    holds its page _HOLD_S past the pixmap so the renders overlap; it is
+    restored via monkeypatch so it cannot leak into later tests.
+    """
     import concurrent.futures
+    import tempfile
+    import threading as _threading
 
     data = _one_page_pdf()
-    # The fake render child (module-level so spawn can pickle it) holds its
-    # page _HOLD_S past the pixmap so the 6 concurrent calls overlap. The
-    # parent holds the module-level semaphore slot for start + join(budget),
-    # so a call that cannot get a slot blocks on acquire() until an earlier
-    # render frees one. With a bound of 2, the 6 renders take ~3 batches of
-    # _HOLD_S; with no bound they take ~1 batch. Total wall time is the
-    # behavioral proof the bound is active. _HOLD_S is a true module constant
-    # (spawn re-imports the module fresh, so a monkeypatched value is NOT seen
-    # in the child -- it must be set at import time).
-    hold = _HOLD_S
-    mod._render_one_page = _slow_success_render_child
-    t0 = time.monotonic()
+    # The fake render child holds its page _HOLD_S past the pixmap so the 6
+    # concurrent calls overlap. monkeypatch restores mod._render_one_page
+    # after the test (no leak into later tests).
+    monkeypatch.setattr(mod, "_render_one_page", _slow_success_render_child)
+    # The fake render child registers its own pid in pid_dir on entry and
+    # removes it on exit (finally), so counting the dir is a robust
+    # LIVE-PROCESS count (a /proc cmdline scan cannot see the spawn child's
+    # target -- the target travels over the pipe, not the cmdline).
+    pid_dir = tempfile.mkdtemp(prefix="ao_render_pids_")
+    monkeypatch.setenv("AO_RENDER_PID_DIR", pid_dir)
+
+    peak = 0
+    peak_lock = _threading.Lock()
+    stop = _threading.Event()
+
+    def sampler() -> None:
+        nonlocal peak
+        while not stop.is_set():
+            live = _live_render_child_count(pid_dir)
+            with peak_lock:
+                if live > peak:
+                    peak = live
+            time.sleep(0.02)
+
+    sam = _threading.Thread(target=sampler, daemon=True)
+    sam.start()
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
             futs = [
@@ -310,24 +406,17 @@ def test_render_concurrency_bounded_across_calls() -> None:
             ]
             results = [f.result() for f in futs]
     finally:
-        total = time.monotonic() - t0
+        stop.set()
+        sam.join(2)
 
     for out, error in results:
         assert error is None
         assert len(out) == 1
         assert out[0].startswith(b"\x89PNG")
-    # 6 renders, bound 2: ~3 sequential batches of `hold` s = ~3*hold if the
-    # bound is honored; ~1 batch = ~hold if all 6 ran in parallel (no bound).
-    # Allow spawn + pre-check overhead on top of 3 batches.
-    bound_floor = 3 * hold
-    assert total >= bound_floor, (
-        f"6 concurrent renders finished in {total:.2f}s: the concurrency bound "
-        f"({mod._RENDER_CONCURRENCY}) was not exercised (expected >= "
-        f"{bound_floor:.1f}s for 3 batches of {hold}s)"
-    )
-    assert total <= bound_floor + 3.0, (
-        f"6 concurrent renders took {total:.2f}s: bound honored but renders "
-        f"overlapped less than expected (expected ~{bound_floor:.1f}s)"
+    assert peak > 0, "the sampler never observed a live render process"
+    assert peak <= mod._RENDER_CONCURRENCY, (
+        f"{peak} render processes were live at once (bound "
+        f"{mod._RENDER_CONCURRENCY} exceeded)"
     )
 
 
@@ -351,12 +440,18 @@ def _deflate(data: bytes) -> bytes:
 
 
 def _form_xobject(stream_raw: bytes, inner: bytes = b"") -> bytes:
-    comp = _deflate(stream_raw)
+    """A Form XObject object with ``stream_raw`` as its (unfiltered) decoded
+    content. Building the heavy fixture this way (raw stream bytes, no
+    20,000 draw_rect calls) makes the test run in seconds. ``inner`` is an
+    extra /Resources /XObject entry dict (for nested XObjects)."""
     return (
         b"<< /Type /XObject /Subtype /Form /BBox [0 0 595 842] "
         b"/Resources <<" + inner + b">> /Matrix [1 0 0 1 0 0] "
-        b"/Filter /FlateDecode /Length "
-        + str(len(comp)).encode() + b" >>\nstream\n" + comp + b"\nendstream\n"
+        b"/Length "
+        + str(len(stream_raw)).encode()
+        + b" >>\nstream\n"
+        + stream_raw
+        + b"\nendstream\n"
     )
 
 
@@ -636,30 +731,76 @@ def test_filter_chain_page_refused_by_precheck() -> None:
     assert error == "page too large (partial)"
 
 
+def _xobject_heavy_page_pdf() -> bytes:
+    """A one-page PDF whose content stream is tiny (one "/FzFrm0 Do") but
+    invokes a Form XObject whose decoded stream is over the bound. Built
+    directly from stream bytes (fast), not by drawing 20,000 rects."""
+    heavy = _heavy_content_stream()
+    objs = [
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>\n"),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n"),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            b"/Resources << /XObject << /FzFrm0 5 0 R >> >> "
+            b"/Contents 4 0 R >>\n",
+        ),
+        (
+            4,
+            b"<< /Length 9 >>\nstream\n/FzFrm0 Do\nendstream\n",
+        ),
+        (5, _form_xobject(heavy)),
+    ]
+    return _minimal_pdf(objs)
+
+
 def test_xobject_heavy_page_refused_by_precheck() -> None:
     """R10-P2-2: a page whose own content stream is tiny but invokes a heavy
     Form XObject must be refused by the decoded-size pre-check. The page
-    content stream is ~9 bytes decoded; the XObject stream it invokes is a
-    Flate stream whose decoded size is over the bound. A page-level-only
-    measure would let it through."""
-    # Build the page by invoking the heavy source page as a Form XObject
-    # ("/FzFrm0 Do"): the page content stream is tiny, the XObject is heavy.
-    d = fitz.open()
-    page = d.new_page()
-    # A heavy source page (its decoded content is over the bound).
-    src = fitz.open()
-    spage = src.new_page()
-    for i in range(20000):
-        spage.draw_rect(
-            fitz.Rect(i % 595, (i * 7) % 840, (i % 595) + 2, (i * 7) % 840 + 1),
-            color=(1, 0, 0),
-            fill=(0, 1, 0),
-        )
-    src_bytes = src.tobytes()
-    src.close()
-    page.show_pdf_page(page.rect, fitz.open(stream=src_bytes, filetype="pdf"), 0)
-    data = d.tobytes(deflate=True)
-    d.close()
+    content stream is ~10 bytes decoded; the XObject stream it invokes is
+    over the bound. A page-level-only measure would let it through."""
+    data = _xobject_heavy_page_pdf()
+    t0 = time.monotonic()
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    elapsed_s = time.monotonic() - t0
+
+    assert out == []
+    assert error == "page too large (partial)"
+    assert elapsed_s < 3.0, f"pre-check refusal took {elapsed_s:.1f}s (not fast)"
+
+
+def test_nested_xobject_bytes_counted_by_precheck() -> None:
+    """R11-P3: a page whose Form XObject itself invokes a nested heavy Form
+    XObject (one nesting level, via the XObject's /Resources /XObject dict)
+    must be refused: the pre-check follows XObjects an XObject references."""
+    heavy = _heavy_content_stream()
+    # The outer XObject (5 0 R) has a tiny stream and a flat /Resources
+    # /XObject dict (inline here) naming the nested heavy XObject (6 0 R).
+    # The pre-check follows that dict one nesting level deep.
+    objs = [
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>\n"),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n"),
+        (
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            b"/Resources << /XObject << /FzFrm0 5 0 R >> >> "
+            b"/Contents 4 0 R >>\n",
+        ),
+        (
+            4,
+            b"<< /Length 9 >>\nstream\n/FzFrm0 Do\nendstream\n",
+        ),
+        (
+            5,
+            b"<< /Type /XObject /Subtype /Form /BBox [0 0 595 842] "
+            b"/Resources << /XObject << /FzFrm1 6 0 R >> >> "
+            b"/Matrix [1 0 0 1 0 0] /Length 9 "
+            b">>\nstream\n/FzFrm1 Do\nendstream\n",
+        ),
+        # The nested XObject: the heavy decoded stream.
+        (6, _form_xobject(heavy)),
+    ]
+    data = _minimal_pdf(objs)
 
     t0 = time.monotonic()
     out, error = mod._render_pdf(data, max_pages=2, dpi=150)

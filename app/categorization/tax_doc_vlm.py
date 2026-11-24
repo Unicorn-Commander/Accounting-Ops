@@ -394,6 +394,7 @@ def _render_pdf(
                 proc = _RENDER_MP_CTX.Process(
                     target=_render_one_page,
                     args=(pdf_bytes, page_index, zoom, child_conn),
+                    daemon=True,
                 )
                 proc.start()
                 child_conn.close()
