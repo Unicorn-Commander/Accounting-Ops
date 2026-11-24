@@ -427,6 +427,7 @@ async def issue_invoice_draft(
     from app.connectors.stripe.checkout import (
         PAY_LINK_UNAVAILABLE,
         CheckoutUnavailableError,
+        checkout_return_url,
         create_checkout_session,
     )
 
@@ -465,8 +466,16 @@ async def issue_invoice_draft(
     except InvoiceError as exc:
         raise ValueError(str(exc)) from exc
     shaped = _shape_invoice_result(view, wid)
-    if not shaped.get("hosted_pay_url") and shaped.get("public_url") and shaped.get("status") != "void":
+    # Runs on a re-issue of a posted invoice too, so a null link left by an
+    # earlier Stripe failure is retried (same Idempotency-Key per invoice).
+    if (
+        not shaped.get("hosted_pay_url")
+        and shaped.get("id")
+        and shaped.get("status") not in ("void", "paid")
+    ):
         from decimal import Decimal
+
+        return_url = checkout_return_url(_get_settings().public_base_url, str(shaped["id"]))
 
         try:
             url = await create_checkout_session(
@@ -475,8 +484,8 @@ async def issue_invoice_draft(
                 invoice_id=str(shaped.get("id")),
                 workspace_id=str(wid),
                 invoice_number=str(shaped.get("invoice_number") or "invoice"),
-                success_url=str(shaped["public_url"]),
-                cancel_url=str(shaped["public_url"]),
+                success_url=return_url,
+                cancel_url=return_url,
                 customer_email=shaped.get("customer_email"),
             )
         except CheckoutUnavailableError:

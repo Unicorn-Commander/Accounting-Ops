@@ -42,6 +42,7 @@ from app.ar.invoice_brand.template import (
 from app.connectors.stripe.checkout import (
     PAY_LINK_UNAVAILABLE,
     CheckoutUnavailableError,
+    checkout_return_url,
     create_checkout_session,
 )
 # NOTE (Community Edition carve-out): app.ar.entitlement is the enterprise
@@ -577,6 +578,19 @@ def _inactive_response() -> HTMLResponse:
     return HTMLResponse(_INACTIVE_HTML, status_code=410, headers={"Cache-Control": "no-store"})
 
 
+_RETURN_HTML = (
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>Invoice payment</title>"
+    "</head><body><p>Thank you. If your payment went through you will receive a "
+    "receipt from the payment processor. You can close this page.</p></body></html>"
+)
+
+
+@router.get("/pay/complete/{invoice_id}", response_class=HTMLResponse)
+async def public_checkout_return(invoice_id: UUID) -> HTMLResponse:
+    """Static Stripe Checkout return page. Shows no invoice or customer data."""
+    return HTMLResponse(_RETURN_HTML, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/pay/{token}", response_class=HTMLResponse)
 async def public_invoice(token: str) -> HTMLResponse:
     view = await _invoice_for_token(token)
@@ -609,12 +623,16 @@ async def public_invoice_pdf(token: str) -> Response:
 
 
 async def _attach_pay_link(workspace_id: UUID, view: dict[str, Any]) -> dict[str, Any]:
-    """Fill hosted_pay_url once. Leaves it null when Checkout is not configured."""
-    if view.get("hosted_pay_url") or view.get("status") == "void":
+    """Fill hosted_pay_url once. Leaves it null when Checkout is not configured.
+
+    Runs on every issue, including a re-issue of an already posted invoice whose
+    link is still null after an earlier Stripe failure: that is the retry.
+    """
+    if view.get("hosted_pay_url") or view.get("status") in ("void", "paid"):
         return view
-    public_url = view.get("public_url")
-    if not public_url:
+    if not view.get("id"):
         return view
+    return_url = checkout_return_url(get_settings().public_base_url, str(view["id"]))
     try:
         amount = Decimal(str(view.get("balance_due") or view.get("total") or "0"))
     except Exception:
@@ -626,8 +644,8 @@ async def _attach_pay_link(workspace_id: UUID, view: dict[str, Any]) -> dict[str
             invoice_id=str(view.get("id")),
             workspace_id=str(workspace_id),
             invoice_number=str(view.get("invoice_number") or "invoice"),
-            success_url=public_url,
-            cancel_url=public_url,
+            success_url=return_url,
+            cancel_url=return_url,
             customer_email=view.get("customer_email"),
         )
     except CheckoutUnavailableError:

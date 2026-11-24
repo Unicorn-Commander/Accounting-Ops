@@ -37,6 +37,17 @@ class CheckoutUnavailableError(RuntimeError):
     """Checkout is configured but Stripe did not return a session URL."""
 
 
+def checkout_return_url(public_base_url: str, invoice_id: str) -> str:
+    """Stripe success / cancel URL for an invoice, built from its id only.
+
+    The raw /pay/{token} value is never stored (only its hash), so a retry on a
+    posted invoice could not rebuild it. This URL is stable across retries, so
+    the Idempotency-Key invoice-checkout-<invoice_id> always sees the same
+    parameters, and it carries no bearer secret into Stripe or our logs.
+    """
+    return f"{public_base_url.rstrip('/')}/pay/complete/{invoice_id}"
+
+
 def checkout_configured() -> bool:
     return bool(os.environ.get("STRIPE_CHECKOUT_SECRET_KEY"))
 
