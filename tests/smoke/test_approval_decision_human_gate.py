@@ -371,3 +371,73 @@ def test_human_session_still_approves_ebay():
         assert mark.call_args.kwargs["new_status"] == "approved"
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------
+# PWR-99: the gate now covers compliance_rule too. Approve activates a proposed
+# rule, so an agent or PAT caller gets 403 and the activate helper never runs;
+# a human session still gets through.
+# --------------------------------------------------------------------------
+def test_agent_and_pat_cannot_approve_compliance_rule():
+    """Agent + PAT approve of a compliance_rule gets 403 BEFORE the activate
+    helper runs: no rule activation, row never marked decided."""
+    for caller in (_agent_caller, _pat_caller):
+        async def run():
+            session, row = _session_for("compliance_rule")
+
+            @asynccontextmanager
+            async def _fake_ws(*args):
+                yield session
+
+            ctx, auth = caller()
+            with (
+                patch.object(approvals, "workspace_session", _fake_ws),
+                patch.object(approvals, "_approve_compliance_rule", AsyncMock()) as activate,
+                patch.object(approvals, "_mark_decided", AsyncMock()) as mark,
+                patch.object(approvals, "write_decision_audit", AsyncMock(return_value=uuid4())),
+                patch.object(approvals, "_project_approval_decision"),
+            ):
+                with pytest.raises(HTTPException) as denial:
+                    await approvals.decide_approval(
+                        WID, UUID(row["id"]),
+                        approvals.DecideRequest(decision="approve"), ctx, auth,
+                    )
+            assert denial.value.status_code == 403
+            assert "human session" in denial.value.detail
+            activate.assert_not_awaited()
+            mark.assert_not_awaited()
+            assert row["status"] == "pending"
+
+        asyncio.run(run())
+
+
+def test_human_session_still_approves_compliance_rule():
+    """A verified interactive human still approves a compliance_rule: the
+    activate helper runs and the row is marked decided approved."""
+    async def run():
+        session, row = _session_for("compliance_rule")
+
+        @asynccontextmanager
+        async def _fake_ws(*args):
+            yield session
+
+        with (
+            patch.object(approvals, "workspace_session", _fake_ws),
+            patch.object(approvals, "_approve_compliance_rule", AsyncMock(
+                return_value={"rule_id": str(uuid4()), "active_profile_id": str(uuid4())}
+            )) as activate,
+            patch.object(approvals, "_mark_decided", AsyncMock()) as mark,
+            patch.object(approvals, "write_decision_audit", AsyncMock(return_value=uuid4())),
+            patch.object(approvals, "_project_approval_decision"),
+        ):
+            ctx, auth = _human_ctx(), _human_auth()
+            outcome = await approvals.decide_approval(
+                WID, UUID(row["id"]),
+                approvals.DecideRequest(decision="approve"), ctx, auth,
+            )
+        assert outcome["ok"] is True and outcome["decision"] == "approved"
+        assert outcome["applied"] is True
+        assert activate.await_count == 1
+        assert mark.call_args.kwargs["new_status"] == "approved"
+
+    asyncio.run(run())

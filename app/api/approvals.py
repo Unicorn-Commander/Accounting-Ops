@@ -231,7 +231,9 @@ def _require_stripe_decision_human(auth: AuthContext, workspace: WorkspaceContex
 #   manual_journal_entry_proposal, stripe_post_balance_transaction apply the
 #   held entry with user_confirmed=True + approving_human stamped;
 #   ebay_post_transaction arms the worker replay "after this durable human
-#   decision" (_record_ebay_decision, decision=approve).
+#   decision" (_record_ebay_decision, decision=approve);
+#   compliance_rule activates the proposed rule (an agent-approved rule
+#   becomes an active control the agent's own output is then checked against).
 _LEDGER_APPROVAL_SUBJECT_TYPES = frozenset(
     {
         "journal_entry_post",
@@ -240,6 +242,7 @@ _LEDGER_APPROVAL_SUBJECT_TYPES = frozenset(
         "manual_journal_entry_proposal",
         "stripe_post_balance_transaction",
         "ebay_post_transaction",
+        "compliance_rule",
     }
 )
 
