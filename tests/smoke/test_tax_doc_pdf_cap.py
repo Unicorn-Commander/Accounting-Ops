@@ -179,6 +179,30 @@ def test_slow_page_finishing_after_timeout_does_not_change_returned(monkeypatch)
     assert returned[1] == "render timeout (partial)"
 
 
+def test_thread_start_raising_releases_slot(monkeypatch) -> None:
+    """R4-3: if thread.start() raises, the caller must release the slot it
+    acquired and re-raise, so the slot count is unchanged and the worker never
+    holds a slot it will never release (the worker's own finally is the normal
+    release path; it does not run if the thread never started)."""
+    data = _one_page_pdf()
+
+    real_thread = threading.Thread
+
+    def _start_raises(self) -> None:
+        raise RuntimeError("thread spawn refused")
+
+    monkeypatch.setattr(real_thread, "start", _start_raises)
+    before = mod._render_slot._value
+    try:
+        mod._render_pdf(data, max_pages=1, dpi=150)
+        raise AssertionError("thread.start raised; _render_pdf must re-raise")
+    except RuntimeError:
+        pass
+    # The slot acquired for the page was released on the start() failure: the
+    # semaphore is back at its full count (no leaked slot).
+    assert mod._render_slot._value == before
+
+
 def test_worker_owns_doc_close_and_slot_on_timeout(monkeypatch) -> None:
     """R3-4: on a per-page timeout the WORKER thread owns the document handle
     and the slot. The caller must NOT close the doc or release the slot while

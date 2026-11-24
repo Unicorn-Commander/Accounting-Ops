@@ -333,7 +333,15 @@ def _render_pdf(
                 _render_slot.release()
 
         thread = threading.Thread(target=_work, daemon=True)
-        thread.start()
+        try:
+            thread.start()
+        except BaseException:
+            # thread.start raised (e.g. the OS refused to spawn a thread): the
+            # worker never ran, so it will never release the slot in its own
+            # finally. Release it here and re-raise, so the slot count is
+            # unchanged and the error propagates.
+            _render_slot.release()
+            raise
         thread.join(per_page_budget_s)
         if thread.is_alive():
             # Still running after the budget: give up on this page and stop the
