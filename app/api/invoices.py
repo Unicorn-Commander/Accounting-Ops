@@ -522,17 +522,13 @@ def _public_token_ok(token: str) -> bool:
     return all(ch.isalnum() or ch in "-_" for ch in token)
 
 
-_INACTIVE = object()
-_INACTIVE_HTML = (
-    "<!doctype html><html><head><meta charset=\"utf-8\"><title>Invoice link</title>"
-    "</head><body><p>This invoice link is no longer active. If you have just paid, "
-    "thank you. Contact the sender for a new link.</p></body></html>"
-)
+async def _invoice_for_token(token: str) -> dict[str, Any] | None:
+    """Resolve a public pay token to a live, unpaid invoice view, else None.
 
-
-async def _invoice_for_token(token: str) -> dict[str, Any] | object | None:
-    """Resolve a public pay token. None = unknown; _INACTIVE = expired, revoked,
-    paid or void (no customer PII is rendered for those)."""
+    Unknown, expired, revoked, paid and void all return None, so /pay answers
+    each of them with the SAME 404 and a caller cannot tell a once-valid link
+    from a guess. No customer data is rendered for any of them.
+    """
     if not _public_token_ok(token):
         return None
     token_hash = hash_pay_token(token)
@@ -559,7 +555,7 @@ async def _invoice_for_token(token: str) -> dict[str, Any] | object | None:
     if row is None:
         return None
     if not row["live"]:
-        return _INACTIVE
+        return None
     try:
         async with workspace_session(SessionLocal, row["workspace_id"]) as session:
             view = await get_invoice(
@@ -570,12 +566,8 @@ async def _invoice_for_token(token: str) -> dict[str, Any] | object | None:
     except InvoiceError:
         return None
     if view.get("status") in ("paid", "void"):
-        return _INACTIVE
+        return None
     return _attach_pdf_url(view, row["workspace_id"])
-
-
-def _inactive_response() -> HTMLResponse:
-    return HTMLResponse(_INACTIVE_HTML, status_code=410, headers={"Cache-Control": "no-store"})
 
 
 _RETURN_HTML = (
@@ -596,8 +588,6 @@ async def public_invoice(token: str) -> HTMLResponse:
     view = await _invoice_for_token(token)
     if view is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found")
-    if view is _INACTIVE:
-        return _inactive_response()
     return HTMLResponse(render_invoice_html(view), headers={"Cache-Control": "no-store"})
 
 
@@ -606,8 +596,6 @@ async def public_invoice_pdf(token: str) -> Response:
     view = await _invoice_for_token(token)
     if view is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found")
-    if view is _INACTIVE:
-        return _inactive_response()
     try:
         pdf_bytes = render_invoice_pdf(render_invoice_html(view))
     except PdfRenderUnavailableError:

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import uuid
 
+import httpx
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -184,14 +186,11 @@ async def test_public_lookup_live_then_inactive_after_void(app_sessions, owner, 
             session, workspace_id=ws["workspace_id"], invoice_id=view["id"],
             actor_uc_uid="rls-test", reason="test",
         )
-    assert await invoices_api._invoice_for_token(token) is invoices_api._INACTIVE
+    assert await invoices_api._invoice_for_token(token) is None
     revoked = await owner.fetchval(
         "SELECT revoked_at FROM public.invoice_pay_token WHERE invoice_id = $1::uuid", view["id"]
     )
     assert revoked is not None
-    resp = await invoices_api.public_invoice(token)
-    assert resp.status_code == 410
-    assert b"Example Customer" not in resp.body and b"example.com" not in resp.body
 
 
 async def test_full_payment_revokes_the_link(app_sessions, workspace) -> None:
@@ -203,7 +202,7 @@ async def test_full_payment_revokes_the_link(app_sessions, workspace) -> None:
             actor_uc_uid="rls-test", amount=view["total"],
         )
     assert paid["status"] == "paid"
-    assert await invoices_api._invoice_for_token(view["public_token"]) is invoices_api._INACTIVE
+    assert await invoices_api._invoice_for_token(view["public_token"]) is None
 
 
 async def test_public_lookup_inactive_when_expired(app_sessions, owner, workspace) -> None:
@@ -214,7 +213,7 @@ async def test_public_lookup_inactive_when_expired(app_sessions, owner, workspac
         "WHERE invoice_id = $1::uuid",
         view["id"],
     )
-    assert await invoices_api._invoice_for_token(view["public_token"]) is invoices_api._INACTIVE
+    assert await invoices_api._invoice_for_token(view["public_token"]) is None
 
 
 async def test_issue_rotates_the_draft_link(app_sessions, workspace) -> None:
@@ -226,9 +225,57 @@ async def test_issue_rotates_the_draft_link(app_sessions, workspace) -> None:
             actor_uc_uid="rls-test",
         )
     assert issued["public_token"] and issued["public_token"] != draft["public_token"]
-    assert await invoices_api._invoice_for_token(draft["public_token"]) is invoices_api._INACTIVE
+    assert await invoices_api._invoice_for_token(draft["public_token"]) is None
     assert isinstance(await invoices_api._invoice_for_token(issued["public_token"]), dict)
 
 
 async def test_unknown_token_is_not_found(app_sessions) -> None:
     assert await invoices_api._invoice_for_token("x" * 43) is None
+
+
+async def _public_get(path: str) -> tuple[int, bytes]:
+    app = FastAPI()
+    app.include_router(invoices_api.router)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://pay.example.com") as client:
+        resp = await client.get(path)
+    return resp.status_code, resp.content
+
+
+async def test_expired_revoked_paid_answer_exactly_like_unknown(app_sessions, owner, workspace) -> None:
+    """AO110-R2-P2-3: same status and body for unknown, expired, revoked, paid."""
+    ws = workspace[0]
+    expired = await _create(app_sessions, ws, f"same-exp-{uuid.uuid4()}")
+    await owner.execute(
+        "UPDATE public.invoice_pay_token SET expires_at = now() - interval '1 minute' "
+        "WHERE invoice_id = $1::uuid",
+        expired["id"],
+    )
+    revoked = await _create(app_sessions, ws, f"same-rev-{uuid.uuid4()}")
+    async with workspace_session(app_sessions, ws["workspace_id"]) as session:
+        await void_invoice(
+            session, workspace_id=ws["workspace_id"], invoice_id=revoked["id"],
+            actor_uc_uid="rls-test", reason="test",
+        )
+    paid = await _create(app_sessions, ws, f"same-paid-{uuid.uuid4()}")
+    async with workspace_session(app_sessions, ws["workspace_id"]) as session:
+        await record_payment(
+            session, workspace_id=ws["workspace_id"], invoice_id=paid["id"],
+            actor_uc_uid="rls-test", amount=paid["total"],
+        )
+    live = await _create(app_sessions, ws, f"same-live-{uuid.uuid4()}")
+    status, body = await _public_get(f"/pay/{live['public_token']}")
+    assert status == 200 and b"Example Customer" in body
+
+    tokens = {
+        "unknown": "u" * 43,
+        "expired": expired["public_token"],
+        "revoked": revoked["public_token"],
+        "paid": paid["public_token"],
+    }
+    for suffix in ("", "/pdf"):
+        answers = {k: await _public_get(f"/pay/{t}{suffix}") for k, t in tokens.items()}
+        assert answers["unknown"][0] == 404
+        for kind, answer in answers.items():
+            assert answer == answers["unknown"], f"{kind}{suffix} differs from unknown"
+            assert b"Example Customer" not in answer[1] and b"example.com" not in answer[1]
