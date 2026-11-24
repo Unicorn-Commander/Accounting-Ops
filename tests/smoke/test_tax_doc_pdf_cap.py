@@ -119,6 +119,63 @@ def test_render_slot_limits_concurrency(monkeypatch) -> None:
     assert error == "render timeout (partial)"
 
 
+def test_heavy_page_refused_fast_by_content_precheck() -> None:
+    """R5-P2-2: a REAL heavy page (thousands of drawing ops, built with pymupdf,
+    no time.sleep / no rasterizer monkeypatch) must be refused by the
+    content-stream pre-check before it is ever rasterized. The join budget is
+    best-effort only (the GIL means it cannot interrupt a page already inside
+    the C rasterizer), so the refusal must happen in the pre-check, fast, with
+    no page produced and a partial error.
+    """
+    # 8000 drawing ops on one page: ~334 KB of content stream, far over the
+    # 128 KB pre-check bound (a real W-2 / 1099 page carries a few KB).
+    doc = fitz.open()
+    page = doc.new_page()
+    for i in range(8000):
+        page.draw_rect(
+            fitz.Rect(i % 600, (i * 7) % 700, i % 600 + 8, (i * 7) % 700 + 4),
+            color=(1, 0, 0),
+            fill=(0, 1, 0),
+        )
+    data = doc.tobytes()
+    doc.close()
+
+    t0 = time.monotonic()
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    elapsed_s = time.monotonic() - t0
+
+    # The heavy page was refused before rasterization: no page, and the render
+    # is marked partial (a truncated tax document is visible, never silently
+    # "complete").
+    assert out == []
+    assert error == "page too large (partial)"
+    # The refusal came from the pre-check, not the join budget (10s): a
+    # pre-check refusal is a fitz open + a few stream reads (~100 ms), not a
+    # raster. It must be far faster than the budget -- a page that the budget
+    # alone would have to wait out for 10s is instead refused in well under a
+    # second.
+    assert elapsed_s < 2.0, f"pre-check refusal took {elapsed_s:.1f}s (not fast)"
+
+
+def test_light_page_passes_content_precheck() -> None:
+    """R5-P2-2 control: a normal page (a few drawing ops, a few KB of content
+    stream) is under the pre-check bound and still rasterizes to a PNG."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "W-2 sample")
+    for i in range(5):
+        page.draw_rect(
+            fitz.Rect(10, 10 + i, 50, 20 + i), color=(1, 0, 0), fill=(0, 1, 0)
+        )
+    data = doc.tobytes()
+    doc.close()
+
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    assert error is None
+    assert len(out) == 1
+    assert out[0].startswith(b"\x89PNG")
+
+
 def test_render_returns_pngs_for_good_pages() -> None:
     """Control: normal pages still rasterize to PNG bytes, no error."""
     data = _one_page_pdf()
@@ -229,6 +286,14 @@ def test_worker_owns_doc_close_and_slot_on_timeout(monkeypatch) -> None:
             release.wait(60)
             pix = doc[0].get_pixmap(matrix=matrix, alpha=alpha)
             return pix
+
+        def get_contents(self) -> list[int]:
+            # The pre-check (R5-P2-2) measures the page's content stream via
+            # get_contents() before rasterizing. The fake stands in for the
+            # real page: report no content streams so the pre-check passes
+            # (the test is about the join budget / doc ownership, not the
+            # pre-check).
+            return []
 
     class _FakeDoc:
         # The caller opens the doc to read page_count for the loop bound

@@ -54,6 +54,7 @@ from fastapi import (
 )
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+from starlette.concurrency import run_in_threadpool
 
 from app.authz import assert_entity_in_scope
 from app.clients.garage_s3 import (
@@ -554,7 +555,12 @@ async def _run_tax_extraction(
     try:
         from app.categorization.tax_doc_vlm import TaxDocExtractor
 
-        result = await TaxDocExtractor().extract(body=body, mime_type=mime_type)
+        # extract() does CPU-bound fitz PDF work that holds the GIL inside the
+        # C rasterizer; run it off the event loop so one heavy uploaded PDF
+        # cannot block the server while it is being refused or rasterized.
+        result = await run_in_threadpool(
+            TaxDocExtractor().extract, body=body, mime_type=mime_type
+        )
         status_val = "failed" if result.error else "extracted"
         confidence = (
             Decimal(str(result.confidence)) if result.confidence is not None else None

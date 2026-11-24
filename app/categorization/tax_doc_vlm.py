@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from starlette.concurrency import run_in_threadpool
 
 from app.categorization.receipt_vlm import _extract_completion
 from app.config import Settings, get_settings
@@ -69,9 +70,21 @@ _RENDER_CONCURRENCY = 2
 _RENDER_SLOT_TIMEOUT_S = 30.0
 # A single page that takes longer than this is pathological for a tax doc (a
 # real W-2 / 1099 page rasterizes in well under a second at 150 DPI). Module
-# constant so tests can shrink it; the worker join deadline is enforced around
-# this, not inside the C rasterizer.
+# constant so tests can shrink it. BEST-EFFORT ONLY: the join deadline cannot
+# interrupt a page that is already rasterizing, because the fitz C rasterizer
+# holds the GIL the whole time (a join deadline only fires while the GIL is
+# free). It bounds how long the caller WAITS, not the page itself; the hard
+# refusal for a pathological page is the content-stream pre-check below.
 _RENDER_PAGE_BUDGET_S = 10.0
+# Pre-check bound: a page whose (uncompressed) content stream is larger than
+# this is refused before it is rasterized. A real W-2 / 1099 / 1099-R page
+# carries a few KB of operators (measured: a text-only page is ~200 bytes);
+# a page over 128 KB of content stream is pathological (thousands of drawing
+# ops / a huge inline XObject). The refusal must happen BEFORE the page is
+# ever handed to the C rasterizer, because that raster -- not the pre-check --
+# is the thing that would hold a worker thread and (while it holds the GIL)
+# block the server's event loop.
+_PAGE_CONTENT_MAX_BYTES = 128 * 1024
 
 _SYSTEM_PROMPT = (
     "You are a meticulous U.S. tax-document analyzer. You are shown the page "
@@ -125,8 +138,17 @@ class TaxDocExtractor:
 
         mime = (mime_type or "").split(";")[0].strip().lower()
         render_error: str | None = None
+        # fitz PDF work (open + content-stream pre-check + rasterization) is
+        # CPU-bound and holds the GIL inside the C rasterizer: run it off the
+        # event loop so one heavy uploaded PDF cannot block the server while
+        # it is being refused or rasterized. Images skip this (no fitz).
         try:
-            images, render_error = _to_page_images(body, mime)
+            if mime in _PDF_MIMES:
+                images, render_error = await run_in_threadpool(
+                    _render_pdf, body, _MAX_PAGES, _RENDER_DPI
+                )
+            else:
+                images, render_error = _to_page_images(body, mime)
         except Exception as exc:  # noqa: BLE001 — render failure must not raise
             return TaxDocExtraction(
                 model=model,
@@ -252,11 +274,21 @@ def _render_pdf(
     The PDF is untrusted (client-uploaded), so the limits are enforced:
     - PAGE cap: only the first ``max_pages`` are rasterized (a 9,999-page
       document cannot burn the whole worker).
-    - TIME cap: each page is rasterized in a worker thread joined with a
-      deadline; a page that overruns it (an extreme XObject / a crafted
-      content stream) is dropped and the render stops. fitz rasterization
-      holds the GIL inside the C library, so the deadline is enforced around
-      the call, not inside it.
+    - CONTENT-SIZE pre-check: before a page is handed to the C rasterizer, its
+      (uncompressed) content stream is measured; a page over
+      ``_PAGE_CONTENT_MAX_BYTES`` is refused and the render stops. This is the
+      HARD bound against a pathological page (thousands of drawing ops / a
+      huge inline XObject): the join budget below is best-effort only, because
+      fitz holds the GIL inside the C rasterizer, so a join deadline cannot
+      interrupt a page that is already rasterizing. The pre-check is cheap
+      (read the page's content-stream xrefs and sum their lengths, no
+      rasterization) and runs in the caller's context, so a heavy page is
+      refused fast, before it can burn a worker or block the event loop.
+    - TIME cap (BEST-EFFORT): each page is rasterized in a worker thread
+      joined with a deadline; a page that overruns it is dropped and the
+      render stops. Because fitz rasterization holds the GIL inside the C
+      library, the deadline fires only around the call, not inside it: it
+      bounds how long the caller waits, not the page itself.
     - CONCURRENCY cap: a module-level semaphore bounds how many pages
       rasterize at once (fitz + GIL means more than a couple just thrash). A
       render that cannot get a slot within the timeout fails with a clear
@@ -286,86 +318,133 @@ def _render_pdf(
     # fewer pages than the cap (the common case, a single-page W-2 or 1099)
     # must rasterize every page it has without doc[page_index] raising
     # IndexError for the missing pages.
+    # The pre-check doc is kept open for the whole loop so each page's content
+    # stream can be measured (the workers open their own docs to rasterize); it
+    # is closed in the finally so a refused/errored render still releases it.
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page_count = doc.page_count
-    doc.close()
-    for page_index in range(min(max_pages, page_count)):
-        # Bound concurrency: a page render that cannot get a slot within the
-        # timeout fails loudly rather than queuing behind a pathological one.
-        if not _render_slot.acquire(timeout=_RENDER_SLOT_TIMEOUT_S):
-            error = "render timeout (partial)"
-            _log.warning(
-                "tax_doc_vlm render: no slot within %.0fs, stopping after %d page(s)",
-                _RENDER_SLOT_TIMEOUT_S,
-                len(out),
-            )
-            break
-        # Each worker keeps its PNG in its OWN local list. The caller takes it
-        # only after a successful join; a page that finishes after the caller
-        # timed out appends to its list, but the caller has already returned
-        # and never reads it, so a late page can't mutate the returned value.
-        worker_out: list[bytes] = []
-        exc: list[BaseException | None] = []
+    try:
+        page_count = doc.page_count
+        for page_index in range(min(max_pages, page_count)):
+            # Cheap pre-check BEFORE the page is rasterized: measure this
+            # page's (uncompressed) content stream and refuse it if it is over
+            # the bound. This is the hard refusal for a pathological page --
+            # the per-page join budget below is best-effort only (the GIL
+            # means it cannot interrupt a page already inside the C rasterizer),
+            # so a page that would burn the worker is stopped here, fast, with
+            # no rasterization and no render slot consumed.
+            content_bytes = _page_content_bytes(doc, page_index)
+            if content_bytes > _PAGE_CONTENT_MAX_BYTES:
+                error = "page too large (partial)"
+                _log.warning(
+                    "tax_doc_vlm render: page %d content stream %d bytes exceeds "
+                    "%d, refusing (partial after %d page(s))",
+                    page_index,
+                    content_bytes,
+                    _PAGE_CONTENT_MAX_BYTES,
+                    len(out),
+                )
+                break
+            # Bound concurrency: a page render that cannot get a slot within the
+            # timeout fails loudly rather than queuing behind a pathological one.
+            if not _render_slot.acquire(timeout=_RENDER_SLOT_TIMEOUT_S):
+                error = "render timeout (partial)"
+                _log.warning(
+                    "tax_doc_vlm render: no slot within %.0fs, stopping after %d page(s)",
+                    _RENDER_SLOT_TIMEOUT_S,
+                    len(out),
+                )
+                break
+            # Each worker keeps its PNG in its OWN local list. The caller takes
+            # it only after a successful join; a page that finishes after the
+            # caller timed out appends to its list, but the caller has already
+            # returned and never reads it, so a late page can't mutate the
+            # returned value.
+            worker_out: list[bytes] = []
+            exc: list[BaseException | None] = []
 
-        # Bind the per-page loop variables as defaults so each worker captures
-        # ITS OWN page_index / worker_out / exc (B023): a late worker for page N
-        # must not see the values rebound for page N+1.
-        def _work(
-            _pi: int = page_index,
-            _out: list[bytes] = worker_out,
-            _exc: list[BaseException | None] = exc,
-        ) -> None:
-            # The worker owns its document + the slot: close the doc and
-            # release the slot in its own finally -- whether the render
-            # succeeded, failed, or the caller abandoned this thread on a
-            # timeout.
-            doc = None
+            # Bind the per-page loop variables as defaults so each worker
+            # captures ITS OWN page_index / worker_out / exc (B023): a late
+            # worker for page N must not see the values rebound for page N+1.
+            def _work(
+                _pi: int = page_index,
+                _out: list[bytes] = worker_out,
+                _exc: list[BaseException | None] = exc,
+            ) -> None:
+                # The worker owns its document + the slot: close the doc and
+                # release the slot in its own finally -- whether the render
+                # succeeded, failed, or the caller abandoned this thread on a
+                # timeout.
+                wdoc = None
+                try:
+                    wdoc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                    _out.append(_rasterize(wdoc[_pi], matrix))
+                except BaseException as exc_:  # noqa: BLE001 - report to joiner
+                    _exc.append(exc_)
+                finally:
+                    if wdoc is not None:
+                        wdoc.close()
+                    _render_slot.release()
+
+            thread = threading.Thread(target=_work, daemon=True)
             try:
-                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                _out.append(_rasterize(doc[_pi], matrix))
-            except BaseException as exc_:  # noqa: BLE001 - report to joiner
-                _exc.append(exc_)
-            finally:
-                if doc is not None:
-                    doc.close()
+                thread.start()
+            except BaseException:
+                # thread.start raised (e.g. the OS refused to spawn a thread):
+                # the worker never ran, so it will never release the slot in
+                # its own finally. Release it here and re-raise, so the slot
+                # count is unchanged and the error propagates.
                 _render_slot.release()
-
-        thread = threading.Thread(target=_work, daemon=True)
-        try:
-            thread.start()
-        except BaseException:
-            # thread.start raised (e.g. the OS refused to spawn a thread): the
-            # worker never ran, so it will never release the slot in its own
-            # finally. Release it here and re-raise, so the slot count is
-            # unchanged and the error propagates.
-            _render_slot.release()
-            raise
-        thread.join(per_page_budget_s)
-        if thread.is_alive():
-            # Still running after the budget: give up on this page and stop the
-            # render. Do NOT close the document or release the slot here: the
-            # worker thread still holds its doc, its page, and the slot, and it
-            # closes the doc + releases the slot in its own finally when it
-            # finishes. Marking the result partial keeps the truncated document
-            # visible.
-            error = "render timeout (partial)"
-            _log.warning(
-                "tax_doc_vlm render: page overran %.0fs budget, partial after %d page(s)",
-                per_page_budget_s,
-                len(out),
-            )
-            break
-        if exc:
-            raise exc[0]
-        # The worker finished: take its PNG (its own list, read only after a
-        # successful join).
-        out.extend(worker_out)
+                raise
+            thread.join(per_page_budget_s)
+            if thread.is_alive():
+                # Still running after the budget: give up on this page and stop
+                # the render. Do NOT close the document or release the slot
+                # here: the worker thread still holds its doc, its page, and
+                # the slot, and it closes the doc + releases the slot in its
+                # own finally when it finishes. Marking the result partial
+                # keeps the truncated document visible.
+                error = "render timeout (partial)"
+                _log.warning(
+                    "tax_doc_vlm render: page overran %.0fs budget, partial after %d page(s)",
+                    per_page_budget_s,
+                    len(out),
+                )
+                break
+            if exc:
+                raise exc[0]
+            # The worker finished: take its PNG (its own list, read only after
+            # a successful join).
+            out.extend(worker_out)
+    finally:
+        # The pre-check doc is the caller's (the workers own their docs); close
+        # it here so a refused / errored / partial render still releases it.
+        doc.close()
     return out, error
 
 
 # Module-level semaphore bounding concurrent fitz page renders. See the note at
 # _RENDER_CONCURRENCY for why (GIL + fitz C rasterizer).
 _render_slot = threading.BoundedSemaphore(_RENDER_CONCURRENCY)
+
+
+def _page_content_bytes(doc: Any, page_index: int) -> int:
+    """Total (uncompressed) bytes of a page's content stream, or 0 on error.
+
+    Cheap by design: it reads the page's content-stream xrefs and sums their
+    lengths without rasterizing anything, so it runs in the caller's context in
+    microseconds for a normal page. This is the pre-check that refuses a
+    pathological page before it can burn a render worker; 0 is treated as
+    "no measurable content" (an empty page), never as "too large".
+    """
+    page = doc[page_index]
+    total = 0
+    for xref in page.get_contents():
+        try:
+            if doc.xref_is_stream(xref):
+                total += len(doc.xref_stream_raw(xref))
+        except Exception:  # noqa: BLE001 - a corrupt stream is not "too large"
+            continue
+    return total
 
 
 def _rasterize(page: Any, matrix: Any) -> bytes:
