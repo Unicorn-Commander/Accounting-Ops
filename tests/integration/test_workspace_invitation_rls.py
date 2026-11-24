@@ -166,8 +166,12 @@ async def test_runtime_role_cross_workspace_select_update_insert(pools, two_work
     async with runtime.acquire() as conn:
         async with conn.transaction():
             await conn.execute("SELECT set_config('app.current_workspace', $1, true)", str(a))
-            seen = {r["id"] for r in await conn.fetch(f"SELECT id FROM {T}")}
-            assert seen == {invites[a]}
+            rows = await conn.fetch(f"SELECT id, workspace_id FROM {T}")
+            # Assert on this test's own rows plus the workspace of every row
+            # seen; other tests may leave their own invitations in A.
+            assert invites[a] in {r["id"] for r in rows}
+            assert invites[b] not in {r["id"] for r in rows}
+            assert {r["workspace_id"] for r in rows} == {a}
             # Even naming B's row explicitly yields nothing.
             assert await conn.fetchval(f"SELECT count(*) FROM {T} WHERE id = $1", invites[b]) == 0
             assert await conn.fetchval(
@@ -224,14 +228,15 @@ async def test_members_create_list_cancel_stay_in_their_workspace(
     )
     assert created["status"] == "pending"
     listed = {row["id"] for row in await members.list_invitations(a, False, workspace=_ctx(a))}
-    assert listed == {str(invites[a]), created["id"]}
+    assert {str(invites[a]), created["id"]} <= listed
+    assert str(invites[b]) not in listed
     # Cancelling B's invitation from A's context is a 404, and B is untouched.
     with pytest.raises(HTTPException) as exc:
         await members.cancel_invitation(a, invites[b], workspace=_ctx(a))
     assert exc.value.status_code == 404
-    assert {row["id"] for row in await members.list_invitations(b, False, workspace=_ctx(b))} == {
-        str(invites[b])
-    }
+    listed_b = {row["id"] for row in await members.list_invitations(b, False, workspace=_ctx(b))}
+    assert str(invites[b]) in listed_b
+    assert created["id"] not in listed_b and str(invites[a]) not in listed_b
     assert (await members.cancel_invitation(a, uuid.UUID(created["id"]), workspace=_ctx(a)))["ok"]
 
 
