@@ -8,14 +8,18 @@ table + ``external_refs`` JSONB convention (a thin ``contact_id`` reference is
 kept for later Contact-Ops reconciliation; email/phone/address are convenience
 snapshots for rendering).
 """
+
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+_log = logging.getLogger("acctops.contacts")
 
 # Kinds we accept for an imported contact. Anything else is coerced to
 # "customer" so a bad client payload can't write arbitrary kinds.
@@ -74,9 +78,7 @@ async def list_counterparties(
         where.append("kind = :kind")
         params["kind"] = _norm_kind(kind)
     if q:
-        where.append(
-            "(lower(display_name) LIKE :q OR lower(external_refs->>'email') LIKE :q)"
-        )
+        where.append("(lower(display_name) LIKE :q OR lower(external_refs->>'email') LIKE :q)")
         params["q"] = f"%{q.strip().lower()}%"
     where_sql = " AND ".join(where)
 
@@ -88,9 +90,10 @@ async def list_counterparties(
     ).scalar_one()
 
     rows = (
-        await session.execute(
-            text(
-                f"""
+        (
+            await session.execute(
+                text(
+                    f"""
                 SELECT
                     id::text                          AS id,
                     display_name,
@@ -107,10 +110,13 @@ async def list_counterparties(
                 ORDER BY lower(display_name)
                 LIMIT :limit OFFSET :offset
                 """
-            ),
-            params,
+                ),
+                params,
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     return {"items": [dict(r) for r in rows], "total": int(total)}
 
 
@@ -153,34 +159,46 @@ async def upsert_counterparty(
     existing = None
     if contact_id:
         existing = (
-            await session.execute(
-                text(
-                    "SELECT id::text AS id, display_name FROM counterparty "
-                    "WHERE external_refs->>'contact_id' = :cid LIMIT 1"
-                ),
-                {"cid": str(contact_id)},
+            (
+                await session.execute(
+                    text(
+                        "SELECT id::text AS id, display_name FROM counterparty "
+                        "WHERE external_refs->>'contact_id' = :cid LIMIT 1"
+                    ),
+                    {"cid": str(contact_id)},
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
     if existing is None and email:
         existing = (
-            await session.execute(
-                text(
-                    "SELECT id::text AS id, display_name FROM counterparty "
-                    "WHERE lower(external_refs->>'email') = lower(:em) LIMIT 1"
-                ),
-                {"em": email},
+            (
+                await session.execute(
+                    text(
+                        "SELECT id::text AS id, display_name FROM counterparty "
+                        "WHERE lower(external_refs->>'email') = lower(:em) LIMIT 1"
+                    ),
+                    {"em": email},
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
     if existing is None:
         existing = (
-            await session.execute(
-                text(
-                    "SELECT id::text AS id, display_name FROM counterparty "
-                    "WHERE kind = :kind AND lower(display_name) = lower(:name) LIMIT 1"
-                ),
-                {"kind": kind, "name": name},
+            (
+                await session.execute(
+                    text(
+                        "SELECT id::text AS id, display_name FROM counterparty "
+                        "WHERE kind = :kind AND lower(display_name) = lower(:name) LIMIT 1"
+                    ),
+                    {"kind": kind, "name": name},
+                )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
 
     if existing is not None:
         await session.execute(
@@ -262,9 +280,13 @@ async def bulk_import_counterparties(
                 updated += 1
             else:
                 created += 1
-        except Exception as exc:  # noqa: BLE001 — collect, don't abort the batch
+        except Exception:  # noqa: BLE001 — collect, don't abort the batch
+            # A DB failure's str(exc) is the SQLAlchemy statement (SQL text +
+            # bound params) — internal detail that must not reach the client.
+            # Log it full, return a fixed per-row message.
+            _log.exception("contact import row %d (%r) failed", idx, name)
             skipped += 1
-            errors.append({"index": idx, "name": name, "error": str(exc)})
+            errors.append({"index": idx, "name": name, "error": "row could not be imported"})
 
     return {
         "created": created,

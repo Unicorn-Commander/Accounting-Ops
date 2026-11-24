@@ -24,6 +24,7 @@ and the API surfaces a clean "not connected yet" message.
 The pure functions (``parse_jsonrpc_result``, ``map_person_to_row``) are unit-
 tested without any network; the I/O functions are thin wrappers over httpx.
 """
+
 from __future__ import annotations
 
 import json
@@ -65,11 +66,7 @@ def is_configured() -> bool:
     until the federation is really wired — no button that 502s on click.
     """
     s = get_settings()
-    return bool(
-        s.contact_ops_mcp_url
-        and s.contact_ops_audience
-        and s.contact_ops_client_secret
-    )
+    return bool(s.contact_ops_mcp_url and s.contact_ops_audience and s.contact_ops_client_secret)
 
 
 def _exchange_client_creds() -> tuple[str, str]:
@@ -100,10 +97,15 @@ def parse_jsonrpc_result(payload: dict[str, Any]) -> dict[str, Any]:
     a JSON-RPC error envelope or an ``isError`` result.
     """
     if "error" in payload and payload["error"]:
+        # The JSON-RPC error message is Contact-Ops' own internal text: log it,
+        # return only the (numeric) code so nothing upstream reaches the client.
         err = payload["error"]
-        raise ContactOpsError(
-            f"Contact-Ops error {err.get('code')}: {err.get('message')}"
+        _log.warning(
+            "[contact-ops] jsonrpc error code=%s message=%r",
+            err.get("code"),
+            str(err.get("message"))[:300],
         )
+        raise ContactOpsError(f"Contact-Ops error (code {err.get('code')})")
     result = payload.get("result") or {}
     if result.get("isError"):
         raise ContactOpsError("Contact-Ops returned an error result")
@@ -113,7 +115,13 @@ def parse_jsonrpc_result(payload: dict[str, Any]) -> dict[str, Any]:
             try:
                 return json.loads(block["text"])
             except json.JSONDecodeError as exc:
-                raise ContactOpsError(f"Unparseable Contact-Ops payload: {exc}") from exc
+                # The payload is upstream-internal: log it, fixed message.
+                _log.warning(
+                    "[contact-ops] unparseable payload: %s body=%r",
+                    exc,
+                    block["text"][:300],
+                )
+                raise ContactOpsError("Contact-Ops returned an unparseable payload") from exc
     # Some tools may return structured content directly.
     if isinstance(result.get("structuredContent"), dict):
         return result["structuredContent"]
@@ -154,9 +162,8 @@ def map_person_to_row(person: dict[str, Any]) -> dict[str, Any] | None:
     employments = person.get("current_employments") or person.get("employments")
     if employments:
         first = employments[0]
-        company = (
-            first.get("organization_name")
-            or (first.get("organization") or {}).get("display_name")
+        company = first.get("organization_name") or (first.get("organization") or {}).get(
+            "display_name"
         )
 
     return {
@@ -194,7 +201,17 @@ async def exchange_token(subject_token: str) -> str:
     async with httpx.AsyncClient(timeout=_TIMEOUT, headers={"User-Agent": _UA}) as client:
         resp = await client.post(token_url, data=data)
     if resp.status_code != 200:
-        _log.info("[contact-ops] token exchange failed: %s %s", resp.status_code, resp.text[:300])
+        # Log status + error code only, NOT resp.text: the token-endpoint body
+        # can echo grant details and must stay out of the logs.
+        try:
+            err_code = resp.json().get("error")
+        except Exception:  # noqa: BLE001 - body may not be JSON
+            err_code = None
+        _log.warning(
+            "[contact-ops] token exchange failed: status=%s error_code=%s",
+            resp.status_code,
+            err_code,
+        )
         raise ContactOpsError(
             "Could not obtain a Contact-Ops access token (token-exchange "
             f"returned {resp.status_code}). The uchub client may not be "
@@ -221,9 +238,7 @@ async def _call_tool(obo_token: str, name: str, arguments: dict[str, Any]) -> di
             headers={"Authorization": f"Bearer {obo_token}"},
         )
     if resp.status_code != 200:
-        raise ContactOpsError(
-            f"Contact-Ops MCP call '{name}' returned {resp.status_code}"
-        )
+        raise ContactOpsError(f"Contact-Ops MCP call '{name}' returned {resp.status_code}")
     return parse_jsonrpc_result(resp.json())
 
 

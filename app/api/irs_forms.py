@@ -47,6 +47,7 @@ cpa-export data was missing.
 
 from __future__ import annotations
 
+import logging
 import os
 from uuid import UUID
 
@@ -62,11 +63,11 @@ from app.tenancy import WorkspaceContext, require_role, resolve_workspace
 from app.tools._cpa_export_client import resolve_cpa_export_bearer
 from app.workspace_session import workspace_session
 
+logger = logging.getLogger("acctops.api.irs_forms")
+
 router = APIRouter(tags=["irs-forms"])
 
-_SUPPORTED_FORMS = frozenset({
-    "1120", "1120-schedule-l", "1125-e", "1120-package"
-})
+_SUPPORTED_FORMS = frozenset({"1120", "1120-schedule-l", "1125-e", "1120-package"})
 
 _VALID_TAX_YEARS = frozenset(range(2020, 2030))
 
@@ -74,6 +75,7 @@ _VALID_TAX_YEARS = frozenset(range(2020, 2030))
 # ---------------------------------------------------------------------------
 # Helper: fetch cpa-export JSON package
 # ---------------------------------------------------------------------------
+
 
 async def _fetch_cpa_package(
     workspace_id: UUID,
@@ -112,6 +114,7 @@ async def _fetch_cpa_package(
 # Helper: fetch entity display name + EIN from DB
 # ---------------------------------------------------------------------------
 
+
 async def _fetch_entity_meta(
     session,
     entity_id: UUID,
@@ -124,17 +127,21 @@ async def _fetch_entity_meta(
     for the EIN — the CPA must fill the EIN manually on the paper form.
     """
     row = (
-        await session.execute(
-            text(
-                """
+        (
+            await session.execute(
+                text(
+                    """
                 SELECT display_name
                 FROM entity
                 WHERE id = :eid
                 """
-            ),
-            {"eid": str(entity_id)},
+                ),
+                {"eid": str(entity_id)},
+            )
         )
-    ).mappings().first()
+        .mappings()
+        .first()
+    )
     if row:
         return row["display_name"] or str(entity_id), None
     return str(entity_id), None
@@ -143,6 +150,7 @@ async def _fetch_entity_meta(
 # ---------------------------------------------------------------------------
 # Helper: fetch tax_review_queue items for entity-year
 # ---------------------------------------------------------------------------
+
 
 async def _fetch_queue_items(
     session,
@@ -157,9 +165,10 @@ async def _fetch_queue_items(
     are still reflected in the pre-fill. Rejected/resolved items are excluded.
     """
     rows = (
-        await session.execute(
-            text(
-                """
+        (
+            await session.execute(
+                text(
+                    """
                 SELECT
                     trq.id::text,
                     trq.item_type,
@@ -173,15 +182,18 @@ async def _fetch_queue_items(
                   AND trq.status    = ANY(:statuses)
                 ORDER BY trq.created_at DESC
                 """
-            ),
-            {
-                "eid": str(entity_id),
-                "yr": tax_year,
-                "itype": item_type,
-                "statuses": list(statuses),
-            },
+                ),
+                {
+                    "eid": str(entity_id),
+                    "yr": tax_year,
+                    "itype": item_type,
+                    "statuses": list(statuses),
+                },
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     return [dict(r) for r in rows]
 
 
@@ -189,9 +201,9 @@ async def _fetch_queue_items(
 # Endpoint
 # ---------------------------------------------------------------------------
 
+
 @router.get(
-    "/api/workspaces/{workspace_id}/entities/{entity_id}"
-    "/irs-forms/{tax_year}/{form_name}.pdf",
+    "/api/workspaces/{workspace_id}/entities/{entity_id}/irs-forms/{tax_year}/{form_name}.pdf",
     response_class=Response,
     summary="Generate a pre-filled IRS form PDF (or zip for 1120-package)",
 )
@@ -242,8 +254,7 @@ async def generate_irs_form(
         raise HTTPException(
             status_code=404,
             detail=(
-                f"Unknown form '{form_name}'. "
-                f"Supported: {', '.join(sorted(_SUPPORTED_FORMS))}."
+                f"Unknown form '{form_name}'. Supported: {', '.join(sorted(_SUPPORTED_FORMS))}."
             ),
         )
 
@@ -264,6 +275,7 @@ async def generate_irs_form(
     # --- Generate the PDF(s) ---
     try:
         from app.exports.form_prefill import generate_form_pdf
+
         pdf_bytes, content_type = generate_form_pdf(
             form_name=fn,
             tax_year=tax_year,
@@ -273,11 +285,15 @@ async def generate_irs_form(
             cpa_package=cpa_package,
         )
     except FileNotFoundError as exc:
+        # The exception carries the full server-side template path: log it,
+        # return only the form name (the caller already knows it).
+        logger.warning("IRS form template missing: %s", exc)
         raise HTTPException(
             status_code=503,
             detail=(
-                f"IRS form PDF template missing: {exc}. "
-                "Run scripts/download_irs_forms.sh on the server to download it."
+                f"IRS form PDF template for {fn} is not available on this "
+                "server. It must be downloaded before this form can be "
+                "rendered."
             ),
         ) from exc
     except ValueError as exc:

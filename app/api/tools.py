@@ -9,6 +9,8 @@ Workspace-level routes (no entity scoping):
 All routes resolve workspace + entity context via FastAPI dependency, enforce
 RBAC via require_role, then delegate to app.tools functions.
 """
+
+import logging
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -42,6 +44,7 @@ from app.tools import (
 )
 from app.tools._cpa_export_client import fetch_return_package
 
+_log = logging.getLogger("acctops.api.tools")
 
 router = APIRouter(
     prefix="/api/workspaces/{workspace_id}/entities/{entity_id}",
@@ -112,12 +115,19 @@ class EntityOwnerUpsertRequest(BaseModel):
 
 
 def _phase_1(exc: NotImplementedError) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc)
-    )
+    return HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc))
 
 
 def _cpa_export_http_error(exc: Exception) -> HTTPException:
+    """Map a cpa-export client failure to a status code with a SAFE detail.
+
+    The exception message is a fixed string (the client never embeds the
+    sidecar's response body in it), so ``str(exc)`` is already safe to return.
+    Anything that is NOT one of the four known client failure classes is an
+    unexpected internal error: log it full and return a generic 502 detail so
+    internal text (a traceback, a file path, an upstream body) can never reach
+    the client.
+    """
     if isinstance(exc, PermissionError):
         code = status.HTTP_403_FORBIDDEN
     elif isinstance(exc, LookupError):
@@ -126,6 +136,13 @@ def _cpa_export_http_error(exc: Exception) -> HTTPException:
         code = status.HTTP_400_BAD_REQUEST
     else:
         code = status.HTTP_502_BAD_GATEWAY
+        # Unexpected (not one of the client's four failure classes): the
+        # message is not a vetted fixed string, so do not echo it.
+        _log.exception("cpa-export unexpected failure: %s: %s", type(exc).__name__, exc)
+        return HTTPException(
+            status_code=code,
+            detail="cpa-export request failed. The request was logged; retry or contact support.",
+        )
     return HTTPException(status_code=code, detail=str(exc))
 
 
@@ -170,9 +187,7 @@ async def http_get_transaction(
     id: UUID, ctx: EntityContext = Depends(resolve_entity)
 ) -> dict[str, Any]:
     try:
-        return await get_transaction(
-            ctx.workspace.workspace_id, ctx.entity_id, id
-        )
+        return await get_transaction(ctx.workspace.workspace_id, ctx.entity_id, id)
     except NotImplementedError as exc:
         raise _phase_1(exc) from exc
 
@@ -182,9 +197,7 @@ async def http_query_specialty_rules(
     ctx: EntityContext = Depends(resolve_entity),
 ) -> list[dict[str, Any]]:
     try:
-        return await query_specialty_rules(
-            ctx.workspace.workspace_id, ctx.entity_id
-        )
+        return await query_specialty_rules(ctx.workspace.workspace_id, ctx.entity_id)
     except NotImplementedError as exc:
         raise _phase_1(exc) from exc
 
@@ -203,9 +216,7 @@ async def http_get_p_and_l(
     period: str, ctx: EntityContext = Depends(resolve_entity)
 ) -> dict[str, Any]:
     try:
-        return await get_p_and_l(
-            ctx.workspace.workspace_id, ctx.entity_id, period
-        )
+        return await get_p_and_l(ctx.workspace.workspace_id, ctx.entity_id, period)
     except NotImplementedError as exc:
         raise _phase_1(exc) from exc
 
@@ -215,9 +226,7 @@ async def http_get_runway(
     body: RunwayRequest, ctx: EntityContext = Depends(resolve_entity)
 ) -> dict[str, Any]:
     try:
-        return await get_runway(
-            ctx.workspace.workspace_id, ctx.entity_id, body.scenario
-        )
+        return await get_runway(ctx.workspace.workspace_id, ctx.entity_id, body.scenario)
     except NotImplementedError as exc:
         raise _phase_1(exc) from exc
 
@@ -355,9 +364,7 @@ async def http_get_consolidated_p_and_l(
             detail="Consolidated views require unrestricted entity scope",
         )
     try:
-        return await get_consolidated_p_and_l(
-            workspace.workspace_id, body.period, body.entity_ids
-        )
+        return await get_consolidated_p_and_l(workspace.workspace_id, body.period, body.entity_ids)
     except NotImplementedError as exc:
         raise _phase_1(exc) from exc
 

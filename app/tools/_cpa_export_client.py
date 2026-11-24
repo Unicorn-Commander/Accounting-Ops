@@ -16,6 +16,7 @@ and runs its own membership + entity-scope checks against that identity.
 ``ACCTOPS_SERVICE_TOKEN`` is still attached as a bearer, but only as a transport
 handshake so an unauthenticated caller cannot reach the sidecar at all.
 """
+
 from __future__ import annotations
 
 import logging
@@ -128,9 +129,12 @@ async def fetch_return_package(
             "cpa-export identity assertion minting failed; failure_class=%s",
             failure_class,
         )
-        allow_bearer_only = os.getenv(
-            _CPA_EXPORT_ALLOW_BEARER_ONLY_ENV, ""
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        allow_bearer_only = os.getenv(_CPA_EXPORT_ALLOW_BEARER_ONLY_ENV, "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         if not allow_bearer_only:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -149,23 +153,58 @@ async def fetch_return_package(
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(url, headers=headers)
 
+    # The sidecar's response body is INTERNAL (its own error rendering, and it
+    # can echo the very assertion / header values we just sent). It must never
+    # reach the client: log it truncated and raise a FIXED message that carries
+    # only the status + the caller's own identifiers. The exception TYPE still
+    # drives the status code the API maps (400->400, 404->404, 403->403,
+    # other->502); the detail is a constant per class.
     if response.status_code == 400:
+        _log.warning(
+            "cpa-export 400 for %s entity=%s year=%s body=%r",
+            form_label,
+            entity_id,
+            tax_year,
+            response.text[:300],
+        )
         raise ValueError(
-            f"cpa-export rejected the {form_label} request: {response.text[:300]}"
+            f"cpa-export rejected the {form_label} request (entity {entity_id}, year {tax_year})."
         )
     if response.status_code == 404:
+        _log.warning(
+            "cpa-export 404 for %s entity=%s year=%s body=%r",
+            form_label,
+            entity_id,
+            tax_year,
+            response.text[:300],
+        )
         raise LookupError(
             f"{form_label} export not found for entity {entity_id}, year "
             f"{tax_year}. Check the entity and year."
         )
     if response.status_code == 403:
+        _log.warning(
+            "cpa-export 403 for %s entity=%s year=%s body=%r",
+            form_label,
+            entity_id,
+            tax_year,
+            response.text[:300],
+        )
         raise PermissionError(
-            f"cpa-export service denied access to entity {entity_id}, year "
-            f"{tax_year}."
+            f"cpa-export service denied access to entity {entity_id}, year {tax_year}."
         )
     if response.status_code != 200:
+        _log.warning(
+            "cpa-export HTTP %s for %s entity=%s year=%s body=%r",
+            response.status_code,
+            form_label,
+            entity_id,
+            tax_year,
+            response.text[:300],
+        )
         raise RuntimeError(
-            f"cpa-export returned HTTP {response.status_code}: {response.text[:200]}"
+            f"cpa-export returned HTTP {response.status_code} "
+            f"for the {form_label} request (entity {entity_id}, year {tax_year})."
         )
 
     data = response.json()

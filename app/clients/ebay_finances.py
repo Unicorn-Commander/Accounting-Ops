@@ -32,7 +32,37 @@ TIMEOUT_SECONDS = 25.0
 
 
 class EbayFinancesError(Exception):
-    """Raised when the MCP returns an error or is unreachable."""
+    """Raised when the MCP returns an error or is unreachable.
+
+    The message is a FIXED string per failure class: the upstream eBay /
+    MCP response body is internal (and can carry token-adjacent values) so it
+    is logged truncated and never embedded here. Callers surface this message
+    to the client verbatim (it lands in the ``errors[]`` array of the
+    transactions list endpoint), so it must stay safe.
+    """
+
+    def __init__(
+        self, message: str, *, upstream_status: int | None = None, upstream_body: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.upstream_status = upstream_status
+        self.upstream_body = upstream_body
+
+    def __str__(self) -> str:
+        return super().__str__()
+
+
+def _ebay_upstream_error(
+    what: str, status_code: int, body: str, *, extra: str = ""
+) -> EbayFinancesError:
+    """Build a safe EbayFinancesError: log the upstream body truncated, keep
+    the message fixed (status + what + any caller-supplied context that is not
+    the upstream body)."""
+    logger.warning("ebay upstream error: %s HTTP %s body=%r", what, status_code, body[:300])
+    detail = f"eBay {what} failed with HTTP {status_code}"
+    if extra:
+        detail = f"{detail} ({extra})"
+    return EbayFinancesError(detail, upstream_status=status_code, upstream_body=body[:300])
 
 
 @dataclass(frozen=True)
@@ -101,6 +131,25 @@ def _parse_sse_or_json(resp: httpx.Response) -> dict:
     return resp.json()
 
 
+def _parse_jsonrpc_error(payload: dict) -> None:
+    """Raise a SAFE EbayFinancesError for a JSON-RPC error envelope.
+
+    The MCP error object is internal (the sidecar's own text): it is logged,
+    never returned. The raised message is fixed.
+    """
+    if "error" in payload and payload["error"]:
+        err = payload["error"]
+        logger.warning(
+            "ebay-finances-mcp JSON-RPC error code=%s message=%r",
+            err.get("code"),
+            str(err.get("message"))[:300],
+        )
+        raise EbayFinancesError(
+            f"ebay-finances-mcp returned an error (code {err.get('code')})",
+            upstream_body=str(err.get("message"))[:300],
+        )
+
+
 async def _call_mcp_tool(tool_name: str, arguments: dict) -> Any:
     """Invoke an MCP tool via JSON-RPC over streamable HTTP.
 
@@ -130,9 +179,7 @@ async def _call_mcp_tool(tool_name: str, arguments: dict) -> Any:
         }
         init_resp = await client.post(EBAY_MCP_URL, json=init_payload, headers=headers)
         if init_resp.status_code >= 400:
-            raise EbayFinancesError(
-                f"ebay-finances-mcp init HTTP {init_resp.status_code}: {init_resp.text[:300]}"
-            )
+            raise _ebay_upstream_error("init", init_resp.status_code, init_resp.text)
         session_id = init_resp.headers.get("mcp-session-id")
         if not session_id:
             raise EbayFinancesError("ebay-finances-mcp didn't return mcp-session-id")
@@ -156,13 +203,10 @@ async def _call_mcp_tool(tool_name: str, arguments: dict) -> Any:
         }
         call_resp = await client.post(EBAY_MCP_URL, json=call_payload, headers=session_headers)
         if call_resp.status_code >= 400:
-            raise EbayFinancesError(
-                f"ebay-finances-mcp tools/call HTTP {call_resp.status_code}: {call_resp.text[:300]}"
-            )
+            raise _ebay_upstream_error("tools/call", call_resp.status_code, call_resp.text)
         data = _parse_sse_or_json(call_resp)
 
-    if "error" in data and data["error"]:
-        raise EbayFinancesError(f"MCP error: {data['error']}")
+    _parse_jsonrpc_error(data)
     result = data.get("result") or {}
     contents = result.get("content") or []
     if not contents:
@@ -190,9 +234,7 @@ async def list_accounts(auth: EbayAuth) -> list[dict]:
     return []
 
 
-async def recent_transactions(
-    auth: EbayAuth, *, days: int = 30, limit: int = 500
-) -> list[dict]:
+async def recent_transactions(auth: EbayAuth, *, days: int = 30, limit: int = 500) -> list[dict]:
     """Return canonical transactions sorted newest-first by the MCP."""
     out = await _call_mcp_tool(
         "recent_transactions",
@@ -243,8 +285,12 @@ async def _get_fulfillment_token(auth: EbayAuth) -> str:
             },
         )
         if resp.status_code != 200:
+            # The token-endpoint body is sensitive (it can echo grant errors
+            # with token fragments): log status + class only, fixed message.
+            logger.warning("eBay token refresh failed HTTP %s", resp.status_code)
             raise EbayFinancesError(
-                f"eBay token refresh failed [{resp.status_code}]: {resp.text[:200]}"
+                f"eBay token refresh failed with HTTP {resp.status_code}",
+                upstream_status=resp.status_code,
             )
         data = resp.json()
     token = data["access_token"]
@@ -253,9 +299,7 @@ async def _get_fulfillment_token(auth: EbayAuth) -> str:
     return token
 
 
-async def fulfillment_orders(
-    auth: EbayAuth, *, days: int = 30, limit: int = 200
-) -> list[dict]:
+async def fulfillment_orders(auth: EbayAuth, *, days: int = 30, limit: int = 200) -> list[dict]:
     """Fetch recent eBay orders via /sell/fulfillment/v1/order, normalized
     to canonical-transaction shape.
 
@@ -288,9 +332,7 @@ async def fulfillment_orders(
             if resp.status_code == 404:
                 break  # eBay's "no data" or "no permission"
             if resp.status_code >= 400:
-                raise EbayFinancesError(
-                    f"eBay fulfillment HTTP {resp.status_code}: {resp.text[:200]}"
-                )
+                raise _ebay_upstream_error("fulfillment", resp.status_code, resp.text)
             payload = resp.json()
             orders = payload.get("orders") or []
             if not orders:
