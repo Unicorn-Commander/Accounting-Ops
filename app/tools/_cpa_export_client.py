@@ -155,28 +155,26 @@ async def fetch_return_package(
 
     # The sidecar's response body is INTERNAL (its own error rendering, and it
     # can echo the very assertion / header values we just sent). It must never
-    # reach the client: log it truncated and raise a FIXED message that carries
-    # only the status + the caller's own identifiers. The exception TYPE still
-    # drives the status code the API maps (400->400, 404->404, 403->403,
-    # other->502); the detail is a constant per class.
+    # reach the client AND must never reach the logs: log ONLY the status, the
+    # body length, and a request ref (form + entity + year), and raise a FIXED
+    # message that carries only the status + the caller's own identifiers. The
+    # exception TYPE still drives the status code the API maps (400->400,
+    # 404->404, 403->403, other->502); the detail is a constant per class.
+    ref = f"form={form_label} entity={entity_id} year={tax_year}"
     if response.status_code == 400:
         _log.warning(
-            "cpa-export 400 for %s entity=%s year=%s body=%r",
-            form_label,
-            entity_id,
-            tax_year,
-            response.text[:300],
+            "cpa-export 400 %s body_bytes=%d",
+            ref,
+            len(response.text),
         )
         raise ValueError(
             f"cpa-export rejected the {form_label} request (entity {entity_id}, year {tax_year})."
         )
     if response.status_code == 404:
         _log.warning(
-            "cpa-export 404 for %s entity=%s year=%s body=%r",
-            form_label,
-            entity_id,
-            tax_year,
-            response.text[:300],
+            "cpa-export 404 %s body_bytes=%d",
+            ref,
+            len(response.text),
         )
         raise LookupError(
             f"{form_label} export not found for entity {entity_id}, year "
@@ -184,23 +182,19 @@ async def fetch_return_package(
         )
     if response.status_code == 403:
         _log.warning(
-            "cpa-export 403 for %s entity=%s year=%s body=%r",
-            form_label,
-            entity_id,
-            tax_year,
-            response.text[:300],
+            "cpa-export 403 %s body_bytes=%d",
+            ref,
+            len(response.text),
         )
         raise PermissionError(
             f"cpa-export service denied access to entity {entity_id}, year {tax_year}."
         )
     if response.status_code != 200:
         _log.warning(
-            "cpa-export HTTP %s for %s entity=%s year=%s body=%r",
+            "cpa-export HTTP %d %s body_bytes=%d",
             response.status_code,
-            form_label,
-            entity_id,
-            tax_year,
-            response.text[:300],
+            ref,
+            len(response.text),
         )
         raise RuntimeError(
             f"cpa-export returned HTTP {response.status_code} "

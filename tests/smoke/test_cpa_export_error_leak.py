@@ -14,6 +14,7 @@ it. No network.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -86,6 +87,35 @@ async def test_400_body_not_in_message(monkeypatch) -> None:
     msg = str(exc.value)
     assert MARKER not in msg
     assert "1120-S" in msg  # the caller's own identifiers remain
+
+
+async def test_400_body_not_in_log(monkeypatch, caplog) -> None:
+    """R5-P2-3: the upstream body is INTERNAL and must never reach the logs
+    either, not just the client. The 400 log line carries only the status, the
+    body length, and a request ref (form + entity + year) -- never the body."""
+    wid, eid = uuid4(), uuid4()
+    body = f"validation failed: {MARKER} assertion=super-secret"
+    _patch_transport(monkeypatch, 400, body)
+
+    with caplog.at_level(logging.WARNING, logger="acctops.cpa_export"):
+        with pytest.raises(ValueError):
+            await client.fetch_return_package(
+                form_path="1120s",
+                form_label="1120-S",
+                workspace_id=wid,
+                entity_id=eid,
+                tax_year=2025,
+            )
+
+    # The marker (a part of the body) must appear in NO log record.
+    for record in caplog.records:
+        assert MARKER not in record.getMessage()
+        assert "super-secret" not in record.getMessage()
+    # A 400 was logged (status + ref + length), so the leak fix is observable:
+    # there IS a warning naming the 400 + the request ref, but carrying no body.
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("cpa-export 400" in r.getMessage() for r in warnings)
+    assert any("1120-S" in r.getMessage() for r in warnings)
 
 
 async def test_non_200_body_not_in_message(monkeypatch) -> None:
