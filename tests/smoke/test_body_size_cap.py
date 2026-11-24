@@ -3,102 +3,173 @@ Starlette has spooled the body into memory.
 
 The 100 MB ``document_upload_max_bytes`` cap was only checked in each upload
 route, AFTER ``await file.read()`` had already buffered the whole body. A
-multi-GB upload exhausted memory before the 413 could fire. The app now passes
-``max_body_size`` to FastAPI, which installs Starlette's
-``RequestBodyLimitMiddleware``: a request whose streamed body crosses the cap
-is rejected with 413 while it is still being read, and the body is never
-fully buffered.
+multi-GB upload exhausted memory before the 413 could fire. The FastAPI
+constructor kwarg that was supposed to fix it (``max_body_size``) is swallowed
+as an **extra by the locked pins (fastapi 0.136.3 / starlette 1.3.1): nothing
+is enforced. The app now wraps itself with ``BodySizeCapMiddleware`` (a pure
+ASGI middleware that counts streamed body bytes) registered on ``app.main.app``.
 
-Offline: a tiny ASGI app wrapped with the same middleware; the over-cap body
-is streamed in chunks and the test asserts the 413 fires before the stream
-ends. No network.
+Offline: real ASGI calls through the real ``app.main.app`` with a body-reading
+route mounted on it (importing app.main is safe: no network at import time);
+over-cap bodies are streamed in chunks and the test asserts the 413 fires
+before the handler ever runs. No network.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from starlette.applications import Starlette
-from starlette.middleware.body_limit import RequestBodyLimitMiddleware
+from starlette.requests import Request
 from starlette.responses import PlainTextResponse
-from starlette.routing import Route
 
-# Small cap so the test stays fast; the production value is 100 MB.
-CAP = 4096
+# A scratch route that READS the whole body, mounted on app.main.app for the
+# duration of each test (and removed afterwards). It stands in for the upload
+# routes, which read the file body the same way.
+_PROBE_PATH = "/__body_cap_probe"
 
 
-def _build_app() -> Any:
-    """Build the app with RequestBodyLimitMiddleware at CAP bytes, the same
-    way FastAPI wraps it when max_body_size is set."""
-
-    async def upload(request) -> Any:
-        # Read the whole body: with the middleware in place an over-cap
-        # request never reaches here (it is 413'd mid-stream). If we DO get
-        # here, the body was within the cap.
-        body = await request.body()
-        return PlainTextResponse(f"got {len(body)}")
-
-    app = Starlette(routes=[Route("/up", upload, methods=["POST"])])
-    return RequestBodyLimitMiddleware(app, max_body_size=CAP)
+def _build_scope(path: str, headers: list[tuple[bytes, bytes]]) -> dict[str, Any]:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode("ascii"),
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+    }
 
 
 def _streaming_body(n_bytes: int, chunk: int = 1024) -> Any:
     """An ASGI receive() that streams n_bytes in chunk-sized pieces."""
-    state = {"sent": 0, "more": True}
+    state = {"sent": 0}
 
     async def receive() -> dict[str, Any]:
-        if not state["more"]:
+        if state["sent"] >= n_bytes:
             return {"type": "http.request", "body": b"", "more_body": False}
         piece = b"x" * min(chunk, n_bytes - state["sent"])
         state["sent"] += len(piece)
-        state["more"] = state["sent"] < n_bytes
-        return {"type": "http.request", "body": piece, "more_body": state["more"]}
+        return {
+            "type": "http.request",
+            "body": piece,
+            "more_body": state["sent"] < n_bytes,
+        }
 
     return receive
 
 
-async def _post(app: Any, n_bytes: int) -> int:
-    scope = {
-        "type": "http",
-        "method": "POST",
-        "path": "/up",
-        "query_string": b"",
-        "headers": [(b"content-length", str(n_bytes).encode())],
-    }
+def _mount_probe() -> None:
+    """Mount the body-reading probe route on the real app for the test."""
+    import app.main as main
+
+    _PROBE_STATE.update({"ran": False, "bytes": 0})
+
+    async def probe(request: Request) -> PlainTextResponse:
+        body = await request.body()
+        _PROBE_STATE["ran"] = True
+        _PROBE_STATE["bytes"] = len(body)
+        return PlainTextResponse(f"got {len(body)}")
+
+    main.app.add_api_route(_PROBE_PATH, probe, methods=["POST"])
+    _PROBE_CLEANUP.append(lambda: main.app.router.routes.remove(
+        next(r for r in main.app.router.routes if getattr(r, "path", None) == _PROBE_PATH)
+    ))
+
+
+def _unmount_probe() -> None:
+    while _PROBE_CLEANUP:
+        _PROBE_CLEANUP.pop()()
+
+
+_PROBE_CLEANUP: list[Any] = []
+_PROBE_STATE: dict[str, Any] = {"ran": False, "bytes": 0}
+
+
+async def _post(body_bytes: int, *, chunked: bool = False, chunk: int = 1024) -> tuple[list[int], bool, int]:
+    """POST ``body_bytes`` to the probe on app.main.app.
+
+    Returns (statuses, handler_ran, bytes_buffered). ``statuses`` is the list
+    of every http.response.start seen (there can be two: the handler's 200
+    followed by the cap middleware's 413 when the body crossed the cap
+    mid-stream).
+    """
+    import app.main as main
+
+    headers: list[tuple[bytes, bytes]] = []
+    if not chunked:
+        headers.append((b"content-length", str(body_bytes).encode("ascii")))
+
     status: list[int] = []
 
     async def send(message: dict[str, Any]) -> None:
         if message["type"] == "http.response.start":
             status.append(message["status"])
 
-    await app(scope, _streaming_body(n_bytes), send)
-    return status[0]
+    await main.app(_build_scope(_PROBE_PATH, headers), _streaming_body(body_bytes, chunk), send)
+    return status, _PROBE_STATE["ran"], _PROBE_STATE["bytes"]
 
 
-async def test_within_cap_body_is_accepted() -> None:
-    app = _build_app()
-    status = await _post(app, CAP - 1024)
-    assert status == 200
+async def test_over_cap_with_content_length_is_413_and_handler_never_runs() -> None:
+    """A body whose declared Content-Length exceeds the cap is 413'd before any
+    body is read; the handler never runs and nothing is buffered."""
+    import app.config as config
+
+    _mount_probe()
+    try:
+        cap = config.get_settings().document_upload_max_bytes
+        statuses, ran, buffered = await _post(cap + 16, chunked=False)
+    finally:
+        _unmount_probe()
+    assert 413 in statuses
+    assert ran is False, "the handler must never run for an over-cap body"
+    assert buffered == 0, "no body may be buffered before the 413"
 
 
-async def test_over_cap_body_is_413_before_full_buffer() -> None:
-    """An over-cap body must be 413'd mid-stream: the app never buffers it.
+async def test_over_cap_chunked_body_is_413_mid_stream() -> None:
+    """A chunked (no Content-Length) body that crosses the cap mid-stream is
+    413'd once the running total exceeds it; the body stops being read."""
+    import app.config as config
 
-    The stream is larger than the cap; the middleware stops reading once the
-    cap is crossed and returns 413. If the body had been fully buffered first,
-    the request would either 500 (memory) or reach the route and 200.
-    """
-    app = _build_app()
-    status = await _post(app, CAP * 4)
-    assert status == 413
+    _mount_probe()
+    try:
+        cap = config.get_settings().document_upload_max_bytes
+        # Stream well past the cap in small chunks: the cap must fire
+        # mid-stream, not after the whole (huge) body was read.
+        statuses, ran, buffered = await _post(cap + 4096, chunked=True, chunk=1024)
+    finally:
+        _unmount_probe()
+    assert 413 in statuses
+    # The handler read at most cap bytes before the stream was cut.
+    assert buffered <= cap, "the body must stop being read once the cap is crossed"
 
 
-async def test_main_app_wires_max_body_size() -> None:
-    """The real app must set max_body_size to the configured cap (importing
-    app.main runs the FastAPI() call that stores it)."""
+async def test_under_cap_body_passes_to_handler() -> None:
+    """A body within the cap reaches the handler and is read in full."""
+    _mount_probe()
+    try:
+        statuses, ran, buffered = await _post(4096, chunked=False)
+    finally:
+        _unmount_probe()
+    assert statuses == [200]
+    assert ran is True
+    assert buffered == 4096
+
+
+async def test_app_wires_body_size_cap_middleware() -> None:
+    """The real app carries the cap middleware with the configured value."""
     import app.config as config
     import app.main as main
+    from app.body_size_cap import BodySizeCapMiddleware
 
-    expected = config.get_settings().document_upload_max_bytes
-    assert main.app.max_body_size == expected
-    assert main.app.max_body_size == 100 * 1024 * 1024  # the documented default
+    cap = config.get_settings().document_upload_max_bytes
+    assert cap == 100 * 1024 * 1024  # the documented default
+    names = [m.cls.__name__ for m in main.app.user_middleware]
+    assert "BodySizeCapMiddleware" in names, (
+        f"BodySizeCapMiddleware is not registered on app.main.app (got {names})"
+    )
+    # The middleware instance on the app must hold the configured cap.
+    instance = next(m for m in main.app.user_middleware if m.cls is BodySizeCapMiddleware)
+    assert instance.kwargs.get("max_bytes") == cap

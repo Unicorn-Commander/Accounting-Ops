@@ -70,6 +70,7 @@ from app.oauth_discovery import (
     protected_resource_metadata_url,
     router as oauth_discovery_router,
 )
+from app.body_size_cap import BodySizeCapMiddleware
 from app.rate_limit import RateLimitMiddleware
 from app.security.provisioning_token import provisioning_available
 from app.security_headers import SecurityHeadersMiddleware
@@ -138,15 +139,17 @@ app = FastAPI(
     version="0.8.0",
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
-    # AO-UP-5: enforce the upload cap at the ASGI layer, not just after
-    # Starlette has spooled the body into memory. A request whose streamed
-    # body exceeds document_upload_max_bytes is rejected with 413 before it
-    # is fully buffered, so a multi-GB upload cannot exhaust memory before
-    # the per-route _read_capped check would have fired. The cap shares the
-    # same env var the web edge reads, so edge + app stay in lockstep.
-    max_body_size=settings.document_upload_max_bytes,
 )
 app.middleware("http")(audit_span_middleware)
+# AO-UP-5: enforce the upload cap at the ASGI layer, not just after Starlette
+# has spooled the body into memory. The FastAPI max_body_size kwarg does not
+# work on the locked pins (it is swallowed as an extra and nothing is
+# installed), so the cap lives in a pure-ASGI middleware: a request whose
+# streamed body exceeds document_upload_max_bytes is rejected with 413 before
+# it is fully buffered, and the handler never runs. The cap shares the same
+# env var the web edge reads (client_max_body_size), so edge + app stay in
+# lockstep.
+app.add_middleware(BodySizeCapMiddleware, max_bytes=settings.document_upload_max_bytes)
 # Security response headers (nosniff + CSP + frame-ancestors) on every
 # response. This API serves no HTML pages (the web app is a separate front
 # end), so a restrictive default-src 'self' CSP is safe here and stops a

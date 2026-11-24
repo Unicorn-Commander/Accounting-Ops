@@ -340,41 +340,6 @@ async def _record_sync_outcome(
         )
 
 
-async def _persist_unhandled_outcome(
-    workspace_id: UUID, exc: Exception
-) -> None:
-    """Write last_outcome=sync_crashed into connector_state for a workspace
-    whose sync pass raised before it could record its own outcome.
-
-    Without this, connector_state keeps the previous pass's "ok" (or nothing)
-    and the UI shows a healthy connector for a worker that is actually
-    crashing every cycle. Reuses _record_sync_outcome so the write goes under
-    the same state-row lock; last_sync_at is left untouched (no progress was
-    made) and the blocked-item keys are never touched (human-owned).
-    """
-    entity_id = await _entity_for_credential(workspace_id, None)
-    if entity_id is None:
-        return
-    crash_state = {
-        "last_outcome": "sync_crashed",
-        "last_crash_at": datetime.now(tz=timezone.utc).isoformat(),
-        "last_crash_error": f"{type(exc).__name__}: {exc}"[:500],
-    }
-    try:
-        await _record_sync_outcome(
-            workspace_id,
-            entity_id,
-            outcome_summary=crash_state,
-            last_sync_at=None,
-            continuation_cursor=None,
-        )
-    except Exception:  # noqa: BLE001 - the original crash is already logged
-        _log.exception(
-            "ebay_sync: failed to persist crash outcome for workspace=%s",
-            workspace_id,
-        )
-
-
 # ---------------------------------------------------------------------------
 # Per-workspace sync
 # ---------------------------------------------------------------------------
@@ -1092,11 +1057,7 @@ async def _sync_all_workspaces(workspace_filter: UUID | None = None) -> list[dic
         try:
             s = await _sync_one_workspace(wid)
         except Exception as exc:
-            # A pass that raised before _record_sync_outcome left the previous
-            # "ok" (or nothing) in connector_state, so the UI reads healthy.
-            # Persist the crash outcome so the connector surface reflects it.
             _log.exception("ebay_sync_unhandled_failure workspace=%s", wid)
-            await _persist_unhandled_outcome(wid, exc)
             s = {
                 "workspace_id": str(wid),
                 "last_outcome": "unhandled_exception",

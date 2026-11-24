@@ -15,9 +15,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from typing import Any
-from uuid import UUID, uuid4
-
-import pytest
+from uuid import uuid4
 
 import app.api.journal as journal_api
 from app.api.journal import CoaUpdateRequest, update_coa_account
