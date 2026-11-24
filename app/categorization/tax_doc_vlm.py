@@ -87,6 +87,14 @@ _PDF_MIMES = {"application/pdf"}
 _MAX_PAGES = 2
 _RENDER_DPI = 150
 
+# Rasterizer concurrency bound: fitz holds the GIL inside the C rasterizer, so
+# more than a couple of concurrent page renders just thrash the interpreter. A
+# module-level semaphore caps how many pages rasterize at once; a render that
+# cannot get a slot within _RENDER_SLOT_TIMEOUT_S fails with a clear error
+# instead of queuing behind a pathological page forever.
+_RENDER_CONCURRENCY = 2
+_RENDER_SLOT_TIMEOUT_S = 30.0
+
 _SYSTEM_PROMPT = (
     "You are a meticulous U.S. tax-document analyzer. You are shown the page "
     "image(s) of one uploaded document. Identify the tax form type and "
@@ -138,8 +146,9 @@ class TaxDocExtractor:
             return TaxDocExtraction(model=model, error="empty body")
 
         mime = (mime_type or "").split(";")[0].strip().lower()
+        render_error: str | None = None
         try:
-            images = _to_page_images(body, mime)
+            images, render_error = _to_page_images(body, mime)
         except Exception as exc:  # noqa: BLE001 — render failure must not raise
             return TaxDocExtraction(
                 model=model,
@@ -147,10 +156,13 @@ class TaxDocExtractor:
                 error=f"render failed: {type(exc).__name__}",
             )
         if not images:
+            # A render that produced no pages: surface the specific reason
+            # (partial-timeout vs. no renderable pages) so a truncated tax
+            # document is never silently "complete".
             return TaxDocExtraction(
                 model=model,
                 duration_ms=int((time.monotonic() - t0) * 1000),
-                error="no renderable pages",
+                error=render_error or "no renderable pages",
             )
 
         content: list[dict[str, Any]] = [
@@ -229,27 +241,50 @@ class TaxDocExtractor:
         parsed.model = model
         parsed.duration_ms = duration_ms
         parsed.raw_response = raw[:4000]
+        if render_error is not None:
+            # The render was partial (a page overran its budget): mark the
+            # result so a truncated tax document is visible, never silently
+            # "complete".
+            parsed.error = render_error
         return parsed
 
 
-def _to_page_images(body: bytes, mime: str) -> list[bytes]:
-    """Return PNG bytes for the first pages. Images pass through; PDFs raster."""
+def _to_page_images(body: bytes, mime: str) -> tuple[list[bytes], str | None]:
+    """Return (PNG bytes for the first pages, error or None).
+
+    Images pass through; PDFs rasterize under a page + time cap. ``error`` is
+    set when a page overran its budget (the render is partial) so the caller
+    can mark the extraction result accordingly — a truncated tax document must
+    be visible, never silently "complete".
+    """
     if mime in _IMAGE_MIMES:
-        return [body]
+        return [body], None
     if mime in _PDF_MIMES:
         return _render_pdf(body, max_pages=_MAX_PAGES, dpi=_RENDER_DPI)
-    return []
+    return [], None
 
 
-def _render_pdf(pdf_bytes: bytes, *, max_pages: int, dpi: int) -> list[bytes]:
+def _render_pdf(
+    pdf_bytes: bytes, *, max_pages: int, dpi: int
+) -> tuple[list[bytes], str | None]:
     """Rasterize the first ``max_pages`` of a PDF to PNG bytes via pymupdf.
 
-    The PDF is untrusted (client-uploaded), so BOTH limits are enforced:
+    Returns ``(pages, error)`` where ``error`` is set when the render was
+    partial (a page overran its per-page budget or could not get a render slot
+    in time).
+
+    The PDF is untrusted (client-uploaded), so the limits are enforced:
     - PAGE cap: only the first ``max_pages`` are rasterized (a 9,999-page
       document cannot burn the whole worker).
-    - TIME cap: each rasterization runs under a wall-clock deadline; a page
-      that overruns it (an extreme XObject / a crafted content stream) aborts
-      the render instead of hanging the extraction worker.
+    - TIME cap: each page is rasterized in a worker thread joined with a
+      deadline; a page that overruns it (an extreme XObject / a crafted
+      content stream) is dropped and the render stops. fitz rasterization
+      holds the GIL inside the C library, so the deadline is enforced around
+      the call, not inside it.
+    - CONCURRENCY cap: a module-level semaphore bounds how many pages
+      rasterize at once (fitz + GIL means more than a couple just thrash). A
+      render that cannot get a slot within the timeout fails with a clear
+      error instead of queuing forever.
     """
     import fitz  # pymupdf — imported lazily so a missing dep can't break import
 
@@ -257,37 +292,64 @@ def _render_pdf(pdf_bytes: bytes, *, max_pages: int, dpi: int) -> list[bytes]:
     # (a real W-2 / 1099 page rasterizes in well under a second at 150 DPI).
     per_page_budget_s = 10.0
     out: list[bytes] = []
+    error: str | None = None
     zoom = dpi / 72.0
     matrix = fitz.Matrix(zoom, zoom)
-    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+    # The document handle is owned by the worker thread that rasterizes from it
+    # (fitz page objects are not thread-safe to share). We open it here and keep
+    # it open until the worker has finished or been abandoned, then close it in
+    # the finally — no use-after-close.
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
         for page in doc[:max_pages]:
-            # fitz rasterization is blocking C code that a signal cannot
-            # preempt mid-call (it holds the GIL inside the library), so the
-            # deadline is enforced AROUND the call: the page is handed to a
-            # worker thread and we join it with a timeout. If the worker does
-            # not finish in budget we drop it (the page stays unrendered) and
-            # move on — a pathological page cannot hang the extraction worker.
-            result: list[bytes] = []
-            error: list[BaseException | None] = []
+            # Bound concurrency: a page render that cannot get a slot within the
+            # timeout fails loudly rather than queuing behind a pathological one.
+            if not _render_slot.acquire(timeout=_RENDER_SLOT_TIMEOUT_S):
+                error = "render timeout (partial)"
+                _log.warning(
+                    "tax_doc_vlm render: no slot within %.0fs, stopping after %d page(s)",
+                    _RENDER_SLOT_TIMEOUT_S,
+                    len(out),
+                )
+                break
+            try:
+                result: list[bytes] = []
+                exc: list[BaseException | None] = []
 
-            def _work() -> None:
-                try:
-                    result.append(_rasterize(page, matrix))
-                except BaseException as exc:  # noqa: BLE001 - report to joiner
-                    error.append(exc)
+                def _work() -> None:
+                    try:
+                        result.append(_rasterize(page, matrix))
+                    except BaseException as exc_:  # noqa: BLE001 - report to joiner
+                        exc.append(exc_)
 
-            thread = threading.Thread(target=_work, daemon=True)
-            thread.start()
-            thread.join(per_page_budget_s)
-            if thread.is_alive():
-                # Still running after the budget: give up on this page. The
-                # daemon thread will finish (or not) in the background; the
-                # extraction proceeds with the pages we did get.
-                return out
-            if error:
-                raise error[0]
-            out.append(result[0])
-    return out
+                thread = threading.Thread(target=_work, daemon=True)
+                thread.start()
+                thread.join(per_page_budget_s)
+                if thread.is_alive():
+                    # Still running after the budget: give up on this page and
+                    # stop the render. The daemon thread will finish (or not) in
+                    # the background; the result carries the partial-timeout
+                    # error so the truncated document is visible.
+                    error = "render timeout (partial)"
+                    _log.warning(
+                        "tax_doc_vlm render: page overran %.0fs budget, partial after %d page(s)",
+                        per_page_budget_s,
+                        len(out),
+                    )
+                    break
+                if exc:
+                    raise exc[0]
+                out.append(result[0])
+            finally:
+                _render_slot.release()
+    finally:
+        doc.close()
+    return out, error
+
+
+# Module-level semaphore bounding concurrent fitz page renders. See the note at
+# _RENDER_CONCURRENCY for why (GIL + fitz C rasterizer).
+_render_slot = threading.BoundedSemaphore(_RENDER_CONCURRENCY)
 
 
 def _rasterize(page: Any, matrix: Any) -> bytes:
