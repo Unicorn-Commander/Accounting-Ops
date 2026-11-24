@@ -15,6 +15,8 @@ CI; the skip is kept only for a dev venv without markdown.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from app.api.specialist_pdf import _build_html, _render_markdown_to_html
@@ -161,19 +163,23 @@ def test_inline_tag_with_newlines_is_text():
 def test_tag_inside_fenced_code_is_escaped_not_parsed():
     """A tag inside a fenced code block is escaped once and shown as text.
 
-    The raw-HTML escape skips fenced code (AO107-R4-2): Python-Markdown
-    escapes the code content itself, so the tag inside the fence carries a
-    single &lt; entity, not the double-escaped &amp;lt; the old
-    escape-everything input produced.
+    Markdown escapes code itself (AO107-R5-1: no pre-escape), so the tag
+    inside the fence carries a single &lt; entity, never &amp;lt;.
     """
     html = markdown_to_html("```html\n<div class=x>code</div>\n```")
-    # The codehilite wrapper uses <div class="codehilite">; the inner tag is
-    # escaped once by the highlighter and must not be double-escaped.
-    assert 'class="codehilite"' in html, "the fenced code block did not render"
-    assert "&lt;" in html, "the tag inside the fence was not escaped"
+    assert re.search(r"<pre><code[^>]*>&lt;div class=x&gt;code&lt;/div&gt;", html), (
+        "the fenced tag is not shown single-escaped inside <pre><code>"
+    )
     assert "&amp;lt;" not in html, "the tag inside the fence is double-escaped"
-    assert "div" in html, "the tag text was lost"
-    assert "code" in html
+    assert "<div" not in html
+
+
+@MARKDOWN_SKIP
+def test_tag_inside_code_span_is_escaped_once():
+    """A tag inside a code span is escaped once (AO107-R4-2 stays green)."""
+    html = markdown_to_html("see `<b>&</b>` here")
+    assert "<code>&lt;b&gt;&amp;&lt;/b&gt;</code>" in html
+    assert "&amp;lt;" not in html, "the code span is double-escaped"
 
 
 @MARKDOWN_SKIP
@@ -186,34 +192,27 @@ def test_comparison_inequalities_are_text():
 
 
 @MARKDOWN_SKIP
-def test_escaped_ampersand_is_double_escaped():
-    """An & in the body becomes &amp; so it cannot forge an entity.
+def test_entity_text_cannot_forge_a_tag():
+    """A body that writes &lt;script&gt; shows the text <script>, never a tag.
 
-    A body that writes &lt;script&gt; as literal text must not be re-parsed
-    into a raw <script> tag by the renderer.  The escape turns the & into
-    &amp;, so the renderer shows the literal text &lt;script&gt; (which,
-    after the renderer's own escaping, appears as &amp;lt;script&amp;gt;).
+    Markdown keeps a valid entity as an entity, so the renderer displays the
+    characters; the entity is never decoded into markup.
     """
     html = markdown_to_html("the &lt;script&gt; tag is text")
     assert "<script>" not in html, "a forged entity reopened a raw tag"
-    assert "&amp;lt;script&amp;gt;" in html, "the literal entity text was lost"
+    assert "&lt;script&gt;" in html, "the literal entity text was lost"
 
 
 @MARKDOWN_SKIP
 def test_blockquote_survives_full_input_escape():
-    """A blockquote line keeps its leading > through the escape.
-
-    The full-input escape turns > into &gt;; the blockquote restoration
-    un-escapes the leading &gt; of a blockquote line so the quote still
-    renders, without reopening any raw-HTML channel.
-    """
+    """A blockquote line keeps its leading > and a line-start tag is text."""
     html = markdown_to_html("> a quoted note\n\npara")
     assert "<blockquote>" in html, "blockquote lost by the full-input escape"
     assert "a quoted note" in html
     assert "<p>para</p>" in html
     # A line-start tag must still be escaped, not turned into a blockquote.
     html2 = markdown_to_html("<div class=x>\ncontent\n</div>")
-    assert "<div" not in html2, "line-start tag reopened by blockquote restore"
+    assert "<div" not in html2, "line-start tag reached the renderer"
     assert "&lt;div" in html2
 
 
@@ -332,3 +331,59 @@ def test_http_mailto_and_anchor_links_survive():
     assert 'href="https://example.com"' in html, "https link dropped"
     assert 'href="mailto:op@example.com"' in html, "mailto link dropped"
     assert 'href="#top"' in html, "anchor link dropped"
+
+
+# ---------------------------------------------------------------------------
+# AO107-R5-1: Markdown escapes raw HTML itself; no regex code stash
+# ---------------------------------------------------------------------------
+# On a6e90459 a regex treated \`...\` (backslash-escaped backticks) as a code
+# span and skipped the escape, but Markdown does not treat it as code, so the
+# tag inside came out live.  Each case below failed there.
+
+_ESCAPED_BACKTICK_REPRODUCERS = [
+    "\\`<script>alert(1)</script>\\`",
+    "\\`<link rel=stylesheet href=http://127.0.0.1:1/x.css>\\`",
+    "\\`<style>@import url(file:///etc/passwd)</style>\\`",
+    "\\`<object data=file:///etc/passwd>\\`",
+    '\\`<img src="file:///etc/passwd">\\`',
+    "x \\`<img src=file:///etc/passwd>\\` y",
+]
+
+
+@MARKDOWN_SKIP
+@pytest.mark.parametrize("body", _ESCAPED_BACKTICK_REPRODUCERS)
+def test_escaped_backticks_do_not_unescape_a_tag(body):
+    """A tag between backslash-escaped backticks is text, not markup."""
+    html = markdown_to_html(body)
+    for tag in ("<script", "<link", "<style", "<object", "<img"):
+        assert tag not in html, f"{tag} reached the renderer from {body!r}"
+    assert "&lt;" in html, "the tag was not shown as text"
+
+
+@MARKDOWN_SKIP
+@pytest.mark.parametrize(
+    "body",
+    [
+        "`unbalanced <script>alert(1)</script>",
+        "``<img src=file:///etc/passwd>` mismatched",
+        "a ` b <object data=file:///x> c",
+    ],
+)
+def test_unbalanced_backticks_do_not_unescape_a_tag(body):
+    """Unbalanced or mismatched backticks never let a tag through."""
+    html = markdown_to_html(body)
+    for tag in ("<script", "<object", "<img"):
+        assert tag not in html, f"{tag} reached the renderer from {body!r}"
+
+
+@MARKDOWN_SKIP
+def test_nul_and_c0_controls_are_stripped():
+    """NUL and C0 controls are removed before Markdown sees the body.
+
+    A NUL inside a tag name cannot split the tag past the escape, and the
+    STX/ETX characters Markdown uses as placeholders cannot be forged.
+    """
+    html = markdown_to_html("a\x00<scr\x00ipt>x</script>\x02\x03b\x1f")
+    assert "\x00" not in html and "\x02" not in html and "\x1f" not in html
+    assert "<script" not in html
+    assert "&lt;script&gt;" in html
