@@ -261,3 +261,59 @@ def test_gate_runs_before_any_provisioning():
     assert src.index("_authorize_provisioning") < src.index(
         "from scripts.provision_workspace"
     )
+
+
+# ---------------------------------------------------------------------------
+# AO114-R2-8: a Brigade workspace-scoped JWT only counts its claimed seat
+# ---------------------------------------------------------------------------
+
+_BRIGADE_ISS = "https://brigade.example.com"
+
+
+@pytest.fixture
+def brigade_owner_of_b_only(monkeypatch):
+    """Viewer in WS_A, owner in WS_B: only WS_B is an admin candidate."""
+    from app.platform import workspace_registry as wr
+
+    async def _ensure(uc_uid, *, autoprovision=False):
+        return USER_ID
+
+    async def _candidates(user_id):
+        return [WS_B]
+
+    async def _membership(uc_uid, workspace_id, *, autoprovision=False):
+        role = "owner" if workspace_id == WS_B else "viewer"
+        return role, None, False, f"ws-{workspace_id}"
+
+    async def _resolve(workspace_id):
+        return workspace_id
+
+    import app.api.workspaces as workspaces
+
+    monkeypatch.setenv("BRIGADE_TRUSTED_ISSUER", _BRIGADE_ISS)
+    monkeypatch.setattr(wr, "resolve_internal_workspace_id", _resolve)
+    monkeypatch.setattr(workspaces, "_ensure_user_account", _ensure)
+    monkeypatch.setattr(setup_assistant, "_admin_candidate_workspaces", _candidates)
+    monkeypatch.setattr(setup_assistant, "_resolve_membership", _membership)
+
+
+def _brigade(claim: uuid.UUID) -> AuthContext:
+    return _auth(
+        scopes=(),
+        claims={"iss": _BRIGADE_ISS, "sub": "jane@example.com", "workspace_id": str(claim)},
+    )
+
+
+async def test_brigade_jwt_cannot_provision_on_a_seat_outside_its_claim(
+    brigade_owner_of_b_only, provisioner_stub
+):
+    with pytest.raises(PermissionError, match="federation token"):
+        await _create(_brigade(WS_A))
+    assert not provisioner_stub
+
+
+async def test_brigade_jwt_scoped_to_its_owner_seat_still_provisions(
+    brigade_owner_of_b_only, provisioner_stub
+):
+    await _create(_brigade(WS_B))
+    assert provisioner_stub, "gate blocked a Brigade JWT scoped to its owner seat"
