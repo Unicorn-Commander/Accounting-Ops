@@ -10,8 +10,10 @@
   authenticating the moment the release lands, so re-mint it first:
 
   ```sql
+  BEGIN READ ONLY;
   SELECT count(*) FROM public.personal_access_token
   WHERE expires_at IS NULL AND revoked_at IS NULL;
+  COMMIT;
   ```
 
   (legacy1 measured 0 such live rows on 2026-11-23.)
@@ -34,8 +36,60 @@
   idempotency key `invoice-checkout-<invoice_id>`). If `/pay/*` is routed by
   path at the proxy, `/pay/complete/*` is covered by the same rule.
 - behaviour(mcp): an agent id that is not in `ACCTOPS_AGENT_TOOL_POLICY` is
-  read-only and its `tools/list` shows only read-only tools. Enrol any agent
-  that must write before the release.
+  read-only and its `tools/list` shows only read-only tools. An agent id comes
+  from a service token (`ACCTOPS_SERVICE_TOKENS[...].agent_id`) or from the
+  RFC 8693 `act` claim of a Brigade/Keycloak token, so delegated Brigade
+  agents are affected too. Before the release, on each ring, run this
+  read-only query with that ring's policy JSON (`'{}'` when the variable is
+  unset): `psql -v policy="$ACCTOPS_AGENT_TOOL_POLICY" -f query.sql`.
+
+  ```sql
+  BEGIN READ ONLY;
+  -- Agents that wrote through an AO MCP write tool in the last 30 days, and
+  -- what AO-MCP-1 does to each on release day. Source: books.decision_audit
+  -- (model_version = the caller's agent_id, written by app/tools/_audit.py
+  -- write_decision_audit).
+  WITH calls AS (
+    SELECT da.model_version AS agent_id,
+           CASE da.tool_name
+             WHEN 'add_rule' THEN 'add_specialty_rule'
+             WHEN 'categorize' THEN 'categorize_transaction'
+             WHEN 'link_receipt' THEN 'link_receipt_to_transaction'
+             WHEN 'approval_decision' THEN 'decide_approval'
+             ELSE da.tool_name
+           END AS mcp_tool,
+           count(*) AS calls, max(da.created_at) AS last_call
+    FROM books.decision_audit da
+    WHERE da.created_at > now() - interval '30 days'
+      AND coalesce(da.model_version, '') <> ''
+      AND da.tool_name IN ('add_rule', 'ai_categorize_pending', 'categorize',
+          'create_entity_with_coa', 'link_receipt', 'post_journal_entry',
+          'propose_manual_journal_entry', 'upsert_entity_owner',
+          'approval_decision')
+    GROUP BY 1, 2
+  )
+  SELECT c.agent_id, c.mcp_tool, c.calls, c.last_call,
+         CASE
+           WHEN NOT (:'policy'::jsonb ? c.agent_id)
+             THEN 'NOT ENROLLED: read-only after release'
+           WHEN (:'policy'::jsonb -> c.agent_id) ? '*'
+             OR (:'policy'::jsonb -> c.agent_id) ? c.mcp_tool
+             THEN 'enrolled, allowed'
+           ELSE 'enrolled, tool NOT in its list: refused'
+         END AS after_release
+  FROM calls c
+  ORDER BY c.agent_id, c.mcp_tool;
+  COMMIT;
+  ```
+
+  Every `NOT ENROLLED` or `refused` row is an agent that loses that write on
+  release day: enrol it in `ACCTOPS_AGENT_TOOL_POLICY` first, or decide to
+  let it go read-only. Source and gap: `books.decision_audit` records only
+  the write tools that call `write_decision_audit` (rule, categorize, receipt
+  link, journal post, AI categorize, entity and owner setup, approval
+  decisions). Writes such as invoices, payments, period close and tax tools
+  leave no agent-attributed row, so after the release also watch the app log
+  for `agent_tool_policy_denied` and `agent_tool_policy_observed`.
 
 - security(approvals): agents and PATs can no longer approve recats, bank
   imports, manual journals, Stripe or eBay postings or activate compliance
