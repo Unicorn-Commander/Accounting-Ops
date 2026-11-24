@@ -15,18 +15,19 @@ Credentials (metadata only — never plaintext):
   - list_credentials         — connector + label + last_used_at
 
 Account mappings (bank account ↔ entity):
-  - list_account_mappings    — live accounts + current entity mappings
+  - list_account_mappings    — live accounts + current entity mappings (accountant)
   - upsert_account_mappings  — bulk upsert (accountant)
 
 Category overrides (user-trained category corrections):
-  - list_category_overrides       — viewer
+  - list_category_overrides       — bookkeeper
   - create_category_override      — accountant
 
 DELETE / claim / POST-credentials remain HTTP-only:
   * deleting credentials, claiming a SimpleFIN setup token, and uploading
     plaintext secrets are too sensitive to surface to an MCP caller.
 
-Role floor: viewer for reads, accountant for upserts (mirrors HTTP).
+Role floor: viewer for reads, bookkeeper for list_category_overrides,
+accountant for list_account_mappings and upserts (mirrors HTTP).
 """
 from __future__ import annotations
 
