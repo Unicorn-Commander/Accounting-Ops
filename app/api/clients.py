@@ -931,6 +931,26 @@ async def add_client(
                 "first."
             ),
         )
+    # AO114-R3-2: the role gate above sees the token's workspace scope and
+    # role floor (_caller_account), but a PAT's own scopes were never
+    # consulted, so a read-only PAT provisioned a workspace. Demand the scope
+    # the lowest practitioner seat (cpa / accountant) demands on every
+    # require_role route; non-PAT callers skip this, as in require_role.
+    from app.tenancy import (
+        _pat_holds_scope,
+        _pat_scopes_from_auth,
+        required_scope_for_role_minimum,
+    )
+
+    pat_scopes = _pat_scopes_from_auth(auth)
+    if pat_scopes is not None:
+        required = required_scope_for_role_minimum("cpa") or "accounting:admin"
+        if not _pat_holds_scope(pat_scopes, required):
+            held = ", ".join(pat_scopes) if pat_scopes else "(none)"
+            raise HTTPException(
+                status_code=403,
+                detail=f"token scope '{held}' insufficient (needs {required})",
+            )
 
     owner_email = _normalize_email(body.owner_email) if body.owner_email else None
 
