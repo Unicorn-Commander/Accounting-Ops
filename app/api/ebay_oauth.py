@@ -203,9 +203,16 @@ async def ebay_oauth_start(
     Role floor: admin (storing a credential is admin-only, parity with /credentials).
     """
     # Manually resolve membership/role since the path has no {workspace_id}.
-    from app.tenancy import _resolve_membership, role_at_least
+    from app.tenancy import _resolve_membership, apply_service_scope, role_at_least
     role, entity_scope, _hipaa, _slug = await _resolve_membership(
         auth.uc_uid, workspace_id, autoprovision=auth.may_autoprovision
+    )
+    # AO-TOK-1: a service token / PAT must stay inside its declared workspace
+    # allow-list, entity scope and role floor here exactly as it does on every
+    # resolve_workspace route. Applied BEFORE the admin and entity checks so
+    # they see the capped role and the narrowed entity scope.
+    role, entity_scope = apply_service_scope(
+        auth, workspace_id, role=role, entity_scope=entity_scope
     )
     if not role_at_least(role, "admin"):
         raise HTTPException(
