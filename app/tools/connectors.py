@@ -405,24 +405,19 @@ async def list_category_overrides(
 
     Returns: {"overrides": [...]}
 
-    Role floor: viewer.
+    Role floor: bookkeeper, and a scoped member sees only its own entities'
+    rules plus the workspace-wide ones (AO111-R2-F1: delegates to the HTTP
+    handler, which enforces both, so the twin cannot drift).
     """
-    await authorize_workspace(workspace_id, None, min_role="viewer")
-    async with workspace_session(SessionLocal, workspace_id) as session:
-        rows = (
-            await session.execute(
-                text(
-                    """
-                    SELECT id::text, entity_id::text, pattern, category,
-                           debit_account, credit_account, created_by_uc_uid,
-                           created_at, match_count
-                    FROM category_override
-                    ORDER BY created_at DESC
-                    """
-                )
-            )
-        ).mappings().all()
-    return {"overrides": [{k: _b(v) for k, v in dict(r).items()} for r in rows]}
+    workspace = await authorize_workspace(workspace_id, None, min_role="bookkeeper")
+    from app.api.category_overrides import list_overrides as _http
+
+    result = await _http(workspace_id=workspace_id, workspace=workspace)
+    return {
+        "overrides": [
+            {k: _b(v) for k, v in r.items()} for r in result["overrides"]
+        ]
+    }
 
 
 async def create_category_override(
