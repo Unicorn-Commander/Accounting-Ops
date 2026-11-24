@@ -307,7 +307,7 @@ async def test_pat_cannot_mint_pat(
 
 
 # ---------------------------------------------------------------------------
-# Test 7 — AO-TOK-1: a legacy NULL-expiry, full-scope PAT is refused
+# Test 7, AO-TOK-1: a legacy NULL-expiry, full-scope PAT is refused
 #
 # The mint path stopped issuing never-expiring tokens (resolve_ttl refuses
 # ttl_days 0/null) and production held 0 live NULL-expiry rows on 2026-11-23,
