@@ -509,3 +509,52 @@ def test_link_title_is_kept_and_escaped():
     html = markdown_to_html('[t](https://example.com "say \\"hi\\" <b>")')
     assert 'href="https://example.com"' in html
     assert "<b>" not in html
+
+
+# ---------------------------------------------------------------------------
+# AO107-R5-3: every reproducer, checked by parsing the renderer input
+# ---------------------------------------------------------------------------
+# 18 of these 21 cases fail on a6e90459 (live tag or attribute in output).
+
+_ALL_REPRODUCERS = _ESCAPED_BACKTICK_REPRODUCERS + [
+    '<a rel="attachment" title="t" class="cccccccccccccccccccccccc" href="file:///etc/passwd">x</a>',
+    "[x](jav&#x61;script:alert(1))",
+    "[x](java\tscript:alert(1))",
+    "[x](java\nscript:alert(1))",
+    "<javascript:alert(1)>",
+    "a\x00<scr\x00ipt>x</script>",
+    "[js](javascript:alert(1))",
+    "[x](JaVaScRiPt:alert(1))",
+    "[r][r]\n\n[r]: javascript:alert(1)",
+    "[x](file:///etc/passwd)",
+    "![v](vbscript:msgbox)",
+    "![i](http://example.com/x.png)",
+    "[rr](//evil.example/x)",
+    "| a |\n|:--|\n| <img src=file:///etc/passwd> |",
+    "```\n</code></pre><img src=file:///etc/passwd>\n```",
+]
+
+
+@MARKDOWN_SKIP
+@pytest.mark.parametrize("body", _ALL_REPRODUCERS)
+def test_renderer_input_carries_only_allowlisted_markup(body):
+    """Parse the output: only allowlisted tags and safe attribute values."""
+    from html.parser import HTMLParser
+
+    from app.pdf.safe_render import _ALLOWED_TAGS
+
+    seen: list[tuple[str, list[tuple[str, str | None]]]] = []
+
+    class _Collect(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            seen.append((tag, attrs))
+
+    _Collect().feed(markdown_to_html(body))
+    for tag, attrs in seen:
+        assert tag in _ALLOWED_TAGS, f"{tag} reached the renderer from {body!r}"
+        for name, value in attrs:
+            assert (tag, name) in {("a", "href"), ("a", "title"), ("img", "src"), ("img", "alt")}
+            if (tag, name) == ("a", "href"):
+                assert value.startswith(("http:", "https:", "mailto:", "#")), value
+            if (tag, name) == ("img", "src"):
+                assert value.startswith("data:image/"), value
