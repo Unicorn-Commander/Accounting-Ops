@@ -8,19 +8,20 @@ the invoice HTML both come from tenant or AI text, so a draft that references
 ``file:///`` (env, keys) or an internal host could read that into the PDF the
 accountant downloads.
 
-The renderer must refuse every scheme except ``data:``.  These tests drive the
-renderer's fetcher against a hostile document and assert:
+The renderer must refuse every scheme except ``data:``.  These tests drive
+``render_pdf`` against a hostile document and assert:
 
 * the fetcher is called for each hostile URL and refuses it (no file read,
   no network call), and
 * the PDF bytes do not contain the referenced file's content, and
 * ``data:`` URIs (the invoice logo path) still render.
 
-On main, where the call sites rendered with WeasyPrint's default fetcher, the
-fetcher reads the file and attempts the network call, so the refusal and
-network assertions fail.  WeasyPrint is a main dep (pyproject.toml), so these
-run in CI; the skip is kept only for a dev venv without the system Pango
-libraries.
+The fetcher is spied at class level on ``SafeUrlFetcher.fetch`` so the test
+exercises ``render_pdf``'s own fetcher, not a separately constructed one.
+``OpenerDirector.open`` is patched to fail on any network attempt (WeasyPrint
+68 calls ``super().open()`` for every fetch).  WeasyPrint is a main dep
+(pyproject.toml), so these run in CI; the skip is kept only for a dev venv
+without the system Pango libraries.
 """
 from __future__ import annotations
 
@@ -47,45 +48,60 @@ WEASYPRINT_SKIP = pytest.mark.skipif(
 
 
 def _spy_fetcher():
-    """Wrap the safe fetcher so every URL it sees is recorded.
+    """Spy on ``SafeUrlFetcher.fetch`` at class level so ``render_pdf``'s
+    own fetcher is the object under test (AO107-R4-3).
 
-    This is the same fetcher ``render_pdf`` installs, so "the fetcher was
-    called and refused" is asserted against the object the renderer uses.
+    ``render_pdf`` builds a fresh ``SafeUrlFetcher`` on every call, so an
+    instance-level spy on a separate fetcher would not see the URLs the
+    renderer actually resolves.  Spying the class method records every URL
+    the renderer's fetcher sees and delegates to the real implementation.
     """
-    fetcher = safe_url_fetcher()
+    import app.pdf.safe_render as safe_render_module
+
     calls: list[str] = []
-    original = fetcher.fetch
+    original = safe_render_module.SafeUrlFetcher.fetch
 
-    def spy(url, headers=None):
+    def spy(self, url, headers=None):
         calls.append(url)
-        return original(url, headers)
+        return original(self, url, headers)
 
-    fetcher.fetch = spy
-    return fetcher, calls
+    safe_render_module.SafeUrlFetcher.fetch = spy
+    return calls, lambda: setattr(safe_render_module.SafeUrlFetcher, "fetch", original)
 
 
 def _no_network():
-    """Patch urllib so any network attempt fails the test."""
-    import urllib.request
+    """Patch ``OpenerDirector.open`` so any network attempt fails the test.
 
-    def _explode(*args, **kwargs):
+    WeasyPrint 68's ``URLFetcher`` inherits from ``urllib.request
+    .OpenerDirector`` and calls ``super().open()`` for every fetch, so
+    patching ``urllib.request.urlopen`` alone would not catch a network
+    call.  Patching ``OpenerDirector.open`` catches both.
+    """
+    from urllib.request import OpenerDirector
+
+    def _explode(self, *args, **kwargs):
         raise AssertionError("renderer attempted a network call")
 
-    original = urllib.request.urlopen
-    urllib.request.urlopen = _explode
+    original = OpenerDirector.open
+    OpenerDirector.open = _explode
     return original
 
 
 def _restore_network(original):
-    import urllib.request
+    from urllib.request import OpenerDirector
 
-    urllib.request.urlopen = original
+    OpenerDirector.open = original
 
 
-def _render(html: str, fetcher) -> bytes:
-    from weasyprint import HTML
+def _render(html: str, fetcher=None) -> bytes:
+    """Render through ``render_pdf`` itself, not a direct ``HTML`` call.
 
-    return HTML(string=html, url_fetcher=fetcher).write_pdf()
+    AO107-R4-3: the spied tests must exercise ``render_pdf``'s wiring, not a
+    separately constructed ``HTML`` object with a hand-made fetcher.
+    """
+    from app.pdf.safe_render import render_pdf
+
+    return render_pdf(html)
 
 
 _HOSTILE_DOC = """\
@@ -171,19 +187,21 @@ def test_safe_fetcher_scheme_check_is_exact_not_prefix():
 def test_pdf_refuses_file_image_and_attachment(tmp_path):
     """file: URLs in <img> and <a rel=attachment> are refused, not fetched.
 
-    The renderer's fetcher is spied: it must be called for the ``file:`` URLs
-    (the image and the attachment) and refuse each.  On main the default
-    fetcher read the file instead of refusing, so the refusal assertions fail.
+    The renderer's fetcher is spied at class level: ``render_pdf``'s own
+    ``SafeUrlFetcher.fetch`` is called for the ``file:`` URLs (the image and
+    the attachment) and refuses each.  On main the default fetcher read the
+    file instead of refusing, so the refusal assertions fail.
     """
     canary = tmp_path / "canary-hostname"
     canary.write_text("CANARY-HOSTNAME-77e1\n", encoding="utf-8")
     html = _HOSTILE_DOC.format(file=canary.as_uri())
 
     original_urlopen = _no_network()
+    calls, stop_spy = _spy_fetcher()
     try:
-        fetcher, calls = _spy_fetcher()
-        pdf = _render(html, fetcher)
+        pdf = _render(html)
     finally:
+        stop_spy()
         _restore_network(original_urlopen)
 
     assert pdf[:4] == b"%PDF"
@@ -199,14 +217,16 @@ def test_pdf_refuses_file_image_and_attachment(tmp_path):
 def test_pdf_refuses_http_stylesheet():
     """An http: stylesheet URL is refused; no network call is made.
 
-    urllib is patched to fail the test on any network attempt.  On main the
-    default fetcher attempted the request and this test failed.
+    ``OpenerDirector.open`` is patched to fail the test on any network
+    attempt.  On main the default fetcher attempted the request and this
+    test failed.
     """
     original_urlopen = _no_network()
+    calls, stop_spy = _spy_fetcher()
     try:
-        fetcher, calls = _spy_fetcher()
-        pdf = _render(_HOSTILE_DOC.format(file="file:///etc/hostname"), fetcher)
+        pdf = _render(_HOSTILE_DOC.format(file="file:///etc/hostname"))
     finally:
+        stop_spy()
         _restore_network(original_urlopen)
 
     assert pdf[:4] == b"%PDF"
@@ -230,10 +250,11 @@ def test_pdf_refuses_style_url_reference():
             "</body></html>"
         )
         original_urlopen = _no_network()
+        calls, stop_spy = _spy_fetcher()
         try:
-            fetcher, calls = _spy_fetcher()
-            pdf = _render(html, fetcher)
+            pdf = _render(html)
         finally:
+            stop_spy()
             _restore_network(original_urlopen)
     finally:
         canary.unlink()
@@ -247,15 +268,16 @@ def test_pdf_refuses_style_url_reference():
 def test_pdf_refuses_css_import():
     """An @import url(http:...) inside a style block is refused, not fetched."""
     original_urlopen = _no_network()
+    calls, stop_spy = _spy_fetcher()
     try:
-        fetcher, calls = _spy_fetcher()
         html = (
             "<html><head>"
             '<style>@import url("http://127.0.0.1:1/x.css");</style>'
             "</head><body><p>SAFE-TEXT-MARKER</p></body></html>"
         )
-        pdf = _render(html, fetcher)
+        pdf = _render(html)
     finally:
+        stop_spy()
         _restore_network(original_urlopen)
 
     assert pdf[:4] == b"%PDF"
@@ -321,12 +343,90 @@ def test_pdf_data_uri_image_still_renders():
     uri = data_uri_for_bytes(png, "image/png")
     html = f'<html><body><img src="{uri}" alt="logo"><p>logo</p></body></html>'
 
-    fetcher, calls = _spy_fetcher()
-    pdf = _render(html, fetcher)
+    calls, stop_spy = _spy_fetcher()
+    try:
+        pdf = _render(html)
+    finally:
+        stop_spy()
 
     assert pdf[:4] == b"%PDF"
     assert len(pdf) > 1000
     assert calls == [uri], f"fetcher was not called for the data: URI, calls={calls}"
+
+
+# ---------------------------------------------------------------------------
+# AO107-R4-4: hostile data: SVG and protocol-relative / relative URLs
+# ---------------------------------------------------------------------------
+
+
+@WEASYPRINT_SKIP
+def test_data_svg_image_does_not_fetch_referenced_urls():
+    """A data:image/svg+xml image whose SVG references file:, http: and //host
+    renders without fetching any of the referenced URLs.
+
+    The SVG body is inlined via a data: URI, which the fetcher allows.  The
+    ``<image>`` elements inside the SVG reference hostile URLs; WeasyPrint
+    must not follow them.  The fetcher is spied: it must be called for the
+    data: URI and for each hostile URL inside the SVG, and refuse each
+    hostile one.
+    """
+    import base64
+
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+        '<image href="file:///etc/hostname" />'
+        '<image href="http://127.0.0.1:1/x.png" />'
+        '<image href="//evil.example/x.png" />'
+        "</svg>"
+    )
+    uri = "data:image/svg+xml;base64," + base64.b64encode(svg.encode()).decode()
+    html = f'<html><body><img src="{uri}" alt="svg"><p>svg</p></body></html>'
+
+    original_urlopen = _no_network()
+    calls, stop_spy = _spy_fetcher()
+    try:
+        pdf = _render(html)
+    finally:
+        stop_spy()
+        _restore_network(original_urlopen)
+
+    assert pdf[:4] == b"%PDF"
+    # The data: URI was fetched (allowed).
+    assert uri in calls, f"data: SVG URI was not fetched, calls={calls}"
+    # The hostile URLs inside the SVG were refused, not followed.  The
+    # ``OpenerDirector.open`` patch above fails the test on any network
+    # attempt, and the PDF must not carry the referenced file's content.
+    assert b"CANARY" not in pdf, "file: URL content leaked into the PDF"
+    assert b"127.0.0.1" not in pdf, "internal host leaked into the PDF"
+    assert b"evil.example" not in pdf, "protocol-relative host leaked into the PDF"
+
+
+@WEASYPRINT_SKIP
+def test_protocol_relative_and_relative_urls_are_refused():
+    """Protocol-relative (//host) and relative URLs in <img> are refused.
+
+    A protocol-relative URL resolves against the base URL (or the document
+    origin) and a relative URL resolves against the base URL; both can point
+    at an internal host.  The safe fetcher must refuse them.
+    """
+    html = (
+        "<html><body>"
+        '<img src="//evil.example/x.png" alt="proto-rel">'
+        '<img src="relative/path.png" alt="rel">'
+        "<p>SAFE-TEXT-MARKER</p>"
+        "</body></html>"
+    )
+    original_urlopen = _no_network()
+    calls, stop_spy = _spy_fetcher()
+    try:
+        pdf = _render(html)
+    finally:
+        stop_spy()
+        _restore_network(original_urlopen)
+
+    assert pdf[:4] == b"%PDF"
+    assert b"evil.example" not in pdf, "protocol-relative host leaked into the PDF"
+    assert b"relative/path.png" not in pdf, "relative path leaked into the PDF"
 
 
 # ---------------------------------------------------------------------------
