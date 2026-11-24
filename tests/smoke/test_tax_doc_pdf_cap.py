@@ -240,8 +240,16 @@ def test_worker_owns_doc_close_and_slot_on_timeout(monkeypatch) -> None:
             return _FakePage()
 
         def close(self) -> None:
+            # The test shares one real doc between the caller's page_count open
+            # and the worker's open (both go through the same fitz.open mock),
+            # so the second close gets a ValueError from the already-closed real
+            # doc. Increment the counter (the unit under test) and tolerate the
+            # double-close of the shared real doc.
             closed["count"] += 1
-            doc.close()
+            try:
+                doc.close()
+            except ValueError:
+                pass
 
     monkeypatch.setattr(fitz, "open", lambda *a, **kw: _FakeDoc())
 

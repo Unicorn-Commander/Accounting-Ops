@@ -319,17 +319,15 @@ def _render_pdf(
             # release the slot in its own finally -- whether the render
             # succeeded, failed, or the caller abandoned this thread on a
             # timeout.
+            doc = None
             try:
                 doc = fitz.open(stream=pdf_bytes, filetype="pdf")
                 _out.append(_rasterize(doc[_pi], matrix))
             except BaseException as exc_:  # noqa: BLE001 - report to joiner
                 _exc.append(exc_)
             finally:
-                try:
+                if doc is not None:
                     doc.close()
-                except (NameError, ValueError):
-                    # doc was never opened (open raised) or is already closed.
-                    pass
                 _render_slot.release()
 
         thread = threading.Thread(target=_work, daemon=True)

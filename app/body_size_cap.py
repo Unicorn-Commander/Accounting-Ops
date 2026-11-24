@@ -15,8 +15,9 @@ pure-ASGI middleware that wraps ``receive`` and ``send``:
   downstream app reads them, and the moment it exceeds the cap the middleware
   sends the 413 itself and ABORTS the app: the next ``receive()`` returns
   ``http.disconnect`` and the one after raises a private exception the
-  middleware catches. A truncated body is never delivered to the handler, so
-  no handler side effects run on partial data.
+  middleware catches. For a chunked over-cap body the app IS entered (Starlette
+  hands it a request), but it is aborted inside the body read and never sees a
+  truncated body: no handler side effects run on partial data.
 
 Because Starlette's outermost ``ServerErrorMiddleware`` would otherwise catch
 the abort exception and render a 500 on top of the 413, the middleware also
