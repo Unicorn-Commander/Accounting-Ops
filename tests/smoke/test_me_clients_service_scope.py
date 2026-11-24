@@ -159,3 +159,25 @@ async def test_my_clients_human_unchanged(opened):
     body = await clients.list_my_clients(auth=_auth(None))
     assert sorted(w["id"] for w in body["workspaces"]) == sorted([WS_A, WS_B])
     assert body["persona"] == "platform_admin"
+
+
+# ---------------------------------------------------------------------------
+# AO114-R2-3: GET /api/me/cpa-recent-activity
+# ---------------------------------------------------------------------------
+
+
+async def test_recent_activity_scoped_token_reads_only_a(opened):
+    body = await clients.cpa_recent_activity(days=30, auth=_scoped_a())
+    assert {i["workspace_id"] for i in body["items"]} == {WS_A}
+    assert opened == [WS_A]
+
+
+async def test_recent_activity_brigade_jwt_reads_only_its_claim(opened):
+    body = await clients.cpa_recent_activity(days=30, auth=_brigade_a())
+    assert {i["workspace_id"] for i in body["items"]} == {WS_A}
+    assert opened == [WS_A]
+
+
+async def test_recent_activity_human_unchanged(opened):
+    body = await clients.cpa_recent_activity(days=30, auth=_auth(None))
+    assert {i["workspace_id"] for i in body["items"]} == {WS_A, WS_B}

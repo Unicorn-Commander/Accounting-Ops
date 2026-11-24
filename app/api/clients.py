@@ -245,7 +245,8 @@ async def cpa_recent_activity(
                 await session.execute(
                     text(
                         """
-                        SELECT w.id::text AS id, w.display_name AS name
+                        SELECT w.id::text AS id, w.display_name AS name,
+                               m.role::text AS role, m.entity_scope AS entity_scope
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :user_id
@@ -256,6 +257,8 @@ async def cpa_recent_activity(
                 )
             ).mappings().all()
 
+    # AO114-R2-3: a scoped token never reads another workspace's audit rows.
+    rows, _ = await _scoped_client_rows(auth, rows, 0)
     items: list[dict[str, Any]] = []
     for ws in rows:
         try:
