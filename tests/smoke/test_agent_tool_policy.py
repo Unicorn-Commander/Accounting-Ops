@@ -44,10 +44,12 @@ def _set_policy(monkeypatch, policy: dict | str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_no_policy_configured_restricts_nobody(monkeypatch):
+def test_no_policy_configured_leaves_agents_read_only(monkeypatch):
+    # AO-MCP-1: an unknown agent used to reach every tool. It is read-only now.
     monkeypatch.delenv(ENV_VAR, raising=False)
     reset_policy_cache()
-    assert is_tool_allowed("receipt-reconciler", "post_journal_entry") is True
+    assert is_tool_allowed("receipt-reconciler", "post_journal_entry") is False
+    assert is_tool_allowed("receipt-reconciler", "list_transactions") is True
     assert is_tool_allowed(None, "post_journal_entry") is True
 
 
@@ -58,11 +60,15 @@ def test_human_callers_are_never_restricted(monkeypatch):
     assert is_tool_allowed("", "post_journal_entry") is True
 
 
-def test_unenrolled_agent_is_not_restricted(monkeypatch):
-    # Enrolment is opt-in, so shipping the feature cannot break an agent that
-    # nobody has characterised yet.
+def test_unenrolled_agent_defaults_to_read_only(monkeypatch):
     _set_policy(monkeypatch, {"receipt-reconciler": ["list_transactions"]})
-    assert is_tool_allowed("listing-ops-ao-sync", "post_journal_entry") is True
+    assert is_tool_allowed("listing-ops-ao-sync", "post_journal_entry") is False
+    assert is_tool_allowed("listing-ops-ao-sync", "decide_approval") is False
+    assert is_tool_allowed("listing-ops-ao-sync", "get_transaction") is True
+    # A tool with no discovery metadata is treated as a write.
+    assert is_tool_allowed("listing-ops-ao-sync", "no_such_tool") is False
+    with pytest.raises(PermissionError):
+        enforce_tool_policy("listing-ops-ao-sync", "post_journal_entry")
 
 
 def test_unenrolled_agent_usage_is_logged_for_enrolment(monkeypatch, caplog):
