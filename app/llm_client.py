@@ -67,6 +67,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from typing import Any, TypeVar
+from urllib.parse import urlsplit, urlunsplit
 
 _log = logging.getLogger("acctops.llm")
 
@@ -204,6 +205,20 @@ class LlmTarget:
     def redacted(self) -> str:
         """Safe-to-log identity: endpoint + model, never the key."""
         return f"{self.label}={self.base_url} model={self.model}"
+
+    def redacted_base_url(self) -> str:
+        """The endpoint with userinfo and query removed -- safe for spans/logs.
+
+        ``redacted()`` keeps the full base_url (fine for a warning log a human
+        reads), but span attributes ship to a third-party collector: a base_url
+        can embed an API key as userinfo or a query token, so the endpoint that
+        leaves the process must be stripped to scheme://host/path.
+        """
+        parts = urlsplit(self.base_url)
+        netloc = parts.hostname or ""
+        if parts.port:
+            netloc = f"{netloc}:{parts.port}"
+        return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def resolve_fallback_target(primary_model: str | None = None) -> LlmTarget | None:
@@ -359,13 +374,13 @@ def _annotate_span(reason: str, primary: LlmTarget, fallback: LlmTarget, op: str
         span.set_attribute("llm.failover", True)
         span.set_attribute("llm.failover.reason", reason)
         span.set_attribute("llm.failover.op", op)
-        span.set_attribute("llm.primary.base_url", primary.base_url)
+        span.set_attribute("llm.primary.base_url", primary.redacted_base_url())
         span.set_attribute("llm.primary.model", primary.model)
-        span.set_attribute("llm.fallback.base_url", fallback.base_url)
+        span.set_attribute("llm.fallback.base_url", fallback.redacted_base_url())
         span.set_attribute("llm.fallback.model", fallback.model)
         span.add_event(
             "llm.failover",
-            {"reason": reason, "op": op, "fallback.base_url": fallback.base_url},
+            {"reason": reason, "op": op, "fallback.base_url": fallback.redacted_base_url()},
         )
     except Exception:  # noqa: BLE001 - telemetry must never break a request
         return
