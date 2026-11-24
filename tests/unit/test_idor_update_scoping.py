@@ -522,6 +522,60 @@ async def test_accept_invitation_is_workspace_scoped(db, monkeypatch):
     assert row_a["accepted_by_user_id"] == str(USER_A)
 
 
+async def test_accept_update_with_mismatched_id_and_workspace_changes_nothing(db, monkeypatch):
+    """AO112-R3-2: drive the REAL accept UPDATE with INV_A's id and WS_B.
+
+    The lookup is forced to return a row whose id belongs to workspace A but
+    whose workspace_id is B. Without `AND workspace_id = :wid` on the UPDATE
+    the victim's invitation is marked accepted; with it, zero rows change.
+    """
+    import app.api.members as members_mod
+    import app.auth as auth_mod
+    import sqlalchemy.ext.asyncio as sa_asyncio
+
+    _patch_session(monkeypatch, db)
+    _patch_send_email(monkeypatch)
+
+    async def _audit(session, **kwargs):
+        return None
+
+    monkeypatch.setattr(members_mod, "_write_membership_audit", _audit)
+
+    async def _fake_authenticate_token(tok):
+        return _FakeAuthCtx("attacker@example.com")
+
+    monkeypatch.setattr(auth_mod, "authenticate_token", _fake_authenticate_token)
+    monkeypatch.setattr(members_mod, "_token_email_verified", lambda claims: True)
+
+    orig = sa_asyncio.AsyncSession.execute
+    forged = _InvRow(INV_A, WS_B, "attacker@example.com")
+
+    async def _execute(self, stmt, params=None):
+        sql = " ".join(str(stmt).split())
+        if "FROM public.workspace_invitation i" in sql and "JOIN" in sql:
+            return _FakeResult([forged])
+        if "SELECT id, email FROM public.user_account" in sql:
+            return _FakeResult([_UserRow("attacker@example.com")])
+        if "FROM public.workspace_membership" in sql and "SELECT" in sql:
+            return _FakeResult([])
+        if "INSERT INTO public.workspace_membership" in sql:
+            return _FakeResult([])
+        if "UPDATE public.workspace_membership" in sql:
+            return _FakeResult([])
+        return await orig(self, stmt, params)
+
+    monkeypatch.setattr(sa_asyncio.AsyncSession, "execute", _execute)
+
+    class _StubRequest:
+        headers = {"authorization": "Bearer fake-token"}
+
+    await members_mod.accept_invitation(request=_StubRequest(), token=TOKEN_B)
+
+    row_a = await _inv_row(db, INV_A)
+    assert row_a["accepted_at"] is None, "accept UPDATE touched a row outside its workspace"
+    assert row_a["accepted_by_user_id"] is None
+
+
 # ===========================================================================
 # store_credential (credentials.py) -- the N11 re-encrypt UPDATE
 # ===========================================================================
@@ -629,6 +683,47 @@ async def test_store_credential_reencrypt_update_is_workspace_scoped(db, monkeyp
     assert crypto.decrypt(
         bytes(victim["nonce"]), bytes(victim["ciphertext"]), WS_A, CRED_A
     ) == "acct-456", "victim credential ciphertext was overwritten cross-workspace"
+
+
+async def test_reencrypt_update_with_mismatched_id_and_workspace_changes_nothing(db, monkeypatch):
+    """AO112-R3-2: drive the REAL re-encrypt UPDATE in store_credential with
+    CRED_A's id (forced out of the INSERT ... RETURNING) and workspace B.
+    Without `AND workspace_id` the victim's ciphertext is overwritten."""
+    import app.security.credentials as creds_mod
+    from sqlalchemy.ext.asyncio import AsyncSession
+    import sqlalchemy.ext.asyncio as sa_asyncio
+
+    crypto = _patch_creds_crypto(monkeypatch)
+    await _seed_credential(db, crypto, CRED_A, WS_A)
+    before = await _cred_row(db, CRED_A)
+
+    class _Returning:
+        def scalar_one(self):
+            return str(CRED_A)
+
+    orig = sa_asyncio.AsyncSession.execute
+
+    async def _execute(self, stmt, params=None):
+        if "INSERT INTO public.tenant_credentials" in str(stmt) or "INSERT INTO tenant_credentials" in str(stmt):
+            return _Returning()
+        return await orig(self, stmt, params)
+
+    monkeypatch.setattr(sa_asyncio.AsyncSession, "execute", _execute)
+
+    session = AsyncSession(bind=db, expire_on_commit=False)
+    try:
+        await creds_mod.store_credential(
+            session, WS_B, "simplefin", "Checking", "attacker-value"
+        )
+        await session.commit()
+    finally:
+        await session.close()
+
+    after = await _cred_row(db, CRED_A)
+    assert bytes(after["ciphertext"]) == bytes(before["ciphertext"]), (
+        "re-encrypt UPDATE overwrote another workspace's credential"
+    )
+    assert bytes(after["nonce"]) == bytes(before["nonce"])
 
 
 # ===========================================================================
