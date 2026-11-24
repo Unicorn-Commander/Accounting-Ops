@@ -296,12 +296,20 @@ async def update_coa_account(
         updates: dict[str, Any] = {}
         if body.account_name is not None:
             updates["account_name"] = body.account_name
+        # normal_balance follows account_type: it is recomputed ONLY when the
+        # type actually changes. A rename-only update (account_type None) must
+        # leave the stored balance untouched, so a rename without a type change
+        # is a valid update on its own.
         if body.account_type is not None:
             updates["account_type"] = body.account_type
             updates["normal_balance"] = (
                 "debit" if body.account_type in ("asset", "expense", "cogs", "other_expense", "tax")
                 else "credit"
             )
+        else:
+            # Carry the stored value forward so the single UPDATE statement
+            # below always binds a normal_balance (it always sets the column).
+            updates["normal_balance"] = normal_balance_for(existing["account_type"])
 
         if updates:
             # If account_name changed, update canonical_form
