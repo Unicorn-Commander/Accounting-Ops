@@ -9,7 +9,9 @@ Reuses the AES-256-GCM tenant_credentials store. Two credential types:
 
 Called by agents/chat/inference_config.py. Functions return ``None`` on absence;
 the resolver wraps calls in try/except and falls back to today's behavior, so a
-DB/gateway hiccup can never break live chat.
+DB hiccup can never break live chat. One exception: a failed MINT for a
+workspace that should hold its own key raises VirtualKeyUnavailableError, which
+fails the turn closed instead of metering the customer's spend to the platform.
 """
 from __future__ import annotations
 
@@ -33,6 +35,15 @@ _log = logging.getLogger("acctops.workspace_llm_keys")
 CONNECTOR_VIRTUAL = "litellm_virtual_key"
 CONNECTOR_BYOK = "byo_llm_key"
 _VIRTUAL_LABEL = "platform"
+
+
+class VirtualKeyUnavailableError(RuntimeError):
+    """This workspace should carry its own gateway key, and the mint failed.
+
+    Raised instead of returning None so the resolver cannot fall back to the
+    PLATFORM key: that fallback would meter the customer's spend to the
+    platform. The caller fails the turn closed and the next turn retries.
+    """
 
 
 async def resolve_billing_customer_id(
@@ -155,9 +166,14 @@ async def get_or_mint_virtual_key(
                 "source": "accounting-ops",
             },
         )
-    except Exception as e:  # noqa: BLE001 — minting is best-effort
-        _log.warning("virtual-key mint skipped for workspace %s: %s", workspace_id, e)
-        return None
+    except Exception as e:  # noqa: BLE001 - any gateway failure fails closed
+        # Minting is configured and the org is resolved, so this workspace
+        # meters under its own key. Fail closed; never the platform key.
+        _log.warning("virtual-key mint failed for workspace %s: %s", workspace_id, e)
+        raise VirtualKeyUnavailableError(str(workspace_id)) from e
+    if not key:
+        _log.warning("virtual-key mint returned no key for workspace %s", workspace_id)
+        raise VirtualKeyUnavailableError(str(workspace_id))
 
     # ON CONFLICT (workspace_id, connector, label) makes a concurrent double-mint
     # idempotent (last write wins; a duplicate mint just wastes one key).
