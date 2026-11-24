@@ -34,6 +34,7 @@ import zlib
 from typing import Any
 
 import fitz  # pymupdf (fitz is its deprecated alias)
+import pytest
 
 import app.categorization.tax_doc_vlm as mod
 
@@ -713,20 +714,123 @@ def test_runlength_filter_page_refused_by_precheck() -> None:
     assert error == "page too large (partial)"
 
 
-def test_filter_chain_page_refused_by_precheck() -> None:
-    """R11-P2-2: a two-filter chain ([/ASCII85Decode /FlateDecode]) on a
-    content stream must be refused (the bounded decoder understands only
-    exactly [/FlateDecode])."""
-    inner = _deflate(_heavy_content_stream())
-    # ASCII85 of the flate stream (base64.a85encode is the A85 variant PDF
-    # uses, adobe=False; the exact encoding does not matter: the chain itself
-    # must be refused before any decode).
+def _stream_doc(data: bytes) -> tuple[Any, int]:
+    """Open ``data`` and return (doc, xref of page 0's first content stream)."""
+    doc = fitz.open(stream=data, filetype="pdf")
+    return doc, doc[0].get_contents()[0]
+
+
+def _a85(data: bytes) -> bytes:
+    """ASCII85 as a PDF /ASCII85Decode stream carries it (no <~, ends ~>)."""
     import base64
 
-    a85 = base64.a85encode(inner, adobe=False)
-    data = _content_pdf(b"[ /ASCII85Decode /FlateDecode ]", a85)
-    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    return base64.a85encode(data, adobe=False) + b"~>"
 
+
+def _light_ops() -> bytes:
+    return b"BT /F1 12 Tf 72 720 Td (W-2 sample) Tj ET\n0 0 1 rg 10 10 50 20 re f"
+
+
+def test_light_flate_array_filter_page_renders() -> None:
+    """R12-P2-A: a LIGHT page whose /Filter is the array [/FlateDecode] (no
+    space before "]") renders. The old tokeniser read "/FlateDecode]" and
+    refused every array-form filter page."""
+    data = _content_pdf(b"[/FlateDecode]", _deflate(_light_ops()))
+    doc, xref = _stream_doc(data)
+    assert mod._filter_list(doc, xref) == ["/FlateDecode"]
+    assert mod._decoded_stream_bytes(doc, xref, mod._PAGE_CONTENT_MAX_BYTES) == len(
+        _light_ops()
+    )
+    doc.close()
+
+    out, error = mod._render_pdf(data, max_pages=2, dpi=72)
+    assert error is None
+    assert len(out) == 1 and out[0].startswith(b"\x89PNG")
+
+
+def test_reportlab_one_line_page_renders() -> None:
+    """R12-P2-A: ReportLab's default output ([/ASCII85Decode/FlateDecode] on
+    the content stream) passes the pre-check via bounded A85 then bounded
+    Flate, and renders."""
+    import io
+
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf)
+    c.drawString(72, 720, "W-2 sample for Example Payroll Co")
+    c.save()
+    data = buf.getvalue()
+
+    doc, xref = _stream_doc(data)
+    assert mod._filter_list(doc, xref) == ["/ASCII85Decode", "/FlateDecode"]
+    assert 0 < mod._decoded_stream_bytes(doc, xref, mod._PAGE_CONTENT_MAX_BYTES) < 1024
+    doc.close()
+
+    out, error = mod._render_pdf(data, max_pages=2, dpi=72)
+    assert error is None
+    assert len(out) == 1 and out[0].startswith(b"\x89PNG")
+
+
+def test_heavy_a85_flate_chain_refused_by_decoded_size() -> None:
+    """R12-P2-A: the supported chain with a HEAVY decoded stream is refused by
+    the decoded-size bound (the bounded Flate behind the A85), not by an
+    "unsupported filter" refusal."""
+    data = _content_pdf(
+        b"[ /ASCII85Decode /FlateDecode ]", _a85(_deflate(_heavy_content_stream()))
+    )
+    doc, xref = _stream_doc(data)
+    with pytest.raises(ValueError, match="flate stream exceeds the content bound"):
+        mod._decoded_stream_bytes(doc, xref, mod._PAGE_CONTENT_MAX_BYTES)
+    doc.close()
+
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    assert out == []
+    assert error == "page too large (partial)"
+
+
+def test_a85_z_run_refused_before_decoding() -> None:
+    """R12-P2-A: an A85 body of "z" groups (1 char -> 4 zero bytes) would
+    decode larger than its raw size: refused before the A85 decode."""
+    data = _content_pdf(b"[/ASCII85Decode/FlateDecode]", b"z" * 50000 + b"~>")
+    doc, xref = _stream_doc(data)
+    with pytest.raises(ValueError, match="ascii85 stream would decode larger"):
+        mod._decoded_stream_bytes(doc, xref, mod._PAGE_CONTENT_MAX_BYTES)
+    doc.close()
+
+
+def test_heavy_flate_array_refused_by_decoded_size() -> None:
+    """R12-P2-A: the heavy [/FlateDecode] (no spaces) array page is refused by
+    the bounded Flate (decoded size), now that the name tokenises."""
+    data = _content_pdf(b"[/FlateDecode]", _deflate(_heavy_content_stream()))
+    doc, xref = _stream_doc(data)
+    with pytest.raises(ValueError, match="flate stream exceeds the content bound"):
+        mod._decoded_stream_bytes(doc, xref, mod._PAGE_CONTENT_MAX_BYTES)
+    doc.close()
+
+
+@pytest.mark.parametrize(
+    "filter_spec, stream",
+    [
+        (b"/RunLengthDecode", b"\x4e" * 10000),
+        (b"[/RunLengthDecode]", b"\x4e" * 10000),
+        (b"[/ASCII85Decode /LZWDecode]", _a85(b"x" * 100)),
+        (b"[/FlateDecode /FlateDecode]", _deflate(_deflate(b"x" * 100))),
+        (b"[/ASCIIHexDecode /FlateDecode]", _deflate(b"x" * 100).hex().encode()),
+    ],
+)
+def test_other_filters_and_chains_refused_as_unsupported(
+    filter_spec: bytes, stream: bytes
+) -> None:
+    """R12-P2-A: any filter or chain other than none, [/FlateDecode] and
+    [/ASCII85Decode /FlateDecode] is refused as UNSUPPORTED (even light)."""
+    data = _content_pdf(filter_spec, stream)
+    doc, xref = _stream_doc(data)
+    with pytest.raises(ValueError, match="unsupported content stream filter"):
+        mod._decoded_stream_bytes(doc, xref, mod._PAGE_CONTENT_MAX_BYTES)
+    doc.close()
+
+    out, error = mod._render_pdf(data, max_pages=2, dpi=72)
     assert out == []
     assert error == "page too large (partial)"
 

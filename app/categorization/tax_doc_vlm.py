@@ -520,11 +520,16 @@ def _xobject_xrefs(doc: Any, xobj_xref: int) -> set[int]:
     return xrefs
 
 
+# A PDF name token: "/" then regular characters up to whitespace or a
+# delimiter (PDF 32000-1 7.2.2 / 7.3.5).
+_PDF_NAME_RE = re.compile(r"/[^\s/\[\]<>(){}%]+")
+
+
 def _filter_list(doc: Any, xref: int) -> list[str]:
     """The stream's /Filter normalised to a list of filter names.
 
     PDFs spell /Filter three ways: a bare name (``/FlateDecode``), an array
-    (``[/FlateDecode]`` or a chain ``[/A85Decode /FlateDecode]``), or an
+    (``[/FlateDecode]`` or a chain ``[/ASCII85Decode /FlateDecode]``), or an
     indirect object (``3 0 R`` to either of those). This returns the names as
     a list; an empty list means no filter. A name that cannot be resolved
     (indirect cycle, malformed) raises: the caller treats any raise as
@@ -534,7 +539,10 @@ def _filter_list(doc: Any, xref: int) -> list[str]:
     if kind in ("null", "") or value in (None, "", "null"):
         return []
     if kind == "array" and isinstance(value, str):
-        return [t.strip() for t in re.findall(r"/\S+", value)]
+        # Tokenise PDF names properly: a name ends at whitespace or a
+        # delimiter, so "[/FlateDecode]" is "/FlateDecode" (not
+        # "/FlateDecode]") and "[/ASCII85Decode/FlateDecode]" is two names.
+        return _PDF_NAME_RE.findall(value)
     if kind == "xref" and isinstance(value, str):
         m = re.match(r"(\d+)\s+0\s+R", value)
         if not m:
@@ -556,12 +564,16 @@ def _decoded_stream_bytes(doc: Any, xref: int, limit: int) -> int:
         with ``zlib.decompressobj`` at ``max_length = limit + 1``, stopping the
         moment the decoded output passes the bound, so a compression bomb
         (tiny raw, huge decoded) is refused without a multi-GB inflate;
+      - exactly [/ASCII85Decode /FlateDecode] (ReportLab's default): a
+        bounded A85 decode (refused before decoding if its output could
+        exceed the raw size) feeding the same bounded Flate;
       - ANY other filter or filter chain (RunLengthDecode, LZWDecode,
-        [/A85Decode /FlateDecode], ...): REFUSE. Real content streams are
-        Flate or unfiltered; any other filter can expand a tiny raw stream to
-        a large decoded one (RunLengthDecode and LZWDecode do), and the
-        bounded decoder only understands Flate, so counting such a stream at
-        its raw size would understate a bomb.
+        [/ASCII85Decode /LZWDecode], ...): REFUSE. Real content streams are
+        Flate, A85+Flate or unfiltered; any other filter can expand a tiny
+        raw stream to a large decoded one (RunLengthDecode and LZWDecode
+        do), and the bounded decoder only understands Flate (and A85 in
+        front of it), so counting such a stream at its raw size would
+        understate a bomb.
     Raises on a decode error (a zlib.error on a corrupt/bomb stream, a
     truncated stream, an over-bound stream): the caller treats any raise as
     "too large" and refuses the page. A stream that cannot be decoded is
@@ -575,30 +587,14 @@ def _decoded_stream_bytes(doc: Any, xref: int, limit: int) -> int:
     if not raw:
         return 0
     filters = _filter_list(doc, xref)
+    if filters == ["/ASCII85Decode", "/FlateDecode"]:
+        # ReportLab's default content-stream encoding. ASCII85 decodes 5
+        # chars to 4 bytes (a "z" is 1 char to 4 zero bytes), so the decoded
+        # A85 output is checked against the raw size BEFORE decoding; the
+        # A85 output (at most the raw size) is then fed to the bounded Flate.
+        return _bounded_flate_len(_bounded_a85_decode(raw), limit)
     if filters == ["/FlateDecode"]:
-        # Bounded Flate decompression. Feed the raw input ONCE; every later
-        # pass feeds only what the previous pass left unconsumed
-        # (decomp.unconsumed_tail). Re-feeding the whole raw stream each pass
-        # would restart the decompressor state and make a stream that yields
-        # one byte per pass burn CPU linear in (raw size x passes) instead of
-        # linear in raw size. If the input is exhausted before decomp.eof,
-        # the stream is truncated (a corrupt or adversarial stream): refuse.
-        decomp = zlib.decompressobj()
-        decoded_len = 0
-        data = raw
-        while data:
-            chunk = decomp.decompress(data, limit + 1)
-            decoded_len += len(chunk)
-            if decoded_len > limit:
-                raise ValueError("flate stream exceeds the content bound")
-            data = decomp.unconsumed_tail
-        tail = decomp.flush()
-        decoded_len += len(tail)
-        if decoded_len > limit:
-            raise ValueError("flate stream exceeds the content bound")
-        if not decomp.eof:
-            raise ValueError("flate stream truncated (no eof)")
-        return decoded_len
+        return _bounded_flate_len(raw, limit)
     if not filters:
         # No filter: the raw bytes ARE the decoded bytes.
         if len(raw) > limit:
@@ -610,6 +606,52 @@ def _decoded_stream_bytes(doc: Any, xref: int, limit: int) -> int:
     raise ValueError(
         "unsupported content stream filter " + " ".join(filters)
     )
+
+
+def _bounded_a85_decode(raw: bytes) -> bytes:
+    """ASCII85-decode ``raw`` (a PDF /ASCII85Decode stream), refusing BEFORE
+    decoding if the output could exceed ``len(raw)``. Normal 5-char groups
+    shrink 5:4; only "z" (1 char -> 4 zero bytes) grows, so the upper bound
+    is computed from the "z" count. Raises on malformed A85."""
+    import base64
+
+    end = raw.find(b"~>")
+    body = raw if end == -1 else raw[:end]
+    z_count = body.count(b"z")
+    # Exact upper bound: a full group is 5 chars -> 4 bytes, a final partial
+    # group of k chars -> k - 1 bytes (< 4k/5), a "z" -> 4 bytes.
+    upper = 4 * z_count + ((len(body) - z_count) * 4) // 5
+    if upper > len(raw):
+        raise ValueError("ascii85 stream would decode larger than its raw size")
+    return base64.a85decode(body, adobe=False)
+
+
+def _bounded_flate_len(raw: bytes, limit: int) -> int:
+    """DECODED length of the Flate stream ``raw``, bounded at ``limit + 1``;
+    raises when the stream is over the bound, corrupt, or truncated."""
+    # Bounded Flate decompression. Feed the raw input ONCE; every later
+    # pass feeds only what the previous pass left unconsumed
+    # (decomp.unconsumed_tail). Re-feeding the whole raw stream each pass
+    # would restart the decompressor state and make a stream that yields
+    # one byte per pass burn CPU linear in (raw size x passes) instead of
+    # linear in raw size. If the input is exhausted before decomp.eof,
+    # the stream is truncated (a corrupt or adversarial stream): refuse.
+    decomp = zlib.decompressobj()
+    decoded_len = 0
+    data = raw
+    while data:
+        chunk = decomp.decompress(data, limit + 1)
+        decoded_len += len(chunk)
+        if decoded_len > limit:
+            raise ValueError("flate stream exceeds the content bound")
+        data = decomp.unconsumed_tail
+    tail = decomp.flush()
+    decoded_len += len(tail)
+    if decoded_len > limit:
+        raise ValueError("flate stream exceeds the content bound")
+    if not decomp.eof:
+        raise ValueError("flate stream truncated (no eof)")
+    return decoded_len
 
 
 def _page_content_bytes(doc: Any, page_index: int) -> int:
