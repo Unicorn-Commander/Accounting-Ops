@@ -205,3 +205,39 @@ async def test_triage_human_unchanged(opened):
     body = await clients.list_my_clients_triage(auth=_auth(None))
     assert sorted(w["id"] for w in body["workspaces"]) == sorted([WS_A, WS_B])
     assert body["persona"] == "platform_admin"
+
+
+# ---------------------------------------------------------------------------
+# AO114-R2-5: GET /api/me/persona (_caller_account, also the add-client gate)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def persona(opened, monkeypatch):
+    from app.api import workspaces
+
+    async def _ensure(_uc, *, autoprovision=False):
+        return USER_ID
+
+    monkeypatch.setattr(workspaces, "_ensure_user_account", _ensure)
+
+
+async def test_persona_scoped_token_sees_only_capped_roles_in_a(persona):
+    body = await clients.my_persona(auth=_scoped_a(role_floor="viewer"))
+    assert body["roles"] == ["viewer"]
+    assert body["persona"] == "cpa"  # onboarded A, the only kept row
+    assert body["clients_onboarded"] == 1
+    assert body["can_add_clients"] is False
+
+
+async def test_persona_brigade_jwt_sees_only_its_claim(persona):
+    body = await clients.my_persona(auth=_brigade_a())
+    assert body["roles"] == ["cpa"]
+    assert body["persona"] == "cpa"
+
+
+async def test_persona_human_unchanged(persona):
+    body = await clients.my_persona(auth=_auth(None))
+    assert body["roles"] == ["cpa", "platform_admin"]
+    assert body["persona"] == "platform_admin"
+    assert body["clients_onboarded"] == 2

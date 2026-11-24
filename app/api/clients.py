@@ -764,7 +764,7 @@ def individual_invite_bodies(
 
 
 async def _caller_account(
-    uc_uid: str, *, autoprovision: bool = False
+    auth: AuthContext,
 ) -> tuple[UUID, str | None, list[str], int]:
     """Return (user_id, email, distinct_roles_held, clients_onboarded) for the caller.
 
@@ -775,10 +775,17 @@ async def _caller_account(
     auto-provision (``AuthContext.may_autoprovision``: Keycloak login / CE
     local). Other callers (service tokens, PATs, Brigade) resolve-or-403 —
     a ghost row here would have no roles anyway.
+
+    AO114-R2-5: the roles (and the onboarded count) of a scoped token come
+    only from the memberships it is scoped to, capped at its role floor, so
+    neither the persona nor the POST /api/me/clients gate sees a seat outside
+    the token's declared workspaces or above its role.
     """
     from app.api.workspaces import _ensure_user_account
 
-    user_id = await _ensure_user_account(uc_uid, autoprovision=autoprovision)
+    user_id = await _ensure_user_account(
+        auth.uc_uid, autoprovision=auth.may_autoprovision
+    )
     async with SessionLocal() as session:
         async with session.begin():
             email_row = (
@@ -791,7 +798,11 @@ async def _caller_account(
                 await session.execute(
                     text(
                         """
-                        SELECT DISTINCT m.role::text AS role
+                        SELECT w.id::text AS id,
+                               m.role::text AS role,
+                               m.entity_scope AS entity_scope,
+                               COALESCE(w.onboarded_by_user_id = :uid, false)
+                                   AS onboarded_by_me
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :uid AND m.status = 'active' AND w.status = 'active'
@@ -801,10 +812,13 @@ async def _caller_account(
                 )
             ).mappings().all()
             clients_onboarded = await _clients_onboarded_count(session, user_id)
+    role_rows, clients_onboarded = await _scoped_client_rows(
+        auth, role_rows, clients_onboarded
+    )
     return (
         user_id,
         (email_row.email if email_row else None),
-        [r["role"] for r in role_rows],
+        sorted({r["role"] for r in role_rows}),
         clients_onboarded,
     )
 
@@ -822,9 +836,7 @@ async def my_persona(
     set up from the console; one or more makes the persona "cpa" (see
     ``_persona_for``).
     """
-    _user_id, _email, roles, clients_onboarded = await _caller_account(
-        auth.uc_uid, autoprovision=auth.may_autoprovision
-    )
+    _user_id, _email, roles, clients_onboarded = await _caller_account(auth)
     role_set = set(roles)
     persona = _persona_for(roles, clients_onboarded)
     can_add = bool(role_set & set(_PRACTITIONER_ROLES))
@@ -909,9 +921,7 @@ async def add_client(
     from app.tenancy import WorkspaceContext
     from scripts.provision_workspace import provision_workspace
 
-    user_id, caller_email, roles, _onboarded = await _caller_account(
-        auth.uc_uid, autoprovision=auth.may_autoprovision
-    )
+    user_id, caller_email, roles, _onboarded = await _caller_account(auth)
     if not (set(roles) & set(_PRACTITIONER_ROLES)):
         raise HTTPException(
             status_code=403,
