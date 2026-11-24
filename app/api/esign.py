@@ -93,7 +93,8 @@ async def _read_capped(file: UploadFile, max_bytes: int) -> bytes | None:
 
 _ESIGN_CHANNEL = "esign"
 _PREFIX = (
-    "/api/workspaces/{workspace_id}/entities/{entity_id}/work-products/{wp_id}/signature-requests"
+    "/api/workspaces/{workspace_id}/entities/{entity_id}"
+    "/work-products/{wp_id}/signature-requests"
 )
 
 
