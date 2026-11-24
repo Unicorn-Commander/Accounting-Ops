@@ -90,9 +90,17 @@ class _Session:
 
 
 async def _post(ws: WorkspaceContext, *, entity_id: UUID, amount_cents: int,
-                sign_matched: bool = True) -> tuple[dict | None, dict[str, Any], dict[str, int]]:
+                sign_matched: bool = True,
+                counts: dict[str, int] | None = None,
+                ) -> tuple[dict | None, dict[str, Any], dict[str, int]]:
+    # The caller may own ``counts`` so it survives an exception raised by the
+    # route (AO111-R2-F7: a dict returned from here never reaches a caller
+    # whose call raised).
     captured: dict[str, Any] = {}
-    counts = {"sessions": 0, "posts": 0}
+    if counts is None:
+        counts = {}
+    counts.setdefault("sessions", 0)
+    counts.setdefault("posts", 0)
 
     class _Ctx:
         async def __aenter__(self):
@@ -144,10 +152,11 @@ async def _post(ws: WorkspaceContext, *, entity_id: UUID, amount_cents: int,
 async def test_scoped_member_cannot_post_into_another_entity(role):
     counts: dict[str, int] = {}
     with pytest.raises(HTTPException) as exc:
-        _, _, counts = await _post(_ws(role, (ENTITY_A,)), entity_id=ENTITY_B, amount_cents=-L_CENTS)
+        await _post(_ws(role, (ENTITY_A,)), entity_id=ENTITY_B, amount_cents=-L_CENTS,
+                    counts=counts)
     assert exc.value.status_code == 403
     # Nothing opened, nothing posted: the guard runs before the session.
-    assert counts == {}
+    assert counts == {"sessions": 0, "posts": 0}
 
 
 @pytest.mark.asyncio
