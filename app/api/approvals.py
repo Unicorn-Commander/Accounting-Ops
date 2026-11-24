@@ -220,11 +220,18 @@ def _require_stripe_decision_human(auth: AuthContext, workspace: WorkspaceContex
         )
 
 
-# Subject types whose APPROVE path applies a ledger change with
-# user_confirmed=True or stamps approving_human (a human attestation). An
-# agent or PAT is never the approver, so the decide endpoint requires a
-# verified interactive human for these. (ebay_post_transaction only queues a
-# worker replay and stamps no ledger entry, so it stays outside the set.)
+# Subject types whose APPROVE path must not run for an agent or PAT caller.
+# An agent is never the approver: approving any of these stamps the durable
+# decision with the workspace human's id (decided_by / approving_human /
+# _record_*_decision), and the next worker pass acts on that durable human
+# decision. The set therefore covers every branch that writes decided_by or a
+# connector decision record on approve, not just the ones that apply a ledger
+# entry immediately:
+#   journal_entry_post, journal_recategorization, bank_transaction_import,
+#   manual_journal_entry_proposal, stripe_post_balance_transaction apply the
+#   held entry with user_confirmed=True + approving_human stamped;
+#   ebay_post_transaction arms the worker replay "after this durable human
+#   decision" (_record_ebay_decision, decision=approve).
 _LEDGER_APPROVAL_SUBJECT_TYPES = frozenset(
     {
         "journal_entry_post",
@@ -232,6 +239,7 @@ _LEDGER_APPROVAL_SUBJECT_TYPES = frozenset(
         "bank_transaction_import",
         "manual_journal_entry_proposal",
         "stripe_post_balance_transaction",
+        "ebay_post_transaction",
     }
 )
 
@@ -460,9 +468,11 @@ async def decide_approval(
         else:
             # ---------------- APPROVE ----------------
             # House rule: an agent is never the approver. Every subject type
-            # that applies a ledger change with user_confirmed=True or stamps
-            # approving_human requires a verified interactive human; agents and
-            # PATs are rejected BEFORE the apply helper runs (nothing applied).
+            # whose approve path stamps the durable decision with the workspace
+            # human's id (decided_by / approving_human / the connector decision
+            # record) requires a verified interactive human; agents and PATs
+            # are rejected BEFORE the apply helper runs (nothing applied, no
+            # decision row, no ebay decision record).
             if subject_type in _LEDGER_APPROVAL_SUBJECT_TYPES:
                 _require_interactive_human(auth, workspace)
 
