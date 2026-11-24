@@ -212,3 +212,53 @@ async def test_my_workspaces_human_unchanged(my_workspaces):
     out = await workspaces.list_my_workspaces(_request(), auth=_auth(None))
     assert sorted(w["id"] for w in out) == sorted([WS_A, WS_B])
     assert {w["role"] for w in out} == {"owner"}
+
+
+# ---------------------------------------------------------------------------
+# AO114-R2-1: a Brigade workspace-scoped JWT sees only its claim's workspace on
+# the aggregates too (the AO-TOK-2 pin only covered resolve_workspace routes).
+# ---------------------------------------------------------------------------
+
+BRIGADE_ISS = "https://brigade.example.com"
+WS_A_REGISTRY = str(uuid.uuid4())  # uc-registry id that maps to the internal A
+
+
+@pytest.fixture
+def brigade(monkeypatch):
+    from app.platform import workspace_registry as wr
+
+    monkeypatch.setenv("BRIGADE_TRUSTED_ISSUER", BRIGADE_ISS)
+
+    async def _resolve(workspace_id):
+        return uuid.UUID(WS_A) if str(workspace_id) == WS_A_REGISTRY else workspace_id
+
+    monkeypatch.setattr(wr, "resolve_internal_workspace_id", _resolve)
+
+    def _make(claim: str | None) -> AuthContext:
+        claims: dict[str, Any] = {"iss": BRIGADE_ISS, "sub": "jane@example.com"}
+        if claim is not None:
+            claims["workspace_id"] = claim
+        return AuthContext(uc_uid="owner-user", agent_id=None, scopes=(), claims=claims)
+
+    return _make
+
+
+async def test_work_inbox_brigade_jwt_lists_only_its_claim(inbox, brigade):
+    body = await _inbox(brigade(WS_A_REGISTRY))
+    assert _inbox_workspaces(body) == {WS_A}
+    assert [w for w, _ in inbox] == [WS_A]
+
+
+async def test_work_inbox_brigade_jwt_malformed_claim_lists_nothing(inbox, brigade):
+    body = await _inbox(brigade("not-a-uuid"))
+    assert body["items"] == []
+
+
+async def test_work_inbox_brigade_jwt_without_claim_unchanged(inbox, brigade):
+    body = await _inbox(brigade(None))
+    assert _inbox_workspaces(body) == {WS_A, WS_B}
+
+
+async def test_my_workspaces_brigade_jwt_lists_only_its_claim(my_workspaces, brigade):
+    out = await workspaces.list_my_workspaces(_request(), auth=brigade(WS_B))
+    assert [w["id"] for w in out] == [WS_B]

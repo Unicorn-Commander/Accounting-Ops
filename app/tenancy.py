@@ -452,30 +452,78 @@ def apply_service_scope(
     return role, entity_scope
 
 
-def service_scope_for_row(
-    auth: AuthContext,
-    workspace_id: UUID,
-    *,
-    role: str,
-    entity_scope: tuple[UUID, ...] | None,
-) -> tuple[str, tuple[UUID, ...] | None] | None:
-    """AO-TOK-3: ``apply_service_scope`` for one row of a cross-workspace list.
+@dataclass(frozen=True)
+class AggregateScope:
+    """The ONE scope filter for every cross-workspace list (/api/me/*, MCP).
 
-    The /api/me/* aggregates walk every membership of the caller instead of
-    resolving one workspace. For a principal with a ``service_scope`` each row
-    must pass the same gate a single-workspace route applies: the capped role
-    and narrowed entity scope are returned, and a row the token is not scoped
-    to (a 403 from ``apply_service_scope``) yields None so the caller skips it.
-    Humans (no service_scope) get their row back unchanged.
+    The /api/me/* aggregates and the MCP ``list_workspaces`` tool walk every
+    active membership of the caller instead of resolving one workspace, so
+    neither ``resolve_workspace`` gate ran for them. Build one per request with
+    ``aggregate_scope(auth)`` and pass each membership row through ``row``:
+
+    * a Brigade workspace-scoped JWT (AO-TOK-2) keeps only the workspace its
+      claim maps to, exactly as ``pin_federation_workspace`` does on a
+      single-workspace route;
+    * a service token / PAT (AO-TOK-3) keeps only the workspaces in its
+      ``service_scope``, at the capped role and narrowed entity scope that
+      ``apply_service_scope`` returns.
+
+    A row either gate refuses yields None and the caller skips it. Humans get
+    their row back unchanged.
     """
-    try:
-        return apply_service_scope(
-            auth, workspace_id, role=role, entity_scope=entity_scope
-        )
-    except HTTPException as exc:
-        if exc.status_code == status.HTTP_403_FORBIDDEN:
+
+    auth: AuthContext
+    # None = no federation pin; otherwise the only internal workspace id the
+    # token may see (empty = a malformed claim, which sees nothing).
+    federation_workspaces: frozenset[UUID] | None = None
+
+    def row(
+        self,
+        workspace_id: UUID | str,
+        *,
+        role: str,
+        entity_scope: tuple[UUID, ...] | None = None,
+    ) -> tuple[str, tuple[UUID, ...] | None] | None:
+        wid = workspace_id if isinstance(workspace_id, UUID) else UUID(str(workspace_id))
+        if (
+            self.federation_workspaces is not None
+            and wid not in self.federation_workspaces
+        ):
             return None
-        raise
+        try:
+            return apply_service_scope(
+                self.auth, wid, role=role, entity_scope=entity_scope
+            )
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_403_FORBIDDEN:
+                return None
+            raise
+
+
+async def aggregate_scope(auth: AuthContext) -> AggregateScope:
+    """Build the per-request ``AggregateScope`` (one registry lookup at most)."""
+    from app.config import get_settings
+
+    if get_settings().is_community:
+        return AggregateScope(auth)
+
+    from app.platform.workspace_registry import (
+        federation_claim_workspace_id,
+        is_federation_token,
+        resolve_internal_workspace_id,
+    )
+
+    if not is_federation_token(auth):
+        return AggregateScope(auth)
+    claim_wsid = federation_claim_workspace_id(auth)
+    if not claim_wsid:
+        return AggregateScope(auth)
+    try:
+        claim_uuid = UUID(claim_wsid)
+    except ValueError:
+        return AggregateScope(auth, frozenset())
+    internal = await resolve_internal_workspace_id(claim_uuid)
+    return AggregateScope(auth, frozenset({internal}))
 
 
 _FEDERATION_WORKSPACE_MISMATCH = (

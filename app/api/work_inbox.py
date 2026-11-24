@@ -60,7 +60,7 @@ from app.metrics.work_inbox import (
     ITEM_TYPE_TAX_REVIEW,
     build_work_inbox,
 )
-from app.tenancy import role_at_least, service_scope_for_row
+from app.tenancy import aggregate_scope, role_at_least
 from app.workspace_session import workspace_session
 
 _log = logging.getLogger("acctops.work_inbox")
@@ -412,6 +412,7 @@ async def work_inbox(
                 )
             ).mappings().all()
 
+    gate = await aggregate_scope(auth)
     now = dt.datetime.now(dt.timezone.utc)
     collected: list[dict[str, Any]] = []
 
@@ -432,13 +433,11 @@ async def work_inbox(
             # skipped below; skip it here instead, never widen to "all".
             _log.info("[work-inbox] workspace %s has a malformed entity_scope", workspace_id)
             continue
-        # AO-TOK-3: a service token / PAT only sees workspaces it is scoped to,
-        # at its capped role and narrowed entity scope. Humans are unchanged.
-        scoped = service_scope_for_row(
-            auth,
-            UUID(workspace_id),
-            role=row["role"],
-            entity_scope=membership_scope,
+        # AO-TOK-2/3: a scoped token (service token, PAT, Brigade JWT) only
+        # sees workspaces it is scoped to, at its capped role and narrowed
+        # entity scope. Humans are unchanged.
+        scoped = gate.row(
+            workspace_id, role=row["role"], entity_scope=membership_scope
         )
         if scoped is None:
             continue
