@@ -60,6 +60,20 @@ def _dying_render_child(pdf_bytes: Any, page_index: Any, zoom: Any, conn: Any) -
     os._exit(9)
 
 
+def _stalled_mid_send_render_child(
+    pdf_bytes: Any, page_index: Any, zoom: Any, conn: Any
+) -> None:
+    """Write a Connection message header for 1 MB plus 100 bytes of it, then
+    stall: the parent's poll() is True (data waiting) but recv() would block
+    for the rest of the message forever. Records its pid like the other
+    pid-recording fake so the test can assert it is dead."""
+    import struct
+
+    _record_child_pid()
+    os.write(conn.fileno(), struct.pack("!i", 1_000_000) + b"\x00" * 100)
+    time.sleep(60)
+
+
 # How long the fake render child holds its page past the pixmap (seconds). A
 # module-level global so the spawned child can read it (spawn re-imports this
 # module as __mp_main__); the concurrency test sets it to a short value so the
@@ -241,6 +255,36 @@ def test_render_timeout_kills_child(monkeypatch, caplog) -> None:
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings, "a partial render must log a WARNING"
     assert any("partial" in r.getMessage() for r in warnings)
+
+
+def test_child_stalled_mid_send_is_killed_at_the_deadline(monkeypatch) -> None:
+    """R12-P3: poll() returns True as soon as the first bytes arrive; a
+    child that stalls mid-send must not hold recv() (and the render slot)
+    forever. The parent kills it at the page budget and reports a visible
+    ``render timeout (partial)``; the slot is released."""
+    import tempfile
+
+    pid_file = tempfile.mkstemp(suffix=".pid")[1]
+    monkeypatch.setenv("AO_RENDER_PID_FILE", pid_file)
+    monkeypatch.setattr(mod, "_RENDER_PAGE_BUDGET_S", 2.0)
+    monkeypatch.setattr(mod, "_render_one_page", _stalled_mid_send_render_child)
+
+    t0 = time.monotonic()
+    out, error = mod._render_pdf(_one_page_pdf(), max_pages=2, dpi=150)
+    elapsed_s = time.monotonic() - t0
+
+    assert out == []
+    assert error == "render timeout (partial)"
+    assert elapsed_s < 10.0, f"stalled recv held {elapsed_s:.1f}s (no deadline)"
+    with open(pid_file, "r", encoding="utf-8") as fh:
+        render_pid = int(fh.read().strip())
+    with pytest.raises(OSError):
+        os.kill(render_pid, 0)
+    # Both slots are free again (non-blocking acquire succeeds twice).
+    assert mod._RENDER_SLOT.acquire(blocking=False)
+    assert mod._RENDER_SLOT.acquire(blocking=False)
+    mod._RENDER_SLOT.release()
+    mod._RENDER_SLOT.release()
 
 
 def _noise_page_pdf() -> bytes:

@@ -83,6 +83,9 @@ _RENDER_PAGE_BUDGET_S = 10.0
 # "render busy" error. Without this, callers queue indefinitely behind
 # stalled pages, each pinning a threadpool thread.
 _RENDER_SLOT_WAIT_S = 30.0
+# Minimum time recv() gets to read a result whose first bytes arrived at the
+# very end of the page budget (see the recv deadline in _render_pdf).
+_RENDER_RECV_GRACE_S = 1.0
 # Module-level bound on how many page render processes may be live at once
 # (across every concurrent _render_pdf call, not per call). Acquired in the
 # parent around each page render (with a wait cap, see _RENDER_SLOT_WAIT_S)
@@ -407,11 +410,44 @@ def _render_pdf(
                 # (the child died without sending; recv() then raises
                 # EOFError = a visible "render failed"), and False when the
                 # budget is up (the child is still rasterizing).
+                deadline = time.monotonic() + per_page_budget_s
                 got = parent_conn.poll(per_page_budget_s)
                 if got:
+                    # poll() is True once the FIRST bytes arrive; recv() then
+                    # blocks until the whole message is read. A child that
+                    # stalls mid-send would hold the slot forever, so a timer
+                    # kills it at the remaining budget (at least
+                    # _RENDER_RECV_GRACE_S, so a result that arrived right at
+                    # the deadline is still read). The kill closes the pipe
+                    # and recv() raises (EOFError, or OSError mid-message).
+                    recv_timed_out = threading.Event()
+
+                    def _kill_stalled(p: Any = proc) -> None:
+                        recv_timed_out.set()
+                        p.kill()
+
+                    killer = threading.Timer(
+                        max(deadline - time.monotonic(), _RENDER_RECV_GRACE_S),
+                        _kill_stalled,
+                    )
+                    killer.daemon = True
+                    killer.start()
                     try:
                         png = parent_conn.recv()
-                    except EOFError:
+                    except (EOFError, OSError):
+                        killer.cancel()
+                        if recv_timed_out.is_set():
+                            proc.join(1)
+                            error = "render timeout (partial)"
+                            _log.warning(
+                                "tax_doc_vlm render: page %d stalled mid-send "
+                                "past the %.0fs budget, killed (partial after "
+                                "%d page(s))",
+                                page_index,
+                                per_page_budget_s,
+                                len(out),
+                            )
+                            break
                         # The child died without sending a result (os._exit,
                         # a hard crash): the pipe closed with no item. A
                         # visible failure, not a timeout. Reap the dead child
@@ -429,6 +465,7 @@ def _render_pdf(
                         )
                         break
                     else:
+                        killer.cancel()
                         # Take the result, then reap the child (it has
                         # finished or is about to exit after conn.send).
                         proc.join(1)
