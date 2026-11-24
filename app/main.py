@@ -138,6 +138,13 @@ app = FastAPI(
     version="0.8.0",
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
+    # AO-UP-5: enforce the upload cap at the ASGI layer, not just after
+    # Starlette has spooled the body into memory. A request whose streamed
+    # body exceeds document_upload_max_bytes is rejected with 413 before it
+    # is fully buffered, so a multi-GB upload cannot exhaust memory before
+    # the per-route _read_capped check would have fired. The cap shares the
+    # same env var the web edge reads, so edge + app stay in lockstep.
+    max_body_size=settings.document_upload_max_bytes,
 )
 app.middleware("http")(audit_span_middleware)
 # Security response headers (nosniff + CSP + frame-ancestors) on every
