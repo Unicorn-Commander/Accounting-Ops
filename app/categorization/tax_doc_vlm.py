@@ -497,10 +497,10 @@ def _decoded_stream_bytes(doc: Any, xref: int, limit: int) -> int:
         a large decoded one (RunLengthDecode and LZWDecode do), and the
         bounded decoder only understands Flate, so counting such a stream at
         its raw size would understate a bomb.
-    Raises on a decode error (a zlib.error on a corrupt/bomb stream, an
-    over-bound stream): the caller treats any raise as "too large" and refuses
-    the page. A stream that cannot be decoded is NEVER counted as 0 -- that
-    would let a bomb through.
+    Raises on a decode error (a zlib.error on a corrupt/bomb stream, a
+    truncated stream, an over-bound stream): the caller treats any raise as
+    "too large" and refuses the page. A stream that cannot be decoded is
+    NEVER counted as 0 -- that would let a bomb through.
 
     Returns the decoded byte count; 0 for a non-stream or empty xref.
     """
@@ -511,24 +511,28 @@ def _decoded_stream_bytes(doc: Any, xref: int, limit: int) -> int:
         return 0
     filters = _filter_list(doc, xref)
     if filters == ["/FlateDecode"]:
-        # Bounded Flate decompression: decompress() returns at most max_length
-        # bytes per call and leaves the rest in the object, so the decoded
-        # output never exceeds limit + 1 bytes at any point. A compression
-        # bomb is refused the moment the running decoded total passes the
-        # bound, without inflating the rest of the stream.
+        # Bounded Flate decompression. Feed the raw input ONCE; every later
+        # pass feeds only what the previous pass left unconsumed
+        # (decomp.unconsumed_tail). Re-feeding the whole raw stream each pass
+        # would restart the decompressor state and make a stream that yields
+        # one byte per pass burn CPU linear in (raw size x passes) instead of
+        # linear in raw size. If the input is exhausted before decomp.eof,
+        # the stream is truncated (a corrupt or adversarial stream): refuse.
         decomp = zlib.decompressobj()
         decoded_len = 0
-        while not decomp.eof:
-            chunk = decomp.decompress(raw, limit + 1)
+        data = raw
+        while data:
+            chunk = decomp.decompress(data, limit + 1)
             decoded_len += len(chunk)
             if decoded_len > limit:
                 raise ValueError("flate stream exceeds the content bound")
-            if not decomp.unused_data and decomp.eof:
-                break
+            data = decomp.unconsumed_tail
         tail = decomp.flush()
         decoded_len += len(tail)
         if decoded_len > limit:
             raise ValueError("flate stream exceeds the content bound")
+        if not decomp.eof:
+            raise ValueError("flate stream truncated (no eof)")
         return decoded_len
     if not filters:
         # No filter: the raw bytes ARE the decoded bytes.
@@ -567,10 +571,11 @@ def _page_content_bytes(doc: Any, page_index: int) -> int:
     the caller only needs the verdict, and a page whose content is already
     over the bound must not burn time decoding every stream.
 
-    ANY decode error (a zlib.error on a corrupt stream, MuPDF refusing a
-    stream, an unknown filter chain) refuses the page: it returns a count OVER
-    the bound (the caller refuses), never 0. A stream that cannot be decoded
-    must not be counted as "no content" -- that would let a bomb through.
+    ANY decode error (a zlib.error on a corrupt stream, a truncated Flate
+    stream, an unsupported filter or chain) refuses the page: it returns a
+    count OVER the bound (the caller refuses), never 0. A stream that cannot
+    be decoded must not be counted as "no content" -- that would let a bomb
+    through.
     """
     page = doc[page_index]
     limit = _PAGE_CONTENT_MAX_BYTES

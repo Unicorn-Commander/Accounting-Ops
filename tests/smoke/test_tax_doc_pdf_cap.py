@@ -406,6 +406,59 @@ def test_compression_bomb_page_refused_without_inflate() -> None:
     )
 
 
+def test_truncated_flate_stream_refused_fast() -> None:
+    """R11-P2-1: a crafted stored-block zlib stream (header 78 01, one stored
+    block, then empty stored blocks, ~1 MB) that never reaches eof must be
+    refused as truncated, in under 1 s of CPU. The old decoder re-fed the
+    whole raw stream each pass (one decoded byte per pass over the whole
+    stream: ~65,000 passes); the fixed decoder feeds raw once then only
+    decomp.unconsumed_tail, so it exhausts the input in one pass and refuses
+    the missing eof.
+    """
+    # zlib header (78 01: deflate, no dict) + one stored block carrying the
+    # payload + ~10 empty stored blocks, so the input is well over the 128 KB
+    # bound and the stream is truncated (no eof block). The payload is kept
+    # under 65535 bytes so the stored-block length fits the 2-byte LEN field.
+    payload = b" " * 60000
+    block_len = len(payload)
+    stream = (
+        b"\x78\x01"
+        + bytes([0])
+        + block_len.to_bytes(2, "little")
+        + (~block_len & 0xFFFF).to_bytes(2, "little")
+        + payload
+        + b"\x00\x00\x00\x00" * 160
+    )
+    data = _minimal_pdf(
+        [
+            (1, b"<< /Type /Catalog /Pages 2 0 R >>\n"),
+            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n"),
+            (
+                3,
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+                b"/Contents 4 0 R >>\n",
+            ),
+            (
+                4,
+                b"<< /Length "
+                + str(len(stream)).encode()
+                + b" /Filter /FlateDecode >>\nstream\n"
+                + stream
+                + b"\nendstream\n",
+            ),
+        ]
+    )
+    t0 = time.monotonic()
+    out, error = mod._render_pdf(data, max_pages=2, dpi=150)
+    elapsed_s = time.monotonic() - t0
+
+    assert out == []
+    assert error == "page too large (partial)"
+    assert elapsed_s < 1.0, (
+        f"truncated stream refusal took {elapsed_s:.1f}s (not bounded)"
+    )
+
+
 def test_normal_page_passes_bounded_precheck() -> None:
     """R10-P2-2(c) control: a normal one-page W-2-like PDF (a few KB of
     decoded content) is under the bound and still rasterizes to a PNG."""
