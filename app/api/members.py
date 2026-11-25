@@ -299,6 +299,11 @@ async def update_member(
                     status_code=400,
                     detail="Cannot mutate your own membership - ask another admin",
                 )
+            # Symmetric guard (AO-ROLE-1a): touching an elevated member's role or
+            # entity_scope needs owner, whatever the new value is. The target's
+            # CURRENT role decides, mirroring member_removal.remove_person.
+            if row.old_role in ELEVATED_ROLES:
+                require_role(workspace, "owner")
             # Block demoting the LAST owner (avoids permanently locking out a workspace).
             if patch.role and row.old_role in {"owner", "client_owner"} and patch.role not in {
                 "owner",
