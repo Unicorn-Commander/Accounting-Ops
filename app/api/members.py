@@ -353,6 +353,24 @@ async def update_member(
                 ),
                 params,
             )
+            if (
+                patch.role is not None
+                and row.old_role in {"owner", "client_owner"}
+                and patch.role not in {"owner", "client_owner"}
+            ):
+                # AO-ROLE-1b: a demoted owner's pending elevated invites die with the role.
+                from app.security.member_removal import cancel_elevated_invitations_created_by
+
+                for inv_row in await cancel_elevated_invitations_created_by(
+                    session, workspace.workspace_id, row.uc_uid
+                ):
+                    await _write_membership_audit(
+                        session,
+                        workspace=workspace,
+                        action="invitation_cancel",
+                        target_user_id=user_id,
+                        invitation_id=str(inv_row.id),
+                    )
             await _write_membership_audit(
                 session,
                 workspace=workspace,
@@ -821,6 +839,7 @@ async def accept_invitation(
                                i.expires_at     AS expires_at,
                                i.accepted_at    AS accepted_at,
                                i.cancelled_at   AS cancelled_at,
+                               i.created_by_uc_uid AS created_by_uc_uid,
                                w.display_name   AS workspace_name,
                                w.slug           AS workspace_slug
                         FROM public.workspace_invitation i
@@ -924,6 +943,30 @@ async def accept_invitation(
             # already the owner must not silently drop you to cpa. The
             # existing role wins iff its rank is >= the invitation's rank.
             from app.tenancy import _ROLE_RANK
+
+            # AO-ROLE-1b: an elevated invitation is only as good as its creator.
+            # If they are no longer an active owner, refuse with the same error
+            # as an unknown token, so nothing is learned about why.
+            if inv.role in ELEVATED_ROLES:
+                creator_ok = (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT 1
+                            FROM public.workspace_membership m
+                            JOIN public.user_account u ON u.id = m.user_id
+                            WHERE m.workspace_id = :wid AND u.uc_uid = :creator
+                              AND m.role IN ('owner', 'client_owner')
+                              AND m.status = 'active'
+                            """
+                        ),
+                        {"wid": str(inv.workspace_id), "creator": inv.created_by_uc_uid},
+                    )
+                ).first()
+                if creator_ok is None:
+                    raise HTTPException(
+                        status_code=404, detail="invitation not found or expired"
+                    )
 
             existing_row = (
                 await session.execute(

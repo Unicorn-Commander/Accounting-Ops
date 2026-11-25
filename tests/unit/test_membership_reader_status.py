@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ALLOW_ALL_STATUSES = {
     ("app/security/member_removal.py", "remove_person", 0):
         "Removal locks the retained row and distinguishes absent/revoked/paused members.",
-    ("app/api/members.py", "accept_invitation", 0):
+    ("app/api/members.py", "accept_invitation", 1):
         "An accepted invitation must inspect and restart a revoked row.",
     ("app/api/members.py", "list_members", 0):
         "The admin list deliberately includes paused members (but excludes revoked ones).",
