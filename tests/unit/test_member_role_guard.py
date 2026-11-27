@@ -20,14 +20,15 @@ def _ctx(role: str) -> WorkspaceContext:
 
 
 def _install(monkeypatch, *, target_role: str, owners: int = 2):
-    """Fake the sessions; records (1) every SQL the handler ran, in order
-    (``state["order"]``), (2) every last-owner lock acquisition
-    (``state["lock_calls"]``). The owner-count SELECT is answered from the
-    fake without entering ``order`` (the count itself is the ``owners`` arg);
-    every other statement is appended. Returns ``state`` so tests can assert
-    the relative order of lock / count / update.
+    """Fake the sessions; records every SQL the handler ran, in order
+    (``state["order"]``), including the REAL acquire_last_owner_lock's
+    pg_advisory_xact_lock statement as it executes through this fake. The
+    owner-count SELECT is answered from the fake without entering ``order``
+    (the count itself is the ``owners`` arg); every other statement is
+    appended. Returns ``state`` so tests can assert the relative order of
+    lock / count / update.
     """
-    state = {"order": [], "lock_calls": []}
+    state = {"order": []}
 
     class Session:
         async def __aenter__(self):
@@ -49,7 +50,11 @@ def _install(monkeypatch, *, target_role: str, owners: int = 2):
                 return SimpleNamespace(first=lambda: row)
             if sql.startswith("SELECT count(*)"):
                 state["order"].append("COUNT")
-                return SimpleNamespace(first=lambda: SimpleNamespace(c=owners))
+                return SimpleNamespace(
+                    first=lambda: SimpleNamespace(c=owners),
+                    all=lambda: [],
+                    scalar_one=lambda: owners,
+                )
             state["order"].append(sql)
             return SimpleNamespace(
                 all=lambda: [], first=lambda: None, scalar_one=lambda: 0
@@ -62,18 +67,6 @@ def _install(monkeypatch, *, target_role: str, owners: int = 2):
         audit.append(kw)
 
     monkeypatch.setattr(members, "_write_membership_audit", fake_audit)
-
-    from app.security import member_removal
-
-    async def fake_lock(session, wid):
-        # Record the acquisition and replay the lock statement through the
-        # fake session so it lands in state["order"] in its true position.
-        state["lock_calls"].append(str(wid))
-        await session.execute(
-            "pg_advisory_xact_lock(hashtextextended(:wid, 218))", {"wid": str(wid)}
-        )
-
-    monkeypatch.setattr(member_removal, "acquire_last_owner_lock", fake_lock)
     return state
 
 
@@ -88,7 +81,6 @@ async def test_admin_cannot_touch_elevated_target(monkeypatch, target, patch):
         await members.update_member(uuid4(), uuid4(), patch, _ctx("admin"))
     assert exc.value.status_code == 403
     assert state["order"] == []
-    assert state["lock_calls"] == []
 
 
 async def test_admin_can_still_change_non_elevated_target(monkeypatch):
@@ -116,7 +108,7 @@ async def test_last_owner_guard_unchanged(monkeypatch):
     assert exc.value.status_code == 400
     assert "last owner" in exc.value.detail
     # The lock and the count ran; the membership UPDATE must not have.
-    assert len(state["lock_calls"]) == 1
+    assert sum("pg_advisory_xact_lock" in sql for sql in state["order"]) == 1
     assert "COUNT" in state["order"]
     assert not any(
         isinstance(sql, str) and sql.startswith("UPDATE") for sql in state["order"]
@@ -124,13 +116,15 @@ async def test_last_owner_guard_unchanged(monkeypatch):
 
 
 async def test_last_owner_lock_serializes_with_removal(monkeypatch):
-    # AO-RACE-2: update_member must take the SAME advisory lock
-    # remove_person takes (hashtextextended(:wid, 218)) BEFORE counting
-    # active owners, so the two last-owner checks cannot both pass.
+    # AO-RACE-2: update_member must take the REAL last-owner advisory lock
+    # (pg_advisory_xact_lock keyed on hashtextextended(:wid, 218), the same
+    # key remove_person uses) BEFORE counting active owners, so the two
+    # last-owner checks cannot both pass. The lock helper is NOT patched
+    # here: the real one runs and its statement lands in state["order"]
+    # through the fake session, proving the exact SQL seed.
     state = _install(monkeypatch, target_role="owner", owners=2)
     ctx = _ctx("owner")
     await members.update_member(uuid4(), uuid4(), MemberPatch(role="viewer"), ctx)
-    assert state["lock_calls"] == [str(ctx.workspace_id)]
     lock_idx = next(
         i for i, sql in enumerate(state["order"]) if "pg_advisory_xact_lock" in sql
     )
@@ -141,7 +135,7 @@ async def test_last_owner_lock_serializes_with_removal(monkeypatch):
         if sql.startswith("UPDATE public.workspace_membership")
     )
     assert (
-        state["order"][lock_idx] == "pg_advisory_xact_lock(hashtextextended(:wid, 218))"
+        state["order"][lock_idx] == "SELECT pg_advisory_xact_lock(hashtextextended(:wid, 218))"
     )
     assert lock_idx < count_idx < update_idx
 
@@ -149,7 +143,6 @@ async def test_last_owner_lock_serializes_with_removal(monkeypatch):
 async def test_last_owner_lock_not_taken_for_non_owner_target(monkeypatch):
     state = _install(monkeypatch, target_role="bookkeeper")
     await members.update_member(uuid4(), uuid4(), MemberPatch(role="viewer"), _ctx("admin"))
-    assert state["lock_calls"] == []
     assert not any("pg_advisory_xact_lock" in sql for sql in state["order"])
 
 
@@ -383,3 +376,133 @@ async def test_accept_when_row_still_pending_returns_200(monkeypatch):
     request, _ = _cancel_race_session(monkeypatch, accept_rowcount=1)
     reply = await members.accept_invitation(request=request, token="fictional-invitation")
     assert reply["status"] == "accepted"
+
+
+# --- AO-RACE-2b: remove_person locks in the same order as update_member ----
+
+
+async def test_remove_person_takes_last_owner_lock_before_row_locks(monkeypatch):
+    # AO-RACE-2b: a local removal (actor is not None) must acquire the
+    # shared last-owner advisory lock BEFORE its first FOR UPDATE row read
+    # (user_account, then workspace_membership). update_member takes the same
+    # lock before any row lock of its own, so a demote(T) racing remove(T)
+    # serializes on the lock instead of deadlocking on the row locks. The
+    # REAL acquire_last_owner_lock runs unpatched; its statement is asserted
+    # to precede both FOR UPDATE reads through the fake session's order.
+    from app.security import member_removal
+
+    seen: list[str] = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        def begin(self):
+            return self
+
+        async def execute(self, statement, params=None):
+            sql = str(statement).strip()
+            seen.append(sql)
+            if "count(*)" in sql:
+                return SimpleNamespace(
+                    scalar_one=lambda: 2, all=lambda: [], first=lambda: None
+                )
+            if "FROM public.workspace" in sql and "membership" not in sql:
+                return SimpleNamespace(
+                    all=lambda: [], first=lambda: (1,), scalar_one=lambda: 1
+                )
+            if "FROM public.user_account" in sql:
+                return SimpleNamespace(
+                    all=lambda: [],
+                    first=lambda: SimpleNamespace(id=uuid4(), uc_uid="t-uid"),
+                    scalar_one=lambda: None,
+                )
+            if "FROM public.workspace_membership" in sql:
+                return SimpleNamespace(
+                    all=lambda: [],
+                    first=lambda: SimpleNamespace(
+                        role="owner", entity_scope=None, status="active"
+                    ),
+                    scalar_one=lambda: None,
+                )
+            return SimpleNamespace(
+                all=lambda: [], first=lambda: None, scalar_one=lambda: 2
+            )
+
+    monkeypatch.setattr(member_removal, "SessionLocal", Session)
+    monkeypatch.setattr(member_removal, "_load_service_tokens", lambda: {})
+    wid = uuid4()
+    actor = WorkspaceContext(
+        workspace_id=wid, workspace_slug="fictional", role="owner",
+        user_uc_uid="remover-uid", agent_id=None, entity_scope=None, hipaa_protected=False,
+    )
+    receipt = await member_removal.remove_person(
+        wid, user_id=uuid4(), actor=actor
+    )
+    assert receipt["revoked_pat_count"] == 0
+    lock_idx = next(
+        i for i, sql in enumerate(seen) if "pg_advisory_xact_lock" in sql
+    )
+    person_lock_idx = next(
+        i for i, sql in enumerate(seen) if "FROM public.user_account" in sql
+    )
+    member_lock_idx = next(
+        i
+        for i, sql in enumerate(seen)
+        if "FROM public.workspace_membership" in sql and "FOR UPDATE" in sql
+    )
+    assert seen[lock_idx] == "SELECT pg_advisory_xact_lock(hashtextextended(:wid, 218))"
+    assert lock_idx < person_lock_idx < member_lock_idx
+
+
+async def test_remove_person_without_actor_takes_no_last_owner_lock(monkeypatch):
+    # Control-plane removals (actor is None) do not count last owners and
+    # must not pay for the lock; their removals stay unserialized by it.
+    from app.security import member_removal
+
+    seen: list[str] = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        def begin(self):
+            return self
+
+        async def execute(self, statement, params=None):
+            sql = str(statement).strip()
+            seen.append(sql)
+            if "count(*)" in sql:
+                return SimpleNamespace(
+                    scalar_one=lambda: 2, all=lambda: [], first=lambda: None
+                )
+            if "FROM public.workspace" in sql and "membership" not in sql:
+                return SimpleNamespace(
+                    all=lambda: [], first=lambda: (1,), scalar_one=lambda: 1
+                )
+            if "FROM public.user_account" in sql:
+                return SimpleNamespace(
+                    all=lambda: [],
+                    first=lambda: SimpleNamespace(id=uuid4(), uc_uid="t-uid"),
+                    scalar_one=lambda: None,
+                )
+            if "FROM public.workspace_membership" in sql:
+                return SimpleNamespace(
+                    all=lambda: [],
+                    first=lambda: SimpleNamespace(
+                        role="owner", entity_scope=None, status="active"
+                    ),
+                    scalar_one=lambda: None,
+                )
+            return SimpleNamespace(all=lambda: [], first=lambda: None, scalar_one=lambda: 2)
+
+    monkeypatch.setattr(member_removal, "SessionLocal", Session)
+    monkeypatch.setattr(member_removal, "_load_service_tokens", lambda: {})
+    await member_removal.remove_person(uuid4(), subject="t-uid")
+    assert not any("pg_advisory_xact_lock" in sql for sql in seen)
