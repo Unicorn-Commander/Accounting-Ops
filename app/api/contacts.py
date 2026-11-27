@@ -50,21 +50,21 @@ router = APIRouter(tags=["contacts"])
 
 
 class ContactRow(BaseModel):
-    display_name: str | None = None
-    name: str | None = None
+    display_name: str | None = Field(default=None, max_length=500)
+    name: str | None = Field(default=None, max_length=500)
     kind: str = "customer"
-    email: str | None = None
-    phone: str | None = None
-    address: str | None = None
-    company: str | None = None
-    person_name: str | None = None
-    contact_id: str | None = None
-    source: str | None = None
+    email: str | None = Field(default=None, max_length=320)
+    phone: str | None = Field(default=None, max_length=64)
+    address: str | None = Field(default=None, max_length=2000)
+    company: str | None = Field(default=None, max_length=2000)
+    person_name: str | None = Field(default=None, max_length=2000)
+    contact_id: str | None = Field(default=None, max_length=2000)
+    source: str | None = Field(default=None, max_length=2000)
 
 
 class ParseRequest(BaseModel):
     filename: str = Field(default="contacts.csv", max_length=256)
-    content: str = Field(..., description="Raw text of the uploaded .vcf or .csv")
+    content: str = Field(..., max_length=2_000_000, description="Raw text of the uploaded .vcf or .csv")
 
 
 class ImportRequest(BaseModel):
