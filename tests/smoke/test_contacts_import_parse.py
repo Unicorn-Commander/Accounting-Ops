@@ -19,8 +19,9 @@ PARSE_URL = f"/api/workspaces/{WS_ID}/counterparties/parse"
 
 @pytest.fixture(scope="module")
 def accountant_client():
-    # The app's MCP session manager only allows ONE TestClient lifespan per
-    # process, so this module shares a single client for its two HTTP tests.
+    # No lifespan: the app's MCP session manager allows only ONE TestClient
+    # lifespan per process, and test_mcp_mount.py needs that single slot.
+    # The parse route performs no DB work, so the client works without one.
     app.dependency_overrides[resolve_workspace] = lambda: WorkspaceContext(
         workspace_id=WS_ID,
         workspace_slug="acme-books",
@@ -30,8 +31,7 @@ def accountant_client():
         entity_scope=None,
         hipaa_protected=False,
     )
-    with TestClient(app) as client:
-        yield client
+    yield TestClient(app)
     app.dependency_overrides.pop(resolve_workspace, None)
 
 
