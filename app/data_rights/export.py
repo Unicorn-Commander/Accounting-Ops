@@ -82,6 +82,10 @@ EXPORT_FORMAT_VERSION = 1
 # anyway. Defence in depth costs one regex.
 _IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
+# String cells that begin with one of these are treated as formulas by the
+# spreadsheet that opens the export CSV, so they are quoted in _csv_cell.
+_CSV_INJECTION_PREFIX_RE = re.compile(r"^[=+\-@\t\r]")
+
 
 class ExportError(RuntimeError):
     """Export could not be produced."""
@@ -117,7 +121,13 @@ def _csv_cell(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=_json_default, sort_keys=True)
     coerced = _json_default(value) if not isinstance(value, (str, int, float)) else value
-    return str(coerced)
+    text = str(coerced)
+    if isinstance(value, str) and _CSV_INJECTION_PREFIX_RE.match(text):
+        # A leading =, +, -, @, tab or CR would be read as a formula by the
+        # spreadsheet that opens this CSV. One quote neutralizes it; the JSON
+        # side keeps the raw value.
+        return "'" + text
+    return text
 
 
 @dataclass

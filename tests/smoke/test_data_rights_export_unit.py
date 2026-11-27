@@ -310,6 +310,29 @@ async def test_csv_header_is_the_union_of_ragged_rows(monkeypatch):
     assert "payee" in header
 
 
+def test_csv_cell_quotes_formula_like_strings():
+    """CSV-AO-1: a cell beginning with = + - @ tab or CR is quoted in the
+    CSV export so a spreadsheet cannot read it as a formula. The JSON side is
+    untouched — this function only feeds the CSV writer."""
+    from app.data_rights.export import _csv_cell
+
+    assert _csv_cell("=1+1") == "'=1+1"
+    assert _csv_cell("@SUM(A1)") == "'@SUM(A1)"
+    assert _csv_cell("+cmd|'/bin/sh -c id')!A0") == "'" + "+cmd|'/bin/sh -c id')!A0"
+    assert _csv_cell("-1") == "'-1"
+    assert _csv_cell("\tA1") == "'\tA1"
+    assert _csv_cell("\rA1") == "'\rA1"
+    # Plain strings and non-str values pass through unchanged.
+    assert _csv_cell("plain") == "plain"
+    assert _csv_cell("  leading space") == "  leading space"
+    assert _csv_cell(None) == ""
+    assert _csv_cell(42) == "42"
+    assert _csv_cell(1.5) == "1.5"
+    assert _csv_cell(Decimal("10.0000")) == "10.0000"
+    assert _csv_cell(b"\x00\xff") == "00ff"
+    assert _csv_cell({"a": 1}) == '{"a": 1}'
+
+
 def test_json_default_handles_every_type_this_schema_produces():
     assert _json_default(Decimal("1.50")) == "1.50"
     assert _json_default(b"\x00\xff") == "00ff"
