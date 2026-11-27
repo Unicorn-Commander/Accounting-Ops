@@ -251,6 +251,11 @@ async def test_invitation_flag_off_restarts_revoked_membership(monkeypatch):
             sql = str(statement).strip()
             if sql.startswith("SELECT"):
                 return SimpleNamespace(first=lambda: next(rows))
+            # The accept UPDATE carries rowcount (AO-RACE-1) but this fake
+            # records writes and returns nothing, so answer with a result.
+            if "UPDATE public.workspace_invitation" in sql:
+                writes.append((sql, params))
+                return SimpleNamespace(rowcount=1)
             writes.append((sql, params))
 
     caller = AuthContext("robin@example.com", None, (), {"email_verified": True})

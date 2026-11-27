@@ -46,6 +46,11 @@ class Session:
         self.calls.append((str(sql), params))
         if "INSERT INTO public.membership_audit" in str(sql):
             return SimpleNamespace(first=lambda: None)
+        # Writes carry no row: the accept UPDATE (AO-RACE-1) reports one row
+        # touched, the membership upsert does the same; other callers use
+        # .first() only, which answers with the next queued row.
+        if str(sql).lstrip().upper().startswith(("INSERT", "UPDATE")):
+            return SimpleNamespace(rowcount=1, first=lambda: None)
         row = next(self.rows)
         return SimpleNamespace(first=lambda: row)
 
@@ -253,13 +258,21 @@ async def test_redemption_verified_matching_email_accepted(monkeypatch):
         email="invited@example.test",
     )
     user = SimpleNamespace(id=uuid4(), email="invited@example.test")
-    session, mail = setup(monkeypatch, [inv, user, None, None, None])
+    # Four data rows: the invitation, the caller account, the existing
+    # membership (none) and the membership audit; the accept UPDATE is a
+    # write that touches exactly one row (AO-RACE-1).
+    session, mail = setup(monkeypatch, [inv, user, None, None])
     request = Request({"type": "http", "headers": [(b"authorization", b"Bearer synthetic-test")]})
 
     result = await members.accept_invitation(request=request, token="synthetic-capability")
 
     assert result["status"] == "accepted"
     assert any("UPDATE public.workspace_invitation" in sql for sql, _ in session.calls)
+    assert any(
+        "cancelled_at IS NULL" in sql and "accepted_at IS NULL" in sql
+        for sql, _ in session.calls
+        if "UPDATE public.workspace_invitation" in sql
+    )
     # AO-RLS-1: the lookup is bound to the token hash, the writes to the
     # invitation's own workspace.
     bound = [params for _, params in session.gucs]

@@ -131,7 +131,7 @@ def _accept_session(monkeypatch, *, role: str, creator_is_owner: bool):
                 return SimpleNamespace(first=lambda: None)
             if not sql.startswith("SELECT"):
                 writes.append(sql)
-            return SimpleNamespace()
+            return SimpleNamespace(rowcount=1)
 
     caller = SimpleNamespace(uc_uid="robin-uid", claims={"email_verified": True}, agent_id=None)
     monkeypatch.setattr(auth, "authenticate_token", AsyncMock(return_value=caller))
@@ -241,3 +241,83 @@ async def test_owner_demotion_cancels_their_elevated_invites(monkeypatch):
     cancelled.clear()
     await members.update_member(uuid4(), uuid4(), MemberPatch(role="owner"), _ctx("owner"))
     assert cancelled == []
+
+
+# --- AO-RACE-1: accept must not race a cancel to a half-resolved row -------
+
+
+def _cancel_race_session(monkeypatch, *, accept_rowcount: int):
+    """An elevated invitation whose creator check still passes, then the
+    cancel UPDATE commits before the accept UPDATE runs (rowcount simulates
+    the row no longer matching the accept guards)."""
+    from app import auth
+    from unittest.mock import AsyncMock
+
+    wid = uuid4()
+    inv = SimpleNamespace(
+        id=uuid4(), workspace_id=wid, email="robin@example.com", role="admin",
+        entity_scope=None, expires_at=None, accepted_at=None, cancelled_at=None,
+        created_by_uc_uid="creator-uid", workspace_name="Fictional Books",
+        workspace_slug="fictional",
+    )
+    calls: list[tuple[str, dict | None]] = []
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        def begin(self):
+            return self
+
+        async def execute(self, statement, params=None):
+            sql = str(statement).strip()
+            calls.append((sql, params))
+            if "FROM public.workspace_invitation i" in sql:
+                return SimpleNamespace(first=lambda: inv)
+            if "SELECT id, email FROM public.user_account" in sql:
+                return SimpleNamespace(
+                    first=lambda: SimpleNamespace(id=uuid4(), email=inv.email)
+                )
+            if "u.uc_uid = :creator" in sql:
+                # The creator is still an active owner when checked: the race
+                # window is the demotion/cancel that commits after this read.
+                return SimpleNamespace(first=lambda: (1,))
+            if sql.startswith("SELECT role::text"):
+                return SimpleNamespace(first=lambda: None)
+            if "UPDATE public.workspace_invitation" in sql:
+                return SimpleNamespace(rowcount=accept_rowcount)
+            return SimpleNamespace(rowcount=1)
+
+    caller = SimpleNamespace(uc_uid="robin-uid", claims={"email_verified": True}, agent_id=None)
+    monkeypatch.setattr(auth, "authenticate_token", AsyncMock(return_value=caller))
+    monkeypatch.setattr(members, "_token_email_verified", lambda _: True)
+    monkeypatch.setattr(members, "SessionLocal", Session)
+    monkeypatch.setattr(members, "_write_membership_audit", AsyncMock())
+    from starlette.requests import Request
+
+    request = Request({"type": "http", "headers": [(b"authorization", b"Bearer fictional")]})
+    return request, calls
+
+
+async def test_accept_after_creator_demotion_race_returns_410(monkeypatch):
+    request, calls = _cancel_race_session(monkeypatch, accept_rowcount=0)
+    with pytest.raises(HTTPException) as exc:
+        await members.accept_invitation(request=request, token="fictional-invitation")
+    assert exc.value.status_code == 410
+    assert exc.value.detail == "invitation already resolved"
+    # The accept UPDATE carries the guards that make the race safe.
+    accept_sql = next(sql for sql, _ in calls if "UPDATE public.workspace_invitation" in sql)
+    assert "cancelled_at IS NULL" in accept_sql
+    assert "accepted_at IS NULL" in accept_sql
+    # The creator read took the share lock for the window it covers.
+    creator_sql = next(sql for sql, _ in calls if "u.uc_uid = :creator" in sql)
+    assert "FOR SHARE OF m" in creator_sql
+
+
+async def test_accept_when_row_still_pending_returns_200(monkeypatch):
+    request, _ = _cancel_race_session(monkeypatch, accept_rowcount=1)
+    reply = await members.accept_invitation(request=request, token="fictional-invitation")
+    assert reply["status"] == "accepted"
