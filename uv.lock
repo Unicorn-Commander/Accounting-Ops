@@ -100,7 +100,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15.0" },
     { name = "pymupdf", specifier = ">=1.24.0,<2" },
-    { name = "pypdf", specifier = ">=4.3.0" },
+    { name = "pypdf", specifier = ">=4.3.0,<7" },
     { name = "pypdfform", specifier = ">=1.4.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },

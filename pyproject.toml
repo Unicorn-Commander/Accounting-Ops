@@ -46,7 +46,7 @@ dependencies = [
   "weasyprint>=68.1,<69",
   "markdown>=3.5",
   # IRS form pre-fill: fill official PDF form fields + overlay DRAFT watermark
-  "pypdf>=4.3.0",
+  "pypdf>=4.3.0,<7",
   "PyPDFForm>=1.4.0",
   "reportlab>=4.2.0",
   # Rasterize scanned tax-document PDFs to page images for the vision VLM
