@@ -41,6 +41,19 @@ async def cancel_elevated_invitations_created_by(
     ).all()
 
 
+async def acquire_last_owner_lock(session, workspace_id: UUID) -> None:
+    """Serialize local last-owner checks for one workspace in this transaction.
+
+    Keyed on (workspace id, 218) — the same key remove_person uses, so a
+    removal racing an owner demotion blocks behind one or the other instead
+    of both passing the last-owner count.
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:wid, 218))"),
+        {"wid": str(workspace_id)},
+    )
+
+
 async def remove_person(
     workspace_id: UUID,
     *,
@@ -103,10 +116,7 @@ async def remove_person(
                 require_role(actor, "owner")
             if member.role in {"owner", "client_owner"}:
                 # Serialize local last-owner checks without blocking CP removal.
-                await session.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtextextended(:wid, 218))"),
-                    {"wid": str(workspace_id)},
-                )
+                await acquire_last_owner_lock(session, workspace_id)
                 owners = (
                     await session.execute(
                         text("""

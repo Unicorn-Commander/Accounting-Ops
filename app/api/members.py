@@ -309,6 +309,12 @@ async def update_member(
                 "owner",
                 "client_owner",
             }:
+                # AO-RACE-2: take the same advisory lock remove_person takes,
+                # so a removal racing this count cannot both pass their
+                # last-owner checks and lock the workspace out of ownership.
+                from app.security.member_removal import acquire_last_owner_lock
+
+                await acquire_last_owner_lock(session, workspace.workspace_id)
                 count_row = (
                     await session.execute(
                         text(

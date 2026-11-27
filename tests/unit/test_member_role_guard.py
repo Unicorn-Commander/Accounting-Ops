@@ -20,7 +20,14 @@ def _ctx(role: str) -> WorkspaceContext:
 
 
 def _install(monkeypatch, *, target_role: str, owners: int = 2):
-    writes: list[str] = []
+    """Fake the sessions; records (1) every SQL the handler ran, in order
+    (``state["order"]``), (2) every last-owner lock acquisition
+    (``state["lock_calls"]``). The owner-count SELECT is answered from the
+    fake without entering ``order`` (the count itself is the ``owners`` arg);
+    every other statement is appended. Returns ``state`` so tests can assert
+    the relative order of lock / count / update.
+    """
+    state = {"order": [], "lock_calls": []}
 
     class Session:
         async def __aenter__(self):
@@ -41,9 +48,12 @@ def _install(monkeypatch, *, target_role: str, owners: int = 2):
                 )
                 return SimpleNamespace(first=lambda: row)
             if sql.startswith("SELECT count(*)"):
+                state["order"].append("COUNT")
                 return SimpleNamespace(first=lambda: SimpleNamespace(c=owners))
-            writes.append(sql)
-            return SimpleNamespace(all=lambda: [])
+            state["order"].append(sql)
+            return SimpleNamespace(
+                all=lambda: [], first=lambda: None, scalar_one=lambda: 0
+            )
 
     monkeypatch.setattr(members, "SessionLocal", Session)
     audit = []
@@ -52,7 +62,19 @@ def _install(monkeypatch, *, target_role: str, owners: int = 2):
         audit.append(kw)
 
     monkeypatch.setattr(members, "_write_membership_audit", fake_audit)
-    return writes
+
+    from app.security import member_removal
+
+    async def fake_lock(session, wid):
+        # Record the acquisition and replay the lock statement through the
+        # fake session so it lands in state["order"] in its true position.
+        state["lock_calls"].append(str(wid))
+        await session.execute(
+            "pg_advisory_xact_lock(hashtextextended(:wid, 218))", {"wid": str(wid)}
+        )
+
+    monkeypatch.setattr(member_removal, "acquire_last_owner_lock", fake_lock)
+    return state
 
 
 @pytest.mark.parametrize("target", ["owner", "client_owner", "admin"])
@@ -61,34 +83,74 @@ def _install(monkeypatch, *, target_role: str, owners: int = 2):
     [MemberPatch(role="viewer"), MemberPatch(entity_scope=[])],
 )
 async def test_admin_cannot_touch_elevated_target(monkeypatch, target, patch):
-    writes = _install(monkeypatch, target_role=target, owners=2)
+    state = _install(monkeypatch, target_role=target, owners=2)
     with pytest.raises(HTTPException) as exc:
         await members.update_member(uuid4(), uuid4(), patch, _ctx("admin"))
     assert exc.value.status_code == 403
-    assert writes == []
+    assert state["order"] == []
+    assert state["lock_calls"] == []
 
 
 async def test_admin_can_still_change_non_elevated_target(monkeypatch):
-    writes = _install(monkeypatch, target_role="bookkeeper")
+    state = _install(monkeypatch, target_role="bookkeeper")
     out = await members.update_member(uuid4(), uuid4(), MemberPatch(role="viewer"), _ctx("admin"))
     assert out["ok"] is True
-    assert any(sql.startswith("UPDATE public.workspace_membership") for sql in writes)
+    assert any(
+        sql.startswith("UPDATE public.workspace_membership") for sql in state["order"]
+    )
 
 
 async def test_owner_can_demote_owner_when_two_owners(monkeypatch):
-    writes = _install(monkeypatch, target_role="owner", owners=2)
+    state = _install(monkeypatch, target_role="owner", owners=2)
     out = await members.update_member(uuid4(), uuid4(), MemberPatch(role="viewer"), _ctx("owner"))
     assert out["ok"] is True
-    assert any(sql.startswith("UPDATE public.workspace_membership") for sql in writes)
+    assert any(
+        sql.startswith("UPDATE public.workspace_membership") for sql in state["order"]
+    )
 
 
 async def test_last_owner_guard_unchanged(monkeypatch):
-    writes = _install(monkeypatch, target_role="owner", owners=1)
+    state = _install(monkeypatch, target_role="owner", owners=1)
     with pytest.raises(HTTPException) as exc:
         await members.update_member(uuid4(), uuid4(), MemberPatch(role="viewer"), _ctx("owner"))
     assert exc.value.status_code == 400
     assert "last owner" in exc.value.detail
-    assert writes == []
+    # The lock and the count ran; the membership UPDATE must not have.
+    assert len(state["lock_calls"]) == 1
+    assert "COUNT" in state["order"]
+    assert not any(
+        isinstance(sql, str) and sql.startswith("UPDATE") for sql in state["order"]
+    )
+
+
+async def test_last_owner_lock_serializes_with_removal(monkeypatch):
+    # AO-RACE-2: update_member must take the SAME advisory lock
+    # remove_person takes (hashtextextended(:wid, 218)) BEFORE counting
+    # active owners, so the two last-owner checks cannot both pass.
+    state = _install(monkeypatch, target_role="owner", owners=2)
+    ctx = _ctx("owner")
+    await members.update_member(uuid4(), uuid4(), MemberPatch(role="viewer"), ctx)
+    assert state["lock_calls"] == [str(ctx.workspace_id)]
+    lock_idx = next(
+        i for i, sql in enumerate(state["order"]) if "pg_advisory_xact_lock" in sql
+    )
+    count_idx = state["order"].index("COUNT")
+    update_idx = next(
+        i
+        for i, sql in enumerate(state["order"])
+        if sql.startswith("UPDATE public.workspace_membership")
+    )
+    assert (
+        state["order"][lock_idx] == "pg_advisory_xact_lock(hashtextextended(:wid, 218))"
+    )
+    assert lock_idx < count_idx < update_idx
+
+
+async def test_last_owner_lock_not_taken_for_non_owner_target(monkeypatch):
+    state = _install(monkeypatch, target_role="bookkeeper")
+    await members.update_member(uuid4(), uuid4(), MemberPatch(role="viewer"), _ctx("admin"))
+    assert state["lock_calls"] == []
+    assert not any("pg_advisory_xact_lock" in sql for sql in state["order"])
 
 
 # --- AO-ROLE-1b: elevated invitations depend on their creator -------------
