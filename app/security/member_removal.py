@@ -14,6 +14,33 @@ from app.db import SessionLocal
 from app.tenancy import WorkspaceContext, require_role
 
 
+async def cancel_elevated_invitations_created_by(
+    session, workspace_id: UUID, creator_uc_uid: str
+) -> list:
+    """Cancel pending admin/owner invitations this person sent (AO-ROLE-1b).
+
+    An elevated invitation carries its creator's authority. Once the creator is
+    removed or no longer an owner, the link must not still grant the role.
+    Returns the cancelled invitation rows (``.id``) for the caller's audit.
+    """
+    await session.execute(
+        text("SELECT set_config('app.current_workspace', :wid, true)"),
+        {"wid": str(workspace_id)},
+    )
+    return (
+        await session.execute(
+            text("""
+        UPDATE public.workspace_invitation SET cancelled_at = clock_timestamp()
+        WHERE workspace_id = :wid AND accepted_at IS NULL AND cancelled_at IS NULL
+          AND created_by_uc_uid = :creator
+          AND role IN ('owner', 'client_owner', 'admin')
+        RETURNING id
+    """),
+            {"wid": workspace_id, "creator": creator_uc_uid},
+        )
+    ).all()
+
+
 async def remove_person(
     workspace_id: UUID,
     *,
@@ -161,6 +188,10 @@ async def remove_person(
                 params,
             )
         ).all()
+        # Elevated invitations this person created lose their authority too.
+        cancelled = list(cancelled) + list(
+            await cancel_elevated_invitations_created_by(session, workspace_id, person.uc_uid)
+        )
         for invitation in cancelled:
             await session.execute(
                 text("""
