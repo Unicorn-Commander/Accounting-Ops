@@ -102,6 +102,7 @@ def client(monkeypatch: pytest.MonkeyPatch):
         agent_id=None,
         scopes=(),
         claims={},  # no pat_id -> a Keycloak session, allowed to mint
+        may_autoprovision=True,
     )
     with TestClient(app) as c:
         c.minted = minted  # type: ignore[attr-defined]

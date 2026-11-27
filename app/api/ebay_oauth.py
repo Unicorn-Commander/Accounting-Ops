@@ -203,15 +203,42 @@ async def ebay_oauth_start(
     Role floor: admin (storing a credential is admin-only, parity with /credentials).
     """
     # Manually resolve membership/role since the path has no {workspace_id}.
-    from app.tenancy import _resolve_membership, role_at_least
-    role, entity_scope, _hipaa, _slug = await _resolve_membership(
+    from app.tenancy import (
+        WorkspaceContext,
+        _pat_scopes_from_auth,
+        _resolve_membership,
+        apply_service_scope,
+        pin_federation_workspace,
+        require_role,
+    )
+    # AO-TOK-2: a Brigade workspace-scoped JWT stays in its claimed workspace.
+    workspace_id = await pin_federation_workspace(auth, workspace_id)
+    role, entity_scope, hipaa, slug = await _resolve_membership(
         auth.uc_uid, workspace_id, autoprovision=auth.may_autoprovision
     )
-    if not role_at_least(role, "admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"role '{role}' insufficient (needs 'admin' to connect a connector)",
-        )
+    # AO-TOK-1: a service token / PAT must stay inside its declared workspace
+    # allow-list, entity scope and role floor here exactly as it does on every
+    # resolve_workspace route. Applied BEFORE the admin and entity checks so
+    # they see the capped role and the narrowed entity scope.
+    role, entity_scope = apply_service_scope(
+        auth, workspace_id, role=role, entity_scope=entity_scope
+    )
+    # AO114-R2-7: require_role, not role_at_least, so a PAT's scopes gate the
+    # credential flow exactly as on every resolve_workspace route (a read-only
+    # PAT held by an admin must not start it).
+    require_role(
+        WorkspaceContext(
+            workspace_id=workspace_id,
+            workspace_slug=slug,
+            role=role,
+            user_uc_uid=auth.uc_uid,
+            agent_id=auth.agent_id,
+            entity_scope=entity_scope,
+            hipaa_protected=hipaa,
+            pat_scopes=_pat_scopes_from_auth(auth),
+        ),
+        "admin",
+    )
     if entity_scope is not None and entity_id not in entity_scope:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

@@ -39,7 +39,7 @@ from sqlalchemy import text
 
 from app.db import SessionLocal
 from app.mcp_auth import authorize_workspace, current_auth
-from app.tenancy import canonical_role
+from app.tenancy import aggregate_scope, canonical_role
 from app.workspace_session import workspace_session
 
 
@@ -118,9 +118,17 @@ async def list_my_workspaces() -> list[dict[str, Any]]:
                 )
             ).mappings().all()
 
+    # AO114-R2-6: the twin of GET /api/me/workspaces applies the same shared
+    # gate: a scoped token (service token, PAT, Brigade JWT) lists only the
+    # workspaces it is scoped to, at its capped role. Humans are unchanged.
+    gate = await aggregate_scope(auth)
     workspaces: list[dict[str, Any]] = []
     for r in rows:
+        scoped = gate.row(r["id"], role=r["role"])
+        if scoped is None:
+            continue
         entry = {k: _b(v) for k, v in dict(r).items()}
+        entry["role"] = scoped[0]
         # Canonical suite role + canonical workspace key alias (SUITE-IDENTITY
         # §7) — additive; the raw `role` + `id` keys are kept for back-compat.
         entry["role_canonical"] = canonical_role(entry["role"])

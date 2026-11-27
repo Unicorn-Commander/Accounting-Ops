@@ -452,6 +452,140 @@ def apply_service_scope(
     return role, entity_scope
 
 
+@dataclass(frozen=True)
+class AggregateScope:
+    """The ONE scope filter for every cross-workspace list (/api/me/*, MCP).
+
+    The /api/me/* aggregates and the MCP ``list_workspaces`` tool walk every
+    active membership of the caller instead of resolving one workspace, so
+    neither ``resolve_workspace`` gate ran for them. Build one per request with
+    ``aggregate_scope(auth)`` and pass each membership row through ``row``:
+
+    * a Brigade workspace-scoped JWT (AO-TOK-2) keeps only the workspace its
+      claim maps to, exactly as ``pin_federation_workspace`` does on a
+      single-workspace route;
+    * a service token / PAT (AO-TOK-3) keeps only the workspaces in its
+      ``service_scope``, at the capped role and narrowed entity scope that
+      ``apply_service_scope`` returns.
+
+    A row either gate refuses yields None and the caller skips it. Humans get
+    their row back unchanged.
+    """
+
+    auth: AuthContext
+    # None = no federation pin; otherwise the only internal workspace id the
+    # token may see (empty = a malformed claim, which sees nothing).
+    federation_workspaces: frozenset[UUID] | None = None
+
+    @property
+    def restricted(self) -> bool:
+        """True when this caller may see less than all of its memberships."""
+        return (
+            self.federation_workspaces is not None
+            or self.auth.service_scope is not None
+        )
+
+    def row(
+        self,
+        workspace_id: UUID | str,
+        *,
+        role: str,
+        entity_scope: tuple[UUID, ...] | None = None,
+    ) -> tuple[str, tuple[UUID, ...] | None] | None:
+        wid = workspace_id if isinstance(workspace_id, UUID) else UUID(str(workspace_id))
+        if (
+            self.federation_workspaces is not None
+            and wid not in self.federation_workspaces
+        ):
+            return None
+        try:
+            return apply_service_scope(
+                self.auth, wid, role=role, entity_scope=entity_scope
+            )
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_403_FORBIDDEN:
+                return None
+            raise
+
+
+async def aggregate_scope(auth: AuthContext) -> AggregateScope:
+    """Build the per-request ``AggregateScope`` (one registry lookup at most)."""
+    from app.config import get_settings
+
+    if get_settings().is_community:
+        return AggregateScope(auth)
+
+    from app.platform.workspace_registry import (
+        federation_claim_workspace_id,
+        is_federation_token,
+        resolve_internal_workspace_id,
+    )
+
+    if not is_federation_token(auth):
+        return AggregateScope(auth)
+    claim_wsid = federation_claim_workspace_id(auth)
+    if not claim_wsid:
+        return AggregateScope(auth)
+    try:
+        claim_uuid = UUID(claim_wsid)
+    except ValueError:
+        return AggregateScope(auth, frozenset())
+    internal = await resolve_internal_workspace_id(claim_uuid)
+    return AggregateScope(auth, frozenset({internal}))
+
+
+_FEDERATION_WORKSPACE_MISMATCH = (
+    "workspace does not match the federation token's scoped workspace"
+)
+
+
+async def pin_federation_workspace(auth: AuthContext, workspace_id: UUID) -> UUID:
+    """AO-TOK-2: keep a Brigade workspace-scoped JWT inside its claim on HTTP.
+
+    Mirrors the MCP pin (app/mcp_auth.py, ``is_federation_token`` /
+    ``federation_claim_workspace_id``). A Brigade federation token carries the
+    uc-registry id of the ONE workspace it was scoped to; without this check the
+    path or X-Workspace-Id could name any other workspace the mapped user
+    belongs to, at that user's full role.
+
+    The requested id is accepted when it equals the claim (a registry id, which
+    is then mapped to the internal workspace id exactly as MCP does) or equals
+    the internal id the claim maps to (what the web UI and AO routes carry).
+    Anything else is a 403. Tokens that are not Brigade federation tokens, and
+    federation tokens without a workspace claim, pass through unchanged.
+    Community Edition never mints federation tokens and skips the branch.
+    """
+    from app.config import get_settings
+
+    if get_settings().is_community:
+        return workspace_id
+
+    from app.platform.workspace_registry import (
+        federation_claim_workspace_id,
+        is_federation_token,
+        resolve_internal_workspace_id,
+    )
+
+    if not is_federation_token(auth):
+        return workspace_id
+    claim_wsid = federation_claim_workspace_id(auth)
+    if not claim_wsid:
+        return workspace_id
+    try:
+        claim_uuid: UUID | None = UUID(claim_wsid)
+    except ValueError:
+        claim_uuid = None
+    if claim_uuid is not None:
+        if workspace_id == claim_uuid:
+            return await resolve_internal_workspace_id(workspace_id)
+        if await resolve_internal_workspace_id(claim_uuid) == workspace_id:
+            return workspace_id
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=_FEDERATION_WORKSPACE_MISMATCH,
+    )
+
+
 async def resolve_workspace(
     request: Request,
     auth: AuthContext = Depends(validate_bearer_token),
@@ -466,6 +600,8 @@ async def resolve_workspace(
     raises 403 — independent of what the impersonated user is allowed.
     """
     workspace_id = _extract_workspace_id(request, workspace_id_header, auth.claims)
+    # AO-TOK-2: a Brigade workspace-scoped JWT stays in its claimed workspace.
+    workspace_id = await pin_federation_workspace(auth, workspace_id)
     role, entity_scope, hipaa, slug = await _resolve_membership(
         auth.uc_uid, workspace_id, autoprovision=auth.may_autoprovision
     )

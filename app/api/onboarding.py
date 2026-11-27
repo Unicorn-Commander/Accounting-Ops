@@ -97,6 +97,55 @@ async def _first_active_workspace(user_id: uuid.UUID) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+async def _first_scoped_workspace(
+    user_id: uuid.UUID, auth: AuthContext
+) -> dict[str, Any] | None:
+    """``_first_active_workspace`` as the caller's token may see it.
+
+    AO114-R3-3: the plain helper returns the first membership by display
+    name over ALL of the user's workspaces, so a token scoped (service_scope
+    or a Brigade workspace claim) to A was handed the id and slug of B. Each
+    membership row now passes the shared ``AggregateScope``; humans get the
+    same first row as before. A restricted token that sees none of its
+    user's workspaces gets 403: it may neither learn of another workspace
+    nor provision one outside its declared scope.
+    """
+    from app.tenancy import aggregate_scope
+
+    gate = await aggregate_scope(auth)
+    if not gate.restricted:
+        return await _first_active_workspace(user_id)
+    async with SessionLocal() as session:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        """
+                        SELECT w.id::text AS id,
+                               w.slug AS slug,
+                               w.display_name AS display_name,
+                               m.role::text AS role
+                        FROM public.workspace_membership m
+                        JOIN public.workspace w ON w.id = m.workspace_id
+                        WHERE m.user_id = :uid AND m.status = 'active' AND w.status = 'active'
+                        ORDER BY w.display_name
+                        """
+                    ),
+                    {"uid": str(user_id)},
+                )
+            )
+            .mappings()
+            .all()
+        )
+    for row in rows:
+        if gate.row(row["id"], role=row["role"]) is not None:
+            return {k: row[k] for k in ("id", "slug", "display_name")}
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="This token is not scoped to any workspace of its user.",
+    )
+
+
 async def _backfill_user_profile(user_id: uuid.UUID, claims: dict[str, Any]) -> None:
     """Best-effort fill of display_name + email from token claims.
 
@@ -379,7 +428,7 @@ async def provision_first_workspace(
 
     # This path is ONLY for a user's first workspace. If they already have one,
     # hand it back rather than minting a duplicate (idempotent under retry).
-    existing = await _first_active_workspace(user_id)
+    existing = await _first_scoped_workspace(user_id, auth)
     if existing is not None:
         return {
             "workspace_id": existing["id"],

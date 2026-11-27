@@ -33,6 +33,7 @@ from app.tenancy import (
     _pat_scopes_from_auth,
     _resolve_membership,
     apply_service_scope,
+    pin_federation_workspace,
     require_role,
 )
 
@@ -254,6 +255,9 @@ async def _authorize_provisioning(auth: AuthContext, user_id: UUID) -> Workspace
     denial = "create_workspace requires admin/owner on at least one existing workspace"
     for workspace_id in await _admin_candidate_workspaces(user_id):
         try:
+            # AO114-R2-8: a Brigade workspace-scoped JWT only counts the seat
+            # in its claimed workspace, as on every resolve_workspace route.
+            await pin_federation_workspace(auth, workspace_id)
             role, entity_scope, hipaa, slug = await _resolve_membership(
                 auth.uc_uid, workspace_id, autoprovision=auth.may_autoprovision
             )

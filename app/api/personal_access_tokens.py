@@ -17,7 +17,11 @@ calling here gets 403 even if the route would otherwise succeed.
 The mint-blocking is enforced via ``_require_keycloak`` which rejects any
 AuthContext carrying ``pat_id`` in its claims (set by the PAT auth path) or
 ``scopes == ('service',)`` (set by service tokens). Browsers signed in via
-the next-auth → Keycloak loop in web/lib/auth.ts carry neither.
+the next-auth → Keycloak loop in web/lib/auth.ts carry neither. It also
+refuses (AO114-R3-1) every bearer that is not an interactive human session:
+a Brigade federation JWT, an agent acting via ``act``, a trusted M2M caller,
+a UC API key and anything carrying a ``service_scope``. A PAT minted by such
+a bearer would be owner-wide and escape the bearer's own workspace pin.
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from sqlalchemy import text
 
 from app.auth import AuthContext, validate_bearer_token
 from app.db import SessionLocal
+from app.platform.workspace_registry import is_federation_token
 from app.security.pat import (
     DEFAULT_TTL_DAYS,
     MAX_ACTIVE_PATS_PER_USER,
@@ -84,7 +89,7 @@ _ROLE_GRANTS: dict[str, set[str]] = {
 
 
 def _require_keycloak(auth: AuthContext) -> None:
-    """Reject service tokens + PATs.
+    """Reject every bearer that is not an interactive human session.
 
     A PAT cannot mint another PAT (chicken-and-egg). A service token is a
     background-worker bearer — also forbidden from minting human-scoped
@@ -99,6 +104,26 @@ def _require_keycloak(auth: AuthContext) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Service tokens cannot manage personal access tokens.",
+        )
+    # AO114-R3-1: only an interactive human session may manage PATs. A
+    # Brigade federation JWT (pinned to one workspace), an agent acting on a
+    # user's behalf, a trusted M2M caller, a UC API key or any other bearer
+    # carrying a service_scope would otherwise mint an owner-wide PAT and
+    # escape its own workspace pin and role floor. ``may_autoprovision`` is
+    # True only for the Keycloak login and CE local paths (app.auth).
+    if (
+        not auth.may_autoprovision
+        or is_federation_token(auth)
+        or auth.is_trusted_m2m
+        or auth.agent_id is not None
+        or auth.service_scope is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only an interactive user session can manage personal "
+                "access tokens."
+            ),
         )
 
 

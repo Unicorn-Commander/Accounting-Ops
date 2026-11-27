@@ -44,6 +44,7 @@ from sqlalchemy import text
 
 from app.auth import AuthContext, validate_bearer_token
 from app.db import SessionLocal
+from app.tenancy import aggregate_scope
 from app.workspace_session import workspace_session
 
 _log = logging.getLogger("acctops.clients")
@@ -121,6 +122,9 @@ async def list_my_clients(
             ).mappings().all()
             clients_onboarded = await _clients_onboarded_count(session, user_id)
 
+    # AO114-R2-2: a scoped token (service token, PAT, Brigade JWT) lists only
+    # the workspaces it is scoped to, at its capped role. Humans unchanged.
+    rows, clients_onboarded = await _scoped_client_rows(auth, rows, clients_onboarded)
     workspaces: list[dict[str, Any]] = []
 
     for row in rows:
@@ -177,6 +181,45 @@ async def list_my_clients(
     }
 
 
+async def _scoped_client_rows(
+    auth: AuthContext, rows: Iterable[Any], clients_onboarded: int
+) -> tuple[list[dict[str, Any]], int]:
+    """Pass the /api/me/clients* membership rows through the AggregateScope.
+
+    Each kept row carries the capped ``role`` and narrowed ``entity_scope``
+    (as a list of str, the shape the membership column has). For a restricted
+    caller ``clients_onboarded`` counts only the kept rows it onboarded, so the
+    persona does not reveal workspaces outside the token's scope.
+    """
+    gate = await aggregate_scope(auth)
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        entry = dict(row)
+        raw = entry.get("entity_scope")
+        try:
+            membership_scope = (
+                tuple(UUID(str(e)) for e in raw) if raw else None
+            )
+        except ValueError:
+            if gate.restricted:
+                continue  # never widen a malformed scope for a scoped token
+            kept.append(entry)
+            continue
+        scoped = gate.row(entry["id"], role=entry["role"], entity_scope=membership_scope)
+        if scoped is None:
+            continue
+        role, entity_scope = scoped
+        entry["role"] = role
+        if gate.restricted:
+            entry["entity_scope"] = (
+                [str(e) for e in entity_scope] if entity_scope is not None else None
+            )
+        kept.append(entry)
+    if gate.restricted:
+        clients_onboarded = sum(1 for r in kept if r.get("onboarded_by_me"))
+    return kept, clients_onboarded
+
+
 @router.get("/api/me/cpa-recent-activity")
 async def cpa_recent_activity(
     days: int = Query(default=30, ge=1, le=365),
@@ -202,7 +245,8 @@ async def cpa_recent_activity(
                 await session.execute(
                     text(
                         """
-                        SELECT w.id::text AS id, w.display_name AS name
+                        SELECT w.id::text AS id, w.display_name AS name,
+                               m.role::text AS role, m.entity_scope AS entity_scope
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :user_id
@@ -213,6 +257,8 @@ async def cpa_recent_activity(
                 )
             ).mappings().all()
 
+    # AO114-R2-3: a scoped token never reads another workspace's audit rows.
+    rows, _ = await _scoped_client_rows(auth, rows, 0)
     items: list[dict[str, Any]] = []
     for ws in rows:
         try:
@@ -367,6 +413,8 @@ async def list_my_clients_triage(
     import datetime as dt
     now = dt.datetime.now(dt.timezone.utc)
 
+    # AO114-R2-4: a scoped token triages only the workspaces it is scoped to.
+    rows, clients_onboarded = await _scoped_client_rows(auth, rows, clients_onboarded)
     workspaces: list[dict[str, Any]] = []
 
     for row in rows:
@@ -716,7 +764,7 @@ def individual_invite_bodies(
 
 
 async def _caller_account(
-    uc_uid: str, *, autoprovision: bool = False
+    auth: AuthContext,
 ) -> tuple[UUID, str | None, list[str], int]:
     """Return (user_id, email, distinct_roles_held, clients_onboarded) for the caller.
 
@@ -727,10 +775,17 @@ async def _caller_account(
     auto-provision (``AuthContext.may_autoprovision``: Keycloak login / CE
     local). Other callers (service tokens, PATs, Brigade) resolve-or-403 —
     a ghost row here would have no roles anyway.
+
+    AO114-R2-5: the roles (and the onboarded count) of a scoped token come
+    only from the memberships it is scoped to, capped at its role floor, so
+    neither the persona nor the POST /api/me/clients gate sees a seat outside
+    the token's declared workspaces or above its role.
     """
     from app.api.workspaces import _ensure_user_account
 
-    user_id = await _ensure_user_account(uc_uid, autoprovision=autoprovision)
+    user_id = await _ensure_user_account(
+        auth.uc_uid, autoprovision=auth.may_autoprovision
+    )
     async with SessionLocal() as session:
         async with session.begin():
             email_row = (
@@ -743,7 +798,11 @@ async def _caller_account(
                 await session.execute(
                     text(
                         """
-                        SELECT DISTINCT m.role::text AS role
+                        SELECT w.id::text AS id,
+                               m.role::text AS role,
+                               m.entity_scope AS entity_scope,
+                               COALESCE(w.onboarded_by_user_id = :uid, false)
+                                   AS onboarded_by_me
                         FROM public.workspace_membership m
                         JOIN public.workspace w ON w.id = m.workspace_id
                         WHERE m.user_id = :uid AND m.status = 'active' AND w.status = 'active'
@@ -753,10 +812,13 @@ async def _caller_account(
                 )
             ).mappings().all()
             clients_onboarded = await _clients_onboarded_count(session, user_id)
+    role_rows, clients_onboarded = await _scoped_client_rows(
+        auth, role_rows, clients_onboarded
+    )
     return (
         user_id,
         (email_row.email if email_row else None),
-        [r["role"] for r in role_rows],
+        sorted({r["role"] for r in role_rows}),
         clients_onboarded,
     )
 
@@ -774,9 +836,7 @@ async def my_persona(
     set up from the console; one or more makes the persona "cpa" (see
     ``_persona_for``).
     """
-    _user_id, _email, roles, clients_onboarded = await _caller_account(
-        auth.uc_uid, autoprovision=auth.may_autoprovision
-    )
+    _user_id, _email, roles, clients_onboarded = await _caller_account(auth)
     role_set = set(roles)
     persona = _persona_for(roles, clients_onboarded)
     can_add = bool(role_set & set(_PRACTITIONER_ROLES))
@@ -862,9 +922,7 @@ async def add_client(
     from app.tenancy import WorkspaceContext
     from scripts.provision_workspace import provision_workspace
 
-    user_id, caller_email, roles, _onboarded = await _caller_account(
-        auth.uc_uid, autoprovision=auth.may_autoprovision
-    )
+    user_id, caller_email, roles, _onboarded = await _caller_account(auth)
     if not (set(roles) & set(_PRACTITIONER_ROLES)):
         raise HTTPException(
             status_code=403,
@@ -874,6 +932,26 @@ async def add_client(
                 "first."
             ),
         )
+    # AO114-R3-2: the role gate above sees the token's workspace scope and
+    # role floor (_caller_account), but a PAT's own scopes were never
+    # consulted, so a read-only PAT provisioned a workspace. Demand the scope
+    # the lowest practitioner seat (cpa / accountant) demands on every
+    # require_role route; non-PAT callers skip this, as in require_role.
+    from app.tenancy import (
+        _pat_holds_scope,
+        _pat_scopes_from_auth,
+        required_scope_for_role_minimum,
+    )
+
+    pat_scopes = _pat_scopes_from_auth(auth)
+    if pat_scopes is not None:
+        required = required_scope_for_role_minimum("cpa") or "accounting:admin"
+        if not _pat_holds_scope(pat_scopes, required):
+            held = ", ".join(pat_scopes) if pat_scopes else "(none)"
+            raise HTTPException(
+                status_code=403,
+                detail=f"token scope '{held}' insufficient (needs {required})",
+            )
 
     owner_email = _normalize_email(body.owner_email) if body.owner_email else None
 

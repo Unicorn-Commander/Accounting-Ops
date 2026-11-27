@@ -1273,7 +1273,7 @@ async def test_client_activity_excludes_inactive_memberships(inactive_membership
 
 async def test_client_roles_exclude_inactive_memberships(inactive_memberships):
     seats = inactive_memberships
-    uid, _, roles, _ = await clients._caller_account(seats.subject)
+    uid, _, roles, _ = await clients._caller_account(seats.auth)
     assert uid == seats.uid
     assert roles == ["viewer"]
 
