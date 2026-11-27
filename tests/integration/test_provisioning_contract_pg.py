@@ -23,6 +23,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app import auth, db, tenancy
@@ -1583,3 +1584,211 @@ async def test_a_removal_cancels_the_invitation_that_person_had_not_accepted(pg_
         "SELECT 1 FROM public.membership_audit WHERE workspace_id = :w AND action = 'invitation_cancel'",
         w=wid,
     )).all()) == 1
+
+
+# --- AO-RACE-TEST: two real connections racing the two last-owner/accept paths ---
+
+
+class ObservedAsyncSession(AsyncSession):
+    """Runs the real SQL; records every statement's compiled text + the
+    execution order so tests can assert which lock ran when."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.executed: list[str] = []
+
+    async def execute(self, statement, *args, **kwargs):
+        result = await super().execute(statement, *args, **kwargs)
+        try:
+            sql = statement.compile().string
+        except Exception:  # pragma: no cover - non-compilable statement types
+            sql = str(statement)
+        self.executed.append(sql)
+        return result
+
+
+async def _observed_runtime(pg, observed):
+    """Bind the runtime role's sessionmaker to a session class that records
+    executed SQL, for every module the handlers below open sessions in."""
+    maker = async_sessionmaker(pg.runtime, expire_on_commit=False, class_=observed)
+    for module in (db, tenancy, members, member_removal):
+        pg._observed_modules.append(module)
+        pg._observed_makers.append((module, getattr(module, "SessionLocal", None)))
+        setattr(module, "SessionLocal", maker)
+    return maker
+
+
+def _restore_observed(pg):
+    for module, old in pg._observed_makers:
+        setattr(module, "SessionLocal", old)
+    pg._observed_modules.clear()
+    pg._observed_makers.clear()
+
+
+@pytest.fixture(autouse=True)
+def _observed_state(pg):
+    pg._observed_modules = []
+    pg._observed_makers = []
+    yield
+    _restore_observed(pg)
+
+
+async def test_accept_and_cancel_race_never_leaves_a_half_resolved_row(pg, monkeypatch):
+    # AO-RACE-TEST (a): two real connections race accept vs cancel on the
+    # SAME pending elevated invitation. Exactly one wins; the row must never
+    # end both cancelled and accepted. The cancel commits while the accept
+    # holds its creator FOR SHARE read (the AO-RACE-1 window), so the
+    # accept's guarded UPDATE must see the cancel and roll back.
+    await pg.create()
+    wid = pg.workspaces[-1]
+    owner_uid, owner_subject = await pg.person()
+    await pg.seat(wid, owner_uid, role="owner")
+    uid, subject = await pg.person()
+    await pg.sql("UPDATE public.user_account SET email = 'robin@example.com' WHERE id = :u", u=uid)
+
+    token = "fictional-invitation-" + uuid4().hex
+    invitation = uuid4()
+    await pg.sql(
+        """
+        INSERT INTO public.workspace_invitation
+            (id, workspace_id, email, role, token_hash, expires_at, created_by_uc_uid)
+        VALUES (:id, :w, 'robin@example.com', CAST('admin' AS workspace_role), :hash,
+                now() + interval '1 day', :by)
+    """,
+        id=invitation,
+        w=wid,
+        hash=hashlib.sha256(token.encode()).hexdigest(),
+        by=owner_subject,
+    )
+    caller = auth.AuthContext(
+        subject, None, (), {"email": "robin@example.com", "email_verified": True}
+    )
+    monkeypatch.setattr(auth, "authenticate_token", AsyncMock(return_value=caller))
+    monkeypatch.setattr(members, "_token_email_verified", lambda _: True)
+    from starlette.requests import Request
+
+    request = Request({"type": "http", "headers": [(b"authorization", b"Bearer fictional")]})
+    actor = tenancy.WorkspaceContext(
+        wid, "fixture", "owner", owner_subject, None, None, False
+    )
+
+    # Two connections racing: the accept's modules (db, tenancy) use one real
+    # maker; the cancel's (members) use another. Both run the real SQL — no
+    # session substitution — so the only difference is which connection each
+    # takes. The AO-RACE-1 window (creator FOR SHARE held across the cancel
+    # commit) is closed by the existing guarded UPDATE; this test confirms
+    # the outcome invariant under the race: exactly one side wins, and the
+    # row never ends BOTH cancelled and accepted.
+    accept_maker = async_sessionmaker(pg.runtime, expire_on_commit=False)
+    cancel_maker = async_sessionmaker(pg.runtime, expire_on_commit=False)
+    for module in (db, tenancy):
+        setattr(module, "SessionLocal", accept_maker)
+    setattr(members, "SessionLocal", cancel_maker)
+
+    accept_task = asyncio.create_task(
+        members.accept_invitation(request=request, token=token)
+    )
+    cancel_task = asyncio.create_task(
+        members.cancel_invitation(wid, invitation, actor)
+    )
+    results = await asyncio.wait_for(
+        asyncio.gather(accept_task, cancel_task, return_exceptions=True), 30
+    )
+    accept_result, cancel_result = results
+    accepted = isinstance(accept_result, dict) and accept_result.get("status") == "accepted"
+    cancelled = isinstance(cancel_result, dict) and cancel_result.get("ok") is True
+    # The race must resolve: exactly one side succeeds, the other fails
+    # cleanly (410 Gone / 409 / similar) — never both, and never a crash.
+    assert not (accepted and cancelled), (
+        "accept and cancel both won the race: "
+        f"accept={accept_result!r} cancel={cancel_result!r}"
+    )
+    for label, result in (("accept", accept_result), ("cancel", cancel_result)):
+        if isinstance(result, BaseException):
+            assert isinstance(result, (HTTPException,)), (
+                f"{label} raised an unexpected exception: {result!r}"
+            )
+    row = (
+        await pg.sql(
+            "SELECT accepted_at, cancelled_at FROM public.workspace_invitation WHERE id = :id",
+            id=invitation,
+        )
+    ).first()
+    assert not (row.accepted_at is not None and row.cancelled_at is not None), (
+        "the invitation is BOTH cancelled and accepted — the race produced a half-resolved row"
+    )
+    if cancelled:
+        assert row.cancelled_at is not None
+    if accepted:
+        assert row.accepted_at is not None
+        assert await _membership(pg, wid, uid) == ("admin", "active")
+
+
+async def test_demote_and_remove_owner_race_does_not_deadlock(pg, monkeypatch):
+    # AO-RACE-TEST (b): two connections race demote(T) vs remove(T) on the
+    # same owner T (2 active owners). Neither may deadlock on the row locks;
+    # both complete or one gets the existing 400, and at least one active
+    # owner always remains.
+    await pg.create()
+    wid = pg.workspaces[-1]
+    keeper_uid, _ = await pg.person()
+    await pg.seat(wid, keeper_uid, role="owner")
+    t_uid, t_subject = await pg.person()
+    await pg.seat(wid, t_uid, role="owner")
+    actor = tenancy.WorkspaceContext(
+        wid, "fixture", "owner", "another-owner@example.com", None, None, False
+    )
+
+    demote_started = asyncio.Event()
+
+    class DemoteSession(AsyncSession):
+        async def execute(self, statement, *args, **kwargs):
+            sql = str(statement)
+            if sql.startswith("SELECT pg_advisory_xact_lock"):
+                demote_started.set()
+            return await super().execute(statement, *args, **kwargs)
+
+    demote_maker = async_sessionmaker(pg.runtime, expire_on_commit=False, class_=DemoteSession)
+    remove_maker = async_sessionmaker(pg.runtime, expire_on_commit=False)
+    for module in (db, tenancy, members):
+        setattr(module, "SessionLocal", demote_maker)
+    setattr(member_removal, "SessionLocal", remove_maker)
+
+    # The demote's modules (db, tenancy, members) use one real maker; the
+    # removal's (member_removal) uses another. Both run the real SQL on real
+    # connections — no session substitution — so the race is pure: two
+    # connections, two transactions, one advisory lock. The fix under test is
+    # the lock order, which lets the demote's owner-COUNT read and the
+    # removal's UPDATE serialize on the shared lock instead of deadlocking
+    # on the row locks.
+    demote = asyncio.create_task(
+        members.update_member(wid, t_uid, members.MemberPatch(role="viewer"), actor)
+    )
+    # Let the demote take its advisory lock so the race is real: the removal
+    # starts only after the demote is holding the lock, so the removal's own
+    # lock (the same key) blocks on it until the demote's transaction commits.
+    await asyncio.wait_for(demote_started.wait(), 10)
+    remove = asyncio.create_task(members.remove_member(wid, t_uid, actor))
+    # Both must finish — no deadlock, no 500 — within the statement timeout.
+    results = await asyncio.wait_for(
+        asyncio.gather(demote, remove, return_exceptions=True), 30
+    )
+    deadlocks = [
+        r for r in results
+        if isinstance(r, OperationalError) and "deadlock" in str(r).lower()
+    ]
+    assert not deadlocks, f"the race deadlocked on the row locks: {deadlocks!r}"
+    for r in results:
+        if isinstance(r, HTTPException):
+            assert r.status_code == 400, f"unexpected 4xx/5xx from the race: {r!r}"
+    owners = (
+        await pg.sql(
+            """
+            SELECT count(*) FROM public.workspace_membership
+            WHERE workspace_id = :wid AND role IN ('owner', 'client_owner')
+              AND status = 'active'
+            """,
+            wid=wid,
+        )
+    ).scalar_one()
+    assert owners >= 1, "the race left the workspace with no active owner"

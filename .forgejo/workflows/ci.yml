@@ -298,7 +298,7 @@ jobs:
           # dropped from the selection) and still pass, so the per-file minimums
           # are kept in addition: the original floors for the six explicitly
           # listed files (test_db_rls_roles >= 16, test_provisioning_contract_pg
-          # >= 40, the stripe family counted by classname >= 23,
+          # >= 42, the stripe family counted by classname >= 23,
           # test_stripe_blocked_resolve_pg >= 17, test_ebay_sync_postgres >= 1)
           # plus one per every file the directory-wide selection newly includes.
           # Any file at 0 testcases fails the job.
@@ -336,7 +336,7 @@ jobs:
           minimums = {
               # Original six: the old per-file floors (review round 2).
               "tests.integration.test_db_rls_roles": 16,
-              "tests.integration.test_provisioning_contract_pg": 40,
+              "tests.integration.test_provisioning_contract_pg": 42,
               # Newly included: >= 1 testcase each.
               "tests.integration.test_add_client": 1,
               "tests.integration.test_approval_recommendations": 3,
