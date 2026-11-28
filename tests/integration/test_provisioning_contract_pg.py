@@ -1652,15 +1652,19 @@ async def test_accept_and_cancel_race_never_leaves_a_half_resolved_row(pg, monke
         paused=accept_paused,
     )
     cancel_maker = async_sessionmaker(pg.runtime, expire_on_commit=False)
-    for module in (db, tenancy):
-        monkeypatch.setattr(module, "SessionLocal", accept_maker)
-    monkeypatch.setattr(members, "SessionLocal", cancel_maker)
+    # accept_invitation opens its session via the SessionLocal imported into
+    # app.api.members (from app.db), so binding members.SessionLocal to the
+    # pausing accept_maker puts the accept on its own connection. The cancel
+    # runs on a separate connection via the db-level maker.
+    monkeypatch.setattr(members, "SessionLocal", accept_maker)
+    monkeypatch.setattr(db, "SessionLocal", cancel_maker)
 
     accept_task = asyncio.create_task(members.accept_invitation(request=request, token=token))
     await asyncio.wait_for(accept_paused.wait(), 30)
     cancel_task = asyncio.create_task(members.cancel_invitation(wid, invitation, actor))
-    accept_result = await asyncio.wait_for(accept_task, 30)
-    cancel_result = await asyncio.wait_for(cancel_task, 30)
+    accept_result, cancel_result = await asyncio.wait_for(
+        asyncio.gather(accept_task, cancel_task, return_exceptions=True), 30
+    )
 
     accepted = isinstance(accept_result, dict) and accept_result.get("status") == "accepted"
     cancelled = isinstance(cancel_result, dict) and cancel_result.get("ok") is True
