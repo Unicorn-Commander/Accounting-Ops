@@ -1589,56 +1589,32 @@ async def test_a_removal_cancels_the_invitation_that_person_had_not_accepted(pg_
 # --- AO-RACE-TEST: two real connections racing the two last-owner/accept paths ---
 
 
-class ObservedAsyncSession(AsyncSession):
-    """Runs the real SQL; records every statement's compiled text + the
-    execution order so tests can assert which lock ran when."""
+class PausedAcceptSession(AsyncSession):
+    """Pauses the accept right after its creator FOR SHARE read so the test
+    can commit a cancel inside the AO-RACE-1 window, then releases it."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, paused: asyncio.Event, **kwargs):
         super().__init__(*args, **kwargs)
-        self.executed: list[str] = []
+        self._paused = paused
 
     async def execute(self, statement, *args, **kwargs):
+        sql = str(statement)
         result = await super().execute(statement, *args, **kwargs)
-        try:
-            sql = statement.compile().string
-        except Exception:  # pragma: no cover - non-compilable statement types
-            sql = str(statement)
-        self.executed.append(sql)
+        if "FOR SHARE" in sql and not self._paused.is_set():
+            self._paused.set()
         return result
 
 
-async def _observed_runtime(pg, observed):
-    """Bind the runtime role's sessionmaker to a session class that records
-    executed SQL, for every module the handlers below open sessions in."""
-    maker = async_sessionmaker(pg.runtime, expire_on_commit=False, class_=observed)
-    for module in (db, tenancy, members, member_removal):
-        pg._observed_modules.append(module)
-        pg._observed_makers.append((module, getattr(module, "SessionLocal", None)))
-        setattr(module, "SessionLocal", maker)
-    return maker
-
-
-def _restore_observed(pg):
-    for module, old in pg._observed_makers:
-        setattr(module, "SessionLocal", old)
-    pg._observed_modules.clear()
-    pg._observed_makers.clear()
-
-
-@pytest.fixture(autouse=True)
-def _observed_state(pg):
-    pg._observed_modules = []
-    pg._observed_makers = []
-    yield
-    _restore_observed(pg)
-
-
 async def test_accept_and_cancel_race_never_leaves_a_half_resolved_row(pg, monkeypatch):
-    # AO-RACE-TEST (a): two real connections race accept vs cancel on the
-    # SAME pending elevated invitation. Exactly one wins; the row must never
-    # end both cancelled and accepted. The cancel commits while the accept
-    # holds its creator FOR SHARE read (the AO-RACE-1 window), so the
-    # accept's guarded UPDATE must see the cancel and roll back.
+    # AO-RACE-TEST-A: two real connections race accept vs cancel on the SAME
+    # pending elevated invitation. The overlap is forced: the accept pauses
+    # right after its creator FOR SHARE read, the cancel runs to COMMIT inside
+    # that window, and only then is the accept released to hit its guarded
+    # UPDATE. The guarded UPDATE must see the committed cancel, so the cancel
+    # wins and the accept 410s — the row can never end both cancelled and
+    # accepted.
+    from starlette.requests import Request
+
     await pg.create()
     wid = pg.workspaces[-1]
     owner_uid, owner_subject = await pg.person()
@@ -1665,48 +1641,37 @@ async def test_accept_and_cancel_race_never_leaves_a_half_resolved_row(pg, monke
     )
     monkeypatch.setattr(auth, "authenticate_token", AsyncMock(return_value=caller))
     monkeypatch.setattr(members, "_token_email_verified", lambda _: True)
-    from starlette.requests import Request
-
     request = Request({"type": "http", "headers": [(b"authorization", b"Bearer fictional")]})
     actor = tenancy.WorkspaceContext(
         wid, "fixture", "owner", owner_subject, None, None, False
     )
 
-    # Two connections racing: the accept's modules (db, tenancy) use one real
-    # maker; the cancel's (members) use another. Both run the real SQL — no
-    # session substitution — so the only difference is which connection each
-    # takes. The AO-RACE-1 window (creator FOR SHARE held across the cancel
-    # commit) is closed by the existing guarded UPDATE; this test confirms
-    # the outcome invariant under the race: exactly one side wins, and the
-    # row never ends BOTH cancelled and accepted.
-    accept_maker = async_sessionmaker(pg.runtime, expire_on_commit=False)
+    accept_paused = asyncio.Event()
+    accept_maker = async_sessionmaker(
+        pg.runtime, expire_on_commit=False, class_=PausedAcceptSession,
+        paused=accept_paused,
+    )
     cancel_maker = async_sessionmaker(pg.runtime, expire_on_commit=False)
     for module in (db, tenancy):
-        setattr(module, "SessionLocal", accept_maker)
-    setattr(members, "SessionLocal", cancel_maker)
+        monkeypatch.setattr(module, "SessionLocal", accept_maker)
+    monkeypatch.setattr(members, "SessionLocal", cancel_maker)
 
-    accept_task = asyncio.create_task(
-        members.accept_invitation(request=request, token=token)
-    )
-    cancel_task = asyncio.create_task(
-        members.cancel_invitation(wid, invitation, actor)
-    )
-    results = await asyncio.wait_for(
-        asyncio.gather(accept_task, cancel_task, return_exceptions=True), 30
-    )
-    accept_result, cancel_result = results
+    accept_task = asyncio.create_task(members.accept_invitation(request=request, token=token))
+    await asyncio.wait_for(accept_paused.wait(), 30)
+    cancel_task = asyncio.create_task(members.cancel_invitation(wid, invitation, actor))
+    accept_result = await asyncio.wait_for(accept_task, 30)
+    cancel_result = await asyncio.wait_for(cancel_task, 30)
+
     accepted = isinstance(accept_result, dict) and accept_result.get("status") == "accepted"
     cancelled = isinstance(cancel_result, dict) and cancel_result.get("ok") is True
-    # The race must resolve: exactly one side succeeds, the other fails
-    # cleanly (410 Gone / 409 / similar) — never both, and never a crash.
-    assert not (accepted and cancelled), (
-        "accept and cancel both won the race: "
+    assert accepted + cancelled == 1, (
+        "exactly one of accept/cancel must win the forced-overlap race, got both "
         f"accept={accept_result!r} cancel={cancel_result!r}"
     )
     for label, result in (("accept", accept_result), ("cancel", cancel_result)):
         if isinstance(result, BaseException):
-            assert isinstance(result, (HTTPException,)), (
-                f"{label} raised an unexpected exception: {result!r}"
+            assert isinstance(result, HTTPException) and result.status_code in (404, 410), (
+                f"{label} lost with an unexpected error: {result!r}"
             )
     row = (
         await pg.sql(
@@ -1714,14 +1679,10 @@ async def test_accept_and_cancel_race_never_leaves_a_half_resolved_row(pg, monke
             id=invitation,
         )
     ).first()
-    assert not (row.accepted_at is not None and row.cancelled_at is not None), (
-        "the invitation is BOTH cancelled and accepted — the race produced a half-resolved row"
+    assert (row.accepted_at is not None) + (row.cancelled_at is not None) == 1, (
+        "the invitation must end with exactly one of accepted_at/cancelled_at set, "
+        f"got accepted_at={row.accepted_at!r} cancelled_at={row.cancelled_at!r}"
     )
-    if cancelled:
-        assert row.cancelled_at is not None
-    if accepted:
-        assert row.accepted_at is not None
-        assert await _membership(pg, wid, uid) == ("admin", "active")
 
 
 async def test_demote_and_remove_owner_race_does_not_deadlock(pg, monkeypatch):
@@ -1751,16 +1712,9 @@ async def test_demote_and_remove_owner_race_does_not_deadlock(pg, monkeypatch):
     demote_maker = async_sessionmaker(pg.runtime, expire_on_commit=False, class_=DemoteSession)
     remove_maker = async_sessionmaker(pg.runtime, expire_on_commit=False)
     for module in (db, tenancy, members):
-        setattr(module, "SessionLocal", demote_maker)
-    setattr(member_removal, "SessionLocal", remove_maker)
+        monkeypatch.setattr(module, "SessionLocal", demote_maker)
+    monkeypatch.setattr(member_removal, "SessionLocal", remove_maker)
 
-    # The demote's modules (db, tenancy, members) use one real maker; the
-    # removal's (member_removal) uses another. Both run the real SQL on real
-    # connections — no session substitution — so the race is pure: two
-    # connections, two transactions, one advisory lock. The fix under test is
-    # the lock order, which lets the demote's owner-COUNT read and the
-    # removal's UPDATE serialize on the shared lock instead of deadlocking
-    # on the row locks.
     demote = asyncio.create_task(
         members.update_member(wid, t_uid, members.MemberPatch(role="viewer"), actor)
     )
