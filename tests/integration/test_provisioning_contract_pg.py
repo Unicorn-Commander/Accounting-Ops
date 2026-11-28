@@ -1590,29 +1590,36 @@ async def test_a_removal_cancels_the_invitation_that_person_had_not_accepted(pg_
 
 
 class PausedAcceptSession(AsyncSession):
-    """Pauses the accept right after its creator FOR SHARE read so the test
-    can commit a cancel inside the AO-RACE-1 window, then releases it."""
+    """Holds the accept's transaction open right after its creator FOR SHARE
+    read (signalled via `paused`, gated by `release`) so the test can commit
+    a cancel inside the AO-RACE-1 window before the accept's guarded UPDATE
+    runs. Only the FIRST FOR SHARE read pauses; later ones return at once."""
 
-    def __init__(self, *args, paused: asyncio.Event, **kwargs):
+    def __init__(self, *args, paused: asyncio.Event, release: asyncio.Event, **kwargs):
         super().__init__(*args, **kwargs)
         self._paused = paused
+        self._release = release
+        self._held = False
 
     async def execute(self, statement, *args, **kwargs):
         sql = str(statement)
         result = await super().execute(statement, *args, **kwargs)
-        if "FOR SHARE" in sql and not self._paused.is_set():
+        if "FOR SHARE" in sql and not self._held:
+            self._held = True
             self._paused.set()
+            await asyncio.wait_for(self._release.wait(), 30)
         return result
 
 
 async def test_accept_and_cancel_race_never_leaves_a_half_resolved_row(pg, monkeypatch):
     # AO-RACE-TEST-A: two real connections race accept vs cancel on the SAME
     # pending elevated invitation. The overlap is forced: the accept pauses
-    # right after its creator FOR SHARE read, the cancel runs to COMMIT inside
-    # that window, and only then is the accept released to hit its guarded
-    # UPDATE. The guarded UPDATE must see the committed cancel, so the cancel
-    # wins and the accept 410s — the row can never end both cancelled and
-    # accepted.
+    # right after its creator FOR SHARE read (and STAYS there, holding its
+    # transaction, until released), the cancel runs to COMMIT inside that
+    # window, and only then is the accept released to hit its guarded UPDATE.
+    # The guarded UPDATE must see the committed cancel: deterministically the
+    # cancel wins and the accept 410s — the row can never end both cancelled
+    # and accepted.
     from starlette.requests import Request
 
     await pg.create()
@@ -1647,9 +1654,10 @@ async def test_accept_and_cancel_race_never_leaves_a_half_resolved_row(pg, monke
     )
 
     accept_paused = asyncio.Event()
+    accept_release = asyncio.Event()
     accept_maker = async_sessionmaker(
         pg.runtime, expire_on_commit=False, class_=PausedAcceptSession,
-        paused=accept_paused,
+        paused=accept_paused, release=accept_release,
     )
     cancel_maker = async_sessionmaker(pg.runtime, expire_on_commit=False)
     # accept_invitation opens its session via the SessionLocal imported into
@@ -1661,32 +1669,44 @@ async def test_accept_and_cancel_race_never_leaves_a_half_resolved_row(pg, monke
 
     accept_task = asyncio.create_task(members.accept_invitation(request=request, token=token))
     await asyncio.wait_for(accept_paused.wait(), 30)
-    cancel_task = asyncio.create_task(members.cancel_invitation(wid, invitation, actor))
-    accept_result, cancel_result = await asyncio.wait_for(
-        asyncio.gather(accept_task, cancel_task, return_exceptions=True), 30
+    # The accept is now HELD after its FOR SHARE read: run the cancel to full
+    # COMPLETION (its UPDATE + commit) while the accept stays paused.
+    cancel_result = await asyncio.wait_for(
+        members.cancel_invitation(wid, invitation, actor), 30
     )
+    accept_release.set()
+    try:
+        accept_result = await asyncio.wait_for(accept_task, 30)
+        accept_error = None
+    except BaseException as exc:  # noqa: BLE001 - a lost race raises the 410
+        accept_result, accept_error = None, exc
 
-    accepted = isinstance(accept_result, dict) and accept_result.get("status") == "accepted"
-    cancelled = isinstance(cancel_result, dict) and cancel_result.get("ok") is True
-    assert accepted + cancelled == 1, (
-        "exactly one of accept/cancel must win the forced-overlap race, got both "
-        f"accept={accept_result!r} cancel={cancel_result!r}"
+    assert isinstance(cancel_result, dict) and cancel_result.get("ok") is True, (
+        f"the cancel must succeed inside the forced window, got {cancel_result!r}"
     )
-    for label, result in (("accept", accept_result), ("cancel", cancel_result)):
-        if isinstance(result, BaseException):
-            assert isinstance(result, HTTPException) and result.status_code in (404, 410), (
-                f"{label} lost with an unexpected error: {result!r}"
-            )
+    assert isinstance(accept_error, HTTPException) and accept_error.status_code == 410, (
+        "the accept lost to the committed cancel with 410 "
+        f"(the guarded UPDATE's 0-row path), got result={accept_result!r} error={accept_error!r}"
+    )
     row = (
         await pg.sql(
             "SELECT accepted_at, cancelled_at FROM public.workspace_invitation WHERE id = :id",
             id=invitation,
         )
     ).first()
-    assert (row.accepted_at is not None) + (row.cancelled_at is not None) == 1, (
-        "the invitation must end with exactly one of accepted_at/cancelled_at set, "
-        f"got accepted_at={row.accepted_at!r} cancelled_at={row.cancelled_at!r}"
+    assert row.cancelled_at is not None and row.accepted_at is None, (
+        "the invitation must end cancelled and never accepted, got "
+        f"accepted_at={row.accepted_at!r} cancelled_at={row.cancelled_at!r}"
     )
+    seats = (
+        await pg.sql(
+            "SELECT count(*) FROM public.workspace_membership "
+            "WHERE workspace_id = :w AND user_id = :u AND status = 'active'",
+            w=wid,
+            u=uid,
+        )
+    ).scalar_one()
+    assert seats == 0, "the losing accept must have left the person no active membership"
 
 
 async def test_demote_and_remove_owner_race_does_not_deadlock(pg, monkeypatch):
