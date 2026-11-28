@@ -23,7 +23,6 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app import auth, db, tenancy
@@ -1710,30 +1709,72 @@ async def test_accept_and_cancel_race_never_leaves_a_half_resolved_row(pg, monke
 
 
 async def test_demote_and_remove_owner_race_does_not_deadlock(pg, monkeypatch):
-    # AO-RACE-TEST (b): two connections race demote(T) vs remove(T) on the
-    # same owner T (2 active owners). Neither may deadlock on the row locks;
-    # both complete or one gets the existing 400, and at least one active
-    # owner always remains.
+    # AO-RACE-TEST-B2: two connections race demote(T) vs remove(T) on the
+    # same owner T (2 active owners). The overlap is forced on the shared
+    # advisory lock: the demote HOLDS the pg_advisory_xact_lock (seed 218)
+    # — signalled via `held` AFTER the lock statement returned, gated by
+    # `release` — while the removal runs and blocks on that same lock. The
+    # demote's commit is what unblocks the removal, which then runs its own
+    # last-owner count against the demoted state. With the AO-RACE-2b lock
+    # order (both paths take the advisory lock before any FOR UPDATE row
+    # lock) no deadlock: the demote commits the demotion first, then the
+    # removal succeeds removing the demoted T (the keeper remains the sole
+    # active owner, T's PAT is revoked).
     await pg.create()
     wid = pg.workspaces[-1]
-    keeper_uid, _ = await pg.person()
+    # The actor must resolve to a user_account row: the shared demote maker
+    # also serves tenancy._ensure_user_account (direct-call context), which
+    # fail-closes with 403 for an unprovisioned identity.
+    keeper_uid, keeper_subject = await pg.person()
     await pg.seat(wid, keeper_uid, role="owner")
     t_uid, t_subject = await pg.person()
     await pg.seat(wid, t_uid, role="owner")
+    # Give T a scoped PAT: the winning removal revokes it — the test asserts
+    # the PAT is revoked.
+    await pg.pat(t_uid, [wid])
     actor = tenancy.WorkspaceContext(
-        wid, "fixture", "owner", "another-owner@example.com", None, None, False
+        wid, "fixture", "owner", keeper_subject, None, None, False
     )
 
-    demote_started = asyncio.Event()
+    held = asyncio.Event()
+    release = asyncio.Event()
+    lock_sql_seen = []
 
-    class DemoteSession(AsyncSession):
+    class PausedDemoteSession(AsyncSession):
+        # Pauses right after the demote's advisory-lock statement returns (via
+        # the `held` event, gated by `release`), holding the lock — the
+        # transaction stays open — until the test sets `release`. The demote
+        # then continues to its commit while the removal blocks on the same
+        # lock. The pause mirrors PausedAcceptSession (TEST-A), which pauses at
+        # a mid-transaction SELECT: the advisory lock is transaction-scoped,
+        # so the lock is held across the pause.
+        def __init__(self, *args, held: asyncio.Event, release: asyncio.Event, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._held = held
+            self._release = release
+            self._locked = False
+
         async def execute(self, statement, *args, **kwargs):
             sql = str(statement)
-            if sql.startswith("SELECT pg_advisory_xact_lock"):
-                demote_started.set()
-            return await super().execute(statement, *args, **kwargs)
+            result = await super().execute(statement, *args, **kwargs)
+            if (
+                not self._locked
+                and "pg_advisory_xact_lock" in sql
+                and "hashtextextended" in sql
+            ):
+                self._locked = True
+                lock_sql_seen.append(sql[:80])
+                self._held.set()
+                await asyncio.wait_for(self._release.wait(), 30)
+            return result
 
-    demote_maker = async_sessionmaker(pg.runtime, expire_on_commit=False, class_=DemoteSession)
+    demote_maker = async_sessionmaker(
+        pg.runtime,
+        expire_on_commit=False,
+        class_=PausedDemoteSession,
+        held=held,
+        release=release,
+    )
     remove_maker = async_sessionmaker(pg.runtime, expire_on_commit=False)
     for module in (db, tenancy, members):
         monkeypatch.setattr(module, "SessionLocal", demote_maker)
@@ -1742,23 +1783,32 @@ async def test_demote_and_remove_owner_race_does_not_deadlock(pg, monkeypatch):
     demote = asyncio.create_task(
         members.update_member(wid, t_uid, members.MemberPatch(role="viewer"), actor)
     )
-    # Let the demote take its advisory lock so the race is real: the removal
-    # starts only after the demote is holding the lock, so the removal's own
-    # lock (the same key) blocks on it until the demote's transaction commits.
-    await asyncio.wait_for(demote_started.wait(), 10)
+    # The demote now HOLDS the advisory lock (its transaction is open); start
+    # the removal and give it a bounded moment to reach its own lock wait.
+    await asyncio.wait_for(held.wait(), 10)
+    assert len(lock_sql_seen) == 1, (
+        f"the demote executed the advisory lock {len(lock_sql_seen)} times, "
+        f"expected exactly once: {lock_sql_seen!r}"
+    )
+    assert "pg_advisory_xact_lock(hashtextextended" in lock_sql_seen[0]
+    assert "218" in lock_sql_seen[0]
     remove = asyncio.create_task(members.remove_member(wid, t_uid, actor))
-    # Both must finish — no deadlock, no 500 — within the statement timeout.
+    await asyncio.sleep(0.5)
+    assert not remove.done(), (
+        "the removal finished before blocking on the shared advisory lock; "
+        "the race window was not forced"
+    )
+    release.set()
     results = await asyncio.wait_for(
         asyncio.gather(demote, remove, return_exceptions=True), 30
     )
-    deadlocks = [
-        r for r in results
-        if isinstance(r, OperationalError) and "deadlock" in str(r).lower()
-    ]
-    assert not deadlocks, f"the race deadlocked on the row locks: {deadlocks!r}"
     for r in results:
-        if isinstance(r, HTTPException):
-            assert r.status_code == 400, f"unexpected 4xx/5xx from the race: {r!r}"
+        # Exactly one of: a success value, or the existing 400 refusals.
+        # Anything else (deadlock, 500, other 4xx) is a regression.
+        assert r is None or isinstance(r, dict) or (
+            isinstance(r, HTTPException) and r.status_code == 400
+        ), f"the race produced an unexpected outcome: {r!r}"
+    # T is out (revoked); the keeper remains the sole active owner.
     owners = (
         await pg.sql(
             """
@@ -1769,4 +1819,30 @@ async def test_demote_and_remove_owner_race_does_not_deadlock(pg, monkeypatch):
             wid=wid,
         )
     ).scalar_one()
-    assert owners >= 1, "the race left the workspace with no active owner"
+    assert owners == 1, (
+        f"the keeper must remain the only active owner, got {owners}"
+    )
+    # T's active membership is gone.
+    t_active = (
+        await pg.sql(
+            "SELECT count(*) FROM public.workspace_membership "
+            "WHERE workspace_id = :wid AND user_id = :u AND status = 'active'",
+            wid=wid,
+            u=t_uid,
+        )
+    ).scalar_one()
+    assert t_active == 0, (
+        f"T must no longer have an active membership, got {t_active}"
+    )
+    # The winning removal revoked T's scoped PAT.
+    pats = (
+        await pg.sql(
+            "SELECT revoked_at IS NOT NULL FROM public.personal_access_token "
+            "WHERE owner_user_id = :u",
+            u=t_uid,
+        )
+    ).all()
+    assert len(pats) == 1 and pats[0][0] is True, (
+        "the winning removal must revoke T's PAT, got "
+        f"{[(row[0],) for row in pats]!r} (expected exactly one revoked PAT)"
+    )
