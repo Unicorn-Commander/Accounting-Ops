@@ -41,6 +41,26 @@ async def cancel_elevated_invitations_created_by(
     ).all()
 
 
+async def acquire_last_owner_lock(session, workspace_id: UUID) -> None:
+    """Serialize local last-owner checks for one workspace in this transaction.
+
+    Keyed on (workspace id, 218) — the same key remove_person uses, so a
+    removal racing an owner demotion blocks behind one or the other instead
+    of both passing the last-owner count.
+
+    Ordering rule (AO-RACE-2b): every caller acquires THIS advisory lock
+    before taking any FOR UPDATE row lock on user_account or
+    workspace_membership for the workspace it guards. Both last-owner paths
+    (remove_person and the demotion guard in members.update_member) then take
+    the lock in the same order, so a demotion racing a removal of the same
+    owner serializes on the lock instead of deadlocking on the row locks.
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:wid, 218))"),
+        {"wid": str(workspace_id)},
+    )
+
+
 async def remove_person(
     workspace_id: UUID,
     *,
@@ -69,6 +89,17 @@ async def remove_person(
             )
         ).first():
             raise HTTPException(404, "Workspace not found")
+        if actor is not None:
+            # AO-RACE-2b: the owner branch below FOR UPDATEs the membership
+            # row; take the shared last-owner lock FIRST (see the ordering
+            # rule on acquire_last_owner_lock) so a racing owner demotion in
+            # update_member, which locks in the same order, serializes on the
+            # advisory lock instead of deadlocking on the row locks. The
+            # target role is unknown until the row reads, so a local owner
+            # removal takes the lock unconditionally; non-owner removals and
+            # control-plane removals (actor is None) pay the uncontended lock
+            # or none at all.
+            await acquire_last_owner_lock(session, workspace_id)
         person = (
             await session.execute(
                 text(
@@ -102,11 +133,7 @@ async def remove_person(
             if member.role in {"owner", "admin", "client_owner"}:
                 require_role(actor, "owner")
             if member.role in {"owner", "client_owner"}:
-                # Serialize local last-owner checks without blocking CP removal.
-                await session.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtextextended(:wid, 218))"),
-                    {"wid": str(workspace_id)},
-                )
+                # The lock is already held from before the row reads above.
                 owners = (
                     await session.execute(
                         text("""

@@ -309,6 +309,12 @@ async def update_member(
                 "owner",
                 "client_owner",
             }:
+                # AO-RACE-2: take the same advisory lock remove_person takes,
+                # so a removal racing this count cannot both pass their
+                # last-owner checks and lock the workspace out of ownership.
+                from app.security.member_removal import acquire_last_owner_lock
+
+                await acquire_last_owner_lock(session, workspace.workspace_id)
                 count_row = (
                     await session.execute(
                         text(
@@ -947,6 +953,10 @@ async def accept_invitation(
             # AO-ROLE-1b: an elevated invitation is only as good as its creator.
             # If they are no longer an active owner, refuse with the same error
             # as an unknown token, so nothing is learned about why.
+            # AO-RACE-1: read the creator's membership row FOR SHARE so a
+            # concurrent demotion or removal blocks behind this check and a
+            # cancellation cannot commit between the check and the UPDATE
+            # below (a cancelled invitation must not be marked accepted).
             if inv.role in ELEVATED_ROLES:
                 creator_ok = (
                     await session.execute(
@@ -958,6 +968,7 @@ async def accept_invitation(
                             WHERE m.workspace_id = :wid AND u.uc_uid = :creator
                               AND m.role IN ('owner', 'client_owner')
                               AND m.status = 'active'
+                            FOR SHARE OF m
                             """
                         ),
                         {"wid": str(inv.workspace_id), "creator": inv.created_by_uc_uid},
@@ -1056,7 +1067,10 @@ async def accept_invitation(
                     )
                 # Else: no-op — accepting an equal-or-lower-rank invite while
                 # already a higher-rank member just marks the invite accepted.
-            await session.execute(
+            # AO-RACE-1: the guards make the accept atomic with any cancel that
+            # commits after the check above; 0 rows means the invitation was
+            # cancelled (or already accepted) meanwhile.
+            accept_res = await session.execute(
                 text(
                     """
                     UPDATE public.workspace_invitation
@@ -1064,10 +1078,14 @@ async def accept_invitation(
                            accepted_by_user_id = :uid
                      WHERE id = :id
                        AND workspace_id = :wid
+                       AND cancelled_at IS NULL
+                       AND accepted_at IS NULL
                     """
                 ),
                 {"id": inv.id, "wid": str(inv.workspace_id), "uid": str(user_id)},
             )
+            if accept_res.rowcount == 0:
+                raise HTTPException(status_code=410, detail="invitation already resolved")
             accept_workspace = WorkspaceContext(
                 workspace_id=inv.workspace_id,
                 workspace_slug=inv.workspace_slug,

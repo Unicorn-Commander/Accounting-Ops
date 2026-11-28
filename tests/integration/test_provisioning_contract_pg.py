@@ -1583,3 +1583,266 @@ async def test_a_removal_cancels_the_invitation_that_person_had_not_accepted(pg_
         "SELECT 1 FROM public.membership_audit WHERE workspace_id = :w AND action = 'invitation_cancel'",
         w=wid,
     )).all()) == 1
+
+
+# --- AO-RACE-TEST: two real connections racing the two last-owner/accept paths ---
+
+
+class PausedAcceptSession(AsyncSession):
+    """Holds the accept's transaction open right after its creator FOR SHARE
+    read (signalled via `paused`, gated by `release`) so the test can commit
+    a cancel inside the AO-RACE-1 window before the accept's guarded UPDATE
+    runs. Only the FIRST FOR SHARE read pauses; later ones return at once."""
+
+    def __init__(self, *args, paused: asyncio.Event, release: asyncio.Event, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._paused = paused
+        self._release = release
+        self._held = False
+
+    async def execute(self, statement, *args, **kwargs):
+        sql = str(statement)
+        result = await super().execute(statement, *args, **kwargs)
+        if "FOR SHARE" in sql and not self._held:
+            self._held = True
+            self._paused.set()
+            await asyncio.wait_for(self._release.wait(), 30)
+        return result
+
+
+async def test_accept_and_cancel_race_never_leaves_a_half_resolved_row(pg, monkeypatch):
+    # AO-RACE-TEST-A: two real connections race accept vs cancel on the SAME
+    # pending elevated invitation. The overlap is forced: the accept pauses
+    # right after its creator FOR SHARE read (and STAYS there, holding its
+    # transaction, until released), the cancel runs to COMMIT inside that
+    # window, and only then is the accept released to hit its guarded UPDATE.
+    # The guarded UPDATE must see the committed cancel: deterministically the
+    # cancel wins and the accept 410s — the row can never end both cancelled
+    # and accepted.
+    from starlette.requests import Request
+
+    await pg.create()
+    wid = pg.workspaces[-1]
+    owner_uid, owner_subject = await pg.person()
+    await pg.seat(wid, owner_uid, role="owner")
+    uid, subject = await pg.person()
+    await pg.sql("UPDATE public.user_account SET email = 'robin@example.com' WHERE id = :u", u=uid)
+
+    token = "fictional-invitation-" + uuid4().hex
+    invitation = uuid4()
+    await pg.sql(
+        """
+        INSERT INTO public.workspace_invitation
+            (id, workspace_id, email, role, token_hash, expires_at, created_by_uc_uid)
+        VALUES (:id, :w, 'robin@example.com', CAST('admin' AS workspace_role), :hash,
+                now() + interval '1 day', :by)
+    """,
+        id=invitation,
+        w=wid,
+        hash=hashlib.sha256(token.encode()).hexdigest(),
+        by=owner_subject,
+    )
+    caller = auth.AuthContext(
+        subject, None, (), {"email": "robin@example.com", "email_verified": True}
+    )
+    monkeypatch.setattr(auth, "authenticate_token", AsyncMock(return_value=caller))
+    monkeypatch.setattr(members, "_token_email_verified", lambda _: True)
+    request = Request({"type": "http", "headers": [(b"authorization", b"Bearer fictional")]})
+    actor = tenancy.WorkspaceContext(
+        wid, "fixture", "owner", owner_subject, None, None, False
+    )
+
+    accept_paused = asyncio.Event()
+    accept_release = asyncio.Event()
+    accept_maker = async_sessionmaker(
+        pg.runtime, expire_on_commit=False, class_=PausedAcceptSession,
+        paused=accept_paused, release=accept_release,
+    )
+    cancel_maker = async_sessionmaker(pg.runtime, expire_on_commit=False)
+    # accept_invitation opens its session via the SessionLocal imported into
+    # app.api.members (from app.db), so binding members.SessionLocal to the
+    # pausing accept_maker puts the accept on its own connection. The cancel
+    # runs on a separate connection via the db-level maker.
+    monkeypatch.setattr(members, "SessionLocal", accept_maker)
+    monkeypatch.setattr(db, "SessionLocal", cancel_maker)
+
+    accept_task = asyncio.create_task(members.accept_invitation(request=request, token=token))
+    await asyncio.wait_for(accept_paused.wait(), 30)
+    # The accept is now HELD after its FOR SHARE read: run the cancel to full
+    # COMPLETION (its UPDATE + commit) while the accept stays paused.
+    cancel_result = await asyncio.wait_for(
+        members.cancel_invitation(wid, invitation, actor), 30
+    )
+    accept_release.set()
+    try:
+        accept_result = await asyncio.wait_for(accept_task, 30)
+        accept_error = None
+    except BaseException as exc:  # noqa: BLE001 - a lost race raises the 410
+        accept_result, accept_error = None, exc
+
+    assert isinstance(cancel_result, dict) and cancel_result.get("ok") is True, (
+        f"the cancel must succeed inside the forced window, got {cancel_result!r}"
+    )
+    assert isinstance(accept_error, HTTPException) and accept_error.status_code == 410, (
+        "the accept lost to the committed cancel with 410 "
+        f"(the guarded UPDATE's 0-row path), got result={accept_result!r} error={accept_error!r}"
+    )
+    row = (
+        await pg.sql(
+            "SELECT accepted_at, cancelled_at FROM public.workspace_invitation WHERE id = :id",
+            id=invitation,
+        )
+    ).first()
+    assert row.cancelled_at is not None and row.accepted_at is None, (
+        "the invitation must end cancelled and never accepted, got "
+        f"accepted_at={row.accepted_at!r} cancelled_at={row.cancelled_at!r}"
+    )
+    seats = (
+        await pg.sql(
+            "SELECT count(*) FROM public.workspace_membership "
+            "WHERE workspace_id = :w AND user_id = :u AND status = 'active'",
+            w=wid,
+            u=uid,
+        )
+    ).scalar_one()
+    assert seats == 0, "the losing accept must have left the person no active membership"
+
+
+async def test_demote_and_remove_owner_race_does_not_deadlock(pg, monkeypatch):
+    # AO-RACE-TEST-B2: two connections race demote(T) vs remove(T) on the
+    # same owner T (2 active owners). The overlap is forced on the shared
+    # advisory lock: the demote HOLDS the pg_advisory_xact_lock (seed 218)
+    # — signalled via `held` AFTER the lock statement returned, gated by
+    # `release` — while the removal runs and blocks on that same lock. The
+    # demote's commit is what unblocks the removal, which then runs its own
+    # last-owner count against the demoted state. With the AO-RACE-2b lock
+    # order (both paths take the advisory lock before any FOR UPDATE row
+    # lock) no deadlock: the demote commits the demotion first, then the
+    # removal succeeds removing the demoted T (the keeper remains the sole
+    # active owner, T's PAT is revoked).
+    await pg.create()
+    wid = pg.workspaces[-1]
+    # The actor must resolve to a user_account row: the shared demote maker
+    # also serves tenancy._ensure_user_account (direct-call context), which
+    # fail-closes with 403 for an unprovisioned identity.
+    keeper_uid, keeper_subject = await pg.person()
+    await pg.seat(wid, keeper_uid, role="owner")
+    t_uid, t_subject = await pg.person()
+    await pg.seat(wid, t_uid, role="owner")
+    # Give T a scoped PAT: the winning removal revokes it — the test asserts
+    # the PAT is revoked.
+    await pg.pat(t_uid, [wid])
+    actor = tenancy.WorkspaceContext(
+        wid, "fixture", "owner", keeper_subject, None, None, False
+    )
+
+    held = asyncio.Event()
+    release = asyncio.Event()
+    lock_sql_seen = []
+
+    class PausedDemoteSession(AsyncSession):
+        # Pauses right after the demote's advisory-lock statement returns (via
+        # the `held` event, gated by `release`), holding the lock — the
+        # transaction stays open — until the test sets `release`. The demote
+        # then continues to its commit while the removal blocks on the same
+        # lock. The pause mirrors PausedAcceptSession (TEST-A), which pauses at
+        # a mid-transaction SELECT: the advisory lock is transaction-scoped,
+        # so the lock is held across the pause.
+        def __init__(self, *args, held: asyncio.Event, release: asyncio.Event, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._held = held
+            self._release = release
+            self._locked = False
+
+        async def execute(self, statement, *args, **kwargs):
+            sql = str(statement)
+            result = await super().execute(statement, *args, **kwargs)
+            if (
+                not self._locked
+                and "pg_advisory_xact_lock" in sql
+                and "hashtextextended" in sql
+            ):
+                self._locked = True
+                lock_sql_seen.append(sql[:80])
+                self._held.set()
+                await asyncio.wait_for(self._release.wait(), 30)
+            return result
+
+    demote_maker = async_sessionmaker(
+        pg.runtime,
+        expire_on_commit=False,
+        class_=PausedDemoteSession,
+        held=held,
+        release=release,
+    )
+    remove_maker = async_sessionmaker(pg.runtime, expire_on_commit=False)
+    for module in (db, tenancy, members):
+        monkeypatch.setattr(module, "SessionLocal", demote_maker)
+    monkeypatch.setattr(member_removal, "SessionLocal", remove_maker)
+
+    demote = asyncio.create_task(
+        members.update_member(wid, t_uid, members.MemberPatch(role="viewer"), actor)
+    )
+    # The demote now HOLDS the advisory lock (its transaction is open); start
+    # the removal and give it a bounded moment to reach its own lock wait.
+    await asyncio.wait_for(held.wait(), 10)
+    assert len(lock_sql_seen) == 1, (
+        f"the demote executed the advisory lock {len(lock_sql_seen)} times, "
+        f"expected exactly once: {lock_sql_seen!r}"
+    )
+    assert "pg_advisory_xact_lock(hashtextextended" in lock_sql_seen[0]
+    assert "218" in lock_sql_seen[0]
+    remove = asyncio.create_task(members.remove_member(wid, t_uid, actor))
+    await asyncio.sleep(0.5)
+    assert not remove.done(), (
+        "the removal finished before blocking on the shared advisory lock; "
+        "the race window was not forced"
+    )
+    release.set()
+    results = await asyncio.wait_for(
+        asyncio.gather(demote, remove, return_exceptions=True), 30
+    )
+    for r in results:
+        # Exactly one of: a success value, or the existing 400 refusals.
+        # Anything else (deadlock, 500, other 4xx) is a regression.
+        assert r is None or isinstance(r, dict) or (
+            isinstance(r, HTTPException) and r.status_code == 400
+        ), f"the race produced an unexpected outcome: {r!r}"
+    # T is out (revoked); the keeper remains the sole active owner.
+    owners = (
+        await pg.sql(
+            """
+            SELECT count(*) FROM public.workspace_membership
+            WHERE workspace_id = :wid AND role IN ('owner', 'client_owner')
+              AND status = 'active'
+            """,
+            wid=wid,
+        )
+    ).scalar_one()
+    assert owners == 1, (
+        f"the keeper must remain the only active owner, got {owners}"
+    )
+    # T's active membership is gone.
+    t_active = (
+        await pg.sql(
+            "SELECT count(*) FROM public.workspace_membership "
+            "WHERE workspace_id = :wid AND user_id = :u AND status = 'active'",
+            wid=wid,
+            u=t_uid,
+        )
+    ).scalar_one()
+    assert t_active == 0, (
+        f"T must no longer have an active membership, got {t_active}"
+    )
+    # The winning removal revoked T's scoped PAT.
+    pats = (
+        await pg.sql(
+            "SELECT revoked_at IS NOT NULL FROM public.personal_access_token "
+            "WHERE owner_user_id = :u",
+            u=t_uid,
+        )
+    ).all()
+    assert len(pats) == 1 and pats[0][0] is True, (
+        "the winning removal must revoke T's PAT, got "
+        f"{[(row[0],) for row in pats]!r} (expected exactly one revoked PAT)"
+    )

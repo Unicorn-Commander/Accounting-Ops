@@ -39,6 +39,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import text
 
 WS_A = uuid.UUID("11111111-2222-3333-4444-555555555555")
@@ -98,6 +99,9 @@ def _strip_pg_only_sql(monkeypatch):
         sql = re.sub(r"::text\b", "", sql)
         # Replace `CAST(? AS <pgtype>)` with just `?` for non-standard types.
         sql = re.sub(r"CAST\((\?+)\s+AS\s+\w+\)", r"\1", sql)
+        # AO-RACE-1: the accept UPDATE now locks the invitation row FOR
+        # UPDATE; sqlite has no row locks, so drop the clause for this shim.
+        sql = sql.replace(" FOR UPDATE", "")
         return sql
 
     async def _execute(self, stmt, params=None):
@@ -326,8 +330,9 @@ class _FakeAuthCtx:
 class _FakeResult:
     """Mimics the `.first()` and `.mappings().first()` API of a real Result."""
 
-    def __init__(self, rows: list):
+    def __init__(self, rows: list, rowcount: int = 0):
         self._rows = rows
+        self.rowcount = rowcount
 
     def first(self):
         return self._rows[0] if self._rows else None
@@ -547,8 +552,8 @@ async def test_accept_update_with_mismatched_id_and_workspace_changes_nothing(db
     monkeypatch.setattr(auth_mod, "authenticate_token", _fake_authenticate_token)
     monkeypatch.setattr(members_mod, "_token_email_verified", lambda claims: True)
 
-    orig = sa_asyncio.AsyncSession.execute
     forged = _InvRow(INV_A, WS_B, "attacker@example.com")
+    orig = sa_asyncio.AsyncSession.execute
 
     async def _execute(self, stmt, params=None):
         sql = " ".join(str(stmt).split())
@@ -562,6 +567,11 @@ async def test_accept_update_with_mismatched_id_and_workspace_changes_nothing(db
             return _FakeResult([])
         if "UPDATE public.workspace_membership" in sql:
             return _FakeResult([])
+        # The forged row belongs to workspace B but its id is the victim's
+        # (INV_A, workspace A): the guarded accept UPDATE must match zero
+        # rows, so the handler 410s before it can do any harm.
+        if "UPDATE public.workspace_invitation" in sql:
+            return _FakeResult([], rowcount=0)
         return await orig(self, stmt, params)
 
     monkeypatch.setattr(sa_asyncio.AsyncSession, "execute", _execute)
@@ -569,7 +579,9 @@ async def test_accept_update_with_mismatched_id_and_workspace_changes_nothing(db
     class _StubRequest:
         headers = {"authorization": "Bearer fake-token"}
 
-    await members_mod.accept_invitation(request=_StubRequest(), token=TOKEN_B)
+    with pytest.raises(HTTPException) as exc:
+        await members_mod.accept_invitation(request=_StubRequest(), token=TOKEN_B)
+    assert exc.value.status_code == 410
 
     row_a = await _inv_row(db, INV_A)
     assert row_a["accepted_at"] is None, "accept UPDATE touched a row outside its workspace"
